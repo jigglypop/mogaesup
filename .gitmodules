@@ -1,0 +1,3 @@
+[submodule "gaesup-character"]
+	path = gaesup-character
+	url = https://github.com/jigglypop/gaesup-character.git

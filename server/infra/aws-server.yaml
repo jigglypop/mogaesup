@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Mogaesup Rust server, private PostgreSQL RDS and private runtime S3. Single AZ, no NAT or load balancer.
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium]
+  CloudFrontPrefixList:
+    Type: String
+    Default: pl-22a6434b
+  CloudFrontServiceGroup:
+    Type: String
+    Default: ''
+    Description: CloudFront-VPCOrigins-Service-SG of this VPC, once CloudFront has created it.
+Conditions:
+  HasCloudFrontGroup: !Not [!Equals [!Ref CloudFrontServiceGroup, '']]
+Resources:
+  RealtimeTicketSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Mogaesup live-room ticket signing key
+      GenerateSecretString: {ExcludePunctuation: true, PasswordLength: 64}
+      Tags: [{Key: application, Value: mogaesup}]
+  RuntimeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'mogaesup-runtime-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration: {BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true}
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+      VersioningConfiguration: {Status: Enabled}
+      LifecycleConfiguration:
+        Rules:
+          - Id: RuntimeHistory
+            Status: Enabled
+            NoncurrentVersionExpiration: {NoncurrentDays: 14}
+            AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}
+      Tags: [{Key: application, Value: mogaesup}]
+  ApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Mogaesup server reachable only from the CloudFront origin network
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourcePrefixListId: !If [HasCloudFrontGroup, !Ref AWS::NoValue, !Ref CloudFrontPrefixList]
+          SourceSecurityGroupId: !If [HasCloudFrontGroup, !Ref CloudFrontServiceGroup, !Ref AWS::NoValue]
+      Tags: [{Key: application, Value: mogaesup}]
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL reachable only from the Mogaesup server security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !GetAtt ApiSecurityGroup.GroupId
+      Tags: [{Key: application, Value: mogaesup}]
+  DatabaseSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Mogaesup RDS subnets
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: mogaesup-postgres
+      DBName: mogaesup
+      Engine: postgres
+      EngineVersion: '17.9'
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: '20'
+      MaxAllocatedStorage: 25
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: mogaesup
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DatabaseSubnets
+      VPCSecurityGroups: [!GetAtt DatabaseSecurityGroup.GroupId]
+      MultiAZ: false
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      DeleteAutomatedBackups: false
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DeletionProtection: true
+      EnableCloudwatchLogsExports: [postgresql]
+      Tags: [{Key: application, Value: mogaesup}]
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore]
+      Policies:
+        - PolicyName: MogaesupRuntimeRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${RuntimeBucket.Arn}/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt RuntimeBucket.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !GetAtt Database.MasterUserSecret.SecretArn
+                  - !Ref RealtimeTicketSecret
+      Tags: [{Key: application, Value: mogaesup}]
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+  ApiInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      CreditSpecification: {CPUCredits: standard}
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 1}
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetA
+          GroupSet: [!GetAtt ApiSecurityGroup.GroupId]
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -eu
+          useradd --system --home-dir /opt/mogaesup --shell /sbin/nologin mogaesup
+          install -d -m 750 -o mogaesup -g mogaesup /opt/mogaesup
+          # Catalog models imported from the character server live here, outside the release directories.
+          install -d -m 750 -o mogaesup -g mogaesup /var/lib/mogaesup /var/lib/mogaesup/blobs
+          systemctl enable --now amazon-ssm-agent
+      Tags: [{Key: application, Value: mogaesup}, {Key: Name, Value: mogaesup-server}]
+  VpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: mogaesup-server
+        Arn: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ApiInstance}'
+        HTTPPort: 8080
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+        OriginSSLProtocols: [TLSv1.2]
+Outputs:
+  InstanceId: {Value: !Ref ApiInstance}
+  RuntimeBucket: {Value: !Ref RuntimeBucket}
+  DatabaseEndpoint: {Value: !GetAtt Database.Endpoint.Address}
+  DatabaseSecretArn: {Value: !GetAtt Database.MasterUserSecret.SecretArn}
+  RealtimeTicketSecretArn: {Value: !Ref RealtimeTicketSecret}
+  VpcOriginId: {Value: !GetAtt VpcOrigin.Id}
+  ApiPrivateDns: {Value: !GetAtt ApiInstance.PrivateDnsName}
+  ApiSecurityGroupId: {Value: !GetAtt ApiSecurityGroup.GroupId}

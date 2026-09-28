@@ -1,0 +1,306 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Mogaesup web app on private S3 behind CloudFront (OAC), with /api/* (REST and live-room WebSocket) sent to the Rust server's VPC origin.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: mogaesup-web-960243570517-apne2
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  ApiVpcOriginId:
+    Type: String
+    Default: ''
+    Description: VpcOriginId output of the mogaesup-server stack.
+  ApiPrivateDns:
+    Type: String
+    Default: ''
+    Description: ApiPrivateDns output of the mogaesup-server stack.
+  DomainName:
+    Type: String
+    Default: ''
+    Description: Site hostname, e.g. mogaesup.com. Empty serves the CloudFront hostname only.
+  RedirectDomainName:
+    Type: String
+    Default: ''
+    Description: Optional second hostname (e.g. www.mogaesup.com) that redirects to DomainName.
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: Issued ACM certificate in us-east-1 covering DomainName and RedirectDomainName.
+  HostedZoneId:
+    Type: String
+    Default: ''
+    Description: Route 53 hosted zone that receives alias records for the hostnames.
+
+Rules:
+  DomainCertificatePair:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref DomainName, '']
+            - !Equals [!Ref CertificateArn, '']
+          - !And
+            - !Not [!Equals [!Ref DomainName, '']]
+            - !Not [!Equals [!Ref CertificateArn, '']]
+        AssertDescription: DomainName and CertificateArn must be supplied together.
+
+Conditions:
+  HasApi: !Not [!Equals [!Ref ApiVpcOriginId, '']]
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
+  HasRedirect: !And [!Condition HasDomain, !Not [!Equals [!Ref RedirectDomainName, '']]]
+  HasZone: !And [!Condition HasDomain, !Not [!Equals [!Ref HostedZoneId, '']]]
+  HasZoneRedirect: !And [!Condition HasZone, !Condition HasRedirect]
+
+Resources:
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRollbackVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: application
+          Value: mogaesup
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        Description: SigV4 access from the Mogaesup distribution only
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  HtmlCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-html-short'
+        Comment: Short cache for index.html and other files without a content hash
+        DefaultTTL: 60
+        MaxTTL: 300
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  HashedAssetCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-hashed-assets-long'
+        Comment: One year immutable cache for Vite content-hashed assets
+        DefaultTTL: 31536000
+        MaxTTL: 31536000
+        MinTTL: 31536000
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  SecurityHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-security-headers'
+        SecurityHeadersConfig:
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Override: true
+
+  SiteRequestFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-site-request'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Redirect the second hostname to the site; serve index.html for extensionless routes such as /@username
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub
+        - |
+          function handler(event) {
+            var request = event.request;
+            var host = request.headers.host ? request.headers.host.value : '';
+            if ('${Redirect}' !== '' && host === '${Redirect}') {
+              return { statusCode: 301, statusDescription: 'Moved Permanently', headers: { location: { value: 'https://${Site}' + request.uri } } };
+            }
+            var uri = request.uri;
+            var segment = uri.substring(uri.lastIndexOf('/') + 1);
+            if (uri.endsWith('/') || segment.indexOf('.') === -1) {
+              request.uri = '/index.html';
+            }
+            return request;
+          }
+        - Redirect: !If [HasRedirect, !Ref RedirectDomainName, '']
+          Site: !Ref DomainName
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Mogaesup web app and API
+        DefaultRootObject: index.html
+        Enabled: true
+        Aliases: !If
+          - HasDomain
+          - !If [HasRedirect, [!Ref DomainName, !Ref RedirectDomainName], [!Ref DomainName]]
+          - !Ref AWS::NoValue
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: private-s3-origin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - !If
+            - HasApi
+            - Id: rust-server-origin
+              DomainName: !Ref ApiPrivateDns
+              VpcOriginConfig:
+                VpcOriginId: !Ref ApiVpcOriginId
+                OriginReadTimeout: 30
+                OriginKeepaliveTimeout: 5
+            - !Ref AWS::NoValue
+        DefaultCacheBehavior:
+          TargetOriginId: private-s3-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          CachePolicyId: !Ref HtmlCachePolicy
+          ResponseHeadersPolicyId: !Ref SecurityHeaders
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SiteRequestFunction.FunctionARN
+        CacheBehaviors:
+          - !If
+            - HasApi
+            # REST and the /api/rooms/* WebSocket upgrade; nothing cached, every viewer header but Host forwarded
+            # (the server checks Origin and reads the session cookie).
+            - PathPattern: api/*
+              TargetOriginId: rust-server-origin
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+              CachedMethods: [GET, HEAD]
+              Compress: true
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            - !Ref AWS::NoValue
+          - PathPattern: assets/*
+            TargetOriginId: private-s3-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref HashedAssetCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeaders
+        ViewerCertificate: !If
+          - HasDomain
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: application
+          Value: mogaesup
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${SiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+  SiteRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: HasZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref DomainName
+          Type: A
+          AliasTarget: {DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2}
+        - Name: !Ref DomainName
+          Type: AAAA
+          AliasTarget: {DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2}
+
+  RedirectRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: HasZoneRedirect
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref RedirectDomainName
+          Type: A
+          AliasTarget: {DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2}
+        - Name: !Ref RedirectDomainName
+          Type: AAAA
+          AliasTarget: {DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FDTNDATAQYW2}
+
+Outputs:
+  BucketName:
+    Description: Private deployment bucket
+    Value: !Ref SiteBucket
+  DistributionId:
+    Description: CloudFront distribution ID
+    Value: !Ref Distribution
+  DistributionDomainName:
+    Description: CloudFront hostname
+    Value: !GetAtt Distribution.DomainName
+  SiteUrl:
+    Description: HTTPS application URL
+    Value: !If [HasDomain, !Sub 'https://${DomainName}', !Sub 'https://${Distribution.DomainName}']

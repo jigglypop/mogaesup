@@ -1,0 +1,18 @@
+# The engine's working clone; the app takes gaesup-world from npm. gaesup-character is a submodule.
+/gaesup-world/
+
+node_modules/
+dist/
+target/
+artifacts/
+server/data/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.data/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
