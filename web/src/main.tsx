@@ -1,5 +1,8 @@
-import './app.css';
+import './ui/tokens.css';
+import './ui/ui.css';
 import './pages/pages.css';
+
+import { lazy, Suspense } from 'react';
 
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom';
@@ -8,16 +11,20 @@ import { AuthProvider } from './auth/AuthProvider';
 import { AdminPage } from './pages/AdminPage';
 import { AuthPage } from './pages/AuthPage';
 import { ExplorePage } from './pages/ExplorePage';
+import { Loading } from './pages/Loading';
 import { MinihomePage } from './pages/MinihomePage';
+import { initTheme } from './ui/theme';
 
-/** `/@username` is a minihome; any other single segment is not a page. */
+initTheme();
+
+// The character studio brings its own screens and 3D viewer; it loads only when someone opens it.
+const StudioPage = lazy(() => import('./studio/StudioPage'));
+
+/** `/@username` is an island and `/@username/edit` its decorating mode; any other single segment is not a page. */
 function UsernameRoute() {
-  const { slug = '' } = useParams();
-  return slug.startsWith('@') && slug.length > 1 ? (
-    <MinihomePage username={slug.slice(1).toLowerCase()} />
-  ) : (
-    <Navigate to="/" replace />
-  );
+  const { slug = '', '*': rest = '' } = useParams();
+  if (!slug.startsWith('@') || slug.length < 2 || (rest !== '' && rest !== 'edit')) return <Navigate to="/" replace />;
+  return <MinihomePage username={slug.slice(1).toLowerCase()} editing={rest === 'edit'} />;
 }
 
 const root = document.getElementById('root');
@@ -28,8 +35,16 @@ if (root) {
         <Routes>
           <Route path="/" element={<AuthPage />} />
           <Route path="/explore" element={<ExplorePage />} />
-          <Route path="/admin" element={<AdminPage />} />
-          <Route path="/:slug" element={<UsernameRoute />} />
+          <Route
+            path="/studio/*"
+            element={
+              <Suspense fallback={<Loading />}>
+                <StudioPage />
+              </Suspense>
+            }
+          />
+          <Route path="/admin/*" element={<AdminPage />} />
+          <Route path="/:slug/*" element={<UsernameRoute />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

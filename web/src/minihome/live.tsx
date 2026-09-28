@@ -10,10 +10,14 @@ import {
 } from 'react';
 
 import type { RapierRigidBody } from '@react-three/rapier';
+
+import { Link } from 'react-router-dom';
+
 import { defaultMultiplayerConfig, RemotePlayers, useMultiplayer, type MultiplayerConfig } from 'gaesup-world';
 
 import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
+import { Icon } from '../ui/icons';
 
 type Multiplayer = ReturnType<typeof useMultiplayer>;
 
@@ -122,11 +126,35 @@ export function LiveAvatars({ playerRef }: { playerRef: RefObject<RapierRigidBod
   );
 }
 
+/** How many are on the island now, counting the viewer, and who the others are; empty until the room connects. */
+export function usePresence() {
+  const live = useLive();
+  if (!live?.isConnected) return { connected: false, count: 0, others: [] as { id: string; name: string; color: string }[] };
+  const others = [...live.players.entries()].map(([id, player]) => ({ id, name: player.name, color: player.color }));
+  return { connected: true, count: others.length + 1, others };
+}
+
 /** Who is here with you, and a line to say to whoever stands near. */
-export function LiveBar() {
+export function ChatBar({ signedIn }: { signedIn: boolean }) {
   const live = useLive();
   const [text, setText] = useState('');
-  if (!live?.isConnected) return null;
+  if (!signedIn) {
+    return (
+      <div className="mg-chatbar mg-glass is-hint">
+        <span>로그인하면 같이 걷고 말할 수 있어요</span>
+        <Link className="mg-btn is-primary is-small" to="/">
+          로그인
+        </Link>
+      </div>
+    );
+  }
+  if (!live?.isConnected) {
+    return (
+      <div className="mg-chatbar mg-glass is-hint" role="status">
+        <span>함께 있는 사람을 찾는 중…</span>
+      </div>
+    );
+  }
   const send = (event: FormEvent) => {
     event.preventDefault();
     const line = text.trim();
@@ -134,10 +162,18 @@ export function LiveBar() {
     live.sendChat(line.slice(0, MAX_CHAT));
     setText('');
   };
+  const others = [...live.players.values()];
   return (
-    <form className="mh-live-bar" onSubmit={send}>
-      <span className="mh-chip">👥 함께 {live.players.size + 1}명</span>
-      {live.localSpeechText && <span className="mh-chip mh-live-said">{live.localSpeechText}</span>}
+    <form className="mg-chatbar mg-glass" onSubmit={send}>
+      <span className="mg-chatbar-people" aria-hidden="true">
+        {others.slice(0, 3).map((player, index) => (
+          <i key={index} style={{ background: player.color }}>
+            {[...player.name][0] ?? '?'}
+          </i>
+        ))}
+      </span>
+      <b className="mg-chatbar-count">함께 {others.length + 1}명</b>
+      {live.localSpeechText && <span className="mg-chip is-soft mg-chatbar-said">{live.localSpeechText}</span>}
       <input
         value={text}
         maxLength={MAX_CHAT}
@@ -146,6 +182,9 @@ export function LiveBar() {
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => event.stopPropagation()}
       />
+      <button className="mg-chatbar-send" type="submit" aria-label="말 보내기" disabled={!text.trim()}>
+        <Icon name="send" />
+      </button>
     </form>
   );
 }

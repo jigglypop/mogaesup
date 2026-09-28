@@ -45,7 +45,7 @@ if (registered !== 201) throw new Error(`register answered ${registered}`);
 
 const started = Date.now();
 await page.goto(`${WEB}/@${username}`);
-await page.locator('.mh-world-loading.is-done').waitFor({ state: 'attached', timeout: 180_000 });
+await page.locator('.mg-world-loading.is-done').waitFor({ state: 'attached', timeout: 180_000 });
 const worldReadyMs = Date.now() - started;
 
 const resources = await page.evaluate(() => {
@@ -121,9 +121,12 @@ function hottest(profile) {
 }
 
 await page.waitForTimeout(SETTLE_MS);
-const renderer = await page.locator('.mh-panel').innerText().catch(() => '');
+// The performance report sits behind the settings menu; it stays open, as the old side panel did.
+await page.getByRole('button', { name: '화면 설정' }).click().catch(() => {});
+await page.getByRole('button', { name: '성능 보기' }).click().catch(() => {});
+const renderer = await page.locator('.mh-status').innerText().catch(() => '');
 const standing = await phase('standing', () => page.waitForTimeout(PHASE_MS));
-await page.locator('.mh-canvas canvas').click({ position: { x: 300, y: 300 } }).catch(() => {});
+await page.locator('.mg-world-canvas canvas').click({ position: { x: 300, y: 300 } }).catch(() => {});
 const walking = await phase('walking', async () => {
   await page.keyboard.down('KeyW');
   await page.waitForTimeout(PHASE_MS / 2);

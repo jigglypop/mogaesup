@@ -5,25 +5,19 @@ import { Link } from 'react-router-dom';
 import { problemText } from '../api/client';
 import { socialApi } from '../api/endpoints';
 import type { GuestbookEntry, User } from '../api/types';
+import { initialOf, toneOf } from '../shell/Shell';
 
-const when = (at: string) => {
+export const when = (at: string) => {
   const minutes = Math.round((Date.now() - Date.parse(at)) / 60_000);
   if (minutes < 1) return '방금';
   if (minutes < 60) return `${minutes}분 전`;
   if (minutes < 1440) return `${Math.round(minutes / 60)}시간 전`;
+  if (minutes < 2880) return '어제';
   return new Date(at).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' });
 };
 
-/** A Cyworld guestbook sheet over the stage. */
-export function Guestbook({
-  username,
-  viewer,
-  onClose,
-}: {
-  username: string;
-  viewer: User | null;
-  onClose: () => void;
-}) {
+/** The island's guestbook: a note to leave at the top, then the notes, newest first. */
+export function Guestbook({ username, viewer }: { username: string; viewer: User | null }) {
   const [entries, setEntries] = useState<GuestbookEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -61,75 +55,77 @@ export function Guestbook({
   };
 
   return (
-    <div className="mh-sheet" role="dialog" aria-label="방명록">
-      <header>
-        <h3>
-          방명록 <b>{total}</b>
-        </h3>
-        <button className="mh-icon-button" onClick={onClose} aria-label="닫기">
-          ✕
-        </button>
-      </header>
+    <div className="mg-guestbook">
       {viewer ? (
-        <form onSubmit={submit} className="mh-guest-form">
-          <span className="mh-friend-face">✏️</span>
-          <input
+        <form onSubmit={submit} className="mg-compose mg-card">
+          <label className="mg-compose-label" htmlFor="guestbook-text">
+            한마디 남기기
+          </label>
+          <textarea
+            id="guestbook-text"
             value={text}
             maxLength={300}
-            placeholder="따뜻한 한마디를 남겨 주세요"
+            rows={2}
+            placeholder="따뜻한 한마디"
             onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => event.stopPropagation()}
           />
-          <label className="mh-secret">
-            <input type="checkbox" checked={secret} onChange={(event) => setSecret(event.target.checked)} />
-            비밀글
-          </label>
-          <button type="submit" disabled={!text.trim()}>
-            남기기
-          </button>
+          <div className="mg-compose-foot">
+            <label className="mg-check">
+              <input type="checkbox" checked={secret} onChange={(event) => setSecret(event.target.checked)} />
+              비밀글
+            </label>
+            <button className="mg-btn is-primary is-small" type="submit" disabled={!text.trim()}>
+              남기기
+            </button>
+          </div>
         </form>
       ) : (
-        <p className="mh-muted mh-center">
+        <p className="mg-compose mg-card mg-muted">
           <Link to="/">로그인</Link>하면 방명록을 남길 수 있어요.
         </p>
       )}
       {error && (
-        <p className="mh-error" role="alert">
+        <p className="mg-error" role="alert">
           {error}
         </p>
       )}
-      <ul className="mh-guest-list">
-        {entries.map((entry, index) => (
+      <p className="mg-list-count">
+        방명록 <b>{total}</b>
+      </p>
+      {entries.length === 0 && <p className="mg-empty">첫 번째로 한마디를 남겨 보세요</p>}
+      <ul className="mg-entries">
+        {entries.map((entry) => (
           <li key={entry.id}>
-            <div className="mh-guest-meta">
-              <span>No.{total - index}</span>
-              <Link to={`/@${entry.author.username}`}>
+            <Link className="mg-avatar" data-tone={toneOf(entry.author.username)} to={`/@${entry.author.username}`} aria-label={`${entry.author.displayName}의 섬`}>
+              {initialOf(entry.author.displayName)}
+            </Link>
+            <div>
+              <p className="mg-entry-meta">
                 <b>{entry.author.displayName}</b>
-              </Link>
-              <time>{when(entry.createdAt)}</time>
-              {entry.secret && <span className="mh-secret-tag">비밀글</span>}
-              {entry.canDelete && (
-                <button
-                  className="mh-link"
-                  onClick={() =>
-                    run(async () => {
-                      await socialApi.remove(entry.id);
-                      await load();
-                    })
-                  }
-                >
-                  삭제
-                </button>
-              )}
-            </div>
-            <div className="mh-guest-body">
-              <span className="mh-friend-face">{entry.author.emoji}</span>
-              <p>{entry.secret && !entry.body ? '주인과 글쓴이만 볼 수 있어요' : entry.body}</p>
+                <time dateTime={entry.createdAt}>{when(entry.createdAt)}</time>
+                {entry.secret && <span className="mg-badge">비밀글</span>}
+                {entry.canDelete && (
+                  <button
+                    className="mg-link"
+                    onClick={() =>
+                      run(async () => {
+                        await socialApi.remove(entry.id);
+                        await load();
+                      })
+                    }
+                  >
+                    삭제
+                  </button>
+                )}
+              </p>
+              <p className="mg-entry-body">{entry.secret && !entry.body ? '주인과 글쓴이만 볼 수 있어요' : entry.body}</p>
             </div>
           </li>
         ))}
       </ul>
       {nextBefore && (
-        <button className="mh-chip-button mh-wide" onClick={() => run(() => load(nextBefore))}>
+        <button className="mg-btn is-quiet is-wide" onClick={() => run(() => load(nextBefore))}>
           더 보기
         </button>
       )}

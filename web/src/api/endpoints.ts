@@ -6,6 +6,7 @@ import type {
   Credentials,
   FactoryCharacter,
   FactoryImport,
+  FactoryUsage,
   GuestbookPage,
   HomeSummary,
   HomeView,
@@ -70,4 +71,5 @@ export const catalogApi = {
     api<CatalogItem>(`/catalog/admin/items/${segment(id)}`, { method: 'PATCH', body }),
   importFactory: (body: FactoryImport) => api<CatalogItem>('/catalog/admin/import', { method: 'POST', body }),
   factoryCharacters: () => api<{ characters: FactoryCharacter[] }>('/catalog/admin/factory-characters'),
+  factoryUsage: () => api<FactoryUsage>('/catalog/admin/factory-usage'),
 };

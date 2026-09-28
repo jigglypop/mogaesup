@@ -1,5 +1,5 @@
-// Opens the web app in Chromium against the running server: sign up, reach the new minihome, wait for the island's
-// first complete frame, save it, then visit it as a second member and leave a guestbook entry.
+// Opens the web app in Chromium against the running server: sign up, reach the new island, wait for its first
+// complete frame, decorate and save it, then visit it as a second member, talk, and leave a guestbook entry.
 // Usage: node scripts/browser-smoke.mjs [webUrl] [screenshotDir]
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -31,7 +31,7 @@ async function member(username, name) {
   await page.locator('input[name=username]').fill(username);
   await page.locator('input[name=displayName]').fill(name);
   await page.locator('input[name=password]').fill('smoke-password-1');
-  await page.getByRole('button', { name: '가입하고 미니홈피 만들기' }).click();
+  await page.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
   await page.waitForURL(`**/@${username}`);
   return page;
 }
@@ -47,50 +47,59 @@ const step = async (label, run) => {
   }
 };
 
+const worldReady = (page) => page.locator('.mg-world-loading.is-done').waitFor({ state: 'attached', timeout: WORLD_READY_MS });
+const saved = (page) =>
+  page
+    .waitForResponse((response) => response.url().endsWith('/api/homes/me/world') && response.request().method() === 'PUT')
+    .catch((error) => error);
+
 const ownerName = `smoke_${suffix}`;
 let owner;
-await step('owner signs up and lands on the new minihome', async () => {
+await step('owner signs up and lands on the new island', async () => {
   owner = await member(ownerName, '스모크');
-  await owner.getByRole('heading', { name: /스모크의 미니홈피/ }).waitFor();
+  await owner.getByRole('heading', { name: /스모크의 섬/ }).waitFor();
 });
 await step('island reaches its first complete frame', async () => {
-  await owner.locator('.mh-world-loading.is-done').waitFor({ state: 'attached', timeout: WORLD_READY_MS });
+  await worldReady(owner);
   await owner.waitForTimeout(1500);
   await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-home.png') });
 });
-await step('owner saves the island from the decorate tab', async () => {
-  await owner.getByRole('button', { name: '꾸미기' }).click();
-  await owner.locator('.mh-decorate').waitFor();
+await step('owner decorates and saves the island', async () => {
+  await owner.getByRole('link', { name: '꾸미기' }).click();
+  await owner.waitForURL(`**/@${ownerName}/edit`);
+  // The island stays loaded: decorating is a mode of the same world.
+  await owner.locator('.mg-drawer').waitFor();
   await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-decorate.png') });
-  const saved = owner
-    .waitForResponse(
-      (response) => response.url().endsWith('/api/homes/me/world') && response.request().method() === 'PUT',
-    )
-    .catch((error) => error);
-  await owner.getByRole('button', { name: '완료' }).click();
-  const response = await saved;
-  if (response instanceof Error) throw response;
-  if (response.status() !== 200) throw new Error(`save answered ${response.status()}`);
+  const response = saved(owner);
+  await owner.getByRole('button', { name: '저장' }).click();
+  const answer = await response;
+  if (answer instanceof Error) throw answer;
+  if (answer.status() !== 200) throw new Error(`save answered ${answer.status()}`);
+  await owner.getByRole('button', { name: '나가기' }).click();
+  await owner.waitForURL(`**/@${ownerName}`);
+  await owner.locator('.mg-side').waitFor();
 });
-await step('owner changes mood and status', async () => {
+await step('owner changes the mood', async () => {
+  await owner.getByRole('tab', { name: '소개' }).click();
   const patched = owner
     .waitForResponse((response) => response.url().endsWith('/api/homes/me') && response.request().method() === 'PATCH')
     .catch((error) => error);
-  await owner.getByRole('radio', { name: '설렘' }).click();
+  await owner.getByRole('radio', { name: /설렘/ }).click();
   const response = await patched;
   if (response instanceof Error) throw response;
   if (response.status() !== 200) throw new Error('mood not saved');
+  await owner.getByRole('tab', { name: '방명록' }).click();
 });
 
 const guestName = `guest_${suffix}`;
 let guest;
-await step('a second member visits and the island loads read-only', async () => {
+await step('a second member visits and cannot decorate', async () => {
   guest = await member(guestName, '손님');
-  await guest.goto(`${WEB}/@${ownerName}`);
-  await guest.getByText('방문 중').waitFor();
-  const tabs = await guest.locator('.mh-tabs button').allTextContents();
-  if (tabs.includes('꾸미기')) throw new Error('visitor sees the decorate tab');
-  await guest.locator('.mh-world-loading.is-done').waitFor({ state: 'attached', timeout: WORLD_READY_MS });
+  await guest.goto(`${WEB}/@${ownerName}/edit`);
+  await guest.waitForURL(`**/@${ownerName}`);
+  await guest.getByText('놀러 옴').waitFor();
+  if (await guest.locator('.mg-drawer').count()) throw new Error('visitor sees the decorating drawer');
+  await worldReady(guest);
   await guest.waitForTimeout(1500);
   await guest.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'guest-visit.png') });
 });
@@ -102,30 +111,31 @@ await step('visitor says hello to whoever is near', async () => {
   const say = guest.getByRole('textbox', { name: '말하기' });
   await say.fill('안녕하세요!');
   await say.press('Enter');
-  await guest.locator('.mh-live-said', { hasText: '안녕하세요!' }).waitFor();
+  await guest.locator('.mg-chatbar-said', { hasText: '안녕하세요!' }).waitFor();
   await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-with-visitor.png') });
 });
 await step('visitor writes in the guestbook', async () => {
-  await guest.getByRole('button', { name: '방명록' }).click();
-  await guest.getByPlaceholder('따뜻한 한마디를 남겨 주세요').fill('섬이 정말 예뻐요');
+  await guest.getByRole('tab', { name: '방명록' }).click();
+  await guest.getByPlaceholder('따뜻한 한마디').fill('섬이 정말 예뻐요');
   await guest.getByRole('button', { name: '남기기' }).click();
   await guest.getByText('섬이 정말 예뻐요').waitFor();
   await guest.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'guest-guestbook.png') });
 });
-await step('visitor sends a 일촌 request', async () => {
-  await guest.getByRole('button', { name: '일촌 신청' }).click();
+await step('visitor asks to be neighbors', async () => {
+  await guest.getByRole('tab', { name: /^이웃/ }).click();
+  await guest.getByRole('button', { name: '이웃 신청' }).click();
   await guest.locator('input[name=name]').fill('섬주인');
   await guest.locator('input[name=theirName]').fill('단골');
-  await guest.getByRole('button', { name: '보내기' }).click();
-  await guest.getByText('일촌 신청을 보냈어요').waitFor();
+  await guest.locator('.mg-side').getByRole('button', { name: '보내기' }).click();
+  await guest.getByText('이웃 신청을 보냈어요').waitFor();
 });
 await step('owner accepts it and sees the visit counted', async () => {
   await owner.reload();
-  await owner.getByRole('button', { name: '수락' }).click();
-  await owner.locator('.mh-friends li', { hasText: '손님' }).getByRole('button', { name: '놀러가기' }).waitFor();
-  const counter = await owner.locator('.mh-counter').innerText();
-  if (!/TOTAL\s*1/.test(counter.replace(/\s+/g, ' '))) throw new Error(`counter ${counter}`);
-  await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-ilchon.png') });
+  await owner.getByRole('tab', { name: /^이웃/ }).click();
+  await owner.locator('.mg-side').getByRole('button', { name: '수락' }).click();
+  await owner.locator('.mg-people li', { hasText: '손님' }).getByRole('link', { name: '놀러가기' }).waitFor();
+  await owner.getByText('오늘 방문 1').waitFor();
+  await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-neighbors.png') });
 });
 
 await browser.close();

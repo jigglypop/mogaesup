@@ -94,7 +94,7 @@ const DIALOGS: DialogTree[] = [
     startId: 'hello',
     nodes: {
       hello: {
-        id: 'hello', speaker: '윤 선생님', text: '미니홈피 섬에 온 걸 환영해요. 무엇이 궁금한가요?',
+        id: 'hello', speaker: '윤 선생님', text: '모개숲에 온 걸 환영해요. 무엇이 궁금한가요?',
         choices: [
           { text: '어떻게 움직여요?', next: 'move' },
           { text: '집을 꾸미고 싶어요', next: 'decorate' },

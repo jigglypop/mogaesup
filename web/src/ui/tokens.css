@@ -1,0 +1,97 @@
+/* 모개숲 glass tokens. One set of names; the dark theme swaps values only, for the page or for one `.mg-dark` panel.
+   The studio's own tokens alias these. */
+@font-face {
+  font-family: 'Gaesup Sans';
+  src: url('/fonts/GaesupSansVariable.woff2') format('woff2');
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+  --mg-font: 'Gaesup Sans', 'Pretendard', -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+  --mg-mono: ui-monospace, 'Cascadia Mono', 'SFMono-Regular', Consolas, monospace;
+
+  --mg-ink: #1d1830;
+  --mg-muted: #5d5675;
+  --mg-primary: #6a4de0;
+  --mg-primary-hover: #5a3dcf;
+  --mg-primary-ink: #ffffff;
+  --mg-primary-soft: rgba(106, 77, 224, 0.12);
+  --mg-accent: #ff7a59;
+  --mg-accent-ink: #1d1830;
+  --mg-good: #13764f;
+  --mg-good-soft: rgba(19, 118, 79, 0.12);
+  --mg-warn: #8a5a12;
+  --mg-warn-soft: rgba(184, 116, 26, 0.14);
+  --mg-bad: #c23a33;
+  --mg-bad-soft: rgba(210, 69, 61, 0.12);
+
+  --mg-hair: rgba(29, 24, 48, 0.08);
+  --mg-hair-strong: rgba(29, 24, 48, 0.14);
+  --mg-line: rgba(255, 255, 255, 0.72);
+  --mg-glass: rgba(255, 255, 255, 0.62);
+  --mg-glass-strong: rgba(255, 255, 255, 0.86);
+  --mg-card: rgba(255, 255, 255, 0.78);
+  --mg-field: rgba(255, 255, 255, 0.82);
+  --mg-tint: rgba(29, 24, 48, 0.05);
+  --mg-surface: #f4f2f8;
+  --mg-sunken: #e9e6f1;
+
+  --mg-blur: blur(22px) saturate(1.6);
+  --mg-blur-menu: blur(16px) saturate(1.5);
+  --mg-shadow: 0 18px 48px rgba(29, 24, 48, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  --mg-shadow-soft: 0 6px 18px rgba(29, 24, 48, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+
+  --mg-r-panel: 26px;
+  --mg-r-card: 18px;
+  --mg-r-control: 12px;
+  --mg-edge: 20px;
+  --mg-rail: 78px;
+
+  --mg-page:
+    radial-gradient(70vmax 45vmax at 6% -8%, rgba(200, 186, 255, 0.5), transparent 62%),
+    radial-gradient(60vmax 40vmax at 100% 4%, rgba(190, 232, 196, 0.55), transparent 58%),
+    radial-gradient(70vmax 50vmax at 60% 112%, rgba(247, 219, 176, 0.45), transparent 62%),
+    #eef1ea;
+}
+
+:root[data-theme='dark'],
+.mg-dark {
+  color-scheme: dark;
+  --mg-ink: #edf0fa;
+  --mg-muted: #a9a3bd;
+  --mg-primary: #b7a5ed;
+  --mg-primary-hover: #c9bbf5;
+  --mg-primary-ink: #1f173c;
+  --mg-primary-soft: rgba(183, 165, 237, 0.16);
+  --mg-accent: #ff9a7a;
+  --mg-accent-ink: #1f173c;
+  --mg-good: #7fd8b1;
+  --mg-good-soft: rgba(127, 216, 177, 0.14);
+  --mg-warn: #e6bd8e;
+  --mg-warn-soft: rgba(230, 189, 142, 0.14);
+  --mg-bad: #f3a8a1;
+  --mg-bad-soft: rgba(243, 168, 161, 0.14);
+
+  --mg-hair: rgba(255, 255, 255, 0.08);
+  --mg-hair-strong: rgba(255, 255, 255, 0.16);
+  --mg-line: rgba(255, 255, 255, 0.12);
+  --mg-glass: rgba(20, 17, 36, 0.58);
+  --mg-glass-strong: rgba(24, 21, 42, 0.86);
+  --mg-card: rgba(32, 28, 54, 0.72);
+  --mg-field: rgba(12, 11, 22, 0.55);
+  --mg-tint: rgba(255, 255, 255, 0.06);
+  --mg-surface: #151622;
+  --mg-sunken: #0d0e17;
+
+  --mg-shadow: 0 18px 48px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --mg-shadow-soft: 0 6px 18px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  --mg-page:
+    radial-gradient(70vmax 45vmax at 6% -8%, rgba(110, 88, 190, 0.35), transparent 62%),
+    radial-gradient(60vmax 40vmax at 100% 4%, rgba(50, 110, 90, 0.3), transparent 58%),
+    radial-gradient(70vmax 50vmax at 60% 112%, rgba(140, 90, 60, 0.25), transparent 62%),
+    #10111c;
+}

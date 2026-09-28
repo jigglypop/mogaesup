@@ -1,12 +1,16 @@
+import { Icon } from '../ui/icons';
+
 export function Loading() {
   return (
-    <div className="gw-loading" role="status">
-      <div className="gw-loading-card">
-        <span className="gw-loading-island" aria-hidden>
-          🏝️
+    <div className="mg-loading" role="status">
+      <div className="mg-loading-card mg-glass">
+        <span className="mg-brand-mark" aria-hidden="true">
+          <Icon name="island" />
         </span>
-        <b>작은 세상을 여는 중</b>
-        <span className="gw-loading-bar" />
+        <b>불러오는 중</b>
+        <span className="mg-progress is-indeterminate">
+          <i />
+        </span>
       </div>
     </div>
   );

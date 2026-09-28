@@ -1,0 +1,66 @@
+/* The character studio inside the app: its screens sit in one dark glass stage, their tokens pointed at 모개숲's. */
+.mg-studio { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 16px; align-items: start; }
+.mg-studio-nav { position: sticky; top: calc(var(--mg-edge) + 72px); display: grid; gap: 14px; padding: 14px; }
+.mg-studio-nav section { display: grid; gap: 2px; }
+.mg-studio-nav p { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 12px; font-weight: 800; color: var(--mg-muted); }
+.mg-studio-nav p svg { width: 14px; height: 14px; }
+.mg-studio-nav a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 40px;
+  padding: 0 10px 0 12px;
+  border-radius: 12px;
+  color: var(--mg-ink);
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.mg-studio-nav a:hover { background: var(--mg-tint); }
+.mg-studio-nav a[aria-current='page'] { background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); }
+.mg-studio-nav a.is-locked { color: var(--mg-muted); }
+.mg-studio-connection { display: grid; gap: 2px; padding: 10px 12px; border-radius: 14px; background: var(--mg-tint); }
+.mg-studio-connection p { padding: 0; color: var(--mg-ink); }
+.mg-studio-connection small { font-size: 11px; color: var(--mg-muted); }
+
+.mg-studio-stage {
+  min-height: calc(100vh - var(--mg-edge) * 2 - 72px);
+  padding: 8px;
+  overflow: hidden;
+  color: var(--mg-ink);
+}
+.mg-studio-locked { display: grid; justify-items: center; gap: 10px; padding: 80px 20px; text-align: center; }
+.mg-studio-locked > svg { width: 32px; height: 32px; color: var(--mg-muted); }
+
+/* The studio's tokens, from the app's (the stage is `.mg-dark`, so these are the dark values). */
+.studio-root.studio-root,
+.studio-root.studio-root .workspace,
+.studio-root.studio-root .admin-detail-dialog {
+  --text: var(--mg-ink);
+  --glass: rgba(255, 255, 255, 0.045);
+  --line: var(--mg-line);
+  --muted: var(--mg-muted);
+  --accent: var(--mg-primary);
+  --accent-rgb: 183 165 237;
+  --accent-strong: var(--mg-primary-hover);
+  --accent-ink: var(--mg-primary-ink);
+  --accent-text: var(--mg-primary);
+  --surface-sunken: var(--mg-sunken);
+  --surface-panel: var(--mg-surface);
+  --danger: var(--mg-bad);
+  --success: var(--mg-good);
+  --warning: var(--mg-warn);
+}
+.studio-root.studio-root { font-family: var(--mg-font); background: rgba(18, 16, 32, 0.84); color-scheme: dark; }
+
+/* The workspace brings its own page frame and navigation; the app's route and menu replace them. */
+.studio-root.studio-root .studio-sidebar { display: none; }
+.studio-root.studio-root .character-factory { min-height: 0; padding-bottom: 8px; background: none; }
+.studio-root.studio-root .studio-shell { display: block; min-height: 0; }
+.studio-root.studio-root .studio-main { margin: 0; min-height: 0; padding: 0; }
+
+@media (max-width: 960px) {
+  .mg-studio { grid-template-columns: 1fr; }
+  .mg-studio-nav { position: static; grid-auto-flow: column; overflow-x: auto; }
+}

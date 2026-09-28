@@ -152,3 +152,8 @@ export type FactoryCharacter = {
   /** The catalog item holding it; `current` when that copy is of the latest sealed version. */
   imported: { id: string; status: CatalogStatus; current: boolean } | null;
 };
+
+/** How far the studio screens reach through the server (`FACTORY_ACCESS`), and this month's paid requests. */
+export type FactoryUsage =
+  | { connected: false }
+  | { connected: true; access: 'read' | 'write' | 'paid'; paidThisMonth: number; paidMonthly: number };

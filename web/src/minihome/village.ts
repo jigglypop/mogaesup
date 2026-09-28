@@ -202,7 +202,7 @@ export function createVillage(): BuildingSerializedState {
     ...fieldFence(),
     { id: 'campfire', type: 'fire', position: { x: at(4), y: 0, z: at(12) }, config: { fireIntensity: 1.2 } },
     { id: 'plaza-flag', type: 'flag', position: { x: at(9) + 1.2, y: 0, z: at(9) - 1.2 }, config: { flagWidth: 1.6, flagHeight: 1, flagStyle: 'flag', primaryColor: '#ff8a65' } },
-    { id: 'notice', type: 'billboard', position: { x: at(7), y: 0, z: at(4) + 1.4 }, config: { billboardText: '미니홈피 섬', billboardColor: '#2bb3a3', billboardWidth: 2.2, billboardHeight: 0.8, billboardElevation: 1.3 } },
+    { id: 'notice', type: 'billboard', position: { x: at(7), y: 0, z: at(4) + 1.4 }, config: { billboardText: '모개숲', billboardColor: '#2bb3a3', billboardWidth: 2.2, billboardHeight: 0.8, billboardElevation: 1.3 } },
     model('oak-1', 'nature-tree-oak', at(2), at(4), 0.4),
     model('oak-2', 'nature-tree-round', at(12), at(4), 2.1),
     model('oak-3', 'nature-tree-oak', at(6), at(9) + 1, 4.2),

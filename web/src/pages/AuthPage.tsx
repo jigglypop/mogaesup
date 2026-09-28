@@ -4,11 +4,12 @@ import { Link, Navigate, useNavigate } from 'react-router-dom';
 
 import { problemText } from '../api/client';
 import { useAuth } from '../auth/AuthProvider';
+import { Icon } from '../ui/icons';
 import { Loading } from './Loading';
 
 type Mode = 'login' | 'signup';
 
-/** `/`: sign in or sign up; a signed-in visitor goes straight to their own minihome. */
+/** `/`: sign in or sign up; a signed-in visitor goes straight to their own island. */
 export function AuthPage() {
   const { status, user, login, register } = useAuth();
   const navigate = useNavigate();
@@ -43,20 +44,26 @@ export function AuthPage() {
   };
 
   return (
-    <main className="page page--center">
-      <section className="page-card page-card--auth">
-        <h1 className="page-brand">🏝️ 모개숲</h1>
-        <div className="page-segment" role="tablist">
+    <main className="mg-auth">
+      <section className="mg-auth-card mg-glass">
+        <h1 className="mg-auth-brand">
+          <span className="mg-brand-mark" aria-hidden="true">
+            <Icon name="island" />
+          </span>
+          모개숲
+        </h1>
+        <div className="mg-tabs" role="tablist">
           {(['login', 'signup'] as const).map((item) => (
             <button key={item} role="tab" aria-selected={mode === item} onClick={() => setMode(item)}>
               {item === 'login' ? '로그인' : '가입하기'}
             </button>
           ))}
         </div>
-        <form className="page-form" onSubmit={submit}>
-          <label>
+        <form className="mg-auth-form" onSubmit={submit}>
+          <label className="mg-label">
             아이디
             <input
+              className="mg-field"
               name="username"
               required
               minLength={3}
@@ -67,14 +74,15 @@ export function AuthPage() {
             />
           </label>
           {mode === 'signup' && (
-            <label>
+            <label className="mg-label">
               이름
-              <input name="displayName" required maxLength={20} autoComplete="nickname" />
+              <input className="mg-field" name="displayName" required maxLength={20} autoComplete="nickname" />
             </label>
           )}
-          <label>
+          <label className="mg-label">
             비밀번호
             <input
+              className="mg-field"
               name="password"
               type="password"
               required
@@ -85,16 +93,16 @@ export function AuthPage() {
             />
           </label>
           {error && (
-            <p className="page-error" role="alert">
+            <p className="mg-error" role="alert">
               {error}
             </p>
           )}
-          <button className="page-button" type="submit" disabled={busy}>
-            {mode === 'login' ? '로그인' : '가입하고 미니홈피 만들기'}
+          <button className="mg-btn is-primary is-wide" type="submit" disabled={busy}>
+            {mode === 'login' ? '로그인' : '가입하고 내 섬 만들기'}
           </button>
         </form>
-        <Link className="page-link" to="/explore">
-          미니홈피 둘러보기
+        <Link className="mg-btn is-quiet is-wide" to="/explore">
+          <Icon name="compass" /> 섬 둘러보기
         </Link>
       </section>
     </main>

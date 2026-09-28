@@ -6,11 +6,10 @@ import {
   useNPCStore,
   usePerformanceReport,
   type FramePhase,
-  type WorldQuality,
 } from 'gaesup-world';
 import { useBuildingStore } from 'gaesup-world/building';
 
-import type { SceneSettings } from './Scene';
+import { Icon } from '../ui/icons';
 
 const HISTORY = 60;
 const BACKEND = { webgpu: 'WebGPU', 'webgpu-fallback': 'WebGL2 대체', webgl: 'WebGL' } as const;
@@ -18,9 +17,6 @@ const PHASE: Record<FramePhase, string> = {
   input: '입력', script: '스크립트', prePhysics: '물리 전', postPhysics: '물리 후', animation: '애니메이션',
   lateUpdate: '후반 갱신', camera: '카메라', effects: '이펙트', snapshot: '스냅샷',
 };
-const QUALITY: { value: WorldQuality & string; label: string }[] = [
-  { value: 'auto', label: '자동' }, { value: 'high', label: '높음' }, { value: 'medium', label: '보통' }, { value: 'low', label: '낮음' },
-];
 const TIER = { high: '높음', medium: '보통', low: '낮음' } as const;
 const SEASON: Record<string, string> = { spring: '봄', summer: '여름', autumn: '가을', fall: '가을', winter: '겨울' };
 
@@ -64,17 +60,8 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-function Toggle({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return (
-    <label className="mh-toggle">
-      <span><b>{label}</b><small>{hint}</small></span>
-      <input type="checkbox" role="switch" checked={checked} onChange={(event) => onChange(event.target.checked)} />
-    </label>
-  );
-}
-
-/** Every number the engine reports about this world, plus the switches that move them. */
-export function StatusPanel({ settings, onChange }: { settings: SceneSettings; onChange: (next: Partial<SceneSettings>) => void }) {
+/** Every number the engine reports about this world. */
+export function StatusPanel({ onClose }: { onClose: () => void }) {
   const report = usePerformanceReport(500);
   const { frames, render, engine, phases, memory, shadow, resolution, gpuMs, cpuBound } = report;
   const [history, setHistory] = useState<number[]>([]);
@@ -93,15 +80,16 @@ export function StatusPanel({ settings, onChange }: { settings: SceneSettings; o
   const phaseMax = phases ? Math.max(0.5, ...FRAME_PHASES.map((phase) => phases[phase])) : 1;
 
   return (
-    <div className="mh-status">
+    <div className="mh-status mg-glass" role="dialog" aria-label="성능">
       <header className="mh-status-head">
         <div>
-          <h3>상태 체크</h3>
+          <h3>성능</h3>
           <p><i className="mh-live" />0.5초마다 갱신</p>
         </div>
         <div className="mh-badges">
           <span className="mh-badge is-accent">{render.backend ? BACKEND[render.backend] : '측정 중'}</span>
           <span className="mh-badge">품질 {TIER[report.tier]}</span>
+          <button className="mg-icon-btn is-quiet" aria-label="성능 닫기" onClick={onClose}><Icon name="close" /></button>
         </div>
       </header>
 
@@ -198,17 +186,6 @@ export function StatusPanel({ settings, onChange }: { settings: SceneSettings; o
         </div>
       </Section>
 
-      <Section title="설정">
-        <div className="mh-segment" role="radiogroup" aria-label="렌더 품질">
-          {QUALITY.map((option) => (
-            <button key={option.value} role="radio" aria-checked={settings.quality === option.value} onClick={() => onChange({ quality: option.value })}>
-              {option.label}
-            </button>
-          ))}
-        </div>
-        <Toggle label="절전 모드" hint="입력이 2초 없으면 30fps로 그려요" checked={settings.idleThrottle} onChange={(idleThrottle) => onChange({ idleThrottle })} />
-        <Toggle label="후처리" hint="블룸·톤매핑. 필요할 때만 불러와요" checked={settings.postProcessing} onChange={(postProcessing) => onChange({ postProcessing })} />
-      </Section>
     </div>
   );
 }
