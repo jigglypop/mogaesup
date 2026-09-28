@@ -17,6 +17,9 @@ parser.add_argument('--ticket-secret', required=True)
 parser.add_argument('--endpoint', required=True)
 parser.add_argument('--origin', required=True)
 parser.add_argument('--factory-url', default='')
+parser.add_argument('--factory-access', default='read', choices=('read', 'write', 'paid'))
+parser.add_argument('--factory-paid-monthly', type=int, default=0)
+parser.add_argument('--factory-gateway-secret', default='')
 parser.add_argument('--model-store', required=True)
 parser.add_argument('--region', default='ap-northeast-2')
 args = parser.parse_args()
@@ -61,7 +64,10 @@ lines = [f'DATABASE_URL={url}', 'LISTEN_ADDR=0.0.0.0:8080', f"APP_ORIGIN={','.jo
          'COOKIE_SECURE=true', f'REALTIME_TICKET_SECRET={ticket_secret}', f'MODEL_STORE={args.model_store}',
          f'AWS_REGION={args.region}', 'RUST_LOG=info']
 if args.factory_url:
-    lines.append(f'FACTORY_URL={args.factory_url}')
+    lines += [f'FACTORY_URL={args.factory_url}', f'FACTORY_ACCESS={args.factory_access}',
+              f'FACTORY_PAID_MONTHLY={args.factory_paid_monthly}']
+    if args.factory_gateway_secret:
+        lines.append(f'FACTORY_GATEWAY_KEY={secret_value(args.factory_gateway_secret)}')
 (config / 'server.env').write_text('\n'.join(lines) + '\n')
 (config / 'server.env').chmod(0o600)
 service = '''[Unit]

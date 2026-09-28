@@ -37,6 +37,14 @@ Resources:
       Description: Mogaesup live-room ticket signing key
       GenerateSecretString: {ExcludePunctuation: true, PasswordLength: 64}
       Tags: [{Key: application, Value: mogaesup}]
+  FactoryGatewaySecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Sent to the character studio as x-gateway-key; its CloudFront lets this server through with it
+      GenerateSecretString: {ExcludePunctuation: true, PasswordLength: 48}
+      Tags: [{Key: application, Value: mogaesup}]
   RuntimeBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -141,6 +149,7 @@ Resources:
                 Resource:
                   - !GetAtt Database.MasterUserSecret.SecretArn
                   - !Ref RealtimeTicketSecret
+                  - !Ref FactoryGatewaySecret
       Tags: [{Key: application, Value: mogaesup}]
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -188,6 +197,7 @@ Outputs:
   DatabaseEndpoint: {Value: !GetAtt Database.Endpoint.Address}
   DatabaseSecretArn: {Value: !GetAtt Database.MasterUserSecret.SecretArn}
   RealtimeTicketSecretArn: {Value: !Ref RealtimeTicketSecret}
+  FactoryGatewaySecretArn: {Value: !Ref FactoryGatewaySecret}
   VpcOriginId: {Value: !GetAtt VpcOrigin.Id}
   ApiPrivateDns: {Value: !GetAtt ApiInstance.PrivateDnsName}
   ApiSecurityGroupId: {Value: !GetAtt ApiSecurityGroup.GroupId}

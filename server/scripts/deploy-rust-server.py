@@ -3,6 +3,7 @@
 
 Uses the existing AWS CLI credentials only and never brings a secret to the developer machine.
 Build first: see README "배포". Usage: python scripts/deploy-rust-server.py [--skip-provision] [--factory-url URL]
+[--factory-access read|write|paid] [--factory-paid-monthly N]
 """
 import argparse
 import hashlib
@@ -65,6 +66,9 @@ def main():
     parser.add_argument('--binary', default='target/x86_64-unknown-linux-musl/release/mogaesup-server')
     parser.add_argument('--origin', default='https://mogaesup.com', help='Comma-separated site origins the server accepts')
     parser.add_argument('--factory-url', default='', help='Character server base URL for admins (gaesup-character)')
+    parser.add_argument('--factory-access', default='read', choices=('read', 'write', 'paid'),
+                        help='What the studio screens may do through the server (FACTORY_ACCESS)')
+    parser.add_argument('--factory-paid-monthly', type=int, default=0, help='Paid studio requests allowed a month')
     parser.add_argument('--model-store', default='s3://mogaesup-web-960243570517-apne2/models',
                         help='Where catalog models copied from the character server are kept')
     parser.add_argument('--skip-provision', action='store_true')
@@ -105,7 +109,10 @@ def main():
                  '--ticket-secret', outputs['RealtimeTicketSecretArn'], '--endpoint', outputs['DatabaseEndpoint'],
                  '--origin', args.origin, '--model-store', args.model_store]
     if args.factory_url:
-        bootstrap += ['--factory-url', args.factory_url]
+        bootstrap += ['--factory-url', args.factory_url, '--factory-access', args.factory_access,
+                      '--factory-paid-monthly', str(args.factory_paid_monthly)]
+        if outputs.get('FactoryGatewaySecretArn'):
+            bootstrap += ['--factory-gateway-secret', outputs['FactoryGatewaySecretArn']]
     commands = [
         'set -eu', 'dnf install -y postgresql17 > /var/log/mogaesup-packages.log',
         f'install -d -m 750 /opt/mogaesup/releases/{release}',
