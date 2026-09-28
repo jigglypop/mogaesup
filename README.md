@@ -30,6 +30,8 @@ git clone --recurse-submodules https://github.com/jigglypop/mogaesup.git
 
 - 서버: `cd server && docker compose up -d --wait && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`. 테스트는 실제 PostgreSQL에 임시 DB를 만들어 돌고, 운영자 토큰이 gaesup-character의 `auth.py`를 통과하는지도 확인한다(`uv`가 있을 때).
 - 웹: `cd web && npm run typecheck && npm test && npm run build`. 서버와 `npm run dev`가 떠 있으면 `npm run smoke`가 Chromium으로 가입부터 방문·실시간 방·방명록·일촌까지 확인한다.
+- 성능: 서버와 `npx vite preview`(빌드본)가 떠 있으면 `npm run perf`가 이 PC의 GPU(Chrome, WebGPU, vsync 끔)로 섬 로딩 시간·전송량·서 있을 때와 걸을 때의 프레임·메인 스레드 상위 함수를 잰다. 대상 서버에 측정용 계정을 하나 만든다.
+- 빌드는 패키지의 캐릭터 GLB(`gltf/*.glb`) 텍스처를 미니홈피 카메라에 맞게 줄인다(색상 1024px, 그 밖 512px, WebP). 원본은 패키지에 그대로 있다.
 
 ## 배포 (AWS 서울 리전)
 

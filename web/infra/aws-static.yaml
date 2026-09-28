@@ -131,6 +131,25 @@ Resources:
           QueryStringsConfig:
             QueryStringBehavior: none
 
+  StaticFileCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-static-day'
+        Comment: A day at the edge for models, WASM and fonts without a content hash; deploys invalidate them
+        DefaultTTL: 86400
+        MaxTTL: 604800
+        MinTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
   SecurityHeaders:
     Type: AWS::CloudFront::ResponseHeadersPolicy
     Properties:
@@ -238,6 +257,30 @@ Resources:
             CachedMethods: [GET, HEAD, OPTIONS]
             Compress: true
             CachePolicyId: !Ref HashedAssetCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeaders
+          - PathPattern: gltf/*
+            TargetOriginId: private-s3-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref StaticFileCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeaders
+          - PathPattern: wasm/*
+            TargetOriginId: private-s3-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref StaticFileCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeaders
+          - PathPattern: fonts/*
+            TargetOriginId: private-s3-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref StaticFileCachePolicy
             ResponseHeadersPolicyId: !Ref SecurityHeaders
           - PathPattern: assets/*
             TargetOriginId: private-s3-origin

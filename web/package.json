@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "smoke": "node scripts/browser-smoke.mjs",
+    "perf": "node scripts/perf-probe.mjs",
     "deploy:aws": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-aws.ps1"
   },
   "dependencies": {
@@ -20,7 +21,7 @@
     "@react-three/fiber": "^9.7.0",
     "@react-three/postprocessing": "^3.1.1",
     "@react-three/rapier": "^2.2.0",
-    "gaesup-world": "^1.3.0",
+    "gaesup-world": "^1.3.1",
     "postprocessing": "6.39.5",
     "react": "~19.2.8",
     "react-dom": "~19.2.8",
@@ -29,13 +30,18 @@
     "three-stdlib": "^2.36.1"
   },
   "devDependencies": {
+    "@gltf-transform/core": "^4.5.1",
+    "@gltf-transform/extensions": "^4.5.1",
+    "@gltf-transform/functions": "^4.5.1",
     "@types/node": "^24.13.6",
     "@types/react": "~19.2.18",
     "@types/react-dom": "~19.2.7",
     "@types/three": "~0.186.0",
     "@vitejs/plugin-react": "^6.1.1",
     "jsdom": "^27.0.0",
+    "meshoptimizer": "^1.3.0",
     "playwright": "1.63.0",
+    "sharp": "^0.35.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.0",
     "vitest": "^5.0.2"

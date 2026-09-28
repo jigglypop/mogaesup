@@ -9,10 +9,10 @@ import {
   type SaveAdapter,
 } from 'gaesup-world';
 
+import { asset, modelUrl, type ResidentModel } from './figures';
 import { at, CELL, createVillage, VILLAGE_VERSION } from './village';
 
-export const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
-export const modelUrl = (id: string) => asset(`gltf/${id}.glb`);
+export { asset, modelUrl };
 
 type RuntimeErrorSink = NonNullable<NonNullable<Parameters<typeof createGaesupRuntime>[0]>['onError']>;
 
@@ -24,7 +24,7 @@ type Behavior = NonNullable<NPCInstanceData['behavior']>;
 export type Resident = {
   id: string;
   name: string;
-  model: string;
+  model: ResidentModel;
   emoji: string;
   /** One-line intro for the 일촌 list. */
   intro: string;

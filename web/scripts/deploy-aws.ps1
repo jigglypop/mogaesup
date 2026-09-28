@@ -76,13 +76,13 @@ try {
     @{ Pattern = '*.wasm'; Type = 'application/wasm' },
     @{ Pattern = '*.woff2'; Type = 'font/woff2' }
   )
-  $excludes = @('--exclude', 'index.html', '--exclude', 'assets/*')
+  $excludes = @('--exclude', 'index.html', '--exclude', 'assets/*', '--exclude', '*.map')
   foreach ($entry in $typed) { $excludes += '--exclude', $entry.Pattern }
   Invoke-Native aws s3 sync $dist $bucket --region $Region @excludes --cache-control 'public,max-age=3600' --no-progress --only-show-errors
   foreach ($entry in $typed) {
     Invoke-Native aws s3 cp $dist $bucket --recursive --region $Region --exclude '*' --include $entry.Pattern --exclude 'assets/*' --content-type $entry.Type --cache-control 'public,max-age=3600' --no-progress --only-show-errors
   }
-  Invoke-Native aws s3 cp (Join-Path $dist 'assets') "$bucket/assets" --recursive --region $Region --cache-control 'public,max-age=31536000,immutable' --no-progress --only-show-errors
+  Invoke-Native aws s3 cp (Join-Path $dist 'assets') "$bucket/assets" --recursive --region $Region --exclude '*.map' --cache-control 'public,max-age=31536000,immutable' --no-progress --only-show-errors
   Invoke-Native aws s3 cp (Join-Path $dist 'index.html') "$bucket/index.html" --region $Region --cache-control 'no-cache,max-age=0,must-revalidate' --content-type 'text/html; charset=utf-8' --no-progress --only-show-errors
 
   $invalidation = Invoke-Native aws cloudfront create-invalidation --distribution-id $outputs.DistributionId --paths '/*' --output json | ConvertFrom-Json

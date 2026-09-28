@@ -6,11 +6,13 @@ import { ApiRequestError } from '../api/client';
 import { catalogApi, homeApi } from '../api/endpoints';
 import type { CatalogItem, HomeView } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
+import { modelUrl, prefetchModels, RESIDENT_MODELS } from '../minihome/figures';
 import { visitorId } from '../minihome/stored';
 import { Loading } from './Loading';
 
 // three.js and the engine load after the first paint, never in the entry chunk.
-const Minihome = lazy(() => import('../minihome/Minihome'));
+const loadMinihome = () => import('../minihome/Minihome');
+const Minihome = lazy(loadMinihome);
 
 type Loaded = { view: HomeView; minimes: CatalogItem[]; viewerMinime: string };
 
@@ -23,6 +25,12 @@ export function MinihomePage({ username }: { username: string }) {
   // Only a different person should reload the home, not a new user object for the same one.
   const viewerName = user?.username ?? null;
 
+  // The island's code and its residents download while the home's data is still on its way, not after it.
+  useEffect(() => {
+    void loadMinihome();
+    prefetchModels(RESIDENT_MODELS.map(modelUrl));
+  }, []);
+
   useEffect(() => {
     if (status === 'loading') return undefined;
     const controller = new AbortController();
@@ -34,14 +42,14 @@ export function MinihomePage({ username }: { username: string }) {
         own ? homeApi.mine() : homeApi.get(username),
         catalogApi.items('minime'),
       ]);
-      const mine = viewerName && !view.isOwner ? await homeApi.get(viewerName).catch(() => null) : null;
-      const visits = await homeApi.visit(username, visitorId()).catch(() => view.visits);
+      const [mine, visits] = await Promise.all([
+        viewerName && !view.isOwner ? homeApi.get(viewerName).catch(() => null) : null,
+        homeApi.visit(username, visitorId()).catch(() => view.visits),
+      ]);
       if (controller.signal.aborted) return;
-      setLoaded({
-        view: { ...view, visits },
-        minimes: catalog.items,
-        viewerMinime: view.isOwner ? view.profile.minime : (mine?.profile.minime ?? 'man'),
-      });
+      const viewerMinime = view.isOwner ? view.profile.minime : (mine?.profile.minime ?? 'man');
+      prefetchModels([catalog.items.find((item) => item.id === viewerMinime)?.modelUrl ?? modelUrl('man')]);
+      setLoaded({ view: { ...view, visits }, minimes: catalog.items, viewerMinime });
     })().catch((error: unknown) => {
       if (controller.signal.aborted) return;
       setProblem(

@@ -29,7 +29,8 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    sourcemap: true,
+    // Maps stay beside the build for local debugging; the deploy leaves them out and the bundles do not point at them.
+    sourcemap: 'hidden',
     rolldownOptions: { output: { strictExecutionOrder: true } },
   },
   test: {
