@@ -131,6 +131,10 @@ fn signed(request: reqwest::RequestBuilder, factory: &Factory, username: &str) -
         Some(token) => request.bearer_auth(operator_token(token, username)),
         None => request,
     };
+    let request = match &factory.gateway_key {
+        Some(key) => request.header("x-gateway-key", key),
+        None => request,
+    };
     match &factory.api_key {
         Some(key) => request.header("x-api-key", key),
         None => request,

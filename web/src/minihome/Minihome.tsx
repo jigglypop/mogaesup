@@ -255,7 +255,8 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     postProcessing: false,
     idleThrottle: true,
   });
-  const [panelOpen, setPanelOpen] = useStored<boolean>('panel', true);
+  // On a phone the panel covers most of the world, so it starts folded there.
+  const [panelOpen, setPanelOpen] = useStored<boolean>('panel', !matchMedia('(max-width: 720px)').matches);
   const [tab, setTab] = useState<PanelTab>('guestbook');
   const [bgm, setBgm] = useState(false);
   const [performance, setPerformance] = useState(false);

@@ -13,6 +13,9 @@ pub struct Factory {
     pub access: FactoryAccess,
     /// Paid studio requests allowed per calendar month (UTC): `FACTORY_PAID_MONTHLY`, none unless set.
     pub paid_monthly: i64,
+    /// Sent as `x-gateway-key` on every request, so a studio closed to the public can still let this server in:
+    /// `FACTORY_GATEWAY_KEY`.
+    pub gateway_key: Option<String>,
 }
 
 /// How far the studio screens reach through this server. Each level includes the ones before it.
@@ -94,6 +97,7 @@ impl Config {
                 paid_monthly: var("FACTORY_PAID_MONTHLY")
                     .map_or(Ok(0), |n| n.parse())
                     .context("FACTORY_PAID_MONTHLY")?,
+                gateway_key: var("FACTORY_GATEWAY_KEY"),
             })
         });
         Ok(Self {

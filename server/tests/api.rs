@@ -298,6 +298,7 @@ struct Call {
     uri: String,
     authorization: Option<String>,
     api_key: Option<String>,
+    gateway_key: Option<String>,
     cookie: Option<String>,
 }
 
@@ -325,6 +326,7 @@ async fn fake_factory(seen: Seen) -> String {
                 uri: request.uri().to_string(),
                 authorization: get("authorization"),
                 api_key: get("x-api-key"),
+                gateway_key: get("x-gateway-key"),
                 cookie: get("cookie"),
             });
             let redirect = |file: &str| {
@@ -374,6 +376,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
         token: Some(token),
         access: FactoryAccess::Read,
         paid_monthly: 0,
+        gateway_key: Some("gate".into()),
     }))
     .await;
     let member = app.register("member_f", "회원").await;
@@ -396,6 +399,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     assert_eq!(first["imported"], Value::Null);
     let calls = seen.0.lock().unwrap().clone();
     assert_eq!(calls[0].api_key.as_deref(), Some("factory-key"));
+    assert_eq!(calls[0].gateway_key.as_deref(), Some("gate"));
     let bearer = calls[0].authorization.as_deref().unwrap().trim_start_matches("Bearer ");
     let claims: Value =
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(bearer.split('.').nth(1).unwrap()).unwrap()).unwrap();
@@ -420,7 +424,9 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
         signed.iter().map(|call| call.uri.as_str()).collect::<Vec<_>>(),
         ["/signed/face.glb", "/signed/front.png"]
     );
-    assert!(signed.iter().all(|call| call.authorization.is_none() && call.api_key.is_none() && call.cookie.is_none()));
+    assert!(signed.iter().all(|call| {
+        call.authorization.is_none() && call.api_key.is_none() && call.gateway_key.is_none() && call.cookie.is_none()
+    }));
 
     let model = app.call("GET", &model_url, None, None).await;
     assert_eq!(model.bytes, character_glb());
@@ -473,6 +479,7 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
         token: Some(token),
         access: FactoryAccess::Read,
         paid_monthly: 0,
+        gateway_key: Some("gate".into()),
     }))
     .await;
     let member = app.register("member_g", "회원").await;
@@ -495,7 +502,8 @@ async fn studio_app(seen: &Seen, access: FactoryAccess, paid_monthly: i64) -> Te
     let url = fake_factory(seen.clone()).await;
     let token =
         FactoryToken { key: vec![7; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
-    TestApp::new(Some(Factory { url, api_key: None, token: Some(token), access, paid_monthly })).await
+    TestApp::new(Some(Factory { url, api_key: None, token: Some(token), access, paid_monthly, gateway_key: None }))
+        .await
 }
 
 #[tokio::test]
