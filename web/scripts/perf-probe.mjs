@@ -9,6 +9,8 @@ import { chromium } from 'playwright';
 const WEB = process.argv[2] ?? 'http://127.0.0.1:5180';
 const OUT = process.argv[3];
 const PHASE_MS = 8_000;
+/** Extra wait after the island is ready, to tell start-up hitches from steady ones. */
+const SETTLE_MS = Number(process.env['PERF_SETTLE_MS'] ?? 0);
 
 const browser = await chromium.launch({
   channel: 'chrome',
@@ -17,6 +19,15 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
 const page = await context.newPage();
+// PERF_IDLE=off measures without the minihome's idle frame-rate throttle (the 절전 모드 setting).
+if (process.env['PERF_IDLE'] === 'off') {
+  await page.addInitScript(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('minihome:scene') ?? '{}');
+      localStorage.setItem('minihome:scene', JSON.stringify({ quality: 'auto', postProcessing: false, ...saved, idleThrottle: false }));
+    } catch {}
+  });
+}
 const errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
 
@@ -55,6 +66,9 @@ await cdp.send('Profiler.enable');
 await cdp.send('Profiler.setSamplingInterval', { interval: 200 });
 
 async function phase(label, act) {
+  // Starting the profiler pauses V8 for a few hundred ms; frames are counted only after that.
+  await cdp.send('Profiler.start');
+  await page.waitForTimeout(500);
   await page.evaluate(() => {
     window.__probe = { frames: [], long: [] };
     const tick = (t) => {
@@ -66,9 +80,7 @@ async function phase(label, act) {
       for (const entry of list.getEntries()) window.__probe.long.push(entry.duration);
     }).observe({ type: 'longtask', buffered: false });
   });
-  await cdp.send('Profiler.start');
   await act();
-  const { profile } = await cdp.send('Profiler.stop');
   const stats = await page.evaluate(() => {
     window.__probe.on = false;
     const { frames, long } = window.__probe;
@@ -86,6 +98,7 @@ async function phase(label, act) {
       heapMB: Math.round((performance.memory?.usedJSHeapSize ?? 0) / 1e6),
     };
   });
+  const { profile } = await cdp.send('Profiler.stop');
   return { label, ...stats, hot: hottest(profile) };
 }
 
@@ -107,6 +120,7 @@ function hottest(profile) {
     .map(([key, us]) => `${((100 * us) / total).toFixed(1).padStart(5)}%  ${(us / 1000).toFixed(0).padStart(6)}ms  ${key}`);
 }
 
+await page.waitForTimeout(SETTLE_MS);
 const renderer = await page.locator('.mh-panel').innerText().catch(() => '');
 const standing = await phase('standing', () => page.waitForTimeout(PHASE_MS));
 await page.locator('.mh-canvas canvas').click({ position: { x: 300, y: 300 } }).catch(() => {});
