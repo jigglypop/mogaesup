@@ -31,7 +31,7 @@ if (-not $env:REALTIME_TICKET_SECRET) {
 $env:LISTEN_ADDR = "127.0.0.1:$ApiPort"
 $env:APP_ORIGIN = $AppOrigin
 $env:COOKIE_SECURE = 'false'
-$env:BLOB_DIR = Join-Path $projectRoot 'data/local/blobs'
+$env:MODEL_STORE = Join-Path $projectRoot 'data/local/models'
 if ($FactoryUrl) { $env:FACTORY_URL = $FactoryUrl }
 if (-not $env:RUST_LOG) { $env:RUST_LOG = 'info' }
 & cargo run

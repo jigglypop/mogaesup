@@ -8,7 +8,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
@@ -20,7 +20,11 @@ use crate::{
 };
 
 const OPERATOR_TOKEN_SECONDS: u64 = 300;
-const MODEL_TIMEOUT: Duration = Duration::from_secs(60);
+const FILE_TIMEOUT: Duration = Duration::from_secs(60);
+/// A cold job listing can take the character server twelve seconds.
+const JSON_TIMEOUT: Duration = Duration::from_secs(30);
+const LISTING_ATTEMPTS: u32 = 3;
+const LISTING_RETRY: Duration = Duration::from_secs(2);
 pub const MAX_MODEL_BYTES: usize = 64 * 1024 * 1024;
 const MIN_SECRET_BYTES: usize = 32;
 /// Headers a studio request needs; cookies and the browser's own credentials never reach the character server.
@@ -171,17 +175,18 @@ async fn proxy(
     response.body(Body::from_stream(upstream.bytes_stream())).map_err(crate::error::internal)
 }
 
-/// A sealed assembly's `model.glb`. The character server answers with a presigned S3 redirect, followed here without
-/// the operator token or key.
-pub async fn fetch_model(state: &AppState, username: &str, job: &str, version: &str) -> ApiResult<Vec<u8>> {
+fn unavailable(error: reqwest::Error) -> ApiError {
+    tracing::warn!(%error, "Character server request failed");
+    UNAVAILABLE
+}
+
+/// A file under the character server's `/api/`, at most `limit` bytes. Its files answer with a presigned S3 redirect,
+/// followed here without the operator token or key.
+pub async fn fetch_file(state: &AppState, username: &str, api_path: &str, limit: usize) -> ApiResult<Vec<u8>> {
     let factory = factory(state)?;
-    let url = format!("{}/api/avatar-factory/jobs/{job}/native-parts/{version}/model.glb", factory.url);
-    let failed = |error: reqwest::Error| {
-        tracing::warn!(%error, "Character model fetch failed");
-        UNAVAILABLE
-    };
+    let url = format!("{}/api/{api_path}", factory.url);
     let mut response =
-        signed(state.http.get(&url), factory, username).timeout(MODEL_TIMEOUT).send().await.map_err(failed)?;
+        signed(state.http.get(&url), factory, username).timeout(FILE_TIMEOUT).send().await.map_err(unavailable)?;
     if response.status().is_redirection() {
         let location = response
             .headers()
@@ -189,26 +194,52 @@ pub async fn fetch_model(state: &AppState, username: &str, job: &str, version: &
             .and_then(|v| v.to_str().ok())
             .and_then(|v| response.url().join(v).ok())
             .ok_or(UNAVAILABLE)?;
-        response = state.http.get(location).timeout(MODEL_TIMEOUT).send().await.map_err(failed)?;
+        response = state.http.get(location).timeout(FILE_TIMEOUT).send().await.map_err(unavailable)?;
     }
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(not_found("factory_model_not_found", "캐릭터 서버에 그 조립 결과가 없습니다."));
+        return Err(not_found("factory_file_not_found", "캐릭터 서버에 그 파일이 없습니다."));
     }
     if !response.status().is_success() {
         return Err(UNAVAILABLE);
     }
-    if response.content_length().is_some_and(|length| length as usize > MAX_MODEL_BYTES) {
+    if response.content_length().is_some_and(|length| length as usize > limit) {
         return Err(too_large());
     }
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        bytes.extend_from_slice(&chunk.map_err(failed)?);
-        if bytes.len() > MAX_MODEL_BYTES {
+        bytes.extend_from_slice(&chunk.map_err(unavailable)?);
+        if bytes.len() > limit {
             return Err(too_large());
         }
     }
     Ok(bytes)
+}
+
+/// JSON from the character server's `/api/`; None for a 404. Its job listing answers 503 `listing_pending` while a cold
+/// snapshot is still being read, so that is retried a few times.
+pub async fn fetch_json(state: &AppState, username: &str, api_path: &str) -> ApiResult<Option<Value>> {
+    let factory = factory(state)?;
+    let url = format!("{}/api/{api_path}", factory.url);
+    for attempt in 1..=LISTING_ATTEMPTS {
+        let response =
+            signed(state.http.get(&url), factory, username).timeout(JSON_TIMEOUT).send().await.map_err(unavailable)?;
+        match response.status() {
+            reqwest::StatusCode::NOT_FOUND => return Ok(None),
+            status if status.is_success() => {
+                let bytes = response.bytes().await.map_err(unavailable)?;
+                return serde_json::from_slice(&bytes).map(Some).map_err(|_| UNAVAILABLE);
+            }
+            reqwest::StatusCode::SERVICE_UNAVAILABLE if attempt < LISTING_ATTEMPTS => {
+                tokio::time::sleep(LISTING_RETRY).await;
+            }
+            status => {
+                tracing::warn!(%status, api_path, "Character server refused a read");
+                return Err(UNAVAILABLE);
+            }
+        }
+    }
+    Err(UNAVAILABLE)
 }
 
 pub const fn too_large() -> ApiError {

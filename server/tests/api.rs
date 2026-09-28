@@ -1,12 +1,11 @@
 mod common;
 
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     extract::Request,
     http::{StatusCode, header},
     response::IntoResponse,
-    routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::{ORIGIN, TestApp};
@@ -249,17 +248,48 @@ async fn 일촌을_맺으면_일촌_공개_홈을_볼_수_있다() {
     app.cleanup().await;
 }
 
-/// The smallest valid GLB: a header and one JSON chunk.
-fn glb() -> Vec<u8> {
-    let json = br#"{"asset":{"version":"2.0"}} "#;
+/// A GLB of just a JSON chunk.
+fn glb(json: Value) -> Vec<u8> {
+    let mut chunk = serde_json::to_vec(&json).unwrap();
+    while !chunk.len().is_multiple_of(4) {
+        chunk.push(b' ');
+    }
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&0x4654_6c67u32.to_le_bytes());
     bytes.extend_from_slice(&2u32.to_le_bytes());
-    bytes.extend_from_slice(&((12 + 8 + json.len()) as u32).to_le_bytes());
-    bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&((12 + 8 + chunk.len()) as u32).to_le_bytes());
+    bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
     bytes.extend_from_slice(b"JSON");
-    bytes.extend_from_slice(json);
+    bytes.extend_from_slice(&chunk);
     bytes
+}
+
+/// Rigged, with the clips the character server's Meshy delivery names.
+fn character_glb() -> Vec<u8> {
+    glb(json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}],
+        "animations": [{"name": "idle"}, {"name": "walk"}, {"name": "run"}, {"name": "sit"}]}))
+}
+
+/// Animated but without a skin: nothing a 미니미 can be.
+fn statue_glb() -> Vec<u8> {
+    glb(json!({"asset": {"version": "2.0"}, "animations": [{"name": "idle"}, {"name": "walk"}]}))
+}
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(width, height).write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+fn factory_job(id: &str, created: &str, model_sha: &str) -> Value {
+    json!({"id": id, "character_id": format!("c_{id}"), "character_name": format!("{id} 캐릭터"), "created_at": created,
+        "production_mode": "character_parts", "assembly_version": "v3", "assembly_origin": "generated_parts_fitted_to_meshy_body",
+        "character_flow": {"stage": "complete"}, "assembly_artifacts": [{"name": "model.glb", "sha256": model_sha}]})
 }
 
 /// One request the fake character server received.
@@ -274,57 +304,66 @@ struct Call {
 #[derive(Clone, Default)]
 struct Seen(Arc<Mutex<Vec<Call>>>);
 
-/// A character server stand-in: model downloads redirect to a "presigned" URL; everything else echoes.
+/// A character server stand-in with three sealed characters and one still assembling: `job_1` has a chosen face,
+/// `statue` has no rig, `tampered` serves bytes its record does not match. Files redirect to a "presigned" URL.
 async fn fake_factory(seen: Seen) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let signed = format!("{base}/signed/model.glb");
-    let record = move |request: Request| {
-        let headers = request.headers();
-        let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
-        seen.0.lock().unwrap().push(Call {
-            uri: request.uri().to_string(),
-            authorization: get("authorization"),
-            api_key: get("x-api-key"),
-            cookie: get("cookie"),
-        });
-    };
-    let app = Router::new()
-        .route(
-            "/api/avatar-factory/jobs/{job}/native-parts/{version}/model.glb",
-            get({
-                let record = record.clone();
-                move |request: Request| async move {
-                    let missing = request.uri().path().contains("/missing/");
-                    record(request);
-                    if missing {
-                        StatusCode::NOT_FOUND.into_response()
-                    } else {
-                        (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, signed.clone())]).into_response()
+    let jobs = json!({"jobs": [
+        factory_job("job_1", "2026-09-03T00:00:00Z", &sha256(&character_glb())),
+        factory_job("statue", "2026-09-02T00:00:00Z", &sha256(&statue_glb())),
+        factory_job("tampered", "2026-09-01T00:00:00Z", &"0".repeat(64)),
+        {"id": "wip", "production_mode": "character_parts", "assembly_version": null, "character_flow": {"stage": "assemble"}},
+    ]});
+    let url = base.clone();
+    let app = Router::new().fallback(move |request: Request| {
+        let (seen, jobs, base) = (seen.clone(), jobs.clone(), base.clone());
+        async move {
+            let headers = request.headers();
+            let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+            seen.0.lock().unwrap().push(Call {
+                uri: request.uri().to_string(),
+                authorization: get("authorization"),
+                api_key: get("x-api-key"),
+                cookie: get("cookie"),
+            });
+            let redirect = |file: &str| {
+                (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, format!("{base}/signed/{file}"))]).into_response()
+            };
+            let path = request.uri().path().trim_start_matches('/').to_owned();
+            let segments: Vec<&str> = path.split('/').collect();
+            match segments.as_slice() {
+                ["api", "avatar-factory", "jobs"] => Json(jobs).into_response(),
+                ["api", "studio", "catalog"] => {
+                    Json(json!({"items": {}, "parts": {"job_1:body": {"name": "공장 영웅"}}, "characters": {}}))
+                        .into_response()
+                }
+                ["api", "avatar-factory", "jobs", id] => {
+                    match jobs["jobs"].as_array().unwrap().iter().find(|job| job["id"] == *id) {
+                        Some(job) => Json(job.clone()).into_response(),
+                        None => StatusCode::NOT_FOUND.into_response(),
                     }
                 }
-            }),
-        )
-        .route(
-            "/signed/model.glb",
-            get({
-                let record = record.clone();
-                move |request: Request| async move {
-                    record(request);
-                    glb()
-                }
-            }),
-        )
-        .fallback(move |request: Request| async move {
-            record(request);
-            ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":true}"#)
-        });
+                ["api", "studio", "bodies", "job_1", "v3", "expressions"] => Json(json!({"selected": "smile",
+                    "items": [{"id": "smile", "artifacts": [{"name": "model.glb", "sha256": sha256(&character_glb())}]}]}))
+                .into_response(),
+                ["api", "studio", "bodies", "job_1", "v3", "expressions", "smile", "model.glb"] => redirect("face.glb"),
+                ["api", "avatar-factory", "jobs", "statue", "native-parts", "v3", "model.glb"] => redirect("statue.glb"),
+                ["api", "avatar-factory", "jobs", _, "native-parts", "v3", "model.glb"] => redirect("plain.glb"),
+                ["api", "avatar-factory", "jobs", _, "native-parts", "v3", "front.png"] => redirect("front.png"),
+                ["signed", "face.glb" | "plain.glb"] => character_glb().into_response(),
+                ["signed", "statue.glb"] => statue_glb().into_response(),
+                ["signed", "front.png"] => png(800, 800).into_response(),
+                ["api", ..] if path.contains("/expressions") => StatusCode::NOT_FOUND.into_response(),
+                _ => Json(json!({"ok": true})).into_response(),
+            }
+        }
+    });
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    base
+    url
 }
-
 #[tokio::test]
-async fn 관리자는_캐릭터_서버_모델을_카탈로그로_가져오고_공개한다() {
+async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소로_가져오고_공개한다() {
     let seen = Seen::default();
     let url = fake_factory(seen.clone()).await;
     let token =
@@ -333,47 +372,84 @@ async fn 관리자는_캐릭터_서버_모델을_카탈로그로_가져오고_�
     let member = app.register("member_f", "회원").await;
     let admin = app.register("operator_f", "운영자").await;
     app.make_admin("operator_f").await;
-
-    let minimes = app.call("GET", "/api/catalog/items?kind=minime", None, None).await;
-    assert_eq!(minimes.body["items"].as_array().unwrap().len(), 8);
-    assert_eq!(app.call("GET", "/api/catalog/admin/items", None, Some(&member)).await.status, StatusCode::FORBIDDEN);
-
-    let payload = json!({"id": "factory-hero", "kind": "minime", "label": "공장 영웅", "emoji": "🦸", "factoryJobId": "job_1", "factoryVersion": "v3"});
     assert_eq!(
-        app.call("POST", "/api/catalog/admin/import", Some(payload.clone()), Some(&member)).await.status,
-        StatusCode::FORBIDDEN
+        app.call("GET", "/api/catalog/items?kind=minime", None, None).await.body["items"].as_array().unwrap().len(),
+        8
     );
-    let imported = app.call("POST", "/api/catalog/admin/import", Some(payload), Some(&admin)).await;
-    assert_eq!(imported.status, StatusCode::CREATED, "{:?}", imported.body);
-    assert_eq!(imported.body["status"], "draft");
-    assert_eq!(imported.body["sourceRef"], "job_1/v3");
-    let model_url = imported.body["modelUrl"].as_str().unwrap().to_owned();
 
+    let listing = "/api/catalog/admin/factory-characters";
+    assert_eq!(app.call("GET", listing, None, Some(&member)).await.status, StatusCode::FORBIDDEN);
+    let characters = app.call("GET", listing, None, Some(&admin)).await;
+    let ids: Vec<&str> =
+        characters.body["characters"].as_array().unwrap().iter().map(|c| c["jobId"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["job_1", "statue", "tampered"]);
+    let first = &characters.body["characters"][0];
+    assert_eq!((first["name"].as_str(), first["version"].as_str()), (Some("공장 영웅"), Some("v3")));
+    assert_eq!(first["thumbnailUrl"], "/api/factory/avatar-factory/jobs/job_1/native-parts/v3/front.png");
+    assert_eq!(first["imported"], Value::Null);
     let calls = seen.0.lock().unwrap().clone();
-    assert_eq!(calls[0].uri, "/api/avatar-factory/jobs/job_1/native-parts/v3/model.glb");
     assert_eq!(calls[0].api_key.as_deref(), Some("factory-key"));
     let bearer = calls[0].authorization.as_deref().unwrap().trim_start_matches("Bearer ");
     let claims: Value =
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(bearer.split('.').nth(1).unwrap()).unwrap()).unwrap();
-    assert_eq!(claims["userId"], 1);
-    assert_eq!(claims["roles"][0], "ADMIN");
-    let signed = Call { uri: "/signed/model.glb".into(), authorization: None, api_key: None, cookie: None };
-    assert_eq!(calls[1], signed);
+    assert_eq!((claims["userId"].as_i64(), claims["roles"][0].as_str()), (Some(1), Some("ADMIN")));
 
-    let blob = app.call("GET", &model_url, None, None).await;
-    assert_eq!(blob.bytes, glb());
-    assert!(blob.headers[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+    let import = |job: &str, id: &str| json!({"id": id, "kind": "minime", "label": "공장 영웅", "emoji": "🦸", "factoryJobId": job});
+    let path = "/api/catalog/admin/import";
+    assert_eq!(
+        app.call("POST", path, Some(import("job_1", "hero")), Some(&member)).await.status,
+        StatusCode::FORBIDDEN
+    );
+    let imported = app.call("POST", path, Some(import("job_1", "factory-hero")), Some(&admin)).await;
+    assert_eq!(imported.status, StatusCode::CREATED, "{:?}", imported.body);
+    assert_eq!(imported.body["status"], "draft");
+    assert_eq!(imported.body["sourceRef"], "job_1/v3/smile");
+    assert_eq!(imported.body["clips"], json!(["idle", "run", "walk"]));
+    let model_url = imported.body["modelUrl"].as_str().unwrap().to_owned();
+    assert_eq!(model_url, format!("/models/{}.glb", sha256(&character_glb())));
+    let signed: Vec<Call> =
+        seen.0.lock().unwrap().iter().filter(|call| call.uri.starts_with("/signed/")).cloned().collect();
+    assert_eq!(
+        signed.iter().map(|call| call.uri.as_str()).collect::<Vec<_>>(),
+        ["/signed/face.glb", "/signed/front.png"]
+    );
+    assert!(signed.iter().all(|call| call.authorization.is_none() && call.api_key.is_none() && call.cookie.is_none()));
+
+    let model = app.call("GET", &model_url, None, None).await;
+    assert_eq!(model.bytes, character_glb());
+    assert!(model.headers[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+    let picture = app.call("GET", imported.body["thumbnailUrl"].as_str().unwrap(), None, None).await;
+    let picture = image::load_from_memory(&picture.bytes).unwrap();
+    assert_eq!((picture.width(), picture.height()), (256, 256));
+
+    let characters = app.call("GET", listing, None, Some(&admin)).await;
+    assert_eq!(
+        characters.body["characters"][0]["imported"],
+        json!({"id": "factory-hero", "status": "draft", "current": true})
+    );
     let hidden = app.call("GET", "/api/catalog/items", None, None).await;
     assert!(!hidden.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "factory-hero"));
     app.call("PATCH", "/api/catalog/admin/items/factory-hero", Some(json!({"status": "published"})), Some(&admin))
         .await;
-    let shown = app.call("GET", "/api/catalog/items", None, None).await;
+    let shown = app.call("GET", "/api/catalog/items?kind=minime", None, None).await;
     assert!(shown.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "factory-hero"));
 
-    let missing = json!({"id": "broken", "kind": "minime", "label": "x", "emoji": "🧪", "factoryJobId": "job_2", "factoryVersion": "missing"});
-    assert_eq!(
-        app.call("POST", "/api/catalog/admin/import", Some(missing), Some(&admin)).await.status,
-        StatusCode::NOT_FOUND
+    let refused = |job: &'static str| {
+        let app = &app;
+        let admin = admin.clone();
+        async move { app.call("POST", path, Some(import(job, "other")), Some(&admin)).await }
+    };
+    assert_eq!(refused("statue").await.body["code"], "not_playable");
+    assert_eq!(refused("tampered").await.body["code"], "factory_checksum");
+    assert_eq!(refused("wip").await.body["code"], "factory_not_sealed");
+    assert_eq!(refused("nobody").await.status, StatusCode::NOT_FOUND);
+    assert_eq!(refused("../etc").await.status, StatusCode::NOT_FOUND);
+    assert!(
+        app.call("GET", "/api/catalog/admin/items", None, Some(&admin)).await.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != "other")
     );
     app.cleanup().await;
 }

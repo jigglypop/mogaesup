@@ -1,5 +1,7 @@
 use anyhow::{Context, bail};
-use std::{env, path::PathBuf};
+use std::env;
+
+use crate::models::Models;
 
 /// Where the character server (gaesup-character) listens, and how this server signs in to it as the operator.
 #[derive(Clone)]
@@ -24,7 +26,8 @@ pub struct Config {
     pub origins: Vec<String>,
     pub cookie_secure: bool,
     pub ticket_secret: Vec<u8>,
-    pub blob_dir: PathBuf,
+    /// Catalog models and pictures: `MODEL_STORE`, an `s3://bucket/prefix` or a local directory.
+    pub models: Models,
     pub factory: Option<Factory>,
 }
 
@@ -62,7 +65,8 @@ impl Config {
             origins,
             cookie_secure: var("COOKIE_SECURE").is_none_or(|value| value != "false"),
             ticket_secret,
-            blob_dir: var("BLOB_DIR").map_or_else(|| PathBuf::from("data/blobs"), PathBuf::from),
+            models: Models::open(&var("MODEL_STORE").unwrap_or_else(|| "data/local/models".into()))
+                .context("MODEL_STORE")?,
             factory: factory.transpose()?,
         })
     }

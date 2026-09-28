@@ -4,6 +4,7 @@ import type {
   CatalogItem,
   CatalogKind,
   Credentials,
+  FactoryCharacter,
   FactoryImport,
   GuestbookPage,
   HomeSummary,
@@ -68,4 +69,5 @@ export const catalogApi = {
   patch: (id: string, body: CatalogChanges) =>
     api<CatalogItem>(`/catalog/admin/items/${segment(id)}`, { method: 'PATCH', body }),
   importFactory: (body: FactoryImport) => api<CatalogItem>('/catalog/admin/import', { method: 'POST', body }),
+  factoryCharacters: () => api<{ characters: FactoryCharacter[] }>('/catalog/admin/factory-characters'),
 };

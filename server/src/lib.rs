@@ -3,10 +3,14 @@ pub mod catalog;
 pub mod config;
 pub mod error;
 pub mod factory;
+pub mod glb;
 pub mod homes;
+pub mod models;
 pub mod rooms;
 pub mod security;
+pub mod slim;
 pub mod social;
+pub mod studio;
 
 use axum::{
     Json, Router,
@@ -66,7 +70,9 @@ pub fn router(state: AppState) -> Router {
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state.clone());
-    api.merge(rooms::router(state))
+    // In production CloudFront serves /models/* from S3 and never sends it here.
+    let models = Router::new().route("/models/{file}", get(models::serve)).with_state(state.clone());
+    api.merge(models).merge(rooms::router(state))
 }
 
 async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {

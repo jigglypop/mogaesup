@@ -99,7 +99,7 @@ export function Profile({ view, viewer, minimes, onUpdate }: ProfileProps) {
                 aria-pressed={item.id === profile.minime}
                 onClick={() => onUpdate({ minime: item.id, emoji: item.emoji })}
               >
-                <span>{item.emoji}</span>
+                {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" /> : <span>{item.emoji}</span>}
                 <small>{item.label}</small>
               </button>
             ))}

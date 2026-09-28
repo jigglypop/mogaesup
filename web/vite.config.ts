@@ -24,6 +24,8 @@ export default defineConfig(({ mode }) => ({
     proxy: {
       // The server checks Origin on writes and room upgrades; the proxy keeps the browser's.
       '/api': { target: SERVER, ws: true },
+      // Catalog models copied from the character server; CloudFront serves these from S3 in production.
+      '/models': { target: SERVER },
     },
   },
   build: {

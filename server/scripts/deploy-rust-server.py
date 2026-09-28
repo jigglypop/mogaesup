@@ -20,6 +20,8 @@ STACK = 'mogaesup-server'
 VPC = 'vpc-01dc516a'
 SUBNETS = ('subnet-4a9f2021', 'subnet-436a0238')
 SERVICE_GROUP = 'CloudFront-VPCOrigins-Service-SG'
+# The AL2023 image the instance runs; changing it replaces the instance (new private DNS for the web stack).
+IMAGE = 'ami-03137ee2d0c5af1fe'
 
 
 def aws(*args):
@@ -49,7 +51,7 @@ def service_group():
 
 def provision():
     group = service_group()
-    overrides = [f'VpcId={VPC}', f'SubnetA={SUBNETS[0]}', f'SubnetB={SUBNETS[1]}']
+    overrides = [f'VpcId={VPC}', f'SubnetA={SUBNETS[0]}', f'SubnetB={SUBNETS[1]}', f'ImageId={IMAGE}']
     if group:
         overrides.append(f'CloudFrontServiceGroup={group}')
     subprocess.run(['aws', 'cloudformation', 'deploy', '--region', REGION, '--stack-name', STACK,
@@ -63,6 +65,8 @@ def main():
     parser.add_argument('--binary', default='target/x86_64-unknown-linux-musl/release/mogaesup-server')
     parser.add_argument('--origin', default='https://mogaesup.com', help='Comma-separated site origins the server accepts')
     parser.add_argument('--factory-url', default='', help='Character server base URL for admins (gaesup-character)')
+    parser.add_argument('--model-store', default='s3://mogaesup-web-960243570517-apne2/models',
+                        help='Where catalog models copied from the character server are kept')
     parser.add_argument('--skip-provision', action='store_true')
     args = parser.parse_args()
     if aws('sts', 'get-caller-identity')['Account'] != ACCOUNT:
@@ -99,7 +103,7 @@ def main():
 
     bootstrap = ['python3', 'bootstrap.py', '--secret', outputs['DatabaseSecretArn'],
                  '--ticket-secret', outputs['RealtimeTicketSecretArn'], '--endpoint', outputs['DatabaseEndpoint'],
-                 '--origin', args.origin]
+                 '--origin', args.origin, '--model-store', args.model_store]
     if args.factory_url:
         bootstrap += ['--factory-url', args.factory_url]
     commands = [
@@ -111,7 +115,7 @@ def main():
         'systemctl stop mogaesup.service 2>/dev/null || true',
         'install -m 755 mogaesup-server /opt/mogaesup/mogaesup-server',
         'chown -R root:mogaesup /opt/mogaesup', 'chmod -R g+rX /opt/mogaesup/releases',
-        'install -d -m 750 -o mogaesup -g mogaesup /var/lib/mogaesup /var/lib/mogaesup/blobs',
+        'install -d -m 750 -o mogaesup -g mogaesup /var/lib/mogaesup',
         ' '.join(shlex.quote(part) for part in bootstrap),
         'for attempt in $(seq 1 30); do if curl -fsS http://127.0.0.1:8080/api/health; then break; fi; sleep 2; done',
         'systemctl is-active mogaesup', 'curl -fsS http://127.0.0.1:8080/api/health',

@@ -7,7 +7,7 @@
 | 폴더 | 역할 |
 | --- | --- |
 | `web/` | 프론트엔드. React 19 + Vite 8, 3D 섬은 npm의 `gaesup-world`로 그린다. 로그인·가입, 미니홈피(`/@아이디`), 둘러보기, 관리(`/admin`) |
-| `server/` | 웹서버. Rust(axum + sqlx) + PostgreSQL. 회원과 세션 쿠키, 미니홈피 프로필·섬 저장(리비전)·방문자, 방명록·일촌, 미니미 카탈로그, 캐릭터 서버 프록시, 실시간 방(WebSocket, gaesup-world 멀티플레이 프로토콜) |
+| `server/` | 웹서버. Rust(axum + sqlx) + PostgreSQL. 회원과 세션 쿠키, 미니홈피 프로필·섬 저장(리비전)·방문자, 방명록·일촌, 미니미 카탈로그와 캐릭터 가져오기, 캐릭터 서버 프록시, 실시간 방(WebSocket, gaesup-world 멀티플레이 프로토콜) |
 | `gaesup-character/` | 캐릭터 서버(관리자용 에셋 생성·캐릭터 커스텀). [별도 레포](https://github.com/jigglypop/gaesup-character)를 서브모듈로 연결한다 |
 
 엔진인 gaesup-world는 이 레포에 넣지 않고 npm 패키지로 받는다. 엔진을 고치면 gaesup-world 레포의 `main`에 올리고, CI가 새 버전을 npm에 낸 뒤 `web/`에서 버전을 올린다.
@@ -20,7 +20,11 @@ git clone --recurse-submodules https://github.com/jigglypop/mogaesup.git
 
 1. 서버: `server/scripts/start-rust-server.ps1`. Docker로 PostgreSQL(127.0.0.1:55432)을 띄우고 `127.0.0.1:8080`에서 돈다. 설정 목록은 `server/.env.example`에 있다.
 2. 웹: `cd web && npm install && npm run dev`. `http://127.0.0.1:5180`에서 열리고 `/api`(WebSocket 포함)를 8080으로 넘긴다.
-3. 관리자: 서버를 `BOOTSTRAP_ADMIN_USERNAME`·`BOOTSTRAP_ADMIN_PASSWORD`와 함께 띄우면 그 계정을 만들거나 관리자로 올린다. `/admin`에서 캐릭터 서버의 조립 결과를 미니미 카탈로그로 가져오려면 `-FactoryUrl`로 캐릭터 서버 주소를 준다.
+3. 관리자: 서버를 `BOOTSTRAP_ADMIN_USERNAME`·`BOOTSTRAP_ADMIN_PASSWORD`와 함께 띄우면 그 계정을 만들거나 관리자로 올린다. `/admin`에서 캐릭터 서버의 완성 캐릭터를 가져오려면 `-FactoryUrl`로 캐릭터 서버 주소를 준다.
+
+## 캐릭터 가져오기
+
+`/admin`은 캐릭터 서버(gaesup-character)의 완성 캐릭터를 스튜디오와 같은 기준으로 보여 준다: 봉인된 `character_parts` 조립본, 캐릭터마다 가장 최근 작업, 삭제·보관한 것 제외. 가져오면 서버가 표정이 구워진 사본(없으면 기본 조립본)을 받아 캐릭터 서버 기록의 SHA-256과 대조하고, 스킨과 `idle`·`walk` 클립을 확인한 뒤 텍스처를 웹용으로 줄여(색상 1024px, 그 밖 512px, 불투명 맵은 JPEG) `MODEL_STORE`에 해시 이름으로 저장한다. 운영에서는 웹 버킷의 `models/`이고 CloudFront가 `/models/*`로 1년 불변 캐시로 내준다. 초안으로 들어오니 확인한 뒤 공개하면 미니미 목록에 나온다.
 
 ## 검증
 

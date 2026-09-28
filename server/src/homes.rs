@@ -338,7 +338,7 @@ pub fn safe_asset_url(value: &str) -> bool {
     {
         return true;
     }
-    if let Some(sha) = value.strip_prefix("/api/catalog/blobs/").and_then(|v| v.strip_suffix(".glb")) {
+    if let Some(sha) = value.strip_prefix("/models/").and_then(|v| v.strip_suffix(".glb")) {
         return sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     }
     value.strip_prefix('/').unwrap_or(value).strip_prefix("gltf/").is_some_and(|rest| {
@@ -422,12 +422,12 @@ mod tests {
     fn asset_urls_stay_on_the_platform() {
         assert!(safe_asset_url("gltf/props/bed.glb"));
         assert!(safe_asset_url("/gltf/nature/kenney/bush.glb"));
-        assert!(safe_asset_url(&format!("/api/catalog/blobs/{}.glb", "a".repeat(64))));
+        assert!(safe_asset_url(&format!("/models/{}.glb", "a".repeat(64))));
         assert!(safe_asset_url("data:image/svg+xml;utf8,%3Csvg%3E"));
         assert!(!safe_asset_url("https://evil.example/x.glb"));
         assert!(!safe_asset_url("gltf/../../etc/passwd"));
         assert!(!safe_asset_url("javascript:alert(1)"));
-        assert!(!safe_asset_url(&format!("/api/catalog/blobs/{}.glb", "A".repeat(64))));
+        assert!(!safe_asset_url(&format!("/models/{}.glb", "A".repeat(64))));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use mogaesup_server::{AppState, MIGRATOR, config::Config, config::Factory, router};
+use mogaesup_server::{AppState, MIGRATOR, config::Config, config::Factory, models::Models, router};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::path::PathBuf;
@@ -24,7 +24,7 @@ fn admin_url() -> String {
 pub struct TestApp {
     pub router: Router,
     pub state: AppState,
-    pub blob_dir: PathBuf,
+    pub model_dir: PathBuf,
     database: String,
     admin: PgPool,
 }
@@ -46,16 +46,16 @@ impl TestApp {
         let url = admin_url().rsplit_once('/').map(|(base, _)| format!("{base}/{database}")).unwrap();
         let db = PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
         MIGRATOR.run(&db).await.unwrap();
-        let blob_dir = std::env::temp_dir().join(&database);
+        let model_dir = std::env::temp_dir().join(&database);
         let config = Config {
             origins: vec![ORIGIN.into()],
             cookie_secure: false,
             ticket_secret: TICKET_SECRET.to_vec(),
-            blob_dir: blob_dir.clone(),
+            models: Models::open(model_dir.to_str().unwrap()).unwrap(),
             factory,
         };
         let state = AppState::new(db, config);
-        Self { router: router(state.clone()), state, blob_dir, database, admin }
+        Self { router: router(state.clone()), state, model_dir, database, admin }
     }
 
     pub async fn cleanup(self) {
@@ -64,7 +64,7 @@ impl TestApp {
             .execute(&self.admin)
             .await
             .unwrap();
-        let _ = std::fs::remove_dir_all(&self.blob_dir);
+        let _ = std::fs::remove_dir_all(&self.model_dir);
     }
 
     pub async fn call(&self, method: &str, path: &str, body: Option<Value>, cookie: Option<&str>) -> Reply {

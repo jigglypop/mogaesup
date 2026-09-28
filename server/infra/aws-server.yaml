@@ -8,8 +8,9 @@ Parameters:
   SubnetB:
     Type: AWS::EC2::Subnet::Id
   ImageId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    # Pinned: a new image replaces the instance, so an ordinary update must not pick up the latest AL2023 by itself.
+    Type: AWS::EC2::Image::Id
+    Default: ami-03137ee2d0c5af1fe
   InstanceType:
     Type: String
     Default: t3.small
@@ -21,6 +22,10 @@ Parameters:
     Type: String
     Default: ''
     Description: CloudFront-VPCOrigins-Service-SG of this VPC, once CloudFront has created it.
+  ModelBucketName:
+    Type: String
+    Default: mogaesup-web-960243570517-apne2
+    Description: The web stack's bucket; catalog models go under models/, which CloudFront serves at /models/*.
 Conditions:
   HasCloudFrontGroup: !Not [!Equals [!Ref CloudFrontServiceGroup, '']]
 Resources:
@@ -128,6 +133,9 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt RuntimeBucket.Arn
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ModelBucketName}/models/*'
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource:

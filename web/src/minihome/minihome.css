@@ -189,6 +189,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   transition: background 0.15s, border-color 0.15s;
 }
 .mh-minimes button span { font-size: 22px; line-height: 1.1; }
+.mh-minimes button img { width: 30px; height: 30px; object-fit: contain; }
 .mh-minimes button small { font-size: 10px; font-weight: 650; color: var(--mh-muted); white-space: nowrap; }
 .mh-minimes button:hover { background: #fff; }
 .mh-minimes button[aria-pressed='true'] { background: var(--mh-accent-soft); border-color: var(--mh-accent); }

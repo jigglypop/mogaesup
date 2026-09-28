@@ -17,6 +17,7 @@ parser.add_argument('--ticket-secret', required=True)
 parser.add_argument('--endpoint', required=True)
 parser.add_argument('--origin', required=True)
 parser.add_argument('--factory-url', default='')
+parser.add_argument('--model-store', required=True)
 parser.add_argument('--region', default='ap-northeast-2')
 args = parser.parse_args()
 
@@ -57,8 +58,8 @@ url = (f"postgres://mogaesup_app:{urllib.parse.quote(password, safe='')}@{args.e
        f"?sslmode=verify-full&sslrootcert={root}/global-bundle.pem")
 origins = [value.strip() for value in args.origin.split(',') if value.strip()]
 lines = [f'DATABASE_URL={url}', 'LISTEN_ADDR=0.0.0.0:8080', f"APP_ORIGIN={','.join(dict.fromkeys(origins))}",
-         'COOKIE_SECURE=true', f'REALTIME_TICKET_SECRET={ticket_secret}', 'BLOB_DIR=/var/lib/mogaesup/blobs',
-         'RUST_LOG=info']
+         'COOKIE_SECURE=true', f'REALTIME_TICKET_SECRET={ticket_secret}', f'MODEL_STORE={args.model_store}',
+         f'AWS_REGION={args.region}', 'RUST_LOG=info']
 if args.factory_url:
     lines.append(f'FACTORY_URL={args.factory_url}')
 (config / 'server.env').write_text('\n'.join(lines) + '\n')

@@ -20,6 +20,8 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures-util = "0.3"
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+object_store = { version = "0.12.5", default-features = false, features = ["aws", "fs"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }

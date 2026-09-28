@@ -119,6 +119,10 @@ export type CatalogItem = {
   label: string;
   emoji: string;
   modelUrl: string;
+  /** A small picture for the picker; characters copied from the character server have one. */
+  thumbnailUrl: string | null;
+  /** Engine clip names the model plays (idle, walk, run, …), recorded when it was copied in. */
+  clips: string[];
   source: 'builtin' | 'factory';
   sourceRef: string | null;
   status: CatalogStatus;
@@ -127,10 +131,24 @@ export type CatalogItem = {
 
 export type CatalogChanges = Partial<Pick<CatalogItem, 'label' | 'emoji' | 'status' | 'sortOrder'>>;
 
-/** Copies a sealed character-server assembly (`native-parts/<version>/model.glb`) into the catalog under `id`. */
+/** Copies a finished character-server character into the catalog under `id`; the server picks its sealed version. */
 export type FactoryImport = Pick<CatalogItem, 'id' | 'kind' | 'label' | 'emoji'> & {
   factoryJobId: string;
-  factoryVersion: string;
   status?: CatalogStatus;
   sortOrder?: number;
+};
+
+/** A finished character on the character server (gaesup-character). */
+export type FactoryCharacter = {
+  jobId: string;
+  characterId: string | null;
+  name: string;
+  version: string;
+  /** `complete` has its face baked in; `expressions` is sealed with the face still being made. */
+  stage: 'complete' | 'expressions';
+  createdAt: string | null;
+  /** The front render, through the admin proxy. */
+  thumbnailUrl: string;
+  /** The catalog item holding it; `current` when that copy is of the latest sealed version. */
+  imported: { id: string; status: CatalogStatus; current: boolean } | null;
 };

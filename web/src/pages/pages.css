@@ -200,6 +200,50 @@
   font-size: 11px;
   color: var(--mh-muted);
 }
+.admin-characters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.admin-character {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  box-shadow: 0 10px 30px rgba(35, 26, 54, 0.08);
+}
+.admin-character img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(200, 186, 255, 0.28), rgba(255, 255, 255, 0.6));
+}
+.admin-character b {
+  font-size: 14px;
+}
+.admin-character small {
+  color: var(--mh-muted);
+  font-size: 12px;
+}
+.admin-state {
+  font-size: 12px;
+  font-weight: 700;
+  color: #8b6cf0;
+  word-break: break-all;
+}
+.page-thumb {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+  border-radius: 8px;
+}
 @media (max-width: 640px) {
   .page {
     padding: 16px;

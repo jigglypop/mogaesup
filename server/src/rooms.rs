@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn peer_model_urls_stay_on_platform_paths() {
         assert!(model_url("https://mogaesup.com/gltf/man.glb"));
-        assert!(model_url(&format!("http://127.0.0.1:5180/api/catalog/blobs/{}.glb", "b".repeat(64))));
+        assert!(model_url(&format!("http://127.0.0.1:5180/models/{}.glb", "b".repeat(64))));
         assert!(!model_url("https://evil.example/x.glb?gltf/"));
         assert!(!model_url("/gltf/man.glb"));
         assert!(!model_url("https://mogaesup.com/api/homes/x.glb"));
