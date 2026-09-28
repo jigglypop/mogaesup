@@ -41,9 +41,11 @@ const resources = await page.evaluate(() => {
   const byType = {};
   for (const entry of performance.getEntriesByType('resource')) {
     const kind = entry.name.includes('/api/') ? 'api' : (entry.name.split('?')[0].split('.').pop() ?? 'other');
-    const bucket = (byType[kind] ??= { count: 0, bytes: 0 });
+    const bucket = (byType[kind] ??= { count: 0, bytes: 0, cached: 0 });
     bucket.count += 1;
-    bucket.bytes += entry.encodedBodySize || entry.transferSize || 0;
+    // Network bytes: a request answered from the HTTP cache (a prefetched model, say) transfers nothing.
+    bucket.bytes += entry.transferSize;
+    if (entry.transferSize === 0 && entry.encodedBodySize > 0) bucket.cached += 1;
   }
   return byType;
 });
