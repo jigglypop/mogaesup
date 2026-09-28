@@ -302,6 +302,7 @@ p.mg-compose { display: block; font-size: 13px; }
   gap: 14px;
   scrollbar-width: thin;
 }
+.mg-world.has-panel .mh-status { right: calc(var(--mg-edge) * 2 + var(--mg-side)); }
 .mh-status-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .mh-status-head h3 { font-size: 15px; font-weight: 800; }
 .mh-status-head p { margin-top: 2px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mg-muted); }
