@@ -167,7 +167,7 @@ async fn create_account(db: &PgPool, user: &User, password_hash: &str) -> Result
     }
     sqlx::query("INSERT INTO homes (owner_id, title) VALUES ($1, $2)")
         .bind(user.id)
-        .bind(format!("{}의 미니홈피", user.display_name))
+        .bind(format!("{}의 섬", user.display_name))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

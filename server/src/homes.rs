@@ -67,7 +67,7 @@ fn profile(row: &PgRow) -> HomeProfile {
 }
 
 pub const HOME_PRIVATE: ApiError =
-    ApiError::new(StatusCode::FORBIDDEN, "home_private", "주인이 공개하지 않은 미니홈피입니다.");
+    ApiError::new(StatusCode::FORBIDDEN, "home_private", "주인이 공개하지 않은 섬입니다.");
 
 /// The home behind `/@username` if `viewer` may see it: public, the owner, or an 일촌 of an 일촌-only home.
 pub async fn visible_home(state: &AppState, name: &str, viewer: Option<&User>) -> ApiResult<(HomeProfile, bool)> {
@@ -76,7 +76,7 @@ pub async fn visible_home(state: &AppState, name: &str, viewer: Option<&User>) -
         .bind(&name)
         .fetch_optional(&state.db)
         .await?
-        .ok_or(not_found("home_not_found", "없는 미니홈피입니다."))?;
+        .ok_or(not_found("home_not_found", "없는 섬입니다."))?;
     let home = profile(&row);
     let is_owner = viewer.is_some_and(|user| user.id == home.owner_id);
     let visible = match home.visibility.as_str() {
@@ -115,7 +115,7 @@ async fn home_view(state: &AppState, home: HomeProfile, is_owner: bool) -> ApiRe
 async fn my_home(state: &AppState, user: &User) -> ApiResult<HomeProfile> {
     sqlx::query("INSERT INTO homes (owner_id, title) VALUES ($1, $2) ON CONFLICT DO NOTHING")
         .bind(user.id)
-        .bind(format!("{}의 미니홈피", user.display_name))
+        .bind(format!("{}의 섬", user.display_name))
         .execute(&state.db)
         .await?;
     let row =

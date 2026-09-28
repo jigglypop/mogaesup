@@ -123,7 +123,9 @@ fn reencode(bytes: &[u8], mime: &str, edge: u32) -> Option<(Vec<u8>, &'static st
 pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
     let (mut json, bin) = split(bytes)?;
     let views = json["bufferViews"].as_array()?.clone();
-    if json["buffers"].as_array().map_or(0, Vec::len) != 1 || views.iter().any(|view| view["buffer"].as_u64() != Some(0)) {
+    if json["buffers"].as_array().map_or(0, Vec::len) != 1
+        || views.iter().any(|view| view["buffer"].as_u64() != Some(0))
+    {
         return None;
     }
     let range = |view: &Value| -> Option<std::ops::Range<usize>> {
@@ -133,7 +135,8 @@ pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
     let edges = edges(&json);
     let mut replaced: HashMap<usize, (Vec<u8>, &'static str, usize)> = HashMap::new();
     for (index, image) in json["images"].as_array()?.iter().enumerate() {
-        let (Some(edge), Some(view)) = (edges[index], image["bufferView"].as_u64().and_then(|v| usize::try_from(v).ok()))
+        let (Some(edge), Some(view)) =
+            (edges[index], image["bufferView"].as_u64().and_then(|v| usize::try_from(v).ok()))
         else {
             continue;
         };
@@ -228,7 +231,8 @@ mod tests {
         let (json, bin) = split(&slimmed).unwrap();
         assert_eq!(view(&json, bin, 0), vertices.as_slice());
         assert_eq!(json["buffers"][0]["byteLength"].as_u64().unwrap() as usize, bin.len());
-        let kinds: Vec<&str> = json["images"].as_array().unwrap().iter().map(|i| i["mimeType"].as_str().unwrap()).collect();
+        let kinds: Vec<&str> =
+            json["images"].as_array().unwrap().iter().map(|i| i["mimeType"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["image/jpeg", "image/png", "image/jpeg"]);
         let size = |index: usize| image::load_from_memory(view(&json, bin, index)).unwrap().width();
         assert_eq!((size(1), size(2), size(3)), (1024, 600, 512));
@@ -242,7 +246,8 @@ mod tests {
         let mut two_buffers = json.clone();
         two_buffers["buffers"] = json!([{"byteLength": bin.len()}, {"byteLength": 4, "uri": "extra.bin"}]);
         assert!(slim(&join(&two_buffers, &bin)).is_none());
-        let bare = json!({"asset": {"version": "2.0"}, "images": [], "bufferViews": [], "buffers": [{"byteLength": 0}]});
+        let bare =
+            json!({"asset": {"version": "2.0"}, "images": [], "bufferViews": [], "buffers": [{"byteLength": 0}]});
         assert!(slim(&join(&bare, &[])).is_none());
     }
 }

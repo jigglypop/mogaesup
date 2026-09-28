@@ -9,6 +9,33 @@ pub struct Factory {
     pub url: String,
     pub api_key: Option<String>,
     pub token: Option<FactoryToken>,
+    /// What the studio screens may do through this server: `FACTORY_ACCESS`, read unless set.
+    pub access: FactoryAccess,
+    /// Paid studio requests allowed per calendar month (UTC): `FACTORY_PAID_MONTHLY`, none unless set.
+    pub paid_monthly: i64,
+}
+
+/// How far the studio screens reach through this server. Each level includes the ones before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FactoryAccess {
+    /// Reading only: browsing the wardrobe and the admins' libraries.
+    Read,
+    /// Admins also change the studio's records (uploads, catalog, outfits), but start nothing that costs money.
+    Write,
+    /// Admins may start paid work (generation, rigging, retries) within the monthly budget.
+    Paid,
+}
+
+impl std::str::FromStr for FactoryAccess {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "read" => Ok(Self::Read),
+            "write" => Ok(Self::Write),
+            "paid" => Ok(Self::Paid),
+            other => bail!("FACTORY_ACCESS must be read, write or paid, not {other}"),
+        }
+    }
 }
 
 /// HS256 settings the character server's `auth.py` accepts; its data is kept per owner id, so every admin works in
@@ -59,7 +86,15 @@ impl Config {
                     })
                 })
                 .transpose()?;
-            Ok(Factory { url: url.trim_end_matches('/').to_owned(), api_key: var("FACTORY_API_KEY"), token })
+            Ok(Factory {
+                url: url.trim_end_matches('/').to_owned(),
+                api_key: var("FACTORY_API_KEY"),
+                token,
+                access: var("FACTORY_ACCESS").map_or(Ok(FactoryAccess::Read), |value| value.parse())?,
+                paid_monthly: var("FACTORY_PAID_MONTHLY")
+                    .map_or(Ok(0), |n| n.parse())
+                    .context("FACTORY_PAID_MONTHLY")?,
+            })
         });
         Ok(Self {
             origins,

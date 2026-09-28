@@ -1,10 +1,10 @@
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
-    extract::{Path, RawQuery, State},
+    extract::{OriginalUri, Path, RawQuery, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::Response,
-    routing::any,
+    routing::{any, get},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     AppState,
-    auth::require_admin,
-    config::{Factory, FactoryToken},
+    auth::{current_user, require_admin},
+    config::{Factory, FactoryAccess, FactoryToken},
     error::{ApiError, ApiResult, not_found},
     security::hmac_sha256,
 };
@@ -137,8 +137,168 @@ fn signed(request: reqwest::RequestBuilder, factory: &Factory, username: &str) -
     }
 }
 
+/// The paths the character studio's screens call; this server answers them under the same names, so the screens run
+/// unchanged inside the app.
+pub const STUDIO_PREFIXES: [&str; 4] = ["avatar-factory", "studio", "avatar-blueprints", "characters"];
+
+/// Whether `path` (the full request path) belongs to the studio, including the admins' `/api/factory/*`.
+pub fn is_studio_path(path: &str) -> bool {
+    path.strip_prefix("/api/").is_some_and(|rest| {
+        rest.starts_with("factory/")
+            || STUDIO_PREFIXES
+                .iter()
+                .any(|prefix| rest.strip_prefix(prefix).is_some_and(|tail| tail.is_empty() || tail.starts_with('/')))
+    })
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/factory/{*path}", any(proxy))
+    let mut router =
+        Router::new().route("/api/factory/{*path}", any(proxy)).route("/api/catalog/admin/factory-usage", get(usage));
+    for prefix in STUDIO_PREFIXES {
+        router = router
+            .route(&format!("/api/{prefix}"), any(studio))
+            .route(&format!("/api/{prefix}/{{*rest}}"), any(studio));
+    }
+    router
+}
+
+/// What a studio request needs from whoever sends it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Need {
+    /// Any signed-in member: reading the wardrobe (bodies, parts, colours, previews) and the part models it puts on.
+    Member,
+    /// An admin, reading anything else.
+    Admin,
+    /// An admin, changing the studio's records; `FACTORY_ACCESS=write` or more.
+    Write,
+    /// An admin, starting work that can cost money; `FACTORY_ACCESS=paid` and budget left this month.
+    Paid,
+}
+
+/// Uploads and selections that never start paid work. Every other POST is treated as paid: the character server starts
+/// generation, rigging, retries and resumes with POSTs, and a new one must not slip through as free.
+const FREE_POSTS: [&[&str]; 9] = [
+    &["avatar-factory", "jobs", "*", "native-parts", "select"],
+    &["avatar-factory", "base-bodies", "glb-assets"],
+    &["avatar-factory", "meshy-options", "texture-assets"],
+    &["avatar-blueprints", "assets"],
+    &["studio", "glb-assets"],
+    &["studio", "glb-assets", "upload"],
+    &["studio", "animals", "references"],
+    &["characters"],
+    &["characters", "*", "sources"],
+];
+
+/// The policy for one studio request; `path` is below `/api/`, e.g. `avatar-factory/wardrobe/bodies`.
+pub fn need(method: &Method, path: &str) -> Need {
+    let segments: Vec<&str> = path.split('/').collect();
+    if matches!(*method, Method::GET | Method::HEAD) {
+        let member = match segments.as_slice() {
+            ["avatar-factory", "wardrobe", ..] => true,
+            ["avatar-factory", "jobs", _, "native-parts", _, file] => file.ends_with(".glb"),
+            _ => false,
+        };
+        return if member { Need::Member } else { Need::Admin };
+    }
+    let free = |pattern: &&[&str]| {
+        pattern.len() == segments.len() && pattern.iter().zip(&segments).all(|(want, got)| *want == "*" || want == got)
+    };
+    if *method == Method::POST && !FREE_POSTS.iter().any(free) { Need::Paid } else { Need::Write }
+}
+
+const READ_ONLY: ApiError =
+    ApiError::new(StatusCode::FORBIDDEN, "factory_read_only", "이 서버에서는 캐릭터 스튜디오를 읽기만 할 수 있습니다.");
+const PAID_OFF: ApiError = ApiError::new(
+    StatusCode::FORBIDDEN,
+    "factory_paid_off",
+    "이 서버에서는 비용이 드는 캐릭터 작업을 시작할 수 없습니다.",
+);
+const BUDGET_SPENT: ApiError =
+    ApiError::new(StatusCode::TOO_MANY_REQUESTS, "factory_budget", "이번 달 유료 캐릭터 작업 한도를 다 썼습니다.");
+
+/// Paid studio requests started since the start of this month (UTC).
+async fn paid_this_month(state: &AppState) -> ApiResult<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM factory_requests
+         WHERE paid AND created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'",
+    )
+    .fetch_one(&state.db)
+    .await?)
+}
+
+/// `/api/{avatar-factory,studio,avatar-blueprints,characters}/*`: the studio's own API, checked against [`need`] and the
+/// server's [`FactoryAccess`], then sent on signed as the operator. Changes are recorded in `factory_requests`.
+async fn studio(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    RawQuery(query): RawQuery,
+    body: Body,
+) -> ApiResult<Response> {
+    let path = uri.path().trim_start_matches("/api/").to_owned();
+    let need = need(&method, &path);
+    let user = match need {
+        Need::Member => current_user(&state, &headers).await?,
+        _ => require_admin(&state, &headers).await?,
+    };
+    let factory = factory(&state)?;
+    let paid = need == Need::Paid;
+    match need {
+        Need::Write if factory.access < FactoryAccess::Write => return Err(READ_ONLY),
+        Need::Paid if factory.access < FactoryAccess::Paid => return Err(PAID_OFF),
+        Need::Paid if paid_this_month(&state).await? >= factory.paid_monthly => return Err(BUDGET_SPENT),
+        _ => {}
+    }
+    let record = if matches!(need, Need::Write | Need::Paid) {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO factory_requests (user_id, method, path, paid) VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(user.id)
+        .bind(method.as_str())
+        .bind(&path)
+        .bind(paid)
+        .fetch_one(&state.db)
+        .await?;
+        if paid {
+            tracing::warn!(user = %user.username, %method, %path, "paid studio request");
+        }
+        Some(id)
+    } else {
+        None
+    };
+    let response = forward(&state, factory, &user.username, method, &headers, &path, query, body).await;
+    if let Some(id) = record {
+        let status = response.as_ref().map_or(502, |response| response.status().as_u16());
+        let saved = sqlx::query("UPDATE factory_requests SET status = $2 WHERE id = $1")
+            .bind(id)
+            .bind(status as i16)
+            .execute(&state.db)
+            .await;
+        if let Err(error) = saved {
+            tracing::warn!(%error, "could not record a studio request's status");
+        }
+    }
+    response
+}
+
+/// `/api/catalog/admin/factory-usage`: how far the studio reaches from here, and this month's paid requests.
+async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    require_admin(&state, &headers).await?;
+    let Some(factory) = state.config.factory.as_ref() else {
+        return Ok(Json(json!({"connected": false})));
+    };
+    let access = match factory.access {
+        FactoryAccess::Read => "read",
+        FactoryAccess::Write => "write",
+        FactoryAccess::Paid => "paid",
+    };
+    Ok(Json(json!({
+        "connected": true,
+        "access": access,
+        "paidThisMonth": paid_this_month(&state).await?,
+        "paidMonthly": factory.paid_monthly,
+    })))
 }
 
 /// The character server's `/api/*` for admins, signed in as its operator. Bodies stream both ways.
@@ -152,6 +312,21 @@ async fn proxy(
 ) -> ApiResult<Response> {
     let admin = require_admin(&state, &headers).await?;
     let factory = factory(&state)?;
+    forward(&state, factory, &admin.username, method, &headers, &path, query, body).await
+}
+
+/// Sends one request to the character server's `/api/{path}` as the operator and streams its answer back.
+#[allow(clippy::too_many_arguments)]
+async fn forward(
+    state: &AppState,
+    factory: &Factory,
+    username: &str,
+    method: Method,
+    headers: &HeaderMap,
+    path: &str,
+    query: Option<String>,
+    body: Body,
+) -> ApiResult<Response> {
     if path.split('/').any(|segment| segment == ".." || segment.is_empty()) {
         return Err(not_found("not_found", "찾을 수 없습니다."));
     }
@@ -162,7 +337,7 @@ async fn proxy(
             request = request.header(name, value.clone());
         }
     }
-    let upstream = signed(request, factory, &admin.username).send().await.map_err(|error| {
+    let upstream = signed(request, factory, username).send().await.map_err(|error| {
         tracing::warn!(%error, "Character server request failed");
         UNAVAILABLE
     })?;

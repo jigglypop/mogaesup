@@ -27,7 +27,8 @@ pub async fn protect(State(state): State<AppState>, request: Request, next: Next
         }
         let json =
             headers.get(header::CONTENT_TYPE).is_some_and(|v| v.to_str().unwrap_or("").starts_with("application/json"));
-        if !json && !request.uri().path().starts_with("/api/factory/") {
+        // The studio's own uploads are multipart; its requests go to the character server as they came.
+        if !json && !crate::factory::is_studio_path(request.uri().path()) {
             return ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "json_required", "JSON 요청이 필요합니다.")
                 .into_response();
         }

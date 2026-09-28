@@ -276,7 +276,7 @@ impl Rooms {
         }
         let peers = hub.rooms.entry(room.to_owned()).or_default();
         if peers.len() >= ROOM_CAPACITY {
-            return Err((StatusCode::CONFLICT, "이 미니홈피에 사람이 가득 찼습니다."));
+            return Err((StatusCode::CONFLICT, "이 섬에 사람이 가득 찼습니다."));
         }
         let id = Uuid::new_v4().to_string();
         peers.insert(

@@ -9,7 +9,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::{ORIGIN, TestApp};
-use mogaesup_server::config::{Factory, FactoryToken};
+use mogaesup_server::config::{Factory, FactoryAccess, FactoryToken};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -77,11 +77,11 @@ async fn 쓰기_요청은_같은_출처의_json만_받는다() {
 }
 
 #[tokio::test]
-async fn 가입하면_미니홈피가_생기고_프로필을_바꾼다() {
+async fn 가입하면_섬이_생기고_프로필을_바꾼다() {
     let app = TestApp::new(None).await;
     let owner = app.register("owner_a", "주인").await;
     let home = app.call("GET", "/api/homes/me", None, Some(&owner)).await;
-    assert_eq!(home.body["profile"]["title"], "주인의 미니홈피");
+    assert_eq!(home.body["profile"]["title"], "주인의 섬");
     assert_eq!(home.body["isOwner"], true);
     assert_eq!(home.body["visits"], json!({"today": 0, "total": 0}));
 
@@ -368,7 +368,14 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     let url = fake_factory(seen.clone()).await;
     let token =
         FactoryToken { key: vec![3; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
-    let app = TestApp::new(Some(Factory { url, api_key: Some("factory-key".into()), token: Some(token) })).await;
+    let app = TestApp::new(Some(Factory {
+        url,
+        api_key: Some("factory-key".into()),
+        token: Some(token),
+        access: FactoryAccess::Read,
+        paid_monthly: 0,
+    }))
+    .await;
     let member = app.register("member_f", "회원").await;
     let admin = app.register("operator_f", "운영자").await;
     app.make_admin("operator_f").await;
@@ -460,7 +467,14 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
     let url = fake_factory(seen.clone()).await;
     let token =
         FactoryToken { key: vec![5; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
-    let app = TestApp::new(Some(Factory { url, api_key: None, token: Some(token) })).await;
+    let app = TestApp::new(Some(Factory {
+        url,
+        api_key: None,
+        token: Some(token),
+        access: FactoryAccess::Read,
+        paid_monthly: 0,
+    }))
+    .await;
     let member = app.register("member_g", "회원").await;
     let admin = app.register("operator_g", "운영자").await;
     app.make_admin("operator_g").await;
@@ -474,5 +488,79 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
     assert!(call.authorization.unwrap().starts_with("Bearer "));
     assert_eq!(call.cookie, None);
     assert_eq!(app.call("GET", "/api/factory/a/../b", None, Some(&admin)).await.status, StatusCode::NOT_FOUND);
+    app.cleanup().await;
+}
+
+async fn studio_app(seen: &Seen, access: FactoryAccess, paid_monthly: i64) -> TestApp {
+    let url = fake_factory(seen.clone()).await;
+    let token =
+        FactoryToken { key: vec![7; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
+    TestApp::new(Some(Factory { url, api_key: None, token: Some(token), access, paid_monthly })).await
+}
+
+#[tokio::test]
+async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_작업은_설정대로_막는다() {
+    let seen = Seen::default();
+    let app = studio_app(&seen, FactoryAccess::Read, 0).await;
+    let member = app.register("member_s", "회원").await;
+    let admin = app.register("operator_s", "운영자").await;
+    app.make_admin("operator_s").await;
+
+    let wardrobe = "/api/avatar-factory/wardrobe/bodies";
+    assert_eq!(app.call("GET", wardrobe, None, None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(app.call("GET", wardrobe, None, Some(&member)).await.body["ok"], true);
+    let part = "/api/avatar-factory/jobs/job_1/native-parts/v3/top.glb";
+    assert_eq!(app.call("GET", part, None, Some(&member)).await.status, StatusCode::OK);
+    assert_eq!(seen.0.lock().unwrap().last().unwrap().uri, "/api/avatar-factory/jobs/job_1/native-parts/v3/top.glb");
+    for other in ["/api/avatar-factory/jobs", "/api/studio/catalog", "/api/characters"] {
+        assert_eq!(app.call("GET", other, None, Some(&member)).await.status, StatusCode::FORBIDDEN, "{other}");
+    }
+    assert_eq!(app.call("GET", "/api/studio/catalog", None, Some(&admin)).await.status, StatusCode::OK);
+
+    let outfit = "/api/avatar-factory/wardrobe/outfits/mine";
+    let read_only = app.call("PUT", outfit, Some(json!({"name": "a"})), Some(&admin)).await;
+    assert_eq!(read_only.body["code"], "factory_read_only");
+    let paid = app.call("POST", "/api/avatar-factory/variants", Some(json!({})), Some(&admin)).await;
+    assert_eq!(paid.body["code"], "factory_paid_off");
+    assert_eq!(app.call("PUT", outfit, Some(json!({})), Some(&member)).await.status, StatusCode::FORBIDDEN);
+    app.cleanup().await;
+
+    let app = studio_app(&seen, FactoryAccess::Paid, 1).await;
+    let admin = app.register("operator_p", "운영자").await;
+    app.make_admin("operator_p").await;
+    let select = "/api/avatar-factory/jobs/job_1/native-parts/select";
+    assert_eq!(app.call("POST", select, Some(json!({})), Some(&admin)).await.status, StatusCode::OK);
+    let first = app.call("POST", "/api/studio/generations", Some(json!({"kind": "prop"})), Some(&admin)).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let second = app.call("POST", "/api/studio/generations", Some(json!({"kind": "prop"})), Some(&admin)).await;
+    assert_eq!((second.status, second.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("factory_budget")));
+    let usage = app.call("GET", "/api/catalog/admin/factory-usage", None, Some(&admin)).await;
+    assert_eq!(usage.body, json!({"connected": true, "access": "paid", "paidThisMonth": 1, "paidMonthly": 1}));
+    let recorded: Vec<(String, bool, Option<i16>)> =
+        sqlx::query_as("SELECT path, paid, status FROM factory_requests ORDER BY id")
+            .fetch_all(&app.state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        recorded,
+        [
+            ("avatar-factory/jobs/job_1/native-parts/select".to_owned(), false, Some(200)),
+            ("studio/generations".to_owned(), true, Some(200)),
+        ]
+    );
+
+    // Uploads are multipart and still need this site's origin.
+    let upload = |origin: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/studio/glb-assets/upload")
+            .header(header::ORIGIN, origin.to_owned())
+            .header(header::COOKIE, admin.clone())
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=x")
+            .body(Body::from("--x--"))
+            .unwrap()
+    };
+    assert_eq!(app.send(upload(ORIGIN)).await.status, StatusCode::OK);
+    assert_eq!(app.send(upload("https://evil.example")).await.status, StatusCode::FORBIDDEN);
     app.cleanup().await;
 }
