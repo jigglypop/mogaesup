@@ -31,9 +31,27 @@ Parameters:
     Default: ''
     AllowedPattern: '^$|^i-[0-9a-f]{8,17}$'
     Description: The character studio's EC2 instance (gaesup-asset-studio). It powers itself off when idle; the server may start it.
+  SharedDatabaseEndpoint:
+    Type: String
+    Default: ''
+    Description: A PostgreSQL instance shared with other stacks (choketmon-postgres) to use instead of this stack's own Database.
+  SharedDatabaseSecretArn:
+    Type: String
+    Default: ''
+    Description: That instance's RDS-managed master secret; the bootstrap creates the mogaesup database and its app role with it.
+  SharedDatabaseSecurityGroup:
+    Type: String
+    Default: ''
+    Description: That instance's security group; this stack adds ingress rules on 5432 for the server (and the studio).
+  StudioSecurityGroup:
+    Type: String
+    Default: ''
+    Description: The studio instance's security group, allowed into the shared database for the character records.
 Conditions:
   HasCloudFrontGroup: !Not [!Equals [!Ref CloudFrontServiceGroup, '']]
   HasStudioInstance: !Not [!Equals [!Ref StudioInstanceId, '']]
+  UseSharedDatabase: !Not [!Equals [!Ref SharedDatabaseEndpoint, '']]
+  StudioUsesSharedDatabase: !And [!Condition UseSharedDatabase, !Not [!Equals [!Ref StudioSecurityGroup, '']]]
 Resources:
   RealtimeTicketSecret:
     Type: AWS::SecretsManager::Secret
@@ -94,6 +112,27 @@ Resources:
           ToPort: 5432
           SourceSecurityGroupId: !GetAtt ApiSecurityGroup.GroupId
       Tags: [{Key: application, Value: mogaesup}]
+  # The shared instance belongs to another stack; these rules are this stack's own and leave its template untouched.
+  SharedDatabaseIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseSharedDatabase
+    Properties:
+      GroupId: !Ref SharedDatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt ApiSecurityGroup.GroupId
+      Description: mogaesup server
+  StudioDatabaseIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: StudioUsesSharedDatabase
+    Properties:
+      GroupId: !Ref SharedDatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref StudioSecurityGroup
+      Description: mogaesup character studio records
   DatabaseSubnets:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -156,6 +195,7 @@ Resources:
                   - !GetAtt Database.MasterUserSecret.SecretArn
                   - !Ref RealtimeTicketSecret
                   - !Ref FactoryGatewaySecret
+                  - !If [UseSharedDatabase, !Ref SharedDatabaseSecretArn, !Ref AWS::NoValue]
         # Wakes the idle-stopped studio (STUDIO_INSTANCE_ID). DescribeInstances has no resource-level permissions.
         - !If
           - HasStudioInstance
@@ -214,8 +254,8 @@ Resources:
 Outputs:
   InstanceId: {Value: !Ref ApiInstance}
   RuntimeBucket: {Value: !Ref RuntimeBucket}
-  DatabaseEndpoint: {Value: !GetAtt Database.Endpoint.Address}
-  DatabaseSecretArn: {Value: !GetAtt Database.MasterUserSecret.SecretArn}
+  DatabaseEndpoint: {Value: !If [UseSharedDatabase, !Ref SharedDatabaseEndpoint, !GetAtt Database.Endpoint.Address]}
+  DatabaseSecretArn: {Value: !If [UseSharedDatabase, !Ref SharedDatabaseSecretArn, !GetAtt Database.MasterUserSecret.SecretArn]}
   RealtimeTicketSecretArn: {Value: !Ref RealtimeTicketSecret}
   FactoryGatewaySecretArn: {Value: !Ref FactoryGatewaySecret}
   VpcOriginId: {Value: !GetAtt VpcOrigin.Id}

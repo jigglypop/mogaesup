@@ -47,6 +47,10 @@ env = os.environ.copy()
 env['PGPASSWORD'] = master['password']
 env['PGSSLMODE'] = 'verify-full'
 env['PGSSLROOTCERT'] = str(root / 'global-bundle.pem')
+# A shared instance (another stack's) has no mogaesup database until the first bootstrap makes one.
+subprocess.run(['psql', '-h', args.endpoint, '-U', master['username'], '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'],
+               input="SELECT 'CREATE DATABASE mogaesup' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mogaesup')\\gexec\n",
+               text=True, env=env, check=True, stdout=subprocess.DEVNULL)
 # The app role owns what its migrations create; the master account stays out of the service.
 sql = """DO $$ BEGIN
 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mogaesup_app') THEN
