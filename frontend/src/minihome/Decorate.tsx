@@ -8,7 +8,6 @@ import {
   BUILDING_WALL_PRESETS,
   useBuildingStore,
   useBuildingStoreApi,
-  type PlacedObject,
 } from 'gaesup-world/building';
 
 import type { CatalogItem } from '../api/types';
@@ -16,7 +15,8 @@ import { Icon } from '../ui/icons';
 import { FURNITURE, ISLAND_FLOORS, LIVING, NATURE, SHELVES, type ModelPiece, type Piece, type Shelf } from './edit/catalog';
 import { useEditState } from './edit/context';
 import { EditIcon, PieceIcon } from './edit/icons';
-import { degreesOf, objectLabel, SIZE_RANGE, sizeOf, turnable } from './edit/objects';
+import { EIGHTHS, SelectionInspector, Stepper, Turns } from './edit/Inspector';
+import { degreesOf } from './edit/objects';
 import type { EditPart, EditSession, EditTool } from './edit/session';
 
 type BuildingStoreApi = ReturnType<typeof useBuildingStoreApi>;
@@ -33,7 +33,6 @@ const HINTS: Record<Exclude<EditTool, 'select'>, Record<EditPart, string>> = {
   erase: { object: '치울 물건을 눌러요', tile: '지울 바닥 칸을 눌러요', wall: '지울 벽을 눌러요' },
 };
 const QUARTERS = [0, 90, 180, 270];
-const EIGHTHS = [0, 45, 90, 135, 180, 225, 270, 315];
 const QUARTER = Math.PI / 2;
 /** Stairs and ramps face a way; a box or round tile looks the same turned. */
 const TURNING_SHAPES = new Set(['stairs', 'ramp']);
@@ -66,84 +65,7 @@ function choosePiece(store: BuildingStoreApi, piece: Piece) {
   }
 }
 
-function Turns({ values, current, onTurn }: { values: number[]; current: number; onTurn: (degrees: number) => void }) {
-  return (
-    <div className={`mg-tabs mg-turns${values.length > 4 ? ' is-eighths' : ''}`} role="radiogroup" aria-label="회전">
-      {values.map((value) => (
-        <button key={value} role="radio" aria-checked={current === value} onClick={() => onTurn(value)}>
-          {value}°
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function Stepper({ label, value, onLess, onMore, lessDisabled, moreDisabled }: {
-  label: string;
-  value: string;
-  onLess: () => void;
-  onMore: () => void;
-  lessDisabled?: boolean;
-  moreDisabled?: boolean;
-}) {
-  return (
-    <div className="mg-stepper" role="group" aria-label={label}>
-      <button className="mg-icon-btn is-quiet" aria-label={`${label} 줄이기`} disabled={lessDisabled} onClick={onLess}>
-        <EditIcon name="minus" />
-      </button>
-      <output aria-live="polite">{value}</output>
-      <button className="mg-icon-btn is-quiet" aria-label={`${label} 늘리기`} disabled={moreDisabled} onClick={onMore}>
-        <EditIcon name="plus" />
-      </button>
-    </div>
-  );
-}
-
-/** The inspector for the object the 선택 tool picked: turn, size, copy, delete. */
-function SelectionInspector({ session, object }: { session: EditSession; object: PlacedObject }) {
-  const degrees = degreesOf(object.rotation);
-  const size = sizeOf(object);
-  return (
-    <>
-      <header>
-        <b>{objectLabel(object, session.labels)}</b>
-        <small>{turnable(object) ? '끌어서 옮겨요 · 화살표 1m · R 90° · Shift+R 45°' : '끌어서 옮겨요 · 화살표 1m'}</small>
-      </header>
-      {turnable(object) && (
-        <div className="mg-label">
-          회전 {EIGHTHS.includes(degrees) ? '' : `${degrees}°`}
-          <Turns values={EIGHTHS} current={degrees} onTurn={(value) => session.setSelectedRotation(value)} />
-        </div>
-      )}
-      {size !== null && (
-        <div className="mg-label">
-          크기
-          <Stepper
-            label="크기"
-            value={`${Math.round(size * 100)}%`}
-            lessDisabled={size <= SIZE_RANGE.min + 1e-6}
-            moreDisabled={size >= SIZE_RANGE.max - 1e-6}
-            onLess={() => session.resizeSelected(size - SIZE_RANGE.step)}
-            onMore={() => session.resizeSelected(size + SIZE_RANGE.step)}
-          />
-        </div>
-      )}
-      <div className="mg-selection-actions">
-        <button className="mg-btn is-small" title="Ctrl+D" onClick={() => session.duplicateSelected()}>
-          <EditIcon name="copy" /> 복제
-        </button>
-        <button className="mg-btn is-small" title="F" onClick={() => session.focusSelected()}>
-          <EditIcon name="focus" /> 보기
-        </button>
-        <button className="mg-btn is-danger is-small" title="Delete" onClick={() => session.deleteSelected()}>
-          <Icon name="trash" /> 지우기
-        </button>
-      </div>
-    </>
-  );
-}
-
-export type DecorateProps = {
+type DecorateProps = {
   session: EditSession;
   /** Furniture the admins copied in from the character studio. */
   studioItems: CatalogItem[];

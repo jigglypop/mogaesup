@@ -35,7 +35,7 @@ const cell = (x: number, z: number) => MAP[z]?.[x] ?? 's';
 /** Where the player starts: the crossroads south of the miniroom. */
 export const SPAWN: [number, number, number] = [at(8), 1, at(5)];
 /** The miniroom's floor cells. */
-export const ROOM = { x0: 3, x1: 4, z0: 2, z1: 3 };
+const ROOM = { x0: 3, x1: 4, z0: 2, z1: 3 };
 
 /** Blades per m² of a tall grass patch. */
 const TALL_GRASS = 52;

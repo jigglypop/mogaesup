@@ -15,7 +15,7 @@ export class IslandTooLargeError extends Error {
   }
 }
 
-export type HomeSaveAdapter = SaveAdapter & {
+type HomeSaveAdapter = SaveAdapter & {
   /** Learns the stored island's latest revision without applying it, so the next write replaces that revision. */
   refreshRevision: () => Promise<void>;
   /** The size of the last island this adapter wrote or tried to write, in bytes. */

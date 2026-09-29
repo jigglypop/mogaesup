@@ -13,7 +13,7 @@ import type {
  * The parts of the building store an edit changes and a save writes. The store (immer) replaces a part whenever its
  * content changes and shares whatever did not change, so keeping these references keeps a step for little memory.
  */
-export type IslandParts = {
+type IslandParts = {
   meshes: ReadonlyMap<string, MeshConfig>;
   tileGroups: ReadonlyMap<string, TileGroupConfig>;
   wallGroups: ReadonlyMap<string, WallGroupConfig>;
@@ -44,7 +44,7 @@ const PART_KEYS = [
 ] as const satisfies readonly (keyof IslandParts)[];
 
 /** What the history needs of the building store; the engine's store fits. */
-export type HistoryStore = {
+type HistoryStore = {
   getState: () => IslandParts & { hydrate: (data: BuildingSerializedState) => void };
   subscribe: (listener: (state: IslandParts, previous: IslandParts) => void) => () => void;
 };
@@ -82,7 +82,7 @@ function sameGroups<Group>(a: ReadonlyMap<string, Group>, b: ReadonlyMap<string,
  * Whether two states look the same on the island: its objects, floors, walls, blocks and weather. Picking a floor or wall
  * installs its (empty) group and material, which changes the store but not the island, so it is not an undo step.
  */
-export function sameIsland(a: IslandParts, b: IslandParts): boolean {
+function sameIsland(a: IslandParts, b: IslandParts): boolean {
   return (
     a.showSnow === b.showSnow &&
     a.showFog === b.showFog &&
@@ -106,7 +106,7 @@ function withMissing<Item>(target: ReadonlyMap<string, Item>, current: ReadonlyM
  * `target` with the floors, walls and materials installed since, left empty: undo takes back what was placed, not the
  * floor or wall the owner has picked, so the next piece still uses it.
  */
-export function mergePalette(target: IslandParts, current: IslandParts): IslandParts {
+function mergePalette(target: IslandParts, current: IslandParts): IslandParts {
   return {
     ...target,
     meshes: withMissing(target.meshes, current.meshes),
@@ -118,7 +118,7 @@ export function mergePalette(target: IslandParts, current: IslandParts): IslandP
 }
 
 /** The engine's snapshot shape of `parts`; `hydrate` copies what it keeps, so the references can go in as they are. */
-export function toSerialized(parts: IslandParts): BuildingSerializedState {
+function toSerialized(parts: IslandParts): BuildingSerializedState {
   return {
     version: 1,
     meshes: [...parts.meshes.values()],
@@ -155,7 +155,7 @@ export type EditHistory = {
   subscribe: (listener: () => void) => () => void;
 };
 
-export type EditHistoryOptions = {
+type EditHistoryOptions = {
   /** Steps kept; the oldest go first. */
   limit?: number;
   /** A pause this long ends a step, so a burst of changes (a drag painting cells) is one step. */

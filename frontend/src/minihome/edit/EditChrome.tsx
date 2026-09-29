@@ -1,14 +1,60 @@
 import { useEffect, useRef } from 'react';
 
-import { usePopover } from '../../shell/Shell';
+import type { HomeView } from '../../api/types';
+import { Brand, usePopover } from '../../shell/Shell';
 import { Icon } from '../../ui/icons';
-import { useSaver } from './context';
+import { useEditState, useHistory, useSaver } from './context';
 import { EditIcon } from './icons';
 import { clock, describeStatus, SIZE_LIMIT_TEXT, sizeText, type IslandSaver } from './save';
+import type { EditSession } from './session';
+import { useEditKeys } from './useEditKeys';
 import { MAX_ISLAND_BYTES } from '../persistence';
 
+type EditBarProps = { view: HomeView; session: EditSession; saver: IslandSaver; onSave: () => void; onExit: () => void };
+
+/** The decorating top bar: save state, undo and redo, leaving and saving; it also owns the decorating shortcuts. */
+export function EditBar({ view, session, saver, onSave, onExit }: EditBarProps) {
+  const history = useHistory(session.history);
+  const saving = useSaver(saver).saving;
+  useEditKeys(session, { save: onSave });
+  return (
+    <header className="mg-topbar">
+      <div className="mg-topbar-left">
+        <Brand />
+        <span className="mg-pill mg-glass mg-edit-title">
+          <span>{view.profile.title}</span>
+          <span className="mg-badge is-draft">꾸미는 중</span>
+        </span>
+      </div>
+      <div className="mg-topbar-right">
+        <SaveStatus saver={saver} />
+        <span className="mg-pill mg-glass mg-undo">
+          <button className="mg-icon-btn is-quiet" aria-label="되돌리기" title="되돌리기 (Ctrl+Z)" disabled={!history.canUndo} onClick={history.undo}>
+            <Icon name="undo" />
+          </button>
+          <button className="mg-icon-btn is-quiet" aria-label="다시 하기" title="다시 하기 (Ctrl+Shift+Z)" disabled={!history.canRedo} onClick={history.redo}>
+            <Icon name="redo" />
+          </button>
+        </span>
+        <button className="mg-btn" onClick={onExit}>
+          나가기
+        </button>
+        <button className="mg-btn is-primary" title="저장 (Ctrl+S)" disabled={saving} onClick={onSave}>
+          저장
+        </button>
+      </div>
+    </header>
+  );
+}
+
+/** Shortcut help for the session, opened by ? or the toolbar. */
+export function EditHelp({ session }: { session: EditSession }) {
+  const open = useEditState(session, (state) => state.help);
+  return open ? <ShortcutHelp onClose={() => session.setHelp(false)} /> : null;
+}
+
 /** The save state beside the undo buttons: a dot and a word, with the details and a retry behind a click. */
-export function SaveStatus({ saver }: { saver: IslandSaver }) {
+function SaveStatus({ saver }: { saver: IslandSaver }) {
   const state = useSaver(saver);
   const status = describeStatus(state);
   const { open, setOpen, ref } = usePopover();
@@ -171,7 +217,7 @@ const SHORTCUTS: { title: string; keys: [keys: string[], label: string][] }[] = 
 ];
 
 /** Every decorating shortcut and gesture, from the ? key or the toolbar; touch comes first on a touch screen. */
-export function ShortcutHelp({ onClose }: { onClose: () => void }) {
+function ShortcutHelp({ onClose }: { onClose: () => void }) {
   const close = useRef<HTMLButtonElement>(null);
   useEffect(() => close.current?.focus(), []);
   const groups = matchMedia('(pointer: coarse)').matches ? [TOUCH, ...SHORTCUTS] : [...SHORTCUTS, TOUCH];

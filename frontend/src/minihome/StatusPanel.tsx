@@ -134,7 +134,7 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
             label="CPU 여유"
             value={cpuBound ? '부족' : '충분'}
             tone={cpuBound ? 'warn' : 'good'}
-            hint="GPU는 한가한데 프레임이 밀리면 CPU 병목이에요. 그동안 그림자를 덜 자주 다시 그리고 가까운 주민 8명만 그려요."
+            hint="GPU는 한가한데 프레임이 밀리면 CPU 병목이에요. 그동안 그림자를 덜 자주 다시 그려요."
           />
           <Metric label="삼각형" value={compact(render.triangles)} tone={grade(render.triangles, 1.5e6, 4e6)} />
           <Metric label="지오메트리" value={number(engine.geometries)} />
@@ -150,7 +150,7 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
             <Metric label="맵" value={`${shadow.maps}장 · ${number(shadow.mapSize)}px`} hint="WebGPU는 cascade 수, WebGL은 1장이에요." />
             <Metric label="가까운 맵 갱신" value={rate(shadow.nearHz)} />
             <Metric label="먼 맵 갱신" value={shadow.maps > 1 ? rate(shadow.farHz) : '–'} hint="먼 cascade는 한 프레임에 하나씩 돌아가며 다시 그려요." />
-            <Metric label="근거리 전용 캐스터" value={number(shadow.nearOnlyCasters)} hint="작은 소품·주민·잔디는 가장 가까운 cascade에만 그림자를 넣어요." />
+            <Metric label="근거리 전용 캐스터" value={number(shadow.nearOnlyCasters)} hint="작은 소품·잔디는 가장 가까운 cascade에만 그림자를 넣어요." />
           </div>
         ) : (
           <p className="mh-muted">그림자를 만드는 해가 없어요.</p>

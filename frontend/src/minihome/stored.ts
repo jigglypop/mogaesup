@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 const KEY = (name: string) => `minihome:${name}`;
 
 /** Reads a stored value; storage can be missing or blocked (private windows, previews). */
-export function readStored<T>(name: string, fallback: T): T {
+function readStored<T>(name: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(KEY(name));
     return raw === null ? fallback : (JSON.parse(raw) as T);
@@ -12,7 +12,7 @@ export function readStored<T>(name: string, fallback: T): T {
   }
 }
 
-export function writeStored(name: string, value: unknown): void {
+function writeStored(name: string, value: unknown): void {
   try {
     localStorage.setItem(KEY(name), JSON.stringify(value));
   } catch {

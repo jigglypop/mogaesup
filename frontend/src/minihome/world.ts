@@ -7,10 +7,7 @@ import {
   type SaveAdapter,
 } from 'gaesup-world';
 
-import { asset, modelUrl } from './figures';
 import { at, CELL, createVillage, VILLAGE_VERSION } from './village';
-
-export { asset, modelUrl };
 
 type RuntimeErrorSink = NonNullable<NonNullable<Parameters<typeof createGaesupRuntime>[0]>['onError']>;
 
@@ -38,10 +35,7 @@ const RULES: GameplayEventBlueprint[] = [
   arrive('beach', '🌊 해변 산책 중'),
 ];
 
-/**
- * One home's world: its own runtime and stores, loading and saving through `adapter`. The island has no residents:
- * the owner, visitors and their live room are the people on it.
- */
+/** One home's world: its own runtime and stores, loading and saving through `adapter`. */
 export function createMinihomeRuntime(adapter: SaveAdapter, onError?: RuntimeErrorSink): GaesupRuntime {
   const runtime = createGaesupRuntime({
     worldId: MINIHOME_WORLD_ID,

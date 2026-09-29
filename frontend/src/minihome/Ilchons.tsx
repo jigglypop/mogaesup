@@ -7,7 +7,7 @@ import { socialApi } from '../api/endpoints';
 import type { HomeView, Ilchon, IlchonRequest, IlchonStatus, User } from '../api/types';
 import { initialOf, REQUESTS_CHANGED, toneOf } from '../shell/Shell';
 
-export type Neighbors = {
+type Neighbors = {
   list: Ilchon[];
   received: IlchonRequest[];
   status: IlchonStatus | null;

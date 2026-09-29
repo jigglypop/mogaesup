@@ -7,7 +7,7 @@ import {
 } from 'gaesup-world/building';
 
 /** Objects stand on a 1 m grid, one to a spot: the engine's `OBJECT_SNAP_SIZE` and its placement rule. */
-export const OBJECT_STEP = 1;
+const OBJECT_STEP = 1;
 const SPOT = OBJECT_STEP / 2;
 /** Tiles are this many meters a side per cell of their `size`. */
 const CELL = 4;
@@ -17,7 +17,7 @@ export type Vec3 = readonly [number, number, number];
 /** A box in an object's own frame: after its scale, before its turn about Y and its position. */
 export type LocalBox = { min: Vec3; max: Vec3 };
 /** Bounds of the model a URL loads, in the model's own units, when they are known. */
-export type ModelBounds = (url: string) => LocalBox | undefined;
+type ModelBounds = (url: string) => LocalBox | undefined;
 
 /** Rounds away float noise such as -18.4 + 1 = -17.399999999999999, so saved positions stay tidy. */
 const tidy = (value: number) => Math.round(value * 1000) / 1000;
@@ -72,7 +72,7 @@ export function freeSpotNear(objects: readonly PlacedObject[], x: number, z: num
   return null;
 }
 
-export const normalizeAngle = (angle: number) => ((angle % TURN) + TURN) % TURN;
+const normalizeAngle = (angle: number) => ((angle % TURN) + TURN) % TURN;
 /** A turn in whole degrees, 0 to 359. */
 export const degreesOf = (angle: number | undefined) => Math.round((normalizeAngle(angle ?? 0) * 180) / Math.PI) % 360;
 export const radiansOf = (degrees: number) => Math.round(normalizeAngle((degrees * Math.PI) / 180) * 1e6) / 1e6;
@@ -109,7 +109,7 @@ export function objectLabel(object: PlacedObject, labels?: ReadonlyMap<string, s
 }
 
 /** The catalog size a model's `modelScale` multiplies: 1 for furniture from the studio. */
-export const baseScaleOf = (object: PlacedObject) => getDefaultBuildingObject(object.config?.modelId ?? '')?.defaultScale ?? 1;
+const baseScaleOf = (object: PlacedObject) => getDefaultBuildingObject(object.config?.modelId ?? '')?.defaultScale ?? 1;
 
 /** How much bigger than its catalog size the owner made it (1 = as placed from the drawer); null when it cannot grow. */
 export function sizeOf(object: PlacedObject): number | null {
@@ -176,11 +176,6 @@ export function pickBoxOf(object: PlacedObject, bounds?: ModelBounds): LocalBox 
 }
 
 export type Ray = { origin: Vec3; direction: Vec3 };
-
-/** Distance along `ray` to `local` on an object at `position` turned by `rotation`, or null when it misses. */
-export function rayHitsBox(ray: Ray, position: Position3D, rotation: number, local: LocalBox): number | null {
-  return raySpan(ray, position, rotation, local)?.[0] ?? null;
-}
 
 /** Where `ray` enters and leaves `local` on an object at `position` turned by `rotation`, or null when it misses. */
 function raySpan(ray: Ray, position: Position3D, rotation: number, local: LocalBox): [number, number] | null {

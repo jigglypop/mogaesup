@@ -142,7 +142,7 @@ p.mg-compose { display: block; font-size: 13px; }
 .mg-minimes img, .mg-minimes span { width: 48px; height: 48px; object-fit: contain; font-size: 30px; display: grid; place-items: center; }
 .mg-minimes small { font-size: 11px; font-weight: 700; color: var(--mg-ink); }
 
-/* Talk and keys along the bottom */
+/* What to use nearby, talk and keys along the bottom */
 .mg-world-bottom {
   position: absolute;
   z-index: 17;
@@ -208,6 +208,40 @@ p.mg-compose { display: block; font-size: 13px; }
 @media (hover: none) and (pointer: coarse) {
   .mg-keys { display: none; }
   .mg-keys.is-touch { display: flex; }
+}
+.mg-interact {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  height: 48px;
+  padding: 0 20px 0 10px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 750;
+  transition: transform 0.15s;
+}
+.mg-interact kbd {
+  flex: none;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 9px;
+  background: var(--mg-primary);
+  color: var(--mg-primary-ink);
+  font: 800 13px/28px var(--mg-font);
+  text-align: center;
+}
+.mg-interact span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mg-interact:active { transform: scale(0.97); }
+@media (hover: hover) {
+  .mg-interact:hover { background: var(--mg-glass-strong); }
+}
+/* A finger taps it; the key is for keyboards. */
+@media (hover: none) and (pointer: coarse) {
+  .mg-interact { padding: 0 22px; }
+  .mg-interact kbd { display: none; }
 }
 
 .mg-toast {
@@ -428,8 +462,9 @@ p.mg-compose { display: block; font-size: 13px; }
   }
   /* The sheet folds down, not to the side. */
   .mg-side-close svg { transform: rotate(90deg); }
-  /* Folded, the panel's button waits above the chat bar instead of covering it. */
+  /* Folded, the panel's button waits above the chat bar instead of covering it, and what to use nearby above both. */
   .mg-side-open { bottom: calc(var(--mg-edge) + 76px + 66px); }
+  .mg-interact { margin-bottom: 54px; }
   /* The field needs the width: the faces also float over the people on the island, and what you said last (seen
      nowhere else) takes a smaller share. */
   .mg-chatbar-people { display: none; }

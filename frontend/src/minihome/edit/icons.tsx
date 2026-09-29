@@ -14,7 +14,7 @@ const PATHS = {
   alert: 'M12 4l9 15.5H3zM12 10v4.5M12 17.2h.01',
 } as const;
 
-export type EditIconName = keyof typeof PATHS;
+type EditIconName = keyof typeof PATHS;
 
 export function EditIcon({ name }: { name: EditIconName }) {
   return (

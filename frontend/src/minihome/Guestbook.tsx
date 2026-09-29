@@ -7,7 +7,7 @@ import { socialApi } from '../api/endpoints';
 import type { GuestbookEntry, User } from '../api/types';
 import { initialOf, toneOf } from '../shell/Shell';
 
-export const when = (at: string) => {
+const when = (at: string) => {
   const minutes = Math.round((Date.now() - Date.parse(at)) / 60_000);
   if (minutes < 1) return '방금';
   if (minutes < 60) return `${minutes}분 전`;

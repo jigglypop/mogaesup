@@ -1,6 +1,6 @@
 /** Where the site serves models and pictures; this module stays free of the engine. */
 
-export const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
+const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 export const modelUrl = (id: string) => asset(`gltf/${id}.glb`);
 
 /**

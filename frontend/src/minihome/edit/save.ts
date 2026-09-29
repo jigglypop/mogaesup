@@ -3,7 +3,7 @@ import type { SaveSystem } from 'gaesup-world';
 import { ApiRequestError } from '../../api/client';
 import { IslandTooLargeError, MAX_ISLAND_BYTES } from '../persistence';
 
-export type SaveProblemKind = 'tooLarge' | 'invalid' | 'auth' | 'network' | 'server';
+type SaveProblemKind = 'tooLarge' | 'invalid' | 'auth' | 'network' | 'server';
 export type SaveProblem = { kind: SaveProblemKind; message: string };
 
 const megabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
@@ -32,7 +32,7 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
   return { kind: 'server', message: '섬을 저장하지 못했어요. 조금 뒤에 다시 저장해 볼게요.' };
 }
 
-export function describeLoadError(error: unknown): SaveProblem {
+function describeLoadError(error: unknown): SaveProblem {
   if (error instanceof ApiRequestError && error.status < 500) return { kind: 'auth', message: `섬을 불러오지 못했어요. ${error.message}` };
   if (error instanceof TypeError) return { kind: 'network', message: '섬을 불러오지 못했어요. 인터넷 연결을 확인하고 다시 불러와 주세요.' };
   return { kind: 'server', message: '섬을 불러오지 못했어요. 조금 뒤에 다시 불러와 주세요.' };
@@ -48,7 +48,7 @@ export function clock(time: number): string {
 export const sizeText = (bytes: number) => megabytes(bytes);
 export const SIZE_LIMIT_TEXT = LIMIT;
 
-export type SaveStatus = { tone: 'good' | 'busy' | 'warn' | 'bad'; label: string; detail: string };
+type SaveStatus = { tone: 'good' | 'busy' | 'warn' | 'bad'; label: string; detail: string };
 
 /** The one-line save status the decorating bar shows, and what it means. */
 export function describeStatus(state: SaverState): SaveStatus {
