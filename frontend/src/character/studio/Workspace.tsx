@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { factoryApi, type FactoryJob } from '../factory/api';
+import { NativeAssembly } from '../factory/NativeAssembly';
 import { usePolling } from '../use-polling';
 import { isCatalogJobDeleted, studioApi } from './api';
 import { AssetGallery } from './AssetGallery';
@@ -14,7 +15,6 @@ import './workspace.css';
 const PhotoFactory = lazy(() => import('../factory/CharacterFactory').then(m => ({ default: m.CharacterFactory })));
 const BaseBodies = lazy(() => import('./BaseBodies'));
 const Wardrobe = lazy(() => import('./Wardrobe'));
-const NativeAssembly = lazy(() => import('../factory/NativeAssembly').then(m => ({ default: m.NativeAssembly })));
 const Animals = lazy(() => import('./Animals'));
 const Textures = lazy(() => import('./Textures'));
 const Generations = lazy(() => import('./Generations'));
@@ -129,7 +129,7 @@ export function Workspace() {
         {deletedAsset && <div className="asset-delete-notice" role="status"><span>{deletedAsset.name} · 휴지통으로 이동했습니다.</span><button disabled={busy || !catalog.value} onClick={() => void perform(async () => { catalog.setValue(await studioApi.savePartMetadata(deletedAsset.id, deletedAsset.slot, { deleted: false }, catalog.value!.revision)); setDeletedAsset(undefined); })}>삭제 취소</button></div>}
         {showUploads && <GlbAssetLibrary bases={bases} defaultBaseId={base?.id} onJob={result => { setBaseId(result.base_job_id || result.id); setAdminAssetId(result.id); setAdminSlot(''); receiveJob(result); void jobs.refresh(); }} />}
         <AssetGallery jobs={candidates} loading={jobs.loading && !jobs.value} catalog={catalog.value} onCatalogChange={catalog.setValue} onRefresh={catalog.refresh} nativeJobId={managedAsset?.id} nativeState={managedNativeState} onOpen={(item, slot) => { setBaseId(item.base_job_id || item.id); setAdminAssetId(item.id); setAdminSlot(slot || ''); setJobId(item.id); setShowMotion(false); }} onCompose={item => setComposeId(item.id)} />
-        {composeJob && <AssetDetailDialog title={`착용·조합 · ${name(composeJob)}`} onClose={() => setComposeId('')}><Suspense fallback={<p>조합 불러오는 중</p>}><NativeAssembly key={composeJob.id} jobId={composeJob.id} simple flow={composeJob.character_flow} /></Suspense></AssetDetailDialog>}
+        {composeJob && <AssetDetailDialog title={`착용·조합 · ${name(composeJob)}`} onClose={() => setComposeId('')}><NativeAssembly key={composeJob.id} jobId={composeJob.id} simple flow={composeJob.character_flow} /></AssetDetailDialog>}
         {managedAsset && <AdminAssetDetail managedAsset={managedAsset} adminSlot={adminSlot} base={base} hidden={!!composeJob} name={name}
           catalog={catalog} bodyProfile={bodyProfile} native={native} nativeState={nativeState} managedNativeState={managedNativeState} setManagedNative={managedNative.setValue}
           showInfo={showInfo} onShowInfo={setShowInfo} showMotion={showMotion} onShowMotion={setShowMotion} busy={busy} error={error} perform={perform}

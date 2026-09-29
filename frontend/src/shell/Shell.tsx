@@ -87,10 +87,9 @@ export function Rail() {
   );
 }
 
-export function SearchBox({ initial = '' }: { initial?: string }) {
+function SearchBox() {
   const navigate = useNavigate();
-  const [text, setText] = useState(initial);
-  useEffect(() => setText(initial), [initial]);
+  const [text, setText] = useState('');
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const query = text.trim();
@@ -113,7 +112,7 @@ export function SearchBox({ initial = '' }: { initial?: string }) {
 }
 
 /** 이웃 requests waiting for the viewer, with accept and decline in place. */
-export function Notifications() {
+function Notifications() {
   const { user } = useAuth();
   const { open, setOpen, ref } = usePopover();
   const [received, setReceived] = useState<IlchonRequest[]>([]);
@@ -193,7 +192,7 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
   { value: 'system', label: '기기 설정' },
 ];
 
-export function UserMenu() {
+function UserMenu() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { open, setOpen, ref } = usePopover();

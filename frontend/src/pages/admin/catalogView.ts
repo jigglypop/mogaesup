@@ -45,7 +45,7 @@ export const FRESHNESS_LABEL: Record<CatalogFreshness, string> = {
 };
 
 /** The steps an import shows, in order; `done` is the end, not a step. */
-export const IMPORT_STEPS: readonly { step: ImportStep; label: string }[] = [
+const IMPORT_STEPS: readonly { step: ImportStep; label: string }[] = [
   { step: 'queued', label: '대기' },
   { step: 'source', label: '작업 확인' },
   { step: 'download', label: '모델 받기' },
@@ -56,7 +56,7 @@ export const IMPORT_STEPS: readonly { step: ImportStep; label: string }[] = [
   { step: 'save', label: '카탈로그 반영' },
 ];
 
-export type StepState = 'done' | 'active' | 'failed' | 'waiting';
+type StepState = 'done' | 'active' | 'failed' | 'waiting';
 
 /** Each step's state: finished before the current one, the current one running or failed, the rest waiting. */
 export function stepStates(item: Pick<CatalogImport, 'status' | 'step'>): { step: ImportStep; label: string; state: StepState }[] {

@@ -4,7 +4,7 @@ import { AssetModelStats } from './AssetModelStats';
 import './asset-model-preview.css';
 
 export type AssetPreviewModel = { url: string; sha256?: string; label: string; name?: string };
-export type AssetModelPreviewProps = {
+type AssetModelPreviewProps = {
   model?: AssetPreviewModel;
   models?: AssetPreviewModel[];
   image?: { url: string };

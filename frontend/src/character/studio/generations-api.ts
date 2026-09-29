@@ -1,4 +1,4 @@
-import { isDefinitiveRejection, request } from '../api';
+import { request, savedRequest } from '../api';
 
 export type GenerationKind = 'prop' | 'texture' | 'illustration';
 export type GenerationSize = 256 | 512 | 1024;
@@ -46,7 +46,7 @@ export type GenerationVector = {
   revision: string; source_sha256: string; created_at: string;
 };
 
-export type GenerationInput = {
+type GenerationInput = {
   kind: GenerationKind;
   category: string;
   name: string;
@@ -55,70 +55,37 @@ export type GenerationInput = {
   reference_id?: string;
 };
 
-export type GenerationList = {
+type GenerationList = {
   items: Generation[];
   capabilities: { ready: boolean; reason?: string };
   defaults: Record<string, string>;
 };
 
-type PendingGeneration = { key: string; input: GenerationInput };
-
-const pendingStorageKey = (kind: GenerationKind) => `gaesup.studio.generation.${kind}.v1`;
 const isSize = (value: unknown): value is GenerationSize => value === 256 || value === 512 || value === 1024;
-
-export function generationRecovery(kind: GenerationKind): { pending: PendingGeneration | null; error: string } {
-  try {
-    const raw = localStorage.getItem(pendingStorageKey(kind));
-    if (!raw) return { pending: null, error: '' };
-    const pending = JSON.parse(raw) as PendingGeneration;
-    const input = pending?.input;
-    if (!pending || typeof pending.key !== 'string' || !pending.key || !input || input.kind !== kind
-      || typeof input.category !== 'string' || !input.category
-      || typeof input.name !== 'string' || typeof input.prompt !== 'string' || !isSize(input.size)
-      || (input.reference_id !== undefined && !/^[a-f0-9]{24}$/.test(input.reference_id))) throw new Error();
-    return { pending, error: '' };
-  } catch {
-    return { pending: null, error: '저장된 생성 요청을 읽을 수 없습니다. 브라우저 저장소의 요청 기록을 확인해 주세요.' };
-  }
-}
-
-function clearPending(kind: GenerationKind, requestKey: string) {
-  const recovery = generationRecovery(kind);
-  if (recovery.pending?.key === requestKey) localStorage.removeItem(pendingStorageKey(kind));
-}
+const generations = (kind: GenerationKind) => savedRequest<GenerationInput>(`gaesup.studio.generation.${kind}.v1`, ({ input }) =>
+  input.kind === kind && typeof input.category === 'string' && !!input.category
+    && typeof input.name === 'string' && typeof input.prompt === 'string' && isSize(input.size)
+    && (input.reference_id === undefined || /^[a-f0-9]{24}$/.test(input.reference_id)),
+  '저장된 생성 요청을 읽을 수 없습니다. 브라우저 저장소의 요청 기록을 확인해 주세요.');
 
 export const generationsApi = {
   async list(kind: GenerationKind, signal?: AbortSignal) {
     const result = await request<GenerationList>(`/api/studio/generations?${new URLSearchParams({ kind })}`, { signal });
-    const pending = generationRecovery(kind).pending;
-    if (pending && result.items.some(item => item.request_key === pending.key)) clearPending(kind, pending.key);
+    const pending = generations(kind).read().pending;
+    if (pending && result.items.some(item => item.request_key === pending.key)) generations(kind).settle(pending.key);
     return result;
   },
   illustrationSelection: (signal?: AbortSignal) => request<{selected:string|null;revision:string}>('/api/studio/illustration-selection', {signal}),
   selectIllustration: (generation_id: string | null, revision: string) => request<{selected:string|null;revision:string}>('/api/studio/illustration-selection', {
     method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({generation_id,revision}),
   }),
-  get: (id: string, signal?: AbortSignal) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}`, { signal }),
-  recovery: generationRecovery,
-  async create(input: GenerationInput) {
-    const recovery = generationRecovery(input.kind);
-    if (recovery.error) throw new Error(recovery.error);
-    const pending = recovery.pending || { key: crypto.randomUUID(), input };
-    localStorage.setItem(pendingStorageKey(input.kind), JSON.stringify(pending));
-    try {
-      const result = await request<Generation>('/api/studio/generations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-        body: JSON.stringify(pending.input),
-        timeoutMs: 60000,
-      });
-      if (result.request_key === pending.key) clearPending(input.kind, pending.key);
-      return result;
-    } catch (error) {
-      if (isDefinitiveRejection(error)) clearPending(input.kind, pending.key);
-      throw error;
-    }
-  },
+  recovery: (kind: GenerationKind) => generations(kind).read(),
+  create: (input: GenerationInput) => generations(input.kind).send(input, pending => request<Generation>('/api/studio/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+    body: JSON.stringify(pending.input),
+    timeoutMs: 60000,
+  }), { answered: (result, key) => result.request_key === key }),
   resume: (id: string) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 }),
   vectorize: (id: string, colors: VectorColors) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/vector`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ colors }), timeoutMs: 60000,

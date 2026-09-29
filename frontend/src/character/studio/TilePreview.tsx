@@ -194,7 +194,7 @@ function ActivePreview(props: Props) {
   </div>;
 }
 
-export function TilePreview({ tile, shape = 'plane', repeat = 3, autoOrbit = false }: TilePreviewProps) {
+export default function TilePreview({ tile, shape = 'plane', repeat = 3, autoOrbit = false }: TilePreviewProps) {
   const gate = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -209,5 +209,3 @@ export function TilePreview({ tile, shape = 'plane', repeat = 3, autoOrbit = fal
     ? <ActivePreview tile={tile} shape={shape} repeat={repeat} autoOrbit={autoOrbit} />
     : <span>3D 미리보기 준비 중</span>}</div>;
 }
-
-export default TilePreview;

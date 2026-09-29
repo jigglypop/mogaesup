@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { GLTF } from 'three/addons/loaders/GLTFLoader.js';
 
-export type FaceSelection = { node_index: number; primitive_index: number; role: string; faces: number[] };
+type FaceSelection = { node_index: number; primitive_index: number; role: string; faces: number[] };
 export type PaintSettings = { role: string; radius: number; erase: boolean };
 
 /** Paint source triangles; export stable glTF node/primitive/face IDs, never world coordinates. */

@@ -10,7 +10,7 @@ export type MeshyOptions = {
   moderation: boolean; target_formats: ('glb' | 'obj' | 'fbx' | 'stl' | 'usdz' | '3mf')[];
   auto_size: boolean; origin_at: 'bottom' | 'center'; alpha_thumbnail: boolean; multi_view_thumbnails: boolean;
 };
-export const defaultMeshyOptions: MeshyOptions = {
+const defaultMeshyOptions: MeshyOptions = {
   ai_model: 'meshy-7.1', geometry_resolution: 'standard', should_texture: true, enable_pbr: true,
   texture_resolution: '2k', texture_mode: 'source', texture_image_assets: [], should_remesh: true,
   topology: 'triangle', target_polycount: 50000, decimation_mode: null, save_pre_remeshed_model: false,

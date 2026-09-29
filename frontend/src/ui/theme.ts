@@ -28,7 +28,7 @@ export function initTheme() {
   darkQuery?.addEventListener('change', () => current === 'system' && apply());
 }
 
-export function setTheme(choice: ThemeChoice) {
+function setTheme(choice: ThemeChoice) {
   current = choice;
   try {
     localStorage.setItem(KEY, choice);

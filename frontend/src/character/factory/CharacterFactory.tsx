@@ -43,7 +43,7 @@ function isPhotoJob(job: FactoryJob) {
   return !job.base_body && job.input_kind !== 'glb' && (!job.base_job_id || (job.requested_slots?.length || 0) > 1);
 }
 
-export function usableBase(job: FactoryJob, catalog?: Catalog) {
+function usableBase(job: FactoryJob, catalog?: Catalog) {
   return !job.base_job_id && ['complete', 'expressions'].includes(job.character_flow?.stage || '')
     && job.assembly_origin !== 'uploaded_glb'
     && !isCatalogJobDeleted(job, catalog) && !catalog?.items[job.id]?.archived && !catalog?.parts?.[`${job.id}:body`]?.deleted;

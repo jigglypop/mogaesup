@@ -23,7 +23,6 @@ export type UserCard = {
   emoji: string;
 };
 
-export const MOOD_COUNT = 4;
 export type HomeVisibility = 'public' | 'ilchon' | 'private';
 
 export type HomeProfile = {

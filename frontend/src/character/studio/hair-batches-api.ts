@@ -1,8 +1,8 @@
-import { isDefinitiveRejection, request } from '../api';
+import { request, savedRequest } from '../api';
 import type { MeshyOptions } from './meshy-options';
 
 export type HairView = 'front' | 'side' | 'back';
-export type HairRedraw = { notes: string; source_side_facing: 'left' | 'right'; worn?: boolean };
+type HairRedraw = { notes: string; source_side_facing: 'left' | 'right'; worn?: boolean };
 export type HairSheetItem = {
   name: string;
   views: Record<HairView, string>;
@@ -41,10 +41,9 @@ export type HairBatch = {
   input: HairBatchInput;
   items: HairBatchItem[];
 };
-export type PendingHairBatch = { key: string; input: HairBatchInput };
+type PendingHairBatch = { key: string; input: HairBatchInput };
 
 const endpoint = '/api/avatar-factory/part-batches';
-const pendingKey = 'gaesup.hair-batch.pending.v1';
 const assetPattern = /^[a-f0-9]{64}$/;
 
 function validPending(value: unknown): value is PendingHairBatch {
@@ -63,24 +62,11 @@ function validPending(value: unknown): value is PendingHairBatch {
       && !!item.views && (['front', 'side', 'back'] as const).every(view => assetPattern.test(item.views[view])));
 }
 
-function recovery(): { pending: PendingHairBatch | null; error: string } {
-  try {
-    const raw = localStorage.getItem(pendingKey);
-    if (!raw) return { pending: null, error: '' };
-    const pending: unknown = JSON.parse(raw);
-    if (!validPending(pending)) throw new Error();
-    return { pending, error: '' };
-  } catch {
-    return { pending: null, error: '저장된 헤어 배치 요청을 읽을 수 없습니다. 요청 기록을 확인해야 새 배치를 접수할 수 있습니다.' };
-  }
-}
-
-function clearPending(key: string) {
-  if (recovery().pending?.key === key) localStorage.removeItem(pendingKey);
-}
+const hairBatches = savedRequest<HairBatchInput>('gaesup.hair-batch.pending.v1', validPending,
+  '저장된 헤어 배치 요청을 읽을 수 없습니다. 요청 기록을 확인해야 새 배치를 접수할 수 있습니다.');
 
 export const hairBatchesApi = {
-  recovery,
+  recovery: hairBatches.read,
   uploadSheet: (file: File) => request<{ id: string }>('/api/avatar-factory/meshy-options/texture-assets', {
     method: 'POST', body: file, timeoutMs: 60000,
   }),
@@ -89,23 +75,9 @@ export const hairBatchesApi = {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), timeoutMs: 60000,
     }),
   list: (signal: AbortSignal) => request<{ items: HairBatch[] }>(endpoint, { signal, timeoutMs: 30000 }),
-  get: (id: string, signal?: AbortSignal) => request<HairBatch>(`${endpoint}/${encodeURIComponent(id)}`, { signal, timeoutMs: 30000 }),
   resume: (id: string) => request<HairBatch>(`${endpoint}/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 30000 }),
-  async create(input: HairBatchInput) {
-    const stored = recovery();
-    if (stored.error) throw new Error(stored.error);
-    const pending = stored.pending || { key: crypto.randomUUID(), input };
-    localStorage.setItem(pendingKey, JSON.stringify(pending));
-    try {
-      const result = await request<HairBatch>(endpoint, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-        body: JSON.stringify(pending.input), timeoutMs: 60000,
-      });
-      clearPending(pending.key);
-      return result;
-    } catch (error) {
-      if (isDefinitiveRejection(error)) clearPending(pending.key);
-      throw error;
-    }
-  },
+  create: (input: HairBatchInput) => hairBatches.send(input, pending => request<HairBatch>(endpoint, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+    body: JSON.stringify(pending.input), timeoutMs: 60000,
+  })),
 };

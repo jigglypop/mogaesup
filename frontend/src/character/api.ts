@@ -1,6 +1,6 @@
-export type Part = { node_index: number; role: string; name?: string };
-export type Operation = { id: string; action_id: string; status: string; error: { code: string; message: string } | null };
-export type Character = {
+type Part = { node_index: number; role: string; name?: string };
+type Operation = { id: string; action_id: string; status: string; error: { code: string; message: string } | null };
+type Character = {
   id: string; name: string; revision: string; height_meters: number | null;
   pipeline_status: string; rig_origin: string; model_id: string | null; model_sha256: string | null;
   provider: { stage: string | null; status: string | null; progress: number | null; task_id: string | null; http_status: number | null };
@@ -62,13 +62,51 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
   }
 }
 
+export type Pending<T> = { key: string; input: T };
+
+// A request that must not run twice (paid work, a new record) is saved under `storage` with its
+// idempotency key before it is sent, so a lost answer replays the same key. A saved value that
+// `valid` rejects blocks new requests with `unreadable` until someone looks at it.
+export function savedRequest<T>(storage: string, valid: (pending: Pending<T>) => boolean, unreadable: string) {
+  const read = (): { pending: Pending<T> | null; error: string } => {
+    try {
+      const raw = localStorage.getItem(storage);
+      if (!raw) return { pending: null, error: '' };
+      const pending = JSON.parse(raw) as Pending<T>;
+      if (!pending || typeof pending.key !== 'string' || !pending.key || !pending.input || !valid(pending)) throw new Error();
+      return { pending, error: '' };
+    } catch {
+      return { pending: null, error: unreadable };
+    }
+  };
+  // Forgets the saved request only while it is still the one under `key`, even one `valid` would reject.
+  const settle = (key: string) => {
+    try { if ((JSON.parse(localStorage.getItem(storage) || 'null') as Pending<T> | null)?.key === key) localStorage.removeItem(storage); }
+    catch { /* Not JSON, so not the request sent under `key`. */ }
+  };
+  // Sends the saved request, else `input` under `key` or a new one. It is forgotten once the server
+  // answers for it (`answered`, any answer by default) or rejects it for good.
+  async function send<R>(input: T, post: (pending: Pending<T>) => Promise<R>,
+    options: { key?: string; answered?: (result: R, key: string) => boolean } = {}): Promise<R> {
+    const saved = read();
+    if (saved.error) throw new Error(saved.error);
+    const pending = saved.pending || { key: options.key || crypto.randomUUID(), input };
+    localStorage.setItem(storage, JSON.stringify(pending));
+    try {
+      const result = await post(pending);
+      if (options.answered?.(result, pending.key) ?? true) settle(pending.key);
+      return result;
+    } catch (error) {
+      if (isDefinitiveRejection(error)) settle(pending.key);
+      throw error;
+    }
+  }
+  return { read, settle, send };
+}
+
 const endpoint = (id: string) => `/api/characters/${encodeURIComponent(id)}`;
 export const api = {
   list: (signal?: AbortSignal) => request<{ characters: Character[] }>('/api/characters', { signal }),
-  detail: (id: string) => request<Character>(endpoint(id)),
   create: (name: string, height: number | null) => request<Character>('/api/characters', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, height_meters: height }) }),
-  update: (c: Character, name: string, height: number | null) => request<Character>(endpoint(c.id), { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'If-Match': c.revision }, body: JSON.stringify({ name, height_meters: height }) }),
   upload: (c: Character, file: File, kind: string) => request<Character>(`${endpoint(c.id)}/sources?kind=${kind}`, { method: 'POST', headers: { 'If-Match': c.revision, 'Content-Type': file.type || 'application/octet-stream' }, body: file, timeoutMs: 60000 }),
-  action: (c: Character, action: string, payload: object, key: string) => request<{ operation: Operation }>(`${endpoint(c.id)}/actions/${action}`, { method: 'POST', headers: { 'If-Match': c.revision, 'Idempotency-Key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
-  recover: (c: Character) => request<{ operation: Operation }>(`${endpoint(c.id)}/operations/${c.operation!.id}/recover`, { method: 'POST', headers: { 'If-Match': c.revision } }),
 };

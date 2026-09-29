@@ -9,8 +9,6 @@ import { studioScope } from './vite/studio.ts';
 const SERVER = process.env['SERVER_URL'] ?? 'http://127.0.0.1:8080';
 
 export default defineConfig(({ mode }) => ({
-  // The studio is a workspace package on the root node_modules with the app's versions of three, React and
-  // gaesup-world, so both share one copy of each: a second three would split WebGPU's node registries and draw unlit.
   plugins: [react(), gaesupAssets()],
   css: { postcss: { plugins: [studioScope()] } },
   define: {

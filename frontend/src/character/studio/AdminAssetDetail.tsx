@@ -1,18 +1,18 @@
-import { lazy, Suspense, useCallback } from 'react';
+import { useCallback } from 'react';
 import { factoryApi, type BodyProfileState, type FactoryJob, type NativePartsState } from '../factory/api';
 import { usePolling } from '../use-polling';
 import { isCatalogJobDeleted, studioApi, type Catalog } from './api';
 import { AssetModelPreview, type AssetPreviewModel } from './AssetModelPreview';
 import { AssetDetailDialog } from './AssetDetailDialog';
+import { MeshyMotion } from '../factory/MeshyMotion';
 import { NativePartRefit } from '../factory/NativePartRefit';
 import { AssetProductionStatus } from './AssetProductionStatus';
 import { partLabels as labels } from '../factory/parts';
 import { expressionNames } from '../texture-expressions';
 
-const MeshyMotion = lazy(() => import('../factory/MeshyMotion').then(m => ({ default: m.MeshyMotion })));
 type Polling<T> = ReturnType<typeof usePolling<T>>;
 type NativeRead = { jobId: string; parts: NativePartsState } | null;
-export type AdminAssetDetailProps = {
+type AdminAssetDetailProps = {
   managedAsset: FactoryJob; adminSlot: string; base?: FactoryJob; hidden: boolean; name: (job: FactoryJob) => string;
   catalog: Polling<Catalog>; bodyProfile: Polling<BodyProfileState>; native: Polling<NativeRead>; nativeState?: NativePartsState;
   managedNativeState?: NativePartsState; setManagedNative: Polling<NativeRead>['setValue'];
@@ -121,6 +121,6 @@ export function AdminAssetDetail({ managedAsset, adminSlot, base, hidden, name, 
   </section>{managedAsset.id === base.id && <details className="admin-record base-motion-panel" open={showMotion} onToggle={event => onShowMotion(event.currentTarget.open)}><summary>기본 몸 동작</summary>{showMotion && <>
     {runtime && runtime.optimized > 0 && <dl className="runtime-budget"><div><dt>런타임 삼각형</dt><dd>{runtime.optimized.toLocaleString()}</dd></div><div><dt>원본 삼각형</dt><dd>{runtime.source.toLocaleString()}</dd></div><div><dt>파츠 예산 합계</dt><dd>{runtime.target.toLocaleString()}</dd></div><div><dt>축소 텍스쳐</dt><dd>{runtime.textures.toLocaleString()}</dd></div></dl>}
     <button disabled={busy || !nativeState?.version || ['accepted', 'running'].includes(nativeState.status) || !!base.character_flow?.busy} onClick={() => void perform(async () => { native.setValue({ jobId: base.id, parts: await factoryApi.assemble(base.id, true) }); })}>기본 자세 정렬 · 새 버전 저장</button>
-    <Suspense fallback={<p>동작 불러오는 중</p>}><MeshyMotion key={base.id} jobId={base.id} visibleSlots={['idle', 'walk', 'run', 'jump', 'fall']} onRigRecovery={() => void native.refresh()} /></Suspense>
+    <MeshyMotion key={base.id} jobId={base.id} visibleSlots={['idle', 'walk', 'run', 'jump', 'fall']} onRigRecovery={() => void native.refresh()} />
   </>}</details>}</AssetDetailDialog>;
 }

@@ -4,8 +4,8 @@ import { DoubleSide, MeshPhysicalMaterial, MeshStandardMaterial, type Material, 
  * softened provider normal maps and both faces drawn (a sleeve, collar or hem shows its inside, and a
  * provider's reversed triangle is not a hole). The assembly export writes the same values
  * (avatar_blender_common.py). */
-export const MATTE_ROUGHNESS = .95;
-export const MATTE_NORMAL_SCALE = .4;
+const MATTE_ROUGHNESS = .95;
+const MATTE_NORMAL_SCALE = .4;
 /** Equipment keeps its own finish (a blade may be metal). */
 const OWN_FINISH = new Set(['weapon', 'tool', 'glasses']);
 

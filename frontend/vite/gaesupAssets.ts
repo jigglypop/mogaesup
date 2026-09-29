@@ -18,9 +18,10 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 /**
- * Texture sizes for the figures (`gltf/*.glb`: the 미니미 and the island's residents). The minihome camera sits about
- * 15 m from the player, so a 1.7 m figure spans roughly 90 px: colour maps past 1024 px and the other maps past
- * 512 px cost download and GPU memory without showing. The package keeps its full-size originals for closer cameras.
+ * Texture sizes for the figures (`gltf/*.glb`: the package's characters, the default 미니미 among them). The minihome
+ * camera sits about 15 m from the player, so a 1.7 m figure spans roughly 90 px: colour maps past 1024 px and the other
+ * maps past 512 px cost download and GPU memory without showing. The package keeps its full-size originals for closer
+ * cameras.
  */
 const FIGURE_MAPS = [
   { slots: /^(baseColor|emissive)/, resize: [1024, 1024] as [number, number], quality: 88 },

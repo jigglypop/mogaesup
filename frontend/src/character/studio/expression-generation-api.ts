@@ -1,4 +1,4 @@
-import { isDefinitiveRejection, request } from '../api';
+import { request, savedRequest } from '../api';
 import { expressionNames, type ExpressionName } from '../texture-expressions';
 
 export type ExpressionGenerationName = ExpressionName;
@@ -23,7 +23,7 @@ export type ExpressionGeneration = {
   artifacts: ExpressionGenerationArtifact[];
 };
 
-export type ExpressionReference = {
+type ExpressionReference = {
   revision: string;
   assets: { id: string; url: string }[];
   updated_at?: string;
@@ -37,9 +37,9 @@ export type ExpressionBatch = {
   can_resume: boolean;
   items: { name: ExpressionGenerationName; generation_id: string | null; status: string; error: string | null }[];
 };
-export type ExpressionGenerationInput = { name: ExpressionGenerationName; prompt: string; reference_assets?: string[] };
-export type ExpressionBatchInput = { reference_assets: string[] };
-export type ExpressionGenerationList = {
+type ExpressionGenerationInput = { name: ExpressionGenerationName; prompt: string; reference_assets?: string[] };
+type ExpressionBatchInput = { reference_assets: string[] };
+type ExpressionGenerationList = {
   items: ExpressionGeneration[];
   capabilities: { ready: boolean; reason: string | null };
   defaults: Record<ExpressionGenerationName, string>;
@@ -47,55 +47,18 @@ export type ExpressionGenerationList = {
   batches: ExpressionBatch[];
 };
 
-type PendingExpressionGeneration = { key: string; input: ExpressionGenerationInput };
-type PendingExpressionBatch = { key: string; input: ExpressionBatchInput };
-
-const storageKey = (job: string, version: string) => `gaesup.studio.expression-generation.${job}.${version}.v1`;
-const batchStorageKey = (job: string, version: string) => `gaesup.studio.expression-generation-batch.${job}.${version}.v1`;
-
-export function expressionGenerationRecovery(job: string, version: string): {
-  pending: PendingExpressionGeneration | null; error: string;
-} {
-  try {
-    const raw = localStorage.getItem(storageKey(job, version));
-    if (!raw) return { pending: null, error: '' };
-    const pending = JSON.parse(raw) as PendingExpressionGeneration;
-    if (!pending || typeof pending.key !== 'string' || !pending.key
-      || !pending.input || typeof pending.input.name !== 'string' || !(pending.input.name in expressionNames)
-      || typeof pending.input.prompt !== 'string' || !pending.input.prompt.trim()
-      || pending.input.reference_assets !== undefined && (!Array.isArray(pending.input.reference_assets)
-        || pending.input.reference_assets.some(id => typeof id !== 'string' || !id))) throw new Error();
-    return { pending, error: '' };
-  } catch {
-    return { pending: null, error: '저장된 표정 생성 요청을 읽을 수 없습니다. 브라우저 저장소의 요청 기록을 확인해 주세요.' };
-  }
-}
-
-export function expressionBatchRecovery(job: string, version: string): {
-  pending: PendingExpressionBatch | null; error: string;
-} {
-  try {
-    const raw = localStorage.getItem(batchStorageKey(job, version));
-    if (!raw) return { pending: null, error: '' };
-    const pending = JSON.parse(raw) as PendingExpressionBatch;
-    if (!pending || typeof pending.key !== 'string' || !pending.key || !pending.input
-      || !Array.isArray(pending.input.reference_assets) || pending.input.reference_assets.length < 1
-      || pending.input.reference_assets.length > 3
-      || pending.input.reference_assets.some(id => typeof id !== 'string' || !id)) throw new Error();
-    return { pending, error: '' };
-  } catch {
-    return { pending: null, error: '저장된 기본 5종 생성 요청을 읽을 수 없습니다. 브라우저 저장소의 요청 기록을 확인해 주세요.' };
-  }
-}
-
-function clearPending(job: string, version: string, requestKey: string) {
-  const recovery = expressionGenerationRecovery(job, version);
-  if (recovery.pending?.key === requestKey) localStorage.removeItem(storageKey(job, version));
-}
-function clearBatchPending(job: string, version: string, requestKey: string) {
-  const recovery = expressionBatchRecovery(job, version);
-  if (recovery.pending?.key === requestKey) localStorage.removeItem(batchStorageKey(job, version));
-}
+const expressionGenerations = (job: string, version: string) => savedRequest<ExpressionGenerationInput>(
+  `gaesup.studio.expression-generation.${job}.${version}.v1`, ({ input }) =>
+    typeof input.name === 'string' && input.name in expressionNames && typeof input.prompt === 'string' && !!input.prompt.trim()
+      && (input.reference_assets === undefined || (Array.isArray(input.reference_assets)
+        && input.reference_assets.every(id => typeof id === 'string' && !!id))),
+  '저장된 표정 생성 요청을 읽을 수 없습니다. 브라우저 저장소의 요청 기록을 확인해 주세요.');
+const expressionBatches = (job: string, version: string) => savedRequest<ExpressionBatchInput>(
+  `gaesup.studio.expression-generation-batch.${job}.${version}.v1`, ({ input }) =>
+    Array.isArray(input.reference_assets) && input.reference_assets.length >= 1 && input.reference_assets.length <= 3
+      && input.reference_assets.every(id => typeof id === 'string' && !!id),
+  '저장된 기본 5종 생성 요청을 읽을 수 없습니다. 브라우저 저장소의 요청 기록을 확인해 주세요.');
+const answered = (result: { request_key: string }, key: string) => result.request_key === key;
 
 const endpoint = (job: string, version: string) => `/api/studio/bodies/${encodeURIComponent(job)}/${encodeURIComponent(version)}/expression-generations`;
 const referenceEndpoint = (job: string, version: string) => `/api/studio/bodies/${encodeURIComponent(job)}/${encodeURIComponent(version)}/expression-reference`;
@@ -103,61 +66,35 @@ const referenceEndpoint = (job: string, version: string) => `/api/studio/bodies/
 export const expressionGenerationApi = {
   async list(job: string, version: string, signal?: AbortSignal) {
     const result = await request<ExpressionGenerationList>(endpoint(job, version), { signal });
-    const pending = expressionGenerationRecovery(job, version).pending;
-    if (pending && result.items.some(item => item.request_key === pending.key)) clearPending(job, version, pending.key);
-    const batchPending = expressionBatchRecovery(job, version).pending;
-    if (batchPending && result.batches?.some(item => item.request_key === batchPending.key)) clearBatchPending(job, version, batchPending.key);
+    const pending = expressionGenerations(job, version).read().pending;
+    if (pending && result.items.some(item => item.request_key === pending.key)) expressionGenerations(job, version).settle(pending.key);
+    const batchPending = expressionBatches(job, version).read().pending;
+    if (batchPending && result.batches?.some(item => item.request_key === batchPending.key)) expressionBatches(job, version).settle(batchPending.key);
     return result;
   },
-  get: (job: string, version: string, id: string, signal?: AbortSignal) =>
-    request<ExpressionGeneration>(`${endpoint(job, version)}/${encodeURIComponent(id)}`, { signal }),
-  recovery: expressionGenerationRecovery,
-  batchRecovery: expressionBatchRecovery,
+  recovery: (job: string, version: string) => expressionGenerations(job, version).read(),
+  batchRecovery: (job: string, version: string) => expressionBatches(job, version).read(),
   uploadReference: (file: File) => request<{ id: string; width: number; height: number; alpha: boolean }>('/api/avatar-blueprints/assets', {
     method: 'POST', headers: { 'Content-Type': 'image/png' }, body: file, timeoutMs: 60000,
   }),
   saveReference: (job: string, version: string, assets: string[], revision: string) => request<ExpressionReference>(referenceEndpoint(job, version), {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assets, revision }),
   }),
-  async create(job: string, version: string, input: ExpressionGenerationInput) {
-    const recovery = expressionGenerationRecovery(job, version);
-    if (recovery.error) throw new Error(recovery.error);
-    const pending = recovery.pending || { key: crypto.randomUUID(), input };
-    localStorage.setItem(storageKey(job, version), JSON.stringify(pending));
-    try {
-      const result = await request<ExpressionGeneration>(endpoint(job, version), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-        body: JSON.stringify(pending.input),
-        timeoutMs: 60000,
-      });
-      if (result.request_key === pending.key) clearPending(job, version, pending.key);
-      return result;
-    } catch (error) {
-      if (isDefinitiveRejection(error)) clearPending(job, version, pending.key);
-      throw error;
-    }
-  },
+  create: (job: string, version: string, input: ExpressionGenerationInput) => expressionGenerations(job, version).send(input, pending =>
+    request<ExpressionGeneration>(endpoint(job, version), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+      body: JSON.stringify(pending.input),
+      timeoutMs: 60000,
+    }), { answered }),
   resume: (job: string, version: string, id: string) => request<ExpressionGeneration>(
     `${endpoint(job, version)}/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 },
   ),
-  async createBatch(job: string, version: string, input: ExpressionBatchInput) {
-    const recovery = expressionBatchRecovery(job, version);
-    if (recovery.error) throw new Error(recovery.error);
-    const pending = recovery.pending || { key: crypto.randomUUID(), input };
-    localStorage.setItem(batchStorageKey(job, version), JSON.stringify(pending));
-    try {
-      const result = await request<ExpressionBatch>(`${endpoint(job, version)}/batch`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-        body: JSON.stringify(pending.input), timeoutMs: 60000,
-      });
-      if (result.request_key === pending.key) clearBatchPending(job, version, pending.key);
-      return result;
-    } catch (error) {
-      if (isDefinitiveRejection(error)) clearBatchPending(job, version, pending.key);
-      throw error;
-    }
-  },
+  createBatch: (job: string, version: string, input: ExpressionBatchInput) => expressionBatches(job, version).send(input, pending =>
+    request<ExpressionBatch>(`${endpoint(job, version)}/batch`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+      body: JSON.stringify(pending.input), timeoutMs: 60000,
+    }), { answered }),
   resumeBatch: (job: string, version: string, id: string) => request<ExpressionBatch>(
     `${endpoint(job, version)}/batch/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 },
   ),
