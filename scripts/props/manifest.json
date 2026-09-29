@@ -1,0 +1,41 @@
+{
+  "style": {
+    "furniture": "섬 마을에 사는 SD 캐릭터(키 1.7m)가 쓰는 게임용 소품이다. 둥근 모서리와 통통한 비율, 큰 색면과 단순한 재질 표현, 부드러운 파스텔 색, 매트한 질감을 쓴다. 작은 나사, 미세한 요철, 복잡한 무늬, 강한 반사와 광택은 줄이고 매우 얇거나 떠 있는 부품은 만들지 않는다. 바닥에 안정적으로 서는 한 개만, 전체 구조가 보이는 3/4 시점으로 표현한다. 사람, 손, 방, 바닥, 그림자, 문자와 치수선은 제외하고 단색 흰 배경에 출력한다.",
+    "tree": "섬 마을 게임 월드에 두는 낮은 폴리곤 느낌의 식물이다. 소수의 큰 덩어리로 된 선명한 실루엣, 큰 색면, 매트한 질감을 쓰고 잎을 낱장으로 그리거나 얇은 잔가지를 많이 넣지 않는다. 바닥 접촉 위치가 분명한 한 개만, 잘리지 않게 3/4 시점으로 표현한다. 화분, 지형, 풀밭, 다른 식물과 사람은 넣지 않고 단색 흰 배경에 출력한다.",
+    "prop": "섬 마을 게임 월드에 두는 자연물 소품이다. 큰 면 몇 개로 된 단순한 형태, 큰 색면, 매트한 질감을 쓰고 잔무늬와 미세한 돌기, 강한 반사를 줄인다. 바닥에 안정적으로 놓이는 한 개만, 전체 형태가 드러나는 3/4 시점으로 표현한다. 지형, 풀밭, 받침대, 그림자와 사람은 넣지 않고 단색 흰 배경에 출력한다."
+  },
+  "items": [
+    { "id": "door-basic", "file": "props/door.glb", "category": "furniture", "name": "현관문", "prompt": "둥근 창이 달린 나무 현관문 한 짝과 문틀. 따뜻한 갈색 나무 판자, 황동색 둥근 손잡이. 문과 문틀이 한 덩어리로 서 있다." },
+    { "id": "window-basic", "file": "props/window.glb", "category": "furniture", "name": "창문", "prompt": "흰 나무 창틀에 네 칸 유리가 끼워진 네모난 집 창문 한 개. 유리는 옅은 하늘색으로 불투명하게 칠한다." },
+    { "id": "fence-basic", "file": "props/fence.glb", "category": "furniture", "name": "울타리", "prompt": "나무 울타리 한 칸. 굵은 기둥 두 개 사이에 가로대 두 줄과 끝이 둥근 세로 판자 다섯 개. 연한 갈색." },
+    { "id": "lamp-basic", "file": "props/lamp.glb", "category": "furniture", "name": "정원 조명", "prompt": "길가에 두는 작은 정원 가로등. 짧고 굵은 짙은 초록 기둥 위에 따뜻한 노란 빛이 도는 둥근 유리 등갓." },
+    { "id": "chair-basic", "file": "props/chair.glb", "category": "furniture", "name": "의자", "prompt": "나무 의자 한 개. 둥근 등받이, 두툼한 좌판 위의 작은 크림색 방석, 굵은 네 다리. 따뜻한 갈색 나무." },
+    { "id": "table-basic", "file": "props/table.glb", "category": "furniture", "name": "식탁", "prompt": "여섯 명이 앉는 긴 나무 식탁 한 개. 모서리가 둥근 두꺼운 직사각형 상판과 굵은 네 다리. 따뜻한 갈색 나무." },
+    { "id": "bed-basic", "file": "props/bed.glb", "category": "furniture", "name": "침대", "prompt": "1인용 아늑한 침대. 둥근 나무 프레임과 머리판, 폭신한 하늘색 이불과 흰 베개 하나." },
+    { "id": "storage-basic", "file": "props/storage.glb", "category": "furniture", "name": "수납장", "prompt": "폭이 넓고 깊이가 얕은 키 큰 나무 수납장. 위는 책이 몇 권 꽂힌 열린 선반, 아래는 둥근 손잡이가 달린 문 두 짝. 진한 갈색." },
+    { "id": "mailbox-basic", "file": "props/mailbox.glb", "category": "furniture", "name": "우편함", "prompt": "나무 기둥 위에 얹힌 빨간 우편함. 둥근 지붕 모양의 우편함 몸통과 옆에 세운 작은 노란 깃발." },
+    { "id": "crafting-basic", "file": "props/crafting.glb", "category": "furniture", "name": "제작대", "prompt": "튼튼한 나무 제작대. 두꺼운 작업판 위에 망치와 톱이 놓여 있고 아래 선반에 나무판 몇 장이 쌓여 있다." },
+    { "id": "shop-stall-basic", "file": "props/shop-stall.glb", "category": "furniture", "name": "가판대", "prompt": "작은 시장 가판대. 빨강·흰색 줄무늬 천막 지붕을 네 기둥이 받치고, 나무 판매대 위에 사과와 오렌지가 담긴 상자가 놓여 있다." },
+    { "id": "nature-tree-round", "file": "nature/tree-round.glb", "category": "tree", "name": "둥근 나무", "prompt": "둥글고 풍성한 수관을 가진 활엽수 한 그루. 굵은 갈색 줄기 위에 밝은 초록 잎 덩어리 서너 개." },
+    { "id": "nature-tree-oak", "file": "nature/tree-oak.glb", "category": "tree", "name": "열매 나무", "prompt": "빨간 사과가 몇 개 달린 과일 나무 한 그루. 둥근 초록 수관 덩어리 두세 개와 굵은 갈색 줄기." },
+    { "id": "nature-tree-pine", "file": "nature/tree-pine.glb", "category": "tree", "name": "소나무", "prompt": "층층이 쌓인 원뿔 모양의 짙은 초록 잎 덩어리를 가진 소나무 한 그루와 곧은 갈색 줄기." },
+    { "id": "nature-tree-fat", "file": "nature/tree-fat.glb", "category": "tree", "name": "통통한 나무", "prompt": "크고 통통한 둥근 수관의 귀여운 나무 한 그루. 짧고 굵은 줄기, 연두색 잎 덩어리." },
+    { "id": "nature-tree-thin", "file": "nature/tree-thin.glb", "category": "tree", "name": "가는 나무", "prompt": "가늘고 키 큰 나무 한 그루. 곧고 얇은 줄기 위에 길쭉한 초록 수관 덩어리." },
+    { "id": "nature-rock-round", "file": "nature/rock-round.glb", "category": "prop", "name": "둥근 바위", "prompt": "둥근 회색 바위 한 개. 부드럽게 깎인 큰 면 몇 개." },
+    { "id": "nature-rock-wide", "file": "nature/rock-wide.glb", "category": "prop", "name": "넓은 바위", "prompt": "옆으로 넓적한 회색 바위 한 개. 윗면이 평평하다." },
+    { "id": "nature-rock-tall", "file": "nature/rock-tall.glb", "category": "prop", "name": "높은 바위", "prompt": "위로 솟은 키 큰 회색 바위 한 개. 몇 개의 큰 면으로 된 단순한 형태." },
+    { "id": "nature-fern", "file": "nature/fern.glb", "category": "tree", "name": "고사리", "prompt": "바닥에 둥글게 퍼진 고사리 한 포기. 큼직한 초록 잎 여섯 장." },
+    { "id": "nature-bush", "file": "nature/kenney/bush.glb", "category": "tree", "name": "덤불", "prompt": "둥근 초록 덤불 한 덩이. 큰 잎 덩어리 서너 개가 뭉쳐 있다." },
+    { "id": "nature-flower-red", "file": "nature/kenney/flower-red.glb", "category": "tree", "name": "빨간 꽃", "prompt": "빨간 꽃 세 송이와 초록 잎이 모인 작은 꽃 무더기." },
+    { "id": "nature-flower-yellow", "file": "nature/kenney/flower-yellow.glb", "category": "tree", "name": "노란 꽃", "prompt": "노란 꽃 네 송이와 초록 잎이 모인 작은 꽃 무더기." },
+    { "id": "nature-flower-purple", "file": "nature/kenney/flower-purple.glb", "category": "tree", "name": "보라 꽃", "prompt": "보라색 꽃 세 송이와 초록 잎이 모인 작은 꽃 무더기." },
+    { "id": "nature-stump", "file": "nature/kenney/stump.glb", "category": "prop", "name": "그루터기", "prompt": "윗면에 나이테가 보이는 나무 그루터기 한 개. 뿌리 몇 가닥이 바닥으로 조금 드러난다." },
+    { "id": "nature-fallen-log", "file": "nature/kenney/fallen-log.glb", "category": "prop", "name": "쓰러진 통나무", "prompt": "바닥에 누운 통나무 한 개. 양 끝에 나이테, 갈색 나무껍질." },
+    { "id": "nature-mushroom-cluster", "file": "nature/kenney/mushroom-cluster.glb", "category": "tree", "name": "버섯", "prompt": "빨간 갓에 흰 점이 있는 버섯 세 개가 모인 무더기." },
+    { "id": "nature-lily", "file": "nature/kenney/lily.glb", "category": "tree", "name": "연꽃", "prompt": "둥근 초록 연잎 한 장 위에 핀 분홍 연꽃 한 송이." },
+    { "id": "nature-rock-small", "file": "nature/kenney/rock-small.glb", "category": "prop", "name": "작은 돌", "prompt": "낮고 둥근 회색 돌 서너 개가 모인 작은 무더기." },
+    { "id": "nature-rock-flat", "file": "nature/kenney/rock-flat.glb", "category": "prop", "name": "납작 돌", "prompt": "디딤돌처럼 납작하고 넓은 회색 바위 한 개." },
+    { "id": "nature-rock-moss", "file": "nature/kenney/rock-moss.glb", "category": "prop", "name": "이끼 바위", "prompt": "윗면을 초록 이끼가 덮은 넓고 낮은 회색 바위 한 개." },
+    { "id": "nature-rock-large", "file": "nature/kenney/rock-large.glb", "category": "prop", "name": "큰 바위", "prompt": "넓고 낮은 큰 회색 바위 한 개. 몇 개의 큰 면으로 된 단순한 형태." }
+  ]
+}
