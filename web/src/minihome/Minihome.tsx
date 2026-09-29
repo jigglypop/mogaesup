@@ -15,6 +15,7 @@ import {
   useAmbientBgm,
   useAutoSave,
   useGameTime,
+  useGaesupStoreApi,
   useLoadOnMount,
   type WorldQuality,
 } from 'gaesup-world';
@@ -48,6 +49,8 @@ const CAMERA = {
   zDistance: -10,
   fov: 42,
   dragOrbit: 'all',
+  // Trees and houses between the player and the camera turn see-through; the camera keeps its distance.
+  collisionMode: 'fade',
 } as const;
 
 type PanelTab = 'guestbook' | 'neighbors' | 'about';
@@ -93,6 +96,15 @@ function Bgm({ enabled }: { enabled: boolean }) {
   return null;
 }
 
+/** Follows the viewer's choice of what happens when something hides the player. */
+function CameraOcclusion({ fade }: { fade: boolean }) {
+  const store = useGaesupStoreApi();
+  useEffect(() => {
+    store.getState().setCameraOption({ collisionMode: fade ? 'fade' : 'push' });
+  }, [store, fade]);
+  return null;
+}
+
 function Switch({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (checked: boolean) => void }) {
   return (
     <label className="mg-switch">
@@ -132,6 +144,18 @@ function SettingsMenu({ settings, onChange, bgm, onBgm, onPerformance }: Setting
             ))}
           </div>
           <Switch label="후처리" hint="블룸·톤매핑. 켤 때만 불러와요" checked={settings.postProcessing} onChange={(postProcessing) => onChange({ postProcessing })} />
+          <Switch
+            label="고품질 조명"
+            hint="튀는 빛과 반사를 더해요. WebGPU에서만, 후처리와 함께 켜져요"
+            checked={settings.postProcessing && !!settings.cinematic}
+            onChange={(cinematic) => onChange(cinematic ? { cinematic, postProcessing: true } : { cinematic })}
+          />
+          <Switch
+            label="가리면 반투명"
+            hint="앞을 가린 나무나 집을 반투명하게 해요. 끄면 카메라가 앞으로 당겨져요"
+            checked={settings.cameraFade ?? true}
+            onChange={(cameraFade) => onChange({ cameraFade })}
+          />
           <Switch label="절전 모드" hint="입력이 2초 없으면 30fps로 그려요" checked={settings.idleThrottle} onChange={(idleThrottle) => onChange({ idleThrottle })} />
           <Switch label="배경 음악" hint="섬의 소리를 틀어요" checked={bgm} onChange={onBgm} />
           <button
@@ -302,6 +326,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     <GaesupWorld runtime={runtime} urls={urls} cameraOption={CAMERA}>
       <Persistence autosave={isOwner && !conflict} />
       <Bgm enabled={bgm} />
+      <CameraOcclusion fade={settings.cameraFade ?? true} />
       <LiveRoom username={profile.username} viewer={viewer} characterUrl={characterUrl} playerRef={playerRef}>
         <div className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`}>
           <div className="mg-world-canvas">

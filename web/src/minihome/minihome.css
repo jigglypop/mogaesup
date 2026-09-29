@@ -12,7 +12,8 @@
 .mg-world-loading {
   position: absolute;
   inset: 0;
-  z-index: 40;
+  /* Over the canvas but under the panels, so the guestbook can be read while the island loads. */
+  z-index: 15;
   display: grid;
   place-items: center;
   background: var(--mg-page);

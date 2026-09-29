@@ -10,8 +10,6 @@ param(
   [string]$HostedZoneId = 'Z05454042ZQ3PMG0TW4JR',
   # Defaults to the issued us-east-1 certificate for DomainName.
   [string]$CertificateArn,
-  # The character server's studio, linked from /admin.
-  [string]$FactoryUiUrl = '',
   [switch]$ProvisionOnly,
   [switch]$SkipBuild
 )
@@ -64,7 +62,6 @@ try {
   if ($ProvisionOnly) { return }
 
   if (-not $SkipBuild) {
-    if ($FactoryUiUrl) { $env:VITE_FACTORY_UI_URL = $FactoryUiUrl }
     Invoke-Native npm run build
   }
   if (-not (Test-Path -LiteralPath (Join-Path $dist 'index.html'))) { throw 'dist/index.html is missing; build first.' }
