@@ -94,6 +94,8 @@ def test_recover_uncertain_rig_uses_get_only(tmp_path, monkeypatch):
 
 
 def test_download_rig_and_optional_animations_without_api_credentials(tmp_path, monkeypatch):
+    (tmp_path / "character.json").write_text(json.dumps({"stage": "rigging", "status": "SUCCEEDED",
+                                                          "task_id": "rigging-1"}))
     (tmp_path / "rigging-result.json").write_text(json.dumps({"status": "SUCCEEDED", "result": {
         "rigged_character_glb_url": "https://cdn.test/rigged.glb",
         "basic_animations": {"walking_glb_url": "https://cdn.test/walking.glb"}}}))

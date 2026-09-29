@@ -88,6 +88,13 @@ def test_latest_placement_reads_memory_when_db_missing(monkeypatch):
     assert latest["plan"]["title"] == "테스트"
 
 
+@pytest.fixture
+def rig_without_face_lock(monkeypatch):
+    # Face locking downloads the rigged GLB; these tests cover the rigging request only.
+    monkeypatch.setattr(world, "_should_lock_face_weights", lambda settings, body: False)
+
+
+@pytest.mark.usefixtures("rig_without_face_lock")
 def test_meshy_rigging_prefers_input_task_id(monkeypatch):
     created: dict[str, object] = {}
 
@@ -136,6 +143,7 @@ def test_meshy_rigging_prefers_input_task_id(monkeypatch):
     assert rigged["animation_clips"][0]["model_url"] == "https://example.test/idle.glb"
 
 
+@pytest.mark.usefixtures("rig_without_face_lock")
 def test_meshy_rigging_defaults_to_humanoid_height(monkeypatch):
     created: dict[str, object] = {}
 
@@ -167,6 +175,7 @@ def test_meshy_rigging_defaults_to_humanoid_height(monkeypatch):
     assert created["payload"]["height_meters"] == 1.7
 
 
+@pytest.mark.usefixtures("rig_without_face_lock")
 def test_meshy_rigging_requires_six_action_combined_glb(monkeypatch):
     monkeypatch.setattr(world, "_create_meshy_task", lambda settings, path, payload, timeout: "rig-task")
     monkeypatch.setattr(
@@ -197,6 +206,7 @@ def test_meshy_rigging_requires_six_action_combined_glb(monkeypatch):
         )
 
 
+@pytest.mark.usefixtures("rig_without_face_lock")
 def test_meshy_rigging_custom_action_slots_override_basic_clips(monkeypatch):
     created: list[dict[str, object]] = []
 

@@ -131,7 +131,7 @@ def test_missing_basic_animations_obeys_submission_budget(tmp_path):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize('profile,model,polycount', [('meshy-7','meshy-7',30000),('smart-topology','meshy-t2',15000)])
+@pytest.mark.parametrize('profile,model,polycount', [('meshy-7','meshy-7',8000),('smart-topology','meshy-t2',15000)])
 def test_current_generation_profiles_send_supported_controls(tmp_path, profile, model, polycount):
     image = tmp_path / 'source.png'; Image.new('RGB',(16,16)).save(image)
     sent = []

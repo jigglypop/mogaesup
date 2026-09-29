@@ -43,7 +43,7 @@ def setup(tmp_path, monkeypatch):
             path = run/(name+'.glb'); path.write_bytes(animated_fixture()); files[name] = {'sha256': digest(path)}
         _write_json(run/'rigging-artifacts.json', files)
     monkeypatch.setattr(module.character_jobs, 'download', download)
-    def download_clip(client, url, path):
+    def download_clip(client, url, path, *, preserve_detail=False):
         assert 'Authorization' not in client.headers
         path.write_bytes(animated_fixture())
     monkeypatch.setattr(module, 'download_glb', download_clip)
@@ -97,7 +97,7 @@ def test_photo_character_automatically_assembles_after_native_rig_and_preserves_
     events = []
     monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'start', lambda self, owner, job: (events.append(('start', job)) or {}, True))
     monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'execute', lambda self, owner, job: events.append(('execute', job)))
-    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'get', lambda self, owner, job: {'status': 'review_required'})
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'get', lambda self, owner, job: {'version': 'fixture-assembly', 'status': 'review_required'})
     service.start(1, jid); service.execute(1, jid, poll_seconds=0)
     assert events == [('start', jid), ('execute', jid)]
     assert read_json(directory/'output/progress.json')['stage'] == 'complete'
@@ -120,7 +120,7 @@ def test_local_assembly_failure_continues_without_resubmitting_rig(setup, monkey
     assert 'private' not in read_json(directory/'job.json')['error']
     assert read_json(directory/'job.json')['error']
     monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'start', lambda *args: ({}, False))
-    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'get', lambda *args: {'status': 'review_required'})
+    monkeypatch.setattr(avatar_native_parts.AvatarNativeParts, 'get', lambda *args: {'version': 'fixture-assembly', 'status': 'review_required'})
     continue_character(service.factory, 1, jid)
     assert read_json(directory/'job.json')['error'] is None
     assert len(calls) == 1
@@ -149,7 +149,8 @@ def test_uncertain_animation_is_not_reposted_and_changed_source_blocks(setup, mo
 def test_frozen_actions_resume_after_rig_timeout_with_new_service_once_each(setup, monkeypatch):
     service, jid, directory, calls, transport = setup
     pipeline = read_json(directory/'pipeline.json')
-    expected = {'idle': 0, 'walk': 77, 'run': 14, 'jump': 101, 'fall': 102, 'sit': 103}
+    # Non-default walk/run ids: a default clip the rig already delivered is reused, never requested.
+    expected = {'idle': 0, 'walk': 77, 'run': 104, 'jump': 101, 'fall': 102, 'sit': 103}
     pipeline['motion_actions'] = expected
     _write_json(directory/'pipeline.json', pipeline)
     job = read_json(directory/'job.json')

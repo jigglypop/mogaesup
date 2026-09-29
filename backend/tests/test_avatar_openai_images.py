@@ -59,8 +59,7 @@ def test_reference_edit_uses_exact_model_once(tmp_path, monkeypatch, failure):
         if failure == 'timeout': raise httpx.ReadTimeout('lost response')
         if failure == 'rejected': return httpx.Response(404, json={'error': {'message': 'unavailable'}})
         return httpx.Response(200, json={'data': [] if failure else [{'b64_json': base64.b64encode(png()).decode()}]})
-    client = httpx.Client
-    monkeypatch.setattr(images.httpx, 'Client', lambda **kwargs: client(**kwargs, transport=httpx.MockTransport(transport)))
+    monkeypatch.setattr(images, 'image_transport', lambda: httpx.MockTransport(transport))
     if failure:
         with pytest.raises((httpx.HTTPError, PipelineError)):
             images.generate_part_image(source, 'crystal staff', images.DEFAULT_MODEL, images.DEFAULT_BASE)
@@ -78,8 +77,7 @@ def test_response_receipt_reuses_received_bytes_without_post(tmp_path, monkeypat
         calls.append(request)
         return httpx.Response(200, headers={'x-request-id': 'fixture-request'},
                               json={'data': [{'b64_json': base64.b64encode(png()).decode()}]})
-    client = httpx.Client
-    monkeypatch.setattr(images.httpx, 'Client', lambda **kwargs: client(**kwargs, transport=httpx.MockTransport(transport)))
+    monkeypatch.setattr(images, 'image_transport', lambda: httpx.MockTransport(transport))
     for _ in range(2):
         assert images.generate_part_image(source, 'whole character', images.DEFAULT_MODEL, images.DEFAULT_BASE, receipt=receipt) == png()
     assert len(calls) == 1
@@ -99,8 +97,7 @@ def test_interrupted_response_keeps_partial_bytes_and_request_id(tmp_path, monke
     def transport(request):
         calls.append(request)
         return httpx.Response(200, headers={'x-request-id': 'fixture-interrupted'}, stream=BrokenStream())
-    client = httpx.Client
-    monkeypatch.setattr(images.httpx, 'Client', lambda **kwargs: client(**kwargs, transport=httpx.MockTransport(transport)))
+    monkeypatch.setattr(images, 'image_transport', lambda: httpx.MockTransport(transport))
     with pytest.raises(httpx.ReadError):
         images.generate_part_image(source, 'whole character', images.DEFAULT_MODEL, images.DEFAULT_BASE, receipt=receipt)
     assert len(calls) == 1
@@ -123,8 +120,7 @@ def test_rejected_response_is_sanitized_classified_and_never_reposted(tmp_path, 
             'type': 'invalid_request_error', 'param': 'size', 'code': 'invalid_image_size',
             'source_url': private_url,
         }})
-    client = httpx.Client
-    monkeypatch.setattr(images.httpx, 'Client', lambda **kwargs: client(**kwargs, transport=httpx.MockTransport(transport)))
+    monkeypatch.setattr(images, 'image_transport', lambda: httpx.MockTransport(transport))
     for _ in range(2):
         with pytest.raises(images.OpenAIImageHTTPError) as error:
             images.generate_part_image(source, 'whole character', images.DEFAULT_MODEL,

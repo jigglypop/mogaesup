@@ -36,18 +36,19 @@ def test_journal_retries_windows_rename_without_rewriting_payload(tmp_path, monk
 def test_journal_reader_retries_open_and_keeps_actual_status(tmp_path, monkeypatch):
     target = tmp_path / "operation.json"
     target.write_text('{"status":"succeeded"}', encoding="utf-8")
-    original_read = Path.read_text
+    # Journals are StoredPaths, whose text reads open the file through Path.read_bytes.
+    original_read = Path.read_bytes
     attempts = []
 
-    def read(path, *args, **kwargs):
+    def read(path):
         attempts.append(path)
         if len(attempts) < 3:
             error = PermissionError(13, "temporarily unavailable")
             error.winerror = 5
             raise error
-        return original_read(path, *args, **kwargs)
+        return original_read(path)
 
-    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "read_bytes", read)
     monkeypatch.setattr("src.services.asset_editor.time.sleep", lambda _: None)
     assert read_json(target, {"status": "unknown"}) == {"status": "succeeded"}
     assert len(attempts) == 3
