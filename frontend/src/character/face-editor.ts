@@ -14,7 +14,7 @@ export class FaceEditor {
   private ray = new THREE.Raycaster();
   private drawing = false;
   private height: number;
-  constructor(private gltf: GLTF, private canvas: HTMLCanvasElement, private camera: THREE.Camera,
+  constructor(gltf: GLTF, private canvas: HTMLCanvasElement, private camera: THREE.Camera,
     private changed: (count: number) => void, private storageKey: string) {
     this.height = new THREE.Box3().setFromObject(gltf.scene).getSize(new THREE.Vector3()).y;
     gltf.scene.traverse(object => {
@@ -47,7 +47,7 @@ export class FaceEditor {
     const mesh = hit.object as THREE.Mesh;
     const key = [...this.meshes].find(([, value]) => value === mesh)?.[0]; if (!key) return;
     const selection = this.assignments.get(key) ?? new Map<number, string>(); this.assignments.set(key, selection);
-    const positions = mesh.geometry.attributes.position, indices = mesh.geometry.index;
+    const positions = mesh.geometry.attributes.position, indices = mesh.geometry.index; if (!positions) return;
     const count = (indices?.count ?? positions.count) / 3;
     const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), center = new THREE.Vector3(), normal = new THREE.Vector3();
     for (let face = 0; face < count; face++) {
@@ -65,7 +65,7 @@ export class FaceEditor {
   export(): FaceSelection[] {
     const result: FaceSelection[] = [];
     for (const [key, values] of this.assignments) {
-      const [node_index, primitive_index] = key.split(':').map(Number);
+      const [node_index, primitive_index] = key.split(':').map(Number); if (node_index === undefined || primitive_index === undefined) continue;
       const roles = new Set(values.values());
       for (const role of roles) result.push({ node_index, primitive_index, role, faces: [...values].filter(([, r]) => r === role).map(([face]) => face).sort((a, b) => a - b) });
     }

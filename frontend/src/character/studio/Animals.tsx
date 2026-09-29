@@ -79,8 +79,8 @@ function CreateAnimal({ onCreated }: { onCreated(animal: Animal): void }) {
   function select(files: File[]) {
     if (unavailable) return;
     setError('');
-    if (!files.length) return;
     const next = files[0];
+    if (!next) return;
     const problem = files.length !== 1 ? '그림을 하나만 선택해 주세요.'
       : !IMAGE_TYPES.includes(next.type) && !/\.(png|jpe?g)$/i.test(next.name) ? 'PNG 또는 JPEG 그림을 선택해 주세요.'
       : next.size === 0 ? '빈 파일은 올릴 수 없습니다.'

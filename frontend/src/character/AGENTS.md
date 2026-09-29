@@ -1,10 +1,10 @@
-# Frontend AGENTS.md
+# 캐릭터 스튜디오 AGENTS.md
 
-`frontend/`는 캐릭터 목록·상세·작업 제어·파츠 미리보기·검수를 담당한다. UI 구현에 필요한 스택과 빌드 명령은 이 영역에서 관리한다.
+`frontend/src/character/`는 앱의 `/studio`에 뜨는 캐릭터 목록·상세·작업 제어·파츠 미리보기·검수 화면이다. 스택과 빌드는 앱(`frontend/`)과 같다.
 
 ## 렌더링 스택
 
-- 사용자가 지정한 기준은 React Three Fiber, WebGPU, gaesup-world다. 현재 안정판 조합은 `@react-three/fiber 9.7.0`, `gaesup-world 1.0.30`, React 19.2, Three.js 0.178이며 정확한 버전은 package-lock.json으로 고정한다.
+- 사용자가 지정한 기준은 React Three Fiber, WebGPU, gaesup-world다. 버전은 앱과 한 벌이며(`frontend/package.json`, 루트 package-lock.json) 앱이 gaesup-world를 올릴 때 함께 올라간다.
 - 업그레이드 시 npm의 현재 버전과 peer dependency를 확인한다. gaesup-world와 맞지 않는 Three.js를 강제 설치하거나 R3F alpha를 안정판으로 취급하지 않는다.
 - R3F가 render loop·camera·scene 수명을 소유하며 gaesup-world 공개 API로 world 설정을 연결한다. 임의 `WebGLRenderer`와 별도 animation loop로 되돌리지 않는다. `WebGPURenderer.init()` 완료 후 장면을 마운트하고 실제 backend가 WebGPU인지 확인한다.
 - WebGPU 미지원 환경에서 호환 렌더러를 사용하면 화면에 구분해 표시한다. WebGL fallback으로 통과한 결과를 WebGPU 검증으로 보고하지 않는다.

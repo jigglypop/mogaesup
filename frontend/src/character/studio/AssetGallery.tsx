@@ -129,7 +129,7 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
 
   function openFitting(jobId: string, slot: 'top' | 'bottom') {
     const item = items.find(candidate => candidate.job.id === jobId && candidate.slot === slot);
-    setFitting({ key: `${jobId}:${slot}`, jobId, slot, label: partLabels[slot], rawUrl: item?.image?.url });
+    setFitting({ key: `${jobId}:${slot}`, jobId, slot, label: partLabels[slot] ?? slot, rawUrl: item?.image?.url });
   }
 
   function assetCard(item: (typeof items)[number], compact = false) {

@@ -224,8 +224,8 @@ export default function Wardrobe() {
     const dress = worn.top && coverages[coverageKey(worn.top)]?.covers_bottom;
     if (part.slot === 'bottom' && dress && !worn.bottom) setNotice('하의를 입어 원피스 상의를 벗겼습니다.');
     setWorn(current => {
-      const next = { ...current };
-      if (current[part.slot] && keyOf(current[part.slot], part.slot) === keyOf(part, part.slot)) delete next[part.slot];
+      const next = { ...current }, prior = current[part.slot];
+      if (prior && keyOf(prior, part.slot) === keyOf(part, part.slot)) delete next[part.slot];
       else {
         next[part.slot] = part;
         if (part.slot === 'bottom' && dress) delete next.top;
@@ -252,7 +252,7 @@ export default function Wardrobe() {
       parts: Object.fromEntries(Object.entries(applied.current).map(([slotName, part]) => [slotName, { job_id: part.job_id, version: part.version, sha256: part.sha256 }])),
       colors: Object.fromEntries(Object.entries(applied.current)
         .filter(([slotName, part]) => !hairSlots.includes(slotName) && Object.keys(colors[keyOf(part, slotName)] || {}).length)
-        .map(([slotName, part]) => [slotName, colors[keyOf(part, slotName)]])),
+        .map(([slotName, part]) => [slotName, colors[keyOf(part, slotName)] || {}])),
     };
     const same = pendingSave.current && JSON.stringify(pendingSave.current.input) === JSON.stringify(input);
     const reuse = loadedId && outfits.value.outfits[loadedId]?.name === input.name ? loadedId : '';
@@ -306,7 +306,7 @@ export default function Wardrobe() {
         {library.error && <p role="alert">{library.error}</p>}
         {library.value && parts.length === 0 && <p className="wardrobe-empty">이 몸으로 만든 파츠가 없습니다.</p>}
         <div className="wardrobe-cards">{parts.filter(part => part.slot === activeSlot).map(part => {
-          const selected = !!worn[part.slot] && keyOf(worn[part.slot], part.slot) === keyOf(part, part.slot);
+          const wornPart = worn[part.slot], selected = !!wornPart && keyOf(wornPart, part.slot) === keyOf(part, part.slot);
           return <button key={keyOf(part, part.slot)} type="button" className="wardrobe-card" aria-pressed={selected} disabled={!viewer} onClick={() => toggle(part)}>
             <Preview part={part} />
             <strong>{part.name}</strong>
@@ -317,14 +317,14 @@ export default function Wardrobe() {
         <div className="wardrobe-worn"><h2>입은 파츠</h2>
           {Object.keys(worn).length === 0 ? <p className="wardrobe-empty">기본 몸만 입고 있습니다.</p>
             : <ul>{slotOrder.filter(slotName => worn[slotName]).map(slotName => <li key={slotName}>
-              <span>{labels[slotName] || slotName}</span><strong>{worn[slotName].name}</strong>
+              <span>{labels[slotName] || slotName}</span><strong>{worn[slotName]?.name}</strong>
               <button type="button" onClick={() => takeOff(slotName)}>벗기기</button></li>)}</ul>}
         </div>
         {Object.values(worn).some(part => palettes[keyOf(part, part.slot)]) && <div className="wardrobe-colors"><h2>옷 색</h2>
           <ul>{slotOrder.filter(slotName => worn[slotName] && palettes[keyOf(worn[slotName], slotName)]).map(slotName => {
-            const key = keyOf(worn[slotName], slotName), chosen = colors[key] || {};
+            const key = keyOf(worn[slotName]!, slotName), chosen = colors[key] || {};
             return <li key={slotName}><span>{labels[slotName] || slotName}</span>
-              <div className="wardrobe-swatches">{palettes[key].regions.map(region => {
+              <div className="wardrobe-swatches">{palettes[key]?.regions.map(region => {
                 const value = chosen[String(region.index)] || region.color;
                 return <label key={region.index} className="wardrobe-swatch" style={{ background: value }} aria-label={`${labels[slotName] || slotName} 색 ${region.index + 1}`}>
                   <input type="color" value={value} onChange={event => { const picked = event.target.value; setColors(current => ({ ...current, [key]: { ...(current[key] || {}), [String(region.index)]: picked } })); }} />
@@ -336,7 +336,7 @@ export default function Wardrobe() {
         </div>}
         {shapeSlots.some(slotName => worn[slotName]?.fit_method === 'body-shell-v1') && <div className="wardrobe-shapes"><h2>모양</h2>
           <ul>{shapeSlots.filter(slotName => worn[slotName]?.fit_method === 'body-shell-v1').map(slotName =>
-            <WardrobeShape key={slotName} part={worn[slotName]} label={labels[slotName] || slotName} reload={reloadParts}
+            <WardrobeShape key={slotName} part={worn[slotName]!} label={labels[slotName] || slotName} reload={reloadParts}
               replace={next => setWorn(current => ({ ...current, [slotName]: next }))} />)}</ul>
         </div>}
         <form className="wardrobe-save" onSubmit={event => { event.preventDefault(); void saveOutfit(); }}>

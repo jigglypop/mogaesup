@@ -101,8 +101,8 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
     const worker = async () => {
       while (true) {
         const index=cursor++;
-        if(index>=ordered.length)return;
         const file=ordered[index];
+        if(!file)return;
         try {
           const uploaded=await hairBatchesApi.uploadSheet(file);
           const splitResult=await hairBatchesApi.splitSheet({asset_id:uploaded.id,rows:1,columns:1,row_edges:[0,1],view_order:order,remove_skin:false,detect_view_seams:true});
@@ -127,7 +127,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       if (!pending) {
         if(!baseId || !version || !selected.length)throw new Error('기준 몸과 생성할 스타일을 선택하세요.');
       }
-      const input = pending?.input || {base_job_id:baseId!,base_version:version!,items:selected.map(i=>({name:items[i].name.trim(),views:items[i].views})),concurrency:4,meshy_options:meshyDefaultsFor('hair'),
+      const input = pending?.input || {base_job_id:baseId!,base_version:version!,items:selected.flatMap(i=>items[i]?[{name:items[i].name.trim(),views:items[i].views}]:[]),concurrency:4,meshy_options:meshyDefaultsFor('hair'),
         redraw:{notes:redrawNotes.trim(),source_side_facing:sourceSideFacing,...(worn ? {worn:true} : {})}};
       const created = await hairBatchesApi.create(input);
       setPending(null);
@@ -158,7 +158,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       if(!regeneration.selected.length)throw new Error('다시 생성할 헤어를 선택하세요.');
       // Same originals and body; fresh four-view redraw with the light hair Meshy preset.
       const created = await hairBatchesApi.create({base_job_id:batch.input.base_job_id,base_version:batch.input.base_version,
-        items:[...regeneration.selected].sort((a,b)=>a-b).map(index=>batch.input.items[index]),
+        items:[...regeneration.selected].sort((a,b)=>a-b).flatMap(index=>batch.input.items[index] ?? []),
         concurrency:batch.input.concurrency,meshy_options:meshyDefaultsFor('hair'),
         redraw:{notes:regeneration.notes.trim(),source_side_facing:regeneration.facing,...(regeneration.worn ? {worn:true} : {})}});
       setRegeneration(null);setExpandedBatch(created.id);
@@ -191,7 +191,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       <label className="hair-batch-check"><input type="checkbox" checked={worn} onChange={e=>setWorn(e.target.checked)}/>기본 몸 머리에 씌워 생성</label>
     </fieldset>
     {uploadProgress && <p role="status">3뷰 이미지 처리 중 · {uploadProgress}</p>}
-    <button disabled={busy || !!recoveryError || (!pending && (disabled || !baseId || !version || !selected.length || selected.some(index=>!items[index].name.trim())))} onClick={()=>void generate()}>{pending?'같은 요청 키로 접수 복구':`${selected.length}종 생성 · 유료 이미지 ${selected.length*(worn?3:4)}장 + 3D ${selected.length}회`}</button>
+    <button disabled={busy || !!recoveryError || (!pending && (disabled || !baseId || !version || !selected.length || selected.some(index=>!items[index]?.name.trim())))} onClick={()=>void generate()}>{pending?'같은 요청 키로 접수 복구':`${selected.length}종 생성 · 유료 이미지 ${selected.length*(worn?3:4)}장 + 3D ${selected.length}회`}</button>
     {pending && <small className="generation-recovery">응답이 확인되지 않은 배치입니다. 입력과 요청 키를 유지해 결과를 복구합니다.</small>}
     </div>
     {(error || recoveryError || batches.error) && <p role="alert">{error || recoveryError || batches.error}</p>}
@@ -202,7 +202,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       {batch.error && <p role="alert">{batch.error}</p>}
       {regeneration?.batchId === batch.id ? <fieldset className="hair-batch-regenerate" disabled={busy || !!pending || disabled || !!recoveryError}>
         <div className="hair-batch-selection"><span>{batch.input.items.length}종 중 {regeneration.selected.length}종 선택</span><button type="button" onClick={()=>setRegeneration({...regeneration,selected:regeneration.selected.length===batch.input.items.length?[]:batch.input.items.map((_,index)=>index)})}>{regeneration.selected.length===batch.input.items.length?'전체 해제':'전체 선택'}</button></div>
-        <figure className="hair-batch-facing"><img src={assetUrl(batch.input.items[0].views.side)} alt={`${batch.input.items[0].name} 원본 측면`}/><figcaption>원본 측면</figcaption></figure>
+        {batch.input.items[0] && <figure className="hair-batch-facing"><img src={assetUrl(batch.input.items[0].views.side)} alt={`${batch.input.items[0].name} 원본 측면`}/><figcaption>원본 측면</figcaption></figure>}
         <label>원본 측면의 얼굴 방향<select value={regeneration.facing} onChange={e=>setRegeneration({...regeneration,facing:e.target.value as 'left'|'right'})}><option value="right">이미지 오른쪽</option><option value="left">이미지 왼쪽</option></select></label>
         <label>보정 내용<textarea value={regeneration.notes} maxLength={2000} rows={2} onChange={e=>setRegeneration({...regeneration,notes:e.target.value})}/></label>
         <label className="hair-batch-check"><input type="checkbox" checked={regeneration.worn} onChange={e=>setRegeneration({...regeneration,worn:e.target.checked})}/>기본 몸 머리에 씌워 생성</label>
@@ -214,7 +214,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
           {view.url ? <a href={view.url} target="_blank" rel="noreferrer"><img src={view.url} loading="lazy" alt={`${item.name} ${fourViewLabels[view.view]}`}/></a> : <div className="hair-batch-placeholder"/>}
           <figcaption>{fourViewLabels[view.view]}{view.status === 'succeeded' ? '' : ` · ${imageStateLabels[view.status] || '이어가기 필요'}`}</figcaption>
           {view.background_removal?.alpha_min === 255 && <small>배경이 남아 있음</small>}
-        </figure>)}</div> : <div className="hair-batch-views">{(['front','back','side'] as const).map(view=><figure key={view}><img src={assetUrl(batch.input.items[item.index].views[view])} loading="lazy" alt={`${item.name} 원본 ${viewLabels[view]}`}/><figcaption>원본 {viewLabels[view]}</figcaption></figure>)}</div>}
+        </figure>)}</div> : <div className="hair-batch-views">{(['front','back','side'] as const).map(view=><figure key={view}><img src={assetUrl(batch.input.items[item.index]!.views[view])} loading="lazy" alt={`${item.name} 원본 ${viewLabels[view]}`}/><figcaption>원본 {viewLabels[view]}</figcaption></figure>)}</div>}
         {item.progress?.message && item.status !== 'complete' && <small>{item.progress.message}</small>}
         {(item.error||item.state_error) && <p role="alert">{item.error||item.state_error}</p>}
         <button disabled={item.status==='queued' || !item.job_id} onClick={()=>void open(item.job_id)}>결과 보기</button></article>)}</div>

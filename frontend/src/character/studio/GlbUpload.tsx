@@ -9,8 +9,8 @@ export function GlbUpload({ disabled = false, onUpload, maxMb = 64 }: { disabled
   function select(files: File[]) {
     if (disabled || locked.current) return;
     setError(''); setComplete(false);
-    if (!files.length) return;
     const next = files[0];
+    if (!next) return;
     const problem = files.length !== 1 ? 'GLB 파일을 하나만 선택해 주세요.'
       : !/\.glb$/i.test(next.name) ? '.glb 파일을 선택해 주세요.'
       : next.size === 0 ? '빈 파일은 등록할 수 없습니다.'

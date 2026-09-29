@@ -89,16 +89,16 @@ export class NativeWardrobe {
       if (!this.originalIndex.has(mesh)) this.originalIndex.set(mesh, geometry.index);
       const original = this.originalIndex.get(mesh)!;
       const key = this.primitiveKeys.get(mesh);
-      const bits = key && hidden ? hidden[key] : undefined;
-      if (!bits || geometry.groups.length > 1) { if (geometry.index !== original) geometry.setIndex(original); continue; }
-      const count = original ? original.count/3 : geometry.attributes.position.count/3;
+      const bits = key && hidden ? hidden[key] : undefined, position = geometry.attributes.position;
+      if (!bits || !position || geometry.groups.length > 1) { if (geometry.index !== original) geometry.setIndex(original); continue; }
+      const count = original ? original.count/3 : position.count/3;
       const kept: number[] = [];
       for (let t = 0; t < count; t++) {
-        if ((bits[t >> 3] >> (t & 7)) & 1) continue;
+        if (((bits[t >> 3] ?? 0) >> (t & 7)) & 1) continue;
         if (original) kept.push(original.getX(3*t), original.getX(3*t+1), original.getX(3*t+2));
         else kept.push(3*t, 3*t+1, 3*t+2);
       }
-      const large = geometry.attributes.position.count > 65535;
+      const large = position.count > 65535;
       geometry.setIndex(new BufferAttribute(large ? new Uint32Array(kept) : new Uint16Array(kept), 1));
     }
   }
@@ -112,18 +112,18 @@ export class NativeWardrobe {
     // one ring so the press reaches just past the outer garment's hem.
     const covered = new Map<string, Uint8Array>();
     if (tuck && outer) for (const mesh of this.baseMeshes) {
-      const key = this.primitiveKeys.get(mesh), bits = key ? outer[key] : undefined;
-      if (!key || !bits) continue;
+      const key = this.primitiveKeys.get(mesh), bits = key ? outer[key] : undefined, position = mesh.geometry.attributes.position;
+      if (!key || !bits || !position) continue;
       const index = this.originalIndex.has(mesh) ? this.originalIndex.get(mesh)! : mesh.geometry.index;
       const corner = (t: number, k: number) => index ? index.getX(3*t+k) : 3*t+k;
-      const vertices = new Uint8Array(mesh.geometry.attributes.position.count);
+      const vertices = new Uint8Array(position.count);
       const count = index ? index.count/3 : vertices.length/3;
       for (let t = 0; t < count; t++) {
-        if ((bits[t >> 3] >> (t & 7)) & 1) for (let k = 0; k < 3; k++) vertices[corner(t, k)] = 1;
+        if (((bits[t >> 3] ?? 0) >> (t & 7)) & 1) for (let k = 0; k < 3; k++) vertices[corner(t, k)] = 1;
       }
       const grown = vertices.slice();
       for (let t = 0; t < count; t++) {
-        if (vertices[corner(t, 0)] | vertices[corner(t, 1)] | vertices[corner(t, 2)]) for (let k = 0; k < 3; k++) grown[corner(t, k)] = 1;
+        if ((vertices[corner(t, 0)] ?? 0) | (vertices[corner(t, 1)] ?? 0) | (vertices[corner(t, 2)] ?? 0)) for (let k = 0; k < 3; k++) grown[corner(t, k)] = 1;
       }
       covered.set(key, grown);
     }
@@ -138,9 +138,9 @@ export class NativeWardrobe {
       const values = original.slice();
       if (anchor && move && covered.size && anchor.length === position.count && move.length === 3*position.count) {
         for (let v = 0; v < position.count; v++) {
-          const value = anchor[v];
-          if (value < 0 || covered.get(tuck!.keys[value >>> 20])?.[value & 0xfffff] !== 1) continue;
-          values[3*v] += move[3*v]; values[3*v+1] += move[3*v+1]; values[3*v+2] += move[3*v+2];
+          const value = anchor[v] ?? -1, bodyKey = tuck!.keys[value >>> 20];
+          if (value < 0 || !bodyKey || covered.get(bodyKey)?.[value & 0xfffff] !== 1) continue;
+          for (let k = 0; k < 3; k++) values[3*v+k] = (values[3*v+k] ?? 0) + (move[3*v+k] ?? 0);
         }
       }
       position.array.set(values); position.needsUpdate = true;
@@ -211,10 +211,10 @@ export class NativeWardrobe {
           const materials = new Set(meshes.flatMap(mesh => Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
           materials.forEach(material => { if (material instanceof MeshStandardMaterial) prepareExpressionMaterial(material); });
         }
-        if (spec.slot in OUTER_LAYERS) {
+        const offset = OUTER_LAYERS[spec.slot];
+        if (offset !== undefined) {
           // Parts fitted in different jobs can touch within millimetres; the outer
           // layer (top over bottom, hat over hair) wins the depth test there.
-          const offset = OUTER_LAYERS[spec.slot];
           new Set(meshes.flatMap(mesh => Array.isArray(mesh.material) ? mesh.material : [mesh.material])).forEach(material => {
             Object.assign(material, { polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset*4 });
           });
@@ -227,7 +227,7 @@ export class NativeWardrobe {
             const rest = this.bones.get(bone.name);
             const parent = (bone.parent as Bone)?.isBone ? bone.parent!.name : null;
             if (!rest || names.has(bone.name) || rest.parent !== parent ||
-                rest.matrix.elements.some((v, i) => Math.abs(v - bone.matrixWorld.elements[i]) > 1e-4)) {
+                rest.matrix.elements.some((v, i) => Math.abs(v - (bone.matrixWorld.elements[i] ?? 0)) > 1e-4)) {
               throw new Error('의상의 본 위치·구조가 고정 몸과 맞지 않습니다. 다시 피팅해야 합니다.');
             }
             names.add(bone.name); return rest.bone;
@@ -314,9 +314,10 @@ export class NativeWardrobe {
     this.body.updateMatrixWorld(true);
     for (const mesh of this.baseMeshes) {
       mesh.skeleton.update();
-      const count = mesh.geometry.attributes.position.count;
+      const position = mesh.geometry.attributes.position; if (!position) continue;
+      const count = position.count;
       for (let i = 0; i < count; i += Math.max(1, Math.floor(count/8))) {
-        const point = new Vector3().fromBufferAttribute(mesh.geometry.attributes.position, i);
+        const point = new Vector3().fromBufferAttribute(position, i);
         mesh.applyBoneTransform(i, point).applyMatrix4(mesh.matrixWorld); bodySample.push(point.x, point.y, point.z);
       }
     }
@@ -324,9 +325,10 @@ export class NativeWardrobe {
       const mesh = object as SkinnedMesh; if (!mesh.isSkinnedMesh) return;
       shared &&= mesh.skeleton.bones.every(bone => this.bones.get(bone.name)?.bone === bone);
       mesh.skeleton.update();
-      const count = mesh.geometry.attributes.position.count;
+      const position = mesh.geometry.attributes.position; if (!position) return;
+      const count = position.count;
       for (let i = 0; i < count; i += Math.max(1, Math.floor(count/8))) {
-        const point = new Vector3().fromBufferAttribute(mesh.geometry.attributes.position, i);
+        const point = new Vector3().fromBufferAttribute(position, i);
         mesh.applyBoneTransform(i, point).applyMatrix4(mesh.matrixWorld); sample.push(point.x, point.y, point.z); points.push(point.x, point.y, point.z);
       }
     }); });

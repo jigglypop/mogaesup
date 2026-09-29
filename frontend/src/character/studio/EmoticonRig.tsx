@@ -45,10 +45,10 @@ export function EmoticonRig({ generation, busy, perform, onChange }: Props) {
   }
   function move(name: string, next: Joint) { setJoints(current => ({ ...current, [name]: next })); }
   function nudge(name: string, event: KeyboardEvent<SVGCircleElement>) {
-    const step = event.shiftKey ? 10 : 2, delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
-    if (!delta || busy) return;
+    const step = event.shiftKey ? 10 : 2, delta = ({ ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] } satisfies Record<string, Joint>)[event.key], joint = joints[name];
+    if (!delta || !joint || busy) return;
     event.preventDefault();
-    move(name, [joints[name][0] + delta[0], joints[name][1] + delta[1]]);
+    move(name, [joint[0] + delta[0], joint[1] + delta[1]]);
   }
 
   return <section className="generation-result emoticon-rig" aria-label="리깅과 모션">

@@ -27,7 +27,7 @@ export default function Textures({ extra }: { extra?: ReactNode }) {
   const selected = items.find(tile => tile.id === selectedId) || items[0];
 
   useEffect(() => {
-    if (items.length && !items.some(tile => tile.id === selectedId)) setSelectedId(items[0].id);
+    if (items[0] && !items.some(tile => tile.id === selectedId)) setSelectedId(items[0].id);
   }, [items, selectedId]);
 
   const generate = (event: React.FormEvent) => {

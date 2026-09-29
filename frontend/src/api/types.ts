@@ -154,7 +154,7 @@ export type ImportedCopy = {
   freshness: CatalogFreshness;
 };
 
-/** A finished character on the character server (gaesup-character). */
+/** A finished character on the character server (backend/). */
 export type FactoryCharacter = {
   jobId: string;
   characterId: string | null;

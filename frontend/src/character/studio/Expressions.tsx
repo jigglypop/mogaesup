@@ -134,7 +134,7 @@ export function Expressions({ job, version, bodySha, viewer }: {
       </a>)}</div>}
       <div className="expression-library">{saved.value?.items.filter(record => record.materials.length).map(record => <article key={record.id}>
         <button aria-pressed={activeId === record.id} onClick={() => void restore(record)}>
-          {record.materials[0] && <img src={record.artifacts.find(a => a.name === record.materials[0].file)?.url} alt={`${expressionNames[record.name]} 얼굴 UV 텍스처`} loading="lazy" />}
+          {record.materials[0] && <img src={record.artifacts.find(a => a.name === record.materials[0]?.file)?.url} alt={`${expressionNames[record.name]} 얼굴 UV 텍스처`} loading="lazy" />}
           {expressionNames[record.name]}{record.id === saved.value?.selected ? ' · 저장된 선택' : ''}
         </button>
         <div>{record.artifacts.filter(a => ['model.glb', 'body.glb'].includes(a.name)).map(a => <a key={a.name} href={a.url} download>{a.name === 'model.glb' ? '캐릭터 GLB' : '몸 GLB'}</a>)}</div>

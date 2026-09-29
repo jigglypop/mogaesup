@@ -16,8 +16,10 @@ export function regionColorControl(material: MeshStandardMaterial, mask: Texture
   const amounts = [0, 1, 2, 3].map(() => uniform(0));
   const weights = [regions.r, regions.g, regions.b, float(1).sub(regions.a)];
   const color = weights.reduce((current, weight, index) => {
-    const shaded = targets[index].mul(luminance.div(max(float(lights[index] ?? .5), .02))).clamp(0, 1);
-    return mix(current, shaded, weight.mul(amounts[index]));
+    const target = targets[index], amount = amounts[index];
+    if (!target || !amount) return current;
+    const shaded = target.mul(luminance.div(max(float(lights[index] ?? .5), .02))).clamp(0, 1);
+    return mix(current, shaded, weight.mul(amount));
   }, base as unknown as ReturnType<typeof mix>);
   Object.assign(material, { colorNode: sampled ? vec4(color, sampled.a) : color });
   material.needsUpdate = true;
@@ -25,7 +27,7 @@ export function regionColorControl(material: MeshStandardMaterial, mask: Texture
     amounts.forEach((amount, index) => {
       const value = colors[index];
       amount.value = value ? 1 : 0;
-      if (value) targets[index].value.set(value);
+      if (value) targets[index]?.value.set(value);
     });
   };
 }

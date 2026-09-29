@@ -58,7 +58,7 @@ function PreviewMaterial({ tile, shape, repeat, onError }: Pick<Props, 'tile' | 
       else loaded.add(texture);
       return texture;
     });
-    void Promise.all(urls.map(load)).then(([albedo, normal, orm]) => {
+    void Promise.all([load(albedoUrl), load(normalUrl), load(ormUrl)]).then(([albedo, normal, orm]) => {
       if (cancelled || failed) return;
       albedo.colorSpace = THREE.SRGBColorSpace;
       normal.colorSpace = THREE.NoColorSpace;

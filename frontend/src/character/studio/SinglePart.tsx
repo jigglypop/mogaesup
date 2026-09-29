@@ -38,7 +38,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const [bottomKind, setBottomKind] = useState<'source' | 'pants' | 'skirt'>('source');
   const [sleeve, setSleeve] = useState<'source' | 'none' | 'short' | 'long'>('source');
   const [ease, setEase] = useState<'source' | 'regular' | 'loose'>('source');
-  const [partMethod, setPartMethod] = useState<PartMethod>(methodOptions[slot]?.[0][0] || 'isolated');
+  const [partMethod, setPartMethod] = useState<PartMethod>(methodOptions[slot]?.[0]?.[0] || 'isolated');
   const [provider, setProvider] = useState<'meshy' | 'tripo'>('meshy');
   const [capabilities, setCapabilities] = useState<FactoryCapabilities>();
   const [busy, setBusy] = useState(false);
@@ -52,7 +52,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const inputLocked = busy || meshyUploading || !!pending || !!recovery.error;
   const batchMode = slot === 'hair' && inputMode === 'batch' && !pending;
 
-  useEffect(() => { setInputMode(slot === 'hair' ? 'batch' : 'generate'); setPartMethod(methodOptions[slot]?.[0][0] || 'isolated'); }, [slot]);
+  useEffect(() => { setInputMode(slot === 'hair' ? 'batch' : 'generate'); setPartMethod(methodOptions[slot]?.[0]?.[0] || 'isolated'); }, [slot]);
   useEffect(() => {
     const controller = new AbortController();
     factoryApi.capabilities(controller.signal).then(value => {

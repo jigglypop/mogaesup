@@ -213,12 +213,12 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
     dragDepth.current = 0;
     setDraggingPhoto(false);
     if (locked.current) return;
-    const files = [...event.dataTransfer.files];
-    if (files.length !== 1 || !isSupportedImage(files[0])) {
+    const files = [...event.dataTransfer.files], file = files[0];
+    if (files.length !== 1 || !file || !isSupportedImage(file)) {
       setError('PNG 또는 JPEG 사진 1개만 놓아 주세요.');
       return;
     }
-    void upload(files[0]);
+    void upload(file);
   }
   async function produce() {
     if (!source || locked.current || (!pending && !baseReady)) return;

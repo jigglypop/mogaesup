@@ -28,9 +28,9 @@ export default function Prompts() {
   const group = groups.find(item => item.id === groupId) || groups[0];
   const items = group?.items.filter(item => `${item.title}\n${drafts[item.id]?.value ?? item.value}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())) || [];
   const selected = items.find(item => item.id === selectedId) || items[0];
-  const dirty = groups.flatMap(item => item.items).filter(item => drafts[item.id] && drafts[item.id].value.trim() !== item.value);
-  const conflicts = dirty.filter(item => drafts[item.id].base !== item.value);
-  const invalid = dirty.some(item => !drafts[item.id].value.trim() || drafts[item.id].value.trim().length > item.max_length);
+  const dirty = groups.flatMap(item => item.items).filter(({ id, value }) => drafts[id] && drafts[id].value.trim() !== value);
+  const conflicts = dirty.filter(item => drafts[item.id]?.base !== item.value);
+  const invalid = dirty.some(({ id, max_length }) => !drafts[id]?.value.trim() || drafts[id].value.trim().length > max_length);
   const value = selected ? drafts[selected.id]?.value ?? selected.value : '';
   const changed = selected && dirty.some(item => item.id === selected.id);
 
@@ -65,7 +65,7 @@ export default function Prompts() {
     if (locked.current || !catalog || !dirty.length || conflicts.length || invalid) return;
     locked.current = true; setBusy(true); setError(''); setMessage('');
     const submitted = Object.fromEntries(dirty.map(item => [item.id,
-      drafts[item.id].value.trim() === item.default ? null : drafts[item.id].value.trim()]));
+      drafts[item.id]!.value.trim() === item.default ? null : drafts[item.id]!.value.trim()]));
     try {
       const result = await promptsApi.save(submitted, catalog.revision);
       if (!alive.current) return;

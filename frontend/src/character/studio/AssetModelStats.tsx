@@ -16,8 +16,9 @@ function drain() {
 }
 function endpoint(url: string) {
   const match = url.match(/^\/api\/avatar-factory\/jobs\/([a-f0-9]{24})\/(?:artifacts\/([^/?]+)|native-parts\/([a-f0-9]{24})\/([^/?]+))(?:\?.*)?$/);
-  if (!match) return undefined;
-  const query = new URLSearchParams({ name: match[2] || match[4] });
+  const name = match?.[2] || match?.[4];
+  if (!match || !name) return undefined;
+  const query = new URLSearchParams({ name });
   if (match[3]) query.set('version', match[3]);
   return `/api/avatar-factory/jobs/${match[1]}/model-stats?${query}`;
 }

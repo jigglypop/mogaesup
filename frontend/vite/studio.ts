@@ -4,8 +4,8 @@ import type { AtRule, Plugin as PostcssPlugin } from 'postcss';
 
 const slash = (path: string) => path.replace(/\\/g, '/');
 
-/** The character studio's frontend sources: the `character-wardrobe-ui` workspace (the gaesup-character submodule). */
-const STUDIO_SRC = slash(fileURLToPath(new URL('./src', import.meta.resolve('character-wardrobe-ui/package.json'))));
+/** The character studio's sources, written as a page of their own. */
+const STUDIO_SRC = slash(fileURLToPath(new URL('../src/character', import.meta.url)));
 
 /**
  * The studio's stylesheets are written for a page of their own: `:root` tokens, bare element rules. Under the app,
