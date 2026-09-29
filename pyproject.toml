@@ -1,0 +1,13 @@
+# The monorepo's Python environment: the character server (gaesup-character/backend) installed from the submodule, so
+# `uv sync` at the root sets up what the local pipeline runs (scripts/dev.ps1, scripts/props/generate.py).
+[project]
+name = "mogaesup"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["asset-3d-api"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+asset-3d-api = { path = "gaesup-character/backend", editable = true }

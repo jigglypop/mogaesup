@@ -1,0 +1,19 @@
+{
+  "name": "mogaesup",
+  "private": true,
+  "description": "모개숲: the web app, the Rust server and the character studio (gaesup-character) in one checkout",
+  "workspaces": [
+    "web",
+    "gaesup-character/frontend"
+  ],
+  "scripts": {
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "dev:character": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1 -Character",
+    "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1 -Stop",
+    "dev:studio": "npm run dev --workspace character-wardrobe-ui",
+    "typecheck": "npm run typecheck --workspace web && npm exec --workspace character-wardrobe-ui -- tsc --noEmit",
+    "test": "npm test --workspace web",
+    "build": "npm run build --workspace web && npm run build --workspace character-wardrobe-ui",
+    "smoke": "npm run smoke --workspace web"
+  }
+}

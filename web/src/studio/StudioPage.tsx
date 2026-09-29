@@ -11,9 +11,9 @@ import { Loading } from '../pages/Loading';
 import { PageShell } from '../shell/Shell';
 import { Icon } from '../ui/icons';
 
-// The studio's own screens, from the gaesup-character submodule, mounted as they are.
-const Wardrobe = lazy(() => import('@studio/studio/Wardrobe'));
-const Workspace = lazy(() => import('@studio/studio/Workspace').then((module) => ({ default: module.Workspace })));
+// The studio's own screens (the gaesup-character submodule's frontend, a workspace package), mounted as they are.
+const Wardrobe = lazy(() => import('character-wardrobe-ui/wardrobe'));
+const Workspace = lazy(() => import('character-wardrobe-ui/workspace').then((module) => ({ default: module.Workspace })));
 
 type Screen = { path: string; label: string; tab?: string; mode?: string; paid?: boolean };
 type Section = { title: string; locked: boolean; screens: Screen[] };

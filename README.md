@@ -6,11 +6,13 @@
 
 | 폴더 | 역할 |
 | --- | --- |
-| `web/` | 프론트엔드 하나. React 19 + Vite 8, 3D 섬은 npm의 `gaesup-world`로 그린다. 글래스 디자인(`--mg-*` 토큰)으로 로그인·가입, 섬(`/@아이디`)과 꾸미기(`/@아이디/edit`), 둘러보기, 운영(`/admin`), 캐릭터 스튜디오(`/studio`, gaesup-character 프론트 소스를 서브모듈에서 그대로 올린다) |
+| `web/` | 프론트엔드 하나. React 19 + Vite 8, 3D 섬은 npm의 `gaesup-world`로 그린다. 글래스 디자인(`--mg-*` 토큰)으로 로그인·가입, 섬(`/@아이디`)과 꾸미기(`/@아이디/edit`), 둘러보기, 운영(`/admin`), 캐릭터 스튜디오(`/studio`, gaesup-character 프론트를 워크스페이스 패키지로 그대로 올린다) |
 | `server/` | 웹서버. Rust(axum + sqlx) + PostgreSQL. 회원과 세션 쿠키, 섬 프로필·섬 저장(리비전)·방문자, 방명록·이웃(API 이름은 ilchon), 미니미 카탈로그와 캐릭터 가져오기, 캐릭터 스튜디오 API 중계(권한·유료 한도·기록), 실시간 방(WebSocket, gaesup-world 멀티플레이 프로토콜) |
 | `gaesup-character/` | 캐릭터 서버와 스튜디오 화면(에셋 생성·캐릭터 커스텀). [별도 레포](https://github.com/jigglypop/gaesup-character)를 서브모듈로 연결한다 |
 
 엔진인 gaesup-world는 이 레포에 넣지 않고 npm 패키지로 받는다. 엔진을 고치면 gaesup-world 레포의 `main`에 올리고, CI가 새 버전을 npm에 낸 뒤 `web/`에서 버전을 올린다.
+
+의존성은 루트에서 한 번에 받는다. npm 워크스페이스(`web`, `gaesup-character/frontend`)가 한 벌의 `node_modules`를 나눠 쓰고, 루트 `pyproject.toml`이 캐릭터 서버(`gaesup-character/backend`)를 루트 `.venv`에 설치한다. 스튜디오 프론트와 웹은 three·React·gaesup-world를 같은 버전으로 맞춰 둔다.
 
 ```
 git clone --recurse-submodules https://github.com/jigglypop/mogaesup.git
@@ -18,17 +20,23 @@ git clone --recurse-submodules https://github.com/jigglypop/mogaesup.git
 
 ## 로컬 실행
 
-1. 서버: `server/scripts/start-rust-server.ps1`. Docker로 PostgreSQL(127.0.0.1:55432)을 띄우고 `127.0.0.1:8080`에서 돈다. 설정 목록은 `server/.env.example`에 있다.
-2. 웹: `cd web && npm install && npm run dev`. `http://127.0.0.1:5180`에서 열리고 `/api`(WebSocket 포함)를 8080으로 넘긴다.
-3. 관리자: 서버를 `BOOTSTRAP_ADMIN_USERNAME`·`BOOTSTRAP_ADMIN_PASSWORD`와 함께 띄우면 그 계정을 만들거나 관리자로 올린다. `/admin`에서 캐릭터 서버의 완성 캐릭터를 가져오려면 `-FactoryUrl`로 캐릭터 서버 주소를 준다.
+1. 설치: 루트에서 `npm install`과 `uv sync`.
+2. 기동: `npm run dev`(= `scripts/dev.ps1`). Docker PostgreSQL(127.0.0.1:55432)과 Rust 서버(`127.0.0.1:8080`), 웹(`http://127.0.0.1:5180`, `/api`와 WebSocket을 8080으로 넘긴다)을 숨은 프로세스로 띄우고 로그는 `.data/dev/`에 둔다. 이미 떠 있는 포트는 그대로 쓴다. `npm run dev:stop`이 이 스크립트가 띄운 것을 끈다.
+3. 캐릭터 파이프라인까지: `npm run dev:character`. 캐릭터 서버를 루트 `.venv`로 `127.0.0.1:8016`에 띄우고(멈춘 유료 단계 자동 재개는 끈다), `gaesup-character/.env`의 API 키와 JWT 설정을 Rust 서버의 스튜디오 게이트웨이에 넘겨 `/admin` 가져오기와 `/studio`가 끝까지 돈다. 관리자는 기록을 바꿀 수 있고(`FACTORY_ACCESS=write`), 비용이 드는 작업은 `scripts/dev.ps1 -Character -Paid`(월 `-PaidMonthly`건)일 때만 열린다. `.env`는 운영 키이니 필요할 때만 쓴다.
+4. 관리자: 서버를 `BOOTSTRAP_ADMIN_USERNAME`·`BOOTSTRAP_ADMIN_PASSWORD`와 함께 띄우면 그 계정을 만들거나 관리자로 올린다. 설정 목록은 `server/.env.example`에 있다.
+5. 섬 기물 다시 만들기(유료): `uv run python scripts/props/generate.py --only <id>`로 하나씩 확인한 뒤 `--all`, 그다음 `node web/scripts/props-normalize.mjs`가 크기·방향·무광 재질을 섬에 맞춰 `web/public/gltf/`에 넣는다(패키지의 같은 경로 모델을 대신한다).
 
 ## 캐릭터 스튜디오
 
-`/studio`는 서브모듈의 스튜디오 화면을 앱 안에 그대로 띄운다. 뷰어 하나만 앱의 gaesup-world에 맞춘 사본(`web/src/studio/viewer.tsx`)으로 바꿔 끼우고, 스튜디오 스타일시트는 `.studio-root` 안으로 가둔다(`web/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 나머지는 관리자만 쓴다. `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남는다.
+`/studio`는 서브모듈의 스튜디오 화면을 앱 안에 그대로 띄운다. 스튜디오 프론트(`character-wardrobe-ui`)가 `./workspace`·`./wardrobe`를 타입과 함께 내보내고 웹이 워크스페이스 패키지로 가져온다. 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`web/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 나머지는 관리자만 쓴다. `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남는다.
 
 ## 캐릭터 가져오기
 
-`/admin`은 캐릭터 서버(gaesup-character)의 완성 캐릭터를 스튜디오와 같은 기준으로 보여 준다: 봉인된 `character_parts` 조립본, 캐릭터마다 가장 최근 작업, 삭제·보관한 것 제외. 가져오면 서버가 표정이 구워진 사본(없으면 기본 조립본)을 받아 캐릭터 서버 기록의 SHA-256과 대조하고, 스킨과 `idle`·`walk` 클립을 확인한 뒤 텍스처를 웹용으로 줄여(색상 1024px, 그 밖 512px, 불투명 맵은 JPEG) `MODEL_STORE`에 해시 이름으로 저장한다. 운영에서는 웹 버킷의 `models/`이고 CloudFront가 `/models/*`로 1년 불변 캐시로 내준다. 초안으로 들어오니 확인한 뒤 공개하면 미니미 목록에 나온다.
+`/admin`은 캐릭터 서버(gaesup-character)의 완성 캐릭터를 스튜디오와 같은 기준으로 보여 준다: 봉인된 `character_parts` 조립본, 캐릭터(`character_id`)마다 가장 최근 작업, 삭제·보관한 것 제외. 카탈로그 항목은 캐릭터로 짝지어서, 같은 캐릭터를 새 작업으로 다시 만들면 새 항목이 아니라 그 항목의 새 버전이 된다. 작업·조립본·고른 표정·단계 중 하나라도 바뀌면 "새 버전 있음"과 그 이유가 뜬다.
+
+가져오기는 백그라운드 작업이다. `POST /api/catalog/admin/import`가 바로 202와 가져오기 id를 돌려주고(동시에 2개), 서버가 작업 확인 → 모델 받기 → 검사 → 텍스처 줄이기(색상 1024px, 그 밖 512px, 불투명 맵은 JPEG) → 저장 → 대표 그림 → 카탈로그 반영을 차례로 하며 단계와 진행률을 `catalog_imports`에 남긴다. 검사는 끝까지 모아 보고서(스킨·관절, 빠진 클립과 모든 애니메이션, 삼각형·정점 수, 텍스처와 파일 크기 전후, 높이, 대표 그림)로 남기고, GLB가 아니거나 SHA-256이 다르거나 미니미에 스킨·`idle`·`walk`가 없을 때만 실패한다. 서버가 다시 뜨면 끝나지 않은 가져오기는 중단으로 표시된다.
+
+모델은 `MODEL_STORE`에 해시 이름으로 저장하고 지우지 않는다(운영은 웹 버킷의 `models/`, CloudFront `/models/*` 1년 불변 캐시). 항목마다 버전(`catalog_versions`)이 쌓이고 관리 화면에서 되돌릴 수 있다. 다시 가져와도 공개 상태·이름·이모지·순서는 그대로다. 처음 가져온 항목은 초안이고, 공개하면 미니미 목록에 나온다. 섬 주인은 공개된 미니미나 기본 미니미만 고를 수 있다.
 
 ## 검증
 
