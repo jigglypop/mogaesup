@@ -17,6 +17,7 @@ use crate::{
     error::{ApiError, ApiResult, bad, not_found},
     factory, imports,
     studio::{self, Freshness},
+    studio_power,
 };
 
 const KINDS: [&str; 2] = ["minime", "furniture"];
@@ -41,6 +42,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/catalog/admin/imports/{id}", get(imports::one))
         .route("/api/catalog/admin/factory-characters", get(factory_characters))
         .route("/api/catalog/admin/factory-usage", get(factory::usage))
+        .route("/api/catalog/admin/studio-power", get(studio_power::status).post(studio_power::start))
 }
 
 const ITEM_COLUMNS: &str =

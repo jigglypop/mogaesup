@@ -4,11 +4,13 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { Link, Navigate, useLocation } from 'react-router-dom';
 
-import { problemText } from '../api/client';
+import { ApiRequestError, problemText } from '../api/client';
 import { catalogApi } from '../api/endpoints';
+import { WAKE_RETRY_MS, isStudioAsleep, type StudioSleep } from '../api/studioSleep';
 import type { AdminCatalogItem, CatalogChanges, CatalogImport, CatalogKind, CatalogStatus, FactoryCharacter } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { PageShell } from '../shell/Shell';
+import { StudioPowerLine, WakeBanner, useEvery } from '../studio/StudioPower';
 import { Icon } from '../ui/icons';
 import { CatalogTable } from './admin/CatalogTable';
 import { STATUS_LABEL, outcomeText, retireWarning } from './admin/catalogView';
@@ -39,6 +41,8 @@ export function AdminPage() {
   const [items, setItems] = useState<AdminCatalogItem[] | null>(null);
   const [characters, setCharacters] = useState<FactoryCharacter[] | null>(null);
   const [factoryProblem, setFactoryProblem] = useState('');
+  /** Set while the studio's instance starts (or stops); the listing is asked again every 10 s until it answers. */
+  const [asleep, setAsleep] = useState<StudioSleep | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [preview, setPreview] = useState<PreviewTarget | null>(null);
@@ -58,14 +62,24 @@ export function AdminPage() {
         (result) => {
           setCharacters(result.characters);
           setFactoryProblem('');
+          setAsleep(null);
         },
         (problem: unknown) => {
+          if (problem instanceof ApiRequestError && isStudioAsleep(problem.code)) {
+            const { code, message } = problem;
+            setAsleep((previous) => ({ code, message, since: previous?.since ?? Date.now() }));
+            setCharacters(null);
+            setFactoryProblem('');
+            return;
+          }
+          setAsleep(null);
           setCharacters([]);
           setFactoryProblem(problemText(problem));
         },
       ),
     [],
   );
+  useEvery(asleep && isAdmin ? WAKE_RETRY_MS : null, reloadCharacters);
 
   const onFinished = useCallback(
     (ended: CatalogImport[]) => {
@@ -188,6 +202,12 @@ export function AdminPage() {
               <Icon name="close" />
             </button>
           </div>
+        )}
+
+        {asleep && !catalogTab ? (
+          <WakeBanner sleep={asleep} inline />
+        ) : (
+          <StudioPowerLine quietWhenRunning onRunning={() => void reloadCharacters()} />
         )}
 
         {catalogTab ? (

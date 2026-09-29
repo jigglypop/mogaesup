@@ -462,6 +462,7 @@ fn factory(url: String) -> Factory {
         access: FactoryAccess::Read,
         paid_monthly: 0,
         gateway_key: Some("gate".into()),
+        instance: None,
     }
 }
 

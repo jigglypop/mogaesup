@@ -8,7 +8,7 @@ import subprocess
 import time
 
 allowed = {'OPENAI_API_KEY', 'MESHY_API_KEY', 'OPENAI_API_BASE', 'AVATAR_IMAGE_MODEL', 'TRIPO_API_KEY',
-           'AVATAR_3D_PROVIDER', 'BLENDER_CONCURRENCY'}
+           'AVATAR_3D_PROVIDER', 'BLENDER_CONCURRENCY', 'CHARACTER_DATABASE_URL'}
 values = json.loads(Path('/run/studio-secrets.json').read_text())
 if not values.get('OPENAI_API_KEY') or not values.get('MESHY_API_KEY'):
     raise SystemExit('Provider credentials are not configured')
@@ -23,8 +23,7 @@ if not re.fullmatch(r'[0-9a-f]{64}', release_sha):
 static = Path('/app/static')
 static.mkdir(parents=True, exist_ok=True)
 (static / 'version.json').write_text(
-    json.dumps({'release_sha': release_sha}, separators=(',', ':')) + '
-',
+    json.dumps({'release_sha': release_sha}, separators=(',', ':')) + '\n',
     encoding='utf-8',
 )
 

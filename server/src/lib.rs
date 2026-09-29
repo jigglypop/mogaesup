@@ -12,6 +12,7 @@ pub mod security;
 pub mod slim;
 pub mod social;
 pub mod studio;
+pub mod studio_power;
 
 use axum::{
     Json, Router,
@@ -39,10 +40,14 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Catalog imports copying at once; the rest wait their turn as `queued`.
     pub imports: Arc<Semaphore>,
+    /// The character server's instance, started again when it has powered itself off.
+    pub power: studio_power::StudioPower,
 }
 
 impl AppState {
     pub fn new(db: PgPool, config: Config) -> Self {
+        let power =
+            studio_power::StudioPower::new(config.factory.as_ref().and_then(|factory| factory.instance.clone()));
         Self {
             db,
             config: Arc::new(config),
@@ -51,6 +56,7 @@ impl AppState {
             rooms: rooms::Rooms::default(),
             http: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("HTTP client"),
             imports: Arc::new(Semaphore::new(imports::SLOTS)),
+            power,
         }
     }
 }

@@ -1,3 +1,5 @@
+import { isStudioAsleep, reportStudio } from '../api/studioSleep';
+
 type Part = { node_index: number; role: string; name?: string };
 type Operation = { id: string; action_id: string; status: string; error: { code: string; message: string } | null };
 type Character = {
@@ -20,7 +22,9 @@ export class ApiError extends Error {
   constructor(public code: string, message: string, public status: number) { super(message); }
 }
 
-const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled']);
+// A sleeping studio is answered by the app server before or instead of reaching it; a saved request stays pending
+// and is replayed under the same key once the studio is up.
+const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled', 'studio_waking', 'studio_stopping']);
 
 // A coded server error (including 409 conflicts and 503 configuration errors) means the
 // request was not accepted, so its saved identity can be discarded. Connection losses,
@@ -47,10 +51,13 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
     if (response.ok) throw new ApiError('incomplete_response', '서버 응답을 끝까지 받지 못했습니다. 기존 요청으로 결과를 복구해 주세요.', 0);
     return {};
   });
+  // The app server's own refusals ({code, message}): its permission checks, and the studio sleeping (see studioSleep).
+  const gateway = !response.ok && typeof body?.code === 'string' && typeof body?.message === 'string' ? body as { code: string; message: string } : null;
+  reportStudio(gateway?.code, gateway?.message);
   if (!response.ok) {
     const validation = Array.isArray(body.detail) ? body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join('.') || '입력'}: ${item.msg || '값 확인 필요'}`).join(' / ') : typeof body.detail === 'string' && body.detail !== 'Not Found' ? body.detail : '';
     const fallback = response.status === 401 ? 'API 인증이 필요합니다. 로컬 서버 설정을 확인해 주세요.' : response.status === 404 ? 'API 또는 자료를 찾을 수 없습니다. 프론트와 백엔드 버전·연결 주소를 확인해 주세요.' : response.status >= 500 ? `서버 오류 (${response.status}). 저장된 작업은 다시 불러와 확인할 수 있습니다.` : `요청 오류 (${response.status}). 입력을 확인해 주세요.`;
-    throw new ApiError(body.error?.code || 'request_failed', body.error?.message || validation || fallback, response.status);
+    throw new ApiError(body.error?.code || (isStudioAsleep(gateway?.code) ? gateway.code : 'request_failed'), body.error?.message || gateway?.message || validation || fallback, response.status);
   }
   return body as T;
   } catch (error) {

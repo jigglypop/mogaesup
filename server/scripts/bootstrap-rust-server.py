@@ -20,6 +20,7 @@ parser.add_argument('--factory-url', default='')
 parser.add_argument('--factory-access', default='read', choices=('read', 'write', 'paid'))
 parser.add_argument('--factory-paid-monthly', type=int, default=0)
 parser.add_argument('--factory-gateway-secret', default='')
+parser.add_argument('--studio-instance-id', default='')
 parser.add_argument('--model-store', required=True)
 parser.add_argument('--region', default='ap-northeast-2')
 args = parser.parse_args()
@@ -68,6 +69,9 @@ if args.factory_url:
               f'FACTORY_PAID_MONTHLY={args.factory_paid_monthly}']
     if args.factory_gateway_secret:
         lines.append(f'FACTORY_GATEWAY_KEY={secret_value(args.factory_gateway_secret)}')
+    # The studio powers itself off when idle; the server starts it again (studio_power.rs).
+    if args.studio_instance_id:
+        lines.append(f'STUDIO_INSTANCE_ID={args.studio_instance_id}')
 (config / 'server.env').write_text('\n'.join(lines) + '\n')
 (config / 'server.env').chmod(0o600)
 service = '''[Unit]

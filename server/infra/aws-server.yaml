@@ -26,8 +26,14 @@ Parameters:
     Type: String
     Default: mogaesup-web-960243570517-apne2
     Description: The web stack's bucket; catalog models go under models/, which CloudFront serves at /models/*.
+  StudioInstanceId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^i-[0-9a-f]{8,17}$'
+    Description: The character studio's EC2 instance (gaesup-asset-studio). It powers itself off when idle; the server may start it.
 Conditions:
   HasCloudFrontGroup: !Not [!Equals [!Ref CloudFrontServiceGroup, '']]
+  HasStudioInstance: !Not [!Equals [!Ref StudioInstanceId, '']]
 Resources:
   RealtimeTicketSecret:
     Type: AWS::SecretsManager::Secret
@@ -150,6 +156,20 @@ Resources:
                   - !GetAtt Database.MasterUserSecret.SecretArn
                   - !Ref RealtimeTicketSecret
                   - !Ref FactoryGatewaySecret
+        # Wakes the idle-stopped studio (STUDIO_INSTANCE_ID). DescribeInstances has no resource-level permissions.
+        - !If
+          - HasStudioInstance
+          - PolicyName: MogaesupStudioPower
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: ec2:DescribeInstances
+                  Resource: '*'
+                - Effect: Allow
+                  Action: ec2:StartInstances
+                  Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${StudioInstanceId}'
+          - !Ref AWS::NoValue
       Tags: [{Key: application, Value: mogaesup}]
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile

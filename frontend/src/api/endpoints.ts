@@ -23,6 +23,7 @@ import type {
   RealtimeTicket,
   Registration,
   SaveHomeWorld,
+  StudioPower,
   User,
   VisitCounter,
 } from './types';
@@ -77,6 +78,9 @@ export const catalogApi = {
   importFactory: (body: FactoryImport) => api<CatalogImport>('/catalog/admin/import', { method: 'POST', body }),
   factoryCharacters: () => api<{ characters: FactoryCharacter[] }>('/catalog/admin/factory-characters'),
   factoryUsage: () => api<FactoryUsage>('/catalog/admin/factory-usage'),
+  studioPower: () => api<StudioPower>('/catalog/admin/studio-power'),
+  /** Starts the studio's instance when it is stopped; answers its state after that. */
+  startStudio: () => api<StudioPower>('/catalog/admin/studio-power', { method: 'POST' }),
   imports: (limit = 30) => api<{ imports: CatalogImport[] }>(`/catalog/admin/imports?limit=${limit}`),
   versions: (id: string) => api<{ versions: CatalogVersion[] }>(`/catalog/admin/items/${segment(id)}/versions`),
   rollback: (id: string, versionId: number) =>

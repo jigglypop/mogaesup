@@ -3,11 +3,12 @@
 
 Uses the existing AWS CLI credentials only and never brings a secret to the developer machine.
 Build first: see README "배포". Usage: python scripts/deploy-rust-server.py [--skip-provision] [--factory-url URL]
-[--factory-access read|write|paid] [--factory-paid-monthly N]
+[--factory-access read|write|paid] [--factory-paid-monthly N] [--studio-instance-id i-…]
 """
 import argparse
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -50,11 +51,14 @@ def service_group():
     return groups[0]['GroupId'] if len(groups) == 1 else None
 
 
-def provision():
+def provision(studio_instance=None):
     group = service_group()
     overrides = [f'VpcId={VPC}', f'SubnetA={SUBNETS[0]}', f'SubnetB={SUBNETS[1]}', f'ImageId={IMAGE}']
     if group:
         overrides.append(f'CloudFrontServiceGroup={group}')
+    # Left out, the stack keeps the instance it was given before.
+    if studio_instance is not None:
+        overrides.append(f'StudioInstanceId={studio_instance}')
     subprocess.run(['aws', 'cloudformation', 'deploy', '--region', REGION, '--stack-name', STACK,
                     '--template-file', str(ROOT / 'infra/aws-server.yaml'), '--parameter-overrides', *overrides,
                     '--capabilities', 'CAPABILITY_IAM', '--tags', 'application=mogaesup', '--no-fail-on-empty-changeset'],
@@ -71,15 +75,20 @@ def main():
     parser.add_argument('--factory-paid-monthly', type=int, default=0, help='Paid studio requests allowed a month')
     parser.add_argument('--model-store', default='s3://mogaesup-web-960243570517-apne2/models',
                         help='Where catalog models copied from the character server are kept')
+    parser.add_argument('--studio-instance-id', default=None,
+                        help="The studio's EC2 instance the server may start when it has powered itself off "
+                             "(STUDIO_INSTANCE_ID; the stack keeps the last one given, '' turns it off)")
     parser.add_argument('--skip-provision', action='store_true')
     args = parser.parse_args()
+    if args.studio_instance_id and not re.fullmatch(r'i-[0-9a-f]{8,17}', args.studio_instance_id):
+        raise RuntimeError('--studio-instance-id must be an EC2 instance id (i-…)')
     if aws('sts', 'get-caller-identity')['Account'] != ACCOUNT:
         raise RuntimeError('Unexpected AWS account')
     binary = ROOT / args.binary
     if not binary.is_file() or binary.read_bytes()[:4] != b'\x7fELF':
         raise RuntimeError('Linux ELF release binary is required')
     if not args.skip_provision:
-        provision()
+        provision(args.studio_instance_id)
     deadline = time.monotonic() + 1800
     while True:
         stack = aws('cloudformation', 'describe-stacks', '--region', REGION, '--stack-name', STACK)['Stacks'][0]
@@ -93,6 +102,11 @@ def main():
         time.sleep(20)
     outputs = {item['OutputKey']: item['OutputValue'] for item in stack['Outputs']}
     instance, bucket = outputs['InstanceId'], outputs['RuntimeBucket']
+    # The stack's role may start only the instance its parameter names, so the server is given that one.
+    studio_instance = {item['ParameterKey']: item.get('ParameterValue', '')
+                       for item in stack.get('Parameters', [])}.get('StudioInstanceId', '')
+    if args.studio_instance_id is not None and args.studio_instance_id != studio_instance:
+        raise RuntimeError('The stack names another studio instance; deploy without --skip-provision')
 
     release = datetime.now(timezone.utc).strftime('release-%Y%m%dT%H%M%SZ')
     receipt_dir = ROOT / 'artifacts' / release
@@ -113,6 +127,8 @@ def main():
                       '--factory-paid-monthly', str(args.factory_paid_monthly)]
         if outputs.get('FactoryGatewaySecretArn'):
             bootstrap += ['--factory-gateway-secret', outputs['FactoryGatewaySecretArn']]
+        if studio_instance:
+            bootstrap += ['--studio-instance-id', studio_instance]
     commands = [
         'set -eu', 'dnf install -y postgresql17 > /var/log/mogaesup-packages.log',
         f'install -d -m 750 /opt/mogaesup/releases/{release}',

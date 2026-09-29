@@ -135,6 +135,33 @@ pub fn configured(state: &AppState) -> ApiResult<()> {
     factory(state).map(|_| ())
 }
 
+/// Sends one request to the character server. When its instance may have powered itself off this asks EC2 first,
+/// and a request that cannot reach it wakes it (`studio_power`): the caller then gets `studio_waking` or
+/// `studio_stopping` to retry. Its CloudFront answers 502 or 504 while the instance is down or booting.
+async fn send(state: &AppState, request: reqwest::RequestBuilder) -> ApiResult<reqwest::Response> {
+    if let Some(asleep) = state.power.before().await {
+        return Err(asleep);
+    }
+    match request.send().await {
+        Ok(response)
+            if matches!(response.status(), reqwest::StatusCode::BAD_GATEWAY | reqwest::StatusCode::GATEWAY_TIMEOUT) =>
+        {
+            match state.power.after_failure().await {
+                Some(asleep) => Err(asleep),
+                None => Ok(response),
+            }
+        }
+        Ok(response) => {
+            state.power.answered();
+            Ok(response)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Character server request failed");
+            Err(state.power.after_failure().await.unwrap_or(UNAVAILABLE))
+        }
+    }
+}
+
 fn signed(request: reqwest::RequestBuilder, factory: &Factory, username: &str) -> reqwest::RequestBuilder {
     let request = match &factory.token {
         Some(token) => request.bearer_auth(operator_token(token, username)),
@@ -257,6 +284,12 @@ async fn studio(
         Need::Paid if paid_this_month(&state).await? >= factory.paid_monthly => return Err(BUDGET_SPENT),
         _ => {}
     }
+    // A change the sleeping studio cannot take is not recorded (nor counted against the paid budget).
+    if matches!(need, Need::Write | Need::Paid)
+        && let Some(asleep) = state.power.before().await
+    {
+        return Err(asleep);
+    }
     let record = if matches!(need, Need::Write | Need::Paid) {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO factory_requests (user_id, method, path, paid) VALUES ($1, $2, $3, $4) RETURNING id",
@@ -276,7 +309,8 @@ async fn studio(
     };
     let response = forward(&state, &user.username, method, &headers, &path, query, body).await;
     if let Some(id) = record {
-        let status = response.as_ref().map_or(502, |response| response.status().as_u16());
+        let status =
+            response.as_ref().map_or_else(|error| error.status.as_u16(), |response| response.status().as_u16());
         let saved = sqlx::query("UPDATE factory_requests SET status = $2 WHERE id = $1")
             .bind(id)
             .bind(status as i16)
@@ -337,7 +371,7 @@ async fn forward(
             request = request.header(name, value.clone());
         }
     }
-    let upstream = signed(request, factory, username).send().await.map_err(unavailable)?;
+    let upstream = send(state, signed(request, factory, username)).await?;
     let mut response = Response::builder().status(upstream.status().as_u16());
     for name in FORWARDED_RESPONSE_HEADERS {
         if let Some(value) = upstream.headers().get(name.as_str()) {
@@ -370,8 +404,7 @@ pub async fn fetch_file(
 ) -> ApiResult<Vec<u8>> {
     let factory = factory(state)?;
     let url = format!("{}/api/{api_path}", factory.url);
-    let mut response =
-        signed(state.http.get(&url), factory, username).timeout(FILE_TIMEOUT).send().await.map_err(unavailable)?;
+    let mut response = send(state, signed(state.http.get(&url), factory, username).timeout(FILE_TIMEOUT)).await?;
     if response.status().is_redirection() {
         let location = response
             .headers()
@@ -413,8 +446,7 @@ pub async fn fetch_json(state: &AppState, username: &str, api_path: &str) -> Api
     let factory = factory(state)?;
     let url = format!("{}/api/{api_path}", factory.url);
     for attempt in 1..=LISTING_ATTEMPTS {
-        let response =
-            signed(state.http.get(&url), factory, username).timeout(JSON_TIMEOUT).send().await.map_err(unavailable)?;
+        let response = send(state, signed(state.http.get(&url), factory, username).timeout(JSON_TIMEOUT)).await?;
         match response.status() {
             reqwest::StatusCode::NOT_FOUND => return Ok(None),
             status if status.is_success() => {

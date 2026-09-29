@@ -177,6 +177,11 @@ export type FactoryCharacter = {
   otherItems: string[];
 };
 
+/** The character studio's EC2 instance, which powers itself off when idle (`STUDIO_INSTANCE_ID`; absent in local runs). */
+export type StudioPower =
+  | { configured: false }
+  | { configured: true; instanceId: string; state: 'pending' | 'running' | 'stopping' | 'stopped' | (string & {}) };
+
 /** How far the studio screens reach through the server (`FACTORY_ACCESS`), and this month's paid requests. */
 export type FactoryUsage =
   | { connected: false }

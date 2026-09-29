@@ -49,7 +49,7 @@
 CloudFront(mogaesup.com, www는 apex로 이동)가 정적 파일은 비공개 S3에서, `/api/*`(WebSocket 포함)는 VPC origin으로 EC2의 Rust 서버에서 받는다. 서버는 비공개 RDS PostgreSQL 17을 쓰고 인터넷에 직접 열려 있지 않다.
 
 1. 리눅스 바이너리: `server`에서 `docker run --rm -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/src/target -v ${PWD}:/src -w /src rust:1-alpine sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"`
-2. 서버: `python server/scripts/deploy-rust-server.py --factory-url <캐릭터 서버 주소> --factory-access write`. 스택(`mogaesup-server`)을 맞추고, S3와 SSM으로 바이너리를 올려 체크섬을 확인한 뒤 systemd로 띄운다. 비밀값은 개발 PC로 가져오지 않는다. 스택의 `FactoryGatewaySecret`이 `FACTORY_GATEWAY_KEY`로 들어가 캐릭터 서버 요청마다 `x-gateway-key`로 실린다.
+2. 서버: `python server/scripts/deploy-rust-server.py --factory-url <캐릭터 서버 주소> --factory-access write`. 스택(`mogaesup-server`)을 맞추고, S3와 SSM으로 바이너리를 올려 체크섬을 확인한 뒤 systemd로 띄운다. 비밀값은 개발 PC로 가져오지 않는다. 스택의 `FactoryGatewaySecret`이 `FACTORY_GATEWAY_KEY`로 들어가 캐릭터 서버 요청마다 `x-gateway-key`로 실린다. 캐릭터 서버 인스턴스는 쉬면 스스로 꺼지므로, 처음 한 번 `--studio-instance-id <인스턴스 ID>`를 주면 스택(`StudioInstanceId`)이 기억하고 서버 역할에 그 인스턴스만 켤 권한(`ec2:StartInstances`)을 준다. 서버는 닿지 않는 스튜디오 요청에 인스턴스를 켜고 켜질 때까지 503 `studio_waking`으로 답하며, 관리자는 `/api/catalog/admin/studio-power`로 상태를 보고 켠다.
 3. 웹: `frontend/scripts/deploy-aws.ps1`. 스택(`mogaesup-web`)을 맞추고 빌드·업로드·무효화한 뒤 운영 주소의 `index.html`과 `/api/health`를 확인한다.
 4. 캐릭터 서버: `backend/infra/prepare-aws.ps1 -Upload` 뒤 `backend/infra/deploy-aws.ps1`(자세한 것은 `backend/README.md`). 컨테이너는 API만 낸다.
 5. 스튜디오 잠금: `python server/scripts/lock-studio.py --allow-ip <주인 IP>`. 캐릭터 스튜디오의 CloudFront에 함수를 붙여 게이트웨이 키를 가진 이 서버와 적은 IP만 통과시킨다(`--unlock`으로 뗀다). 스튜디오 스택(`gaesup-asset-studio`)을 다시 배포하면 떨어지니 그 뒤에 다시 돌린다.

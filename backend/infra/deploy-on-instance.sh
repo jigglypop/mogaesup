@@ -30,6 +30,8 @@ exec 9>/var/lock/asset-studio-deploy.lock
 flock -n 9 || { echo 'another deployment is active' >&2; exit 3; }
 
 install -d -m 700 /opt/asset-studio /opt/asset-studio/releases /opt/asset-studio/scratch
+# nginx's logs, on the host so infra/idle-stop.sh sees the last request even while no container runs.
+install -d -m 755 /var/log/asset-studio
 secret_tmp="$(mktemp /opt/asset-studio/provider.json.XXXXXX)"
 chmod 600 "$secret_tmp"
 aws secretsmanager get-secret-value \
@@ -117,6 +119,7 @@ docker run -d --restart unless-stopped --name "$candidate" --network host \
   -e PUBLIC_STUDIO="$PUBLIC_STUDIO" \
   -v /opt/asset-studio/provider.json:/run/studio-secrets.json:ro \
   -v /opt/asset-studio/scratch:/app/data \
+  -v /var/log/asset-studio:/var/log/nginx \
   "$image" >/dev/null
 candidate_id="$(docker inspect -f '{{.Id}}' "$candidate")"
 
@@ -150,4 +153,6 @@ printf '{"release_key":"%s","sha256":"%s","deployed_at":"%s"}\n' \
   "$release_key" "$release_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /opt/asset-studio/current.json
 docker rm -f "$rollback_name" >/dev/null 2>&1 || true
 trap - ERR INT TERM
+# Power off after two idle hours; the app starts the instance again on demand. Kept up to date with each release.
+bash "$release_dir/infra/idle-stop.sh" install || echo 'idle stop could not be installed' >&2
 echo "deployment healthy: $release_sha"

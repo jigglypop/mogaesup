@@ -5,11 +5,13 @@ import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type Reac
 import { Link, Navigate, useLocation } from 'react-router-dom';
 
 import { catalogApi } from '../api/endpoints';
+import { useStudioSleep } from '../api/studioSleep';
 import type { FactoryUsage } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { Loading } from '../pages/Loading';
 import { PageShell } from '../shell/Shell';
 import { Icon } from '../ui/icons';
+import { StudioPowerLine, StudioWaking } from './StudioPower';
 
 // The character studio's own screens (src/character), mounted as they are.
 const Wardrobe = lazy(() => import('../character/studio/Wardrobe'));
@@ -123,6 +125,7 @@ function Connection() {
         </small>
       )}
       {usage.connected && usage.access !== 'paid' && <small>비용이 드는 작업은 이 서버에서 막혀 있어요</small>}
+      {usage.connected && <StudioPowerLine />}
     </section>
   );
 }
@@ -144,6 +147,7 @@ function Locked() {
 export default function StudioPage() {
   const { status, user } = useAuth();
   const { pathname } = useLocation();
+  const sleep = useStudioSleep();
   if (status === 'loading') return <Loading />;
   if (!user) return <Navigate to="/" replace />;
   const admin = user.role === 'admin';
@@ -181,7 +185,18 @@ export default function StudioPage() {
           ))}
           {admin && <Connection />}
         </nav>
-        <Stage>{wardrobe ? <Wardrobe /> : !admin ? <Locked /> : screen && <WorkspaceFrame screen={screen} />}</Stage>
+        <Stage>
+          {/* While the studio sleeps its screens stay closed; they open afresh once it answers. */}
+          {sleep && (wardrobe || admin) ? (
+            <StudioWaking sleep={sleep} member={!admin} />
+          ) : wardrobe ? (
+            <Wardrobe />
+          ) : !admin ? (
+            <Locked />
+          ) : (
+            screen && <WorkspaceFrame screen={screen} />
+          )}
+        </Stage>
       </div>
     </PageShell>
   );
