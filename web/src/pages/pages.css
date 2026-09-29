@@ -5,6 +5,8 @@
 
 .mg-auth {
   position: relative;
+  /* Its own stacking context, so the blurred island behind it paints above the body's wash. */
+  isolation: isolate;
   min-height: 100vh;
   display: grid;
   place-items: center;

@@ -158,7 +158,7 @@
 .mg-rail a.is-divided::before { content: ''; position: absolute; top: -8px; left: 14px; right: 14px; height: 1px; background: var(--mg-hair-strong); }
 
 /* Pages */
-.mg-app.is-page { min-height: 100vh; }
+.mg-app.is-page { min-height: 100vh; isolation: isolate; }
 .mg-app.is-page::before {
   content: '';
   position: fixed;
