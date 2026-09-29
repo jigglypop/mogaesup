@@ -74,7 +74,8 @@
   -webkit-backdrop-filter: var(--mg-blur);
   color: var(--mg-muted);
 }
-.mg-search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--mg-ink); }
+/* The field fills the pill's height, so a tap anywhere on the pill lands in it. */
+.mg-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; color: var(--mg-ink); -webkit-appearance: none; appearance: none; }
 .mg-search input::placeholder { color: var(--mg-muted); }
 .mg-search:focus-within { border-color: var(--mg-primary); }
 
@@ -92,7 +93,17 @@
 }
 .mg-me .mg-avatar { width: 38px; height: 38px; }
 
-.mg-menu { top: calc(100% + 8px); display: grid; gap: 2px; min-width: 280px; }
+/* A menu never runs past the bottom of a short screen (a phone on its side); it scrolls instead. */
+.mg-menu {
+  top: calc(100% + 8px);
+  display: grid;
+  gap: 2px;
+  min-width: 280px;
+  max-height: calc(100vh - var(--mg-edge) * 2 - 64px);
+  max-height: calc(100dvh - var(--mg-edge) * 2 - 64px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .mg-menu.is-right { right: 0; }
 .mg-menu-title { padding: 8px 10px 4px; font-size: 12px; font-weight: 800; color: var(--mg-muted); }
 .mg-menu-who { display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 8px; padding: 8px 10px 10px; border-bottom: 1px solid var(--mg-hair); margin-bottom: 4px; }
@@ -114,7 +125,10 @@
   text-decoration: none;
   text-align: left;
 }
-.mg-menu > a:hover, .mg-menu > button:hover { background: var(--mg-tint); }
+@media (hover: hover) {
+  .mg-menu > a:hover, .mg-menu > button:hover { background: var(--mg-tint); }
+}
+.mg-menu > a:active, .mg-menu > button:active { background: var(--mg-tint); }
 .mg-menu svg { width: 18px; height: 18px; color: var(--mg-muted); }
 .mg-menu-row { display: grid; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--mg-hair); border-bottom: 1px solid var(--mg-hair); margin: 4px 0; }
 .mg-menu-row > span { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
@@ -122,7 +136,9 @@
 
 .mg-requests { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .mg-requests li { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: center; padding: 8px; border-radius: 14px; }
-.mg-requests li:hover { background: var(--mg-tint); }
+@media (hover: hover) {
+  .mg-requests li:hover { background: var(--mg-tint); }
+}
 .mg-requests li > div { display: grid; min-width: 0; }
 .mg-requests li small { color: var(--mg-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mg-requests li > span { grid-column: 2; display: flex; gap: 6px; }
@@ -152,13 +168,31 @@
   font-weight: 750;
 }
 .mg-rail a svg { width: 22px; height: 22px; }
-.mg-rail a:hover { background: var(--mg-tint); }
+@media (hover: hover) {
+  .mg-rail a:hover { background: var(--mg-tint); }
+}
+.mg-rail a:active { background: var(--mg-tint); }
 .mg-rail a[aria-current='page'] { background: var(--mg-primary-soft); color: var(--mg-primary); }
 .mg-rail a.is-divided { margin-top: 8px; position: relative; }
 .mg-rail a.is-divided::before { content: ''; position: absolute; top: -8px; left: 14px; right: 14px; height: 1px; background: var(--mg-hair-strong); }
 
 /* Pages */
-.mg-app.is-page { min-height: 100vh; isolation: isolate; }
+.mg-app.is-page { min-height: 100vh; min-height: 100dvh; isolation: isolate; }
+/* The actions keep their size and the title gives way, so on a phone they never slide over each other. */
+.mg-app.is-page .mg-topbar-left { flex: 1 1 auto; }
+.mg-app.is-page .mg-topbar-right { flex: none; }
+/* Pages scroll under the top bar; a frosted band behind it keeps the cards from showing through between the pills. */
+.mg-app.is-page .mg-topbar::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: calc(var(--mg-edge) * -1) calc(var(--mg-edge) * -1) -16px;
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  mask-image: linear-gradient(#000 55%, transparent);
+  -webkit-mask-image: linear-gradient(#000 55%, transparent);
+  pointer-events: none;
+}
 .mg-app.is-page::before {
   content: '';
   position: fixed;
@@ -189,9 +223,17 @@
 @media (max-width: 720px) {
   :root { --mg-edge: 12px; }
   .mg-topbar-right .mg-search { display: none; }
-  .mg-brand { height: 46px; padding: 0 14px 0 8px; }
+  .mg-brand { width: 46px; height: 46px; padding: 0; justify-content: center; }
   .mg-brand b { display: none; }
   .mg-pill { height: 46px; padding: 0 14px; }
+  /* Menus open as a sheet under the top bar: anchored to a button near the middle they would run off the left edge. */
+  .mg-app.is-page .mg-topbar .mg-menu {
+    position: fixed;
+    top: calc(var(--mg-edge) + 54px);
+    left: var(--mg-edge);
+    right: var(--mg-edge);
+    min-width: 0;
+  }
   .mg-rail {
     position: fixed;
     top: auto;
@@ -209,4 +251,20 @@
   .mg-rail a.is-divided::before { display: none; }
   .mg-page-main { padding: calc(var(--mg-edge) + 60px) var(--mg-edge) 96px; }
   .mg-panel { padding: 18px; }
+}
+
+/* A phone on its side: the rail stays at the side, and the bars get as slim as on a phone. */
+@media (max-height: 500px) and (min-width: 721px) {
+  :root { --mg-edge: 12px; }
+  .mg-brand, .mg-pill { height: 46px; }
+  .mg-rail { top: calc(var(--mg-edge) + 58px); gap: 2px; padding: 6px; border-radius: 22px; }
+  .mg-rail a { padding: 6px 0 5px; gap: 2px; }
+  .mg-rail a.is-divided { margin-top: 4px; }
+  .mg-rail a.is-divided::before { top: -4px; }
+  .mg-page-main { padding-top: calc(var(--mg-edge) + 58px); }
+}
+
+@media (pointer: coarse) {
+  .mg-menu-row .mg-tabs > button { height: 38px; }
+  .mg-menu > a, .mg-menu > button { height: 44px; }
 }

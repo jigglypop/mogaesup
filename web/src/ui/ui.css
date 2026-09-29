@@ -1,6 +1,7 @@
 /* Base elements and the glass primitives every screen is built from. */
 html, body, #root { height: 100%; margin: 0; }
-html { background: var(--mg-surface); }
+/* Taps get the controls' own pressed state below, not the browser's grey box. */
+html { background: var(--mg-surface); -webkit-tap-highlight-color: transparent; }
 body {
   background: var(--mg-page);
   background-attachment: fixed;
@@ -68,13 +69,16 @@ h1, h2, h3, h4, p { margin: 0; }
   box-shadow: var(--mg-shadow-soft);
   transition: background 0.15s, transform 0.15s, box-shadow 0.15s;
 }
-.mg-btn:hover:not(:disabled) { background: var(--mg-card); transform: translateY(-1px); }
 .mg-btn:disabled { opacity: 0.45; }
 .mg-btn.is-primary { background: var(--mg-primary); border-color: transparent; color: var(--mg-primary-ink); }
-.mg-btn.is-primary:hover:not(:disabled) { background: var(--mg-primary-hover); }
 .mg-btn.is-danger { background: var(--mg-bad-soft); border-color: transparent; color: var(--mg-bad); box-shadow: none; }
 .mg-btn.is-quiet { background: transparent; border-color: transparent; box-shadow: none; }
-.mg-btn.is-quiet:hover:not(:disabled) { background: var(--mg-tint); transform: none; }
+/* Hover only where there is a pointer to hover with; on touch screens it would stick after a tap. */
+@media (hover: hover) {
+  .mg-btn:hover:not(:disabled) { background: var(--mg-card); transform: translateY(-1px); }
+  .mg-btn.is-primary:hover:not(:disabled) { background: var(--mg-primary-hover); }
+  .mg-btn.is-quiet:hover:not(:disabled) { background: var(--mg-tint); transform: none; }
+}
 .mg-btn.is-small { height: 32px; padding: 0 12px; font-size: 13px; }
 .mg-btn.is-wide { width: 100%; }
 .mg-btn svg { width: 18px; height: 18px; flex: none; }
@@ -94,11 +98,13 @@ h1, h2, h3, h4, p { margin: 0; }
   box-shadow: var(--mg-shadow-soft);
   text-decoration: none;
 }
-.mg-icon-btn:hover:not(:disabled) { background: var(--mg-card); }
 .mg-icon-btn:disabled { opacity: 0.4; }
 .mg-icon-btn svg { width: 20px; height: 20px; }
 .mg-icon-btn.is-quiet { background: transparent; border-color: transparent; box-shadow: none; width: 34px; height: 34px; }
-.mg-icon-btn.is-quiet:hover:not(:disabled) { background: var(--mg-tint); }
+@media (hover: hover) {
+  .mg-icon-btn:hover:not(:disabled) { background: var(--mg-card); }
+  .mg-icon-btn.is-quiet:hover:not(:disabled) { background: var(--mg-tint); }
+}
 .mg-icon-btn[aria-pressed='true'] { background: var(--mg-primary); color: var(--mg-primary-ink); border-color: transparent; }
 .mg-count {
   position: absolute;
@@ -201,8 +207,10 @@ h1, h2, h3, h4, p { margin: 0; }
   gap: 6px;
   white-space: nowrap;
 }
-.mg-tabs > button:hover:not([aria-selected='true']):not([aria-pressed='true']):not(:disabled),
-.mg-tabs > a:hover:not([aria-current='page']) { color: var(--mg-ink); }
+@media (hover: hover) {
+  .mg-tabs > button:hover:not([aria-selected='true']):not([aria-pressed='true']):not(:disabled),
+  .mg-tabs > a:hover:not([aria-current='page']) { color: var(--mg-ink); }
+}
 .mg-tabs > [aria-selected='true'], .mg-tabs > [aria-pressed='true'], .mg-tabs > [aria-current='page'], .mg-tabs > [aria-checked='true'] {
   background: var(--mg-glass-strong);
   color: var(--mg-ink);
@@ -292,6 +300,21 @@ textarea.mg-field { height: auto; min-height: 76px; padding: 11px 14px; resize: 
 .mg-empty { padding: 28px 12px; text-align: center; color: var(--mg-muted); font-size: 13px; }
 .mg-title { font-size: 28px; font-weight: 850; letter-spacing: -0.035em; line-height: 1.2; }
 .mg-heading { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
+
+/* Touch screens: a pressed state in place of hover, and controls a fingertip can hit. */
+@media (hover: none) {
+  .mg-btn:active:not(:disabled), .mg-icon-btn:active:not(:disabled) { transform: scale(0.96); }
+  .mg-tabs > button:active:not(:disabled), .mg-tabs > a:active { color: var(--mg-ink); }
+}
+@media (pointer: coarse) {
+  /* iOS zooms the whole page into any field under 16px when it takes focus. */
+  input, textarea, select { font-size: 16px; }
+  .mg-btn.is-small { height: 38px; padding: 0 14px; }
+  .mg-icon-btn.is-quiet { width: 40px; height: 40px; }
+  .mg-tabs > button, .mg-tabs > a { height: 40px; }
+  .mg-check { min-height: 40px; }
+  .mg-check input { width: 20px; height: 20px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }

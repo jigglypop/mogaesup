@@ -6,8 +6,11 @@
   overflow: hidden;
   background: #8fd3ee;
 }
-.mg-world-canvas { position: absolute; inset: 0; }
+/* A long press on the world walks or turns; it should not select text or open the phone's callout. */
+.mg-world-canvas { position: absolute; inset: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .mg-world-canvas canvas { display: block; touch-action: none; }
+/* Nothing on the island scrolls the page, so a drag past a panel's end must not pull-to-refresh or bounce it. */
+html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
 
 .mg-world-loading {
   position: absolute;
@@ -44,6 +47,9 @@
 .mg-settings { width: 320px; gap: 6px; padding: 12px; }
 .mg-settings .mg-menu-title { padding: 2px 2px 4px; }
 .mg-settings > .mg-btn { justify-self: start; margin-top: 4px; }
+/* Outside decorating the actions keep their size and the island's name gives way, so they never slide over it. */
+.mg-world:not(.is-editing) .mg-topbar-left { flex: 1 1 auto; }
+.mg-world:not(.is-editing) .mg-topbar-right { flex: none; }
 
 /* The island's story panel */
 .mg-side {
@@ -59,7 +65,7 @@
   padding: 20px;
 }
 .mg-side-close { position: absolute; top: 12px; right: 12px; }
-.mg-side-body { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -20px -20px; padding: 2px 20px 20px; scrollbar-width: thin; }
+.mg-side-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 -20px -20px; padding: 2px 20px 20px; scrollbar-width: thin; }
 .mg-side-open {
   position: absolute;
   z-index: 18;
@@ -70,7 +76,8 @@
 }
 .mg-side-open .mg-avatar { width: 36px; height: 36px; }
 
-.mg-profile { display: grid; gap: 12px; padding-right: 34px; }
+/* One column no wider than the panel, so a long status line is cut short instead of pushing 편집 under the close button. */
+.mg-profile { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding-right: 34px; }
 .mg-profile-main { display: flex; align-items: center; gap: 14px; }
 .mg-profile-text { flex: 1; min-width: 0; }
 .mg-profile-text h2 { font-size: 20px; font-weight: 850; letter-spacing: -0.03em; }
@@ -83,7 +90,9 @@
 .mg-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .mg-row-end { display: flex; justify-content: flex-end; gap: 8px; }
 .mg-link { padding: 0; border: 0; background: none; color: var(--mg-primary); font-size: 12px; font-weight: 750; }
-.mg-link:hover { text-decoration: underline; }
+@media (hover: hover) {
+  .mg-link:hover { text-decoration: underline; }
+}
 
 .mg-compose { display: grid; gap: 8px; padding: 14px; }
 .mg-compose-label { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
@@ -104,7 +113,9 @@ p.mg-compose { display: block; font-size: 13px; }
 
 .mg-people { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .mg-people li { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: 14px; }
-.mg-people li:hover { background: var(--mg-tint); }
+@media (hover: hover) {
+  .mg-people li:hover { background: var(--mg-tint); }
+}
 .mg-people li > div { flex: 1; min-width: 0; display: grid; }
 .mg-people li small { color: var(--mg-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mg-people-actions { display: flex; gap: 4px; }
@@ -139,6 +150,9 @@ p.mg-compose { display: block; font-size: 13px; }
   right: var(--mg-edge);
   bottom: var(--mg-edge);
   display: grid;
+  /* A column no wider than the space: an auto column grows to the chat field's natural width and pushes the send
+     button under the panel or off a phone's edge. */
+  grid-template-columns: minmax(0, 1fr);
   justify-items: start;
   gap: 12px;
   pointer-events: none;
@@ -172,7 +186,8 @@ p.mg-compose { display: block; font-size: 13px; }
 }
 .mg-chatbar-people i:first-child { margin-left: 0; }
 .mg-chatbar-count { font-size: 13px; white-space: nowrap; }
-.mg-chatbar-said { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+/* A block, not the chip's flex box, so a long line ends in an ellipsis. */
+.mg-chatbar-said { display: block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; line-height: 28px; }
 .mg-chatbar input { flex: 1; min-width: 0; height: 40px; border: 0; outline: none; background: transparent; }
 .mg-chatbar input::placeholder { color: var(--mg-muted); }
 .mg-chatbar-send {
@@ -188,6 +203,12 @@ p.mg-compose { display: block; font-size: 13px; }
 }
 .mg-chatbar-send:disabled { opacity: 0.5; }
 .mg-keys { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Keyboard and mouse hints, or on a touch screen the ones for a finger. */
+.mg-keys.is-touch { display: none; }
+@media (hover: none) and (pointer: coarse) {
+  .mg-keys { display: none; }
+  .mg-keys.is-touch { display: flex; }
+}
 
 .mg-toast {
   position: absolute;
@@ -256,6 +277,8 @@ p.mg-compose { display: block; font-size: 13px; }
   right: var(--mg-edge);
   bottom: var(--mg-edge);
   display: grid;
+  /* One column that may shrink below its content: the tab and piece rows scroll instead of widening the drawer. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   padding: 14px 16px 16px;
 }
@@ -297,6 +320,7 @@ p.mg-compose { display: block; font-size: 13px; }
   bottom: var(--mg-edge);
   width: 340px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 16px;
   display: grid;
   align-content: start;
@@ -369,4 +393,65 @@ p.mg-compose { display: block; font-size: 13px; }
   .mg-drawer-search { display: none; }
   .mg-piece { width: 96px; height: 96px; }
   .mh-status { left: var(--mg-edge); width: auto; }
+}
+
+/* Too narrow for the report beside the story panel: it covers the panel rather than the rail. */
+@media (max-width: 860px) {
+  .mg-world.has-panel .mh-status { right: var(--mg-edge); }
+}
+
+/* Phones, outside decorating: the panel is a sheet over the tab bar and the rest floats in one column. */
+@media (max-width: 720px) {
+  .mg-world:not(.is-editing) .mg-topbar-right { gap: 6px; }
+  .mg-island-pill { gap: 8px; padding: 0 12px 0 6px; }
+  .mg-island-pill .mg-avatar { width: 34px; height: 34px; font-size: 16px; }
+  /* The chat bar already says how many are here; in the pill it would leave no room for the name. */
+  .mg-presence { display: none; }
+  /* On the narrowest phones the name takes the picture's room; the panel's button still shows whose island it is. */
+  @media (max-width: 400px) {
+    .mg-island-pill { padding: 0 14px; }
+    .mg-island-pill .mg-avatar { display: none; }
+  }
+  /* Menus open as a sheet under the top bar: anchored to the gear they would run off the left edge. */
+  .mg-world:not(.is-editing) .mg-topbar .mg-menu {
+    position: fixed;
+    top: calc(var(--mg-edge) + 54px);
+    left: var(--mg-edge);
+    right: var(--mg-edge);
+    width: auto;
+    min-width: 0;
+  }
+  .mg-side {
+    height: 58dvh;
+    /* Never taller than the room between the top bar and the tab bar. */
+    max-height: calc(100% - var(--mg-edge) * 2 - 76px - 58px);
+  }
+  /* The sheet folds down, not to the side. */
+  .mg-side-close svg { transform: rotate(90deg); }
+  /* Folded, the panel's button waits above the chat bar instead of covering it. */
+  .mg-side-open { bottom: calc(var(--mg-edge) + 76px + 66px); }
+  /* The field needs the width: the faces also float over the people on the island, and what you said last (seen
+     nowhere else) takes a smaller share. */
+  .mg-chatbar-people { display: none; }
+  .mg-chatbar-said { max-width: 30%; }
+  .mg-chatbar.is-hint { max-width: 100%; padding-left: 16px; }
+  .mg-keys.is-touch { display: none; }
+  .mh-status, .mg-world.has-panel .mh-status { right: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); }
+}
+
+/* A phone on its side: slim bars (see the shell), a compact panel head, and no hints. */
+@media (max-height: 500px) and (min-width: 721px) {
+  .mg-side, .mg-side-open, .mh-status, .mg-toast { top: calc(var(--mg-edge) + 58px); }
+  .mg-side { gap: 10px; padding: 14px; }
+  .mg-side-body { margin: 0 -14px -14px; padding: 2px 14px 14px; }
+  .mg-profile .mg-avatar.is-large { width: 44px; height: 44px; border-radius: 14px; font-size: 20px; }
+  .mg-profile-chips { display: none; }
+  .mg-keys, .mg-keys.is-touch { display: none; }
+}
+
+@media (pointer: coarse) {
+  .mg-form .mg-tabs > button { height: 40px; }
+  /* Text links get a fingertip-sized hit area without moving anything. */
+  .mg-link { padding: 10px 6px; margin: -10px -6px; }
+  .mg-side-body a:not([class]) { padding: 10px 0; }
 }

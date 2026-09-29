@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { Link, useSearchParams } from 'react-router-dom';
 
@@ -21,6 +21,37 @@ const since = (at: string) => {
   if (days < 7) return `${days}일 전 바뀜`;
   return new Date(at).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' });
 };
+
+/** Phones have no search in the top bar; this one narrows the list as you type. */
+function ExploreSearch({ query, onQuery }: { query: string; onQuery: (query: string) => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [text, setText] = useState(query);
+  // The address follows the typing a beat later; taking it back mid-typing would undo keystrokes and break Korean
+  // composition, so only a change from elsewhere (while the field is idle) is copied in.
+  useEffect(() => {
+    if (document.activeElement !== input.current) setText(query);
+  }, [query]);
+  return (
+    <label className="mg-search mg-explore-search">
+      <Icon name="search" />
+      <input
+        ref={input}
+        type="search"
+        value={text}
+        maxLength={40}
+        placeholder="섬이나 사람 찾기"
+        aria-label="섬이나 사람 찾기"
+        enterKeyHint="search"
+        onChange={(event) => {
+          setText(event.target.value);
+          onQuery(event.target.value);
+        }}
+        // The keyboard's search key puts the keyboard away, uncovering the islands.
+        onKeyDown={(event) => event.key === 'Enter' && event.currentTarget.blur()}
+      />
+    </label>
+  );
+}
 
 /** `/explore`: public islands, most recently changed first, filtered by `?q`. */
 export function ExplorePage() {
@@ -50,13 +81,14 @@ export function ExplorePage() {
         <div className="mg-panel-head">
           <h1 className="mg-title">둘러보기</h1>
           {query && (
-            <span className="mg-chip">
+            <span className="mg-chip mg-explore-query">
               &lsquo;{query}&rsquo; 찾는 중
               <button className="mg-icon-btn is-quiet" aria-label="찾기 지우기" onClick={() => setParams({})}>
                 <Icon name="close" />
               </button>
             </span>
           )}
+          <ExploreSearch query={query} onQuery={(text) => setParams(text ? { q: text } : {}, { replace: true })} />
         </div>
         {error && <p className="mg-error">{error}</p>}
         {shown?.length === 0 && <p className="mg-empty">{query ? '찾는 섬이 없어요' : '아직 공개된 섬이 없어요'}</p>}

@@ -104,6 +104,7 @@ export function SearchBox({ initial = '' }: { initial?: string }) {
         maxLength={40}
         placeholder="섬이나 사람 찾기"
         aria-label="섬이나 사람 찾기"
+        enterKeyHint="search"
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => event.stopPropagation()}
       />

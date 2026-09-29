@@ -17,7 +17,10 @@
   font-weight: 700;
   text-decoration: none;
 }
-.mg-studio-nav a:hover { background: var(--mg-tint); }
+@media (hover: hover) {
+  .mg-studio-nav a:hover { background: var(--mg-tint); }
+}
+.mg-studio-nav a:active { background: var(--mg-tint); }
 .mg-studio-nav a[aria-current='page'] { background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); }
 .mg-studio-nav a.is-locked { color: var(--mg-muted); }
 .mg-studio-connection { display: grid; gap: 2px; padding: 10px 12px; border-radius: 14px; background: var(--mg-tint); }
@@ -51,6 +54,10 @@
   --danger: var(--mg-bad);
   --success: var(--mg-good);
   --warning: var(--mg-warn);
+  /* The studio defines these with its admin screens; the wardrobe alone would otherwise draw square corners. */
+  --radius-sm: 8px;
+  --radius-md: var(--mg-r-control);
+  --radius-lg: var(--mg-r-card);
 }
 .studio-root.studio-root { font-family: var(--mg-font); background: rgba(18, 16, 32, 0.84); color-scheme: dark; }
 
@@ -60,7 +67,64 @@
 .studio-root.studio-root .studio-shell { display: block; min-height: 0; }
 .studio-root.studio-root .studio-main { margin: 0; min-height: 0; padding: 0; }
 
+/* The wardrobe mounts on its own, without the workspace's page styles (those load with the admin screens), so its
+   heading, fields and buttons take these. `:where` keeps them below the wardrobe's own rules. */
+.studio-root.studio-root .wardrobe { padding: 20px; }
+.studio-root .wardrobe :where(h1) { font-size: 22px; font-weight: 850; letter-spacing: -0.03em; }
+.studio-root .wardrobe :where(label) { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+.studio-root .wardrobe :where(input:not([type='color'], [type='range'], [type='checkbox'], [type='radio']), select) {
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #ffffff06;
+  color: var(--text);
+}
+.studio-root .wardrobe :where(button) {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgb(var(--accent-rgb) / 0.08);
+  color: var(--text);
+  font-weight: 650;
+}
+.studio-root .wardrobe :where(button[aria-pressed='true']) { border-color: rgb(var(--accent-rgb) / 0.4); color: var(--accent-text); }
+.studio-root .wardrobe :where(button:disabled) { opacity: 0.45; cursor: default; }
+
 @media (max-width: 960px) {
-  .mg-studio { grid-template-columns: 1fr; }
-  .mg-studio-nav { position: static; grid-auto-flow: column; overflow-x: auto; }
+  .mg-studio { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  /* One row of chips that scrolls sideways, instead of three columns that fill the phone before the wardrobe. */
+  .mg-studio-nav {
+    position: static;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px;
+    border-radius: 20px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .mg-studio-nav::-webkit-scrollbar { display: none; }
+  .mg-studio-nav section { display: flex; align-items: center; gap: 2px; flex: none; }
+  .mg-studio-nav p { padding: 0 4px 0 8px; white-space: nowrap; }
+  .mg-studio-nav a { flex: none; height: 38px; padding: 0 12px; white-space: nowrap; }
+  .mg-studio-connection { flex: none; padding: 6px 12px; }
+}
+
+@media (max-width: 720px) {
+  .mg-studio-stage { min-height: 0; padding: 4px; }
+  .studio-root.studio-root .wardrobe { padding: 12px; }
+}
+@media (max-width: 720px), (max-height: 500px) {
+  /* The 3D view never fills the phone, so there is always page around it to scroll with a thumb. */
+  .studio-root.studio-root .wardrobe-scene.meshy-scene { height: min(420px, 62vh); }
+}
+
+@media (pointer: coarse) {
+  .studio-root .wardrobe :where(button) { min-height: 40px; }
+  /* Sideways drags still turn the model; up and down scroll the page instead of being caught by the 3D view. */
+  .studio-root .wardrobe-scene canvas { touch-action: pan-y !important; }
 }

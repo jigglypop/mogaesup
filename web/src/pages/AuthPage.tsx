@@ -54,7 +54,16 @@ export function AuthPage() {
         </h1>
         <div className="mg-tabs" role="tablist">
           {(['login', 'signup'] as const).map((item) => (
-            <button key={item} role="tab" aria-selected={mode === item} onClick={() => setMode(item)}>
+            <button
+              key={item}
+              role="tab"
+              aria-selected={mode === item}
+              onClick={() => {
+                // A sign-in error means nothing on the sign-up form, and the other way round.
+                setMode(item);
+                setError('');
+              }}
+            >
               {item === 'login' ? '로그인' : '가입하기'}
             </button>
           ))}
@@ -71,6 +80,10 @@ export function AuthPage() {
               pattern="[A-Za-z0-9_\-]+"
               title="영문, 숫자, 밑줄(_), 하이픈(-)"
               autoComplete="username"
+              // Phone keyboards would capitalise and correct an id.
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
             />
           </label>
           {mode === 'signup' && (

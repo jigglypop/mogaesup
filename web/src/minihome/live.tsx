@@ -179,6 +179,8 @@ export function ChatBar({ signedIn }: { signedIn: boolean }) {
         maxLength={MAX_CHAT}
         placeholder="근처에 있는 사람에게 말하기"
         aria-label="말하기"
+        enterKeyHint="send"
+        autoComplete="off"
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => event.stopPropagation()}
       />
