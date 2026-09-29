@@ -96,7 +96,7 @@ try {
     $serverArguments += @('-FactoryUrl', 'http://127.0.0.1:8016')
   }
   Start-DevProcess 'server' 8080 'powershell.exe' $serverArguments
-  Start-DevProcess 'web' 5180 'npm.cmd' @('run', 'dev', '--workspace', 'web')
+  Start-DevProcess 'frontend' 5180 'npm.cmd' @('run', 'dev', '--workspace', 'frontend')
 } finally {
   # The children have their copies; this shell does not keep the secrets.
   foreach ($key in $factoryKeys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
@@ -105,7 +105,7 @@ try {
 $checks = @()
 if ($Character) { $checks += , @('character', 'http://127.0.0.1:8016/health') }
 $checks += , @('server', 'http://127.0.0.1:8080/api/health')
-$checks += , @('web', 'http://127.0.0.1:5180/')
+$checks += , @('frontend', 'http://127.0.0.1:5180/')
 foreach ($check in $checks) {
   # The first server start compiles; give it minutes, not seconds.
   $ready = Wait-Http $check[1] 600

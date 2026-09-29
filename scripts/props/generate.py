@@ -9,7 +9,7 @@ It starts a local character API on 127.0.0.1:8016 with auto-resume off, a sandbo
 in the asset bucket, away from the studio's own data) and the signight database unreachable, then submits one studio
 "prop" generation per manifest item. Each item has a fixed Idempotency-Key, so running the script again only waits for
 and downloads what already exists: it never pays twice for the same item. Results land in scripts/props/out/<id>/
-(model.glb, image.png, record.json); `node web/scripts/props-normalize.mjs` then fits them to the island.
+(model.glb, image.png, record.json); `node frontend/scripts/props-normalize.mjs` then fits them to the island.
 """
 
 from __future__ import annotations

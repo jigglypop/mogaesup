@@ -13,8 +13,8 @@ import { dedup, prune, textureCompress } from '@gltf-transform/functions';
 import { MeshoptDecoder, MeshoptEncoder } from 'meshoptimizer';
 import sharp from 'sharp';
 
-const web = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const props = resolve(web, '../scripts/props');
+const frontend = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const props = resolve(frontend, '../scripts/props');
 const packageGltf = resolve(dirname(fileURLToPath(import.meta.resolve('gaesup-world'))), '../public/gltf');
 const manifest = JSON.parse(readFileSync(join(props, 'manifest.json'), 'utf8'));
 /** Props are a few metres from a camera ~15 m away: 512 px colour maps are plenty. */
@@ -73,7 +73,7 @@ async function fit(item) {
     material.setMetallicFactor(0).setMetallicRoughnessTexture(null).setRoughnessFactor(ROUGHNESS);
   }
   await document.transform(dedup(), prune(), textureCompress({ encoder: sharp, targetFormat: 'webp', ...MAPS }));
-  const output = join(process.env['PROPS_OUTPUT'] ?? join(web, 'public/gltf'), item.file);
+  const output = join(process.env['PROPS_OUTPUT'] ?? join(frontend, 'public/gltf'), item.file);
   mkdirSync(dirname(output), { recursive: true });
   await io.write(output, document);
   const fitted = boxOf(document);
