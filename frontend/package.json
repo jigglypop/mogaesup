@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "smoke": "node scripts/browser-smoke.mjs",
+    "test:character": "node scripts/character-e2e.mjs",
     "perf": "node scripts/perf-probe.mjs",
     "deploy:aws": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-aws.ps1"
   },

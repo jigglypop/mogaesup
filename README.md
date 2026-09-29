@@ -40,6 +40,7 @@
 - 서버: `cd server && docker compose up -d --wait && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`. 테스트는 실제 PostgreSQL에 임시 DB를 만들어 돌고, 운영자 토큰이 캐릭터 서버의 `auth.py`(`backend/src`)를 통과하는지도 확인한다(`uv`가 있을 때).
 - 캐릭터 서버: `uv run python -m compileall -q backend/src`. 테스트(`uv run pytest`)는 외부 API·Blender·DB를 대체한 것만 돈다.
 - 웹: `npm run typecheck && npm test && npm run build`(루트). 서버와 `npm run dev`가 떠 있으면 `npm run smoke`가 Chromium으로 가입부터 꾸미기 저장·방문·실시간 방·방명록·이웃까지 확인한다.
+- 캐릭터: `npm run test:character`(루트)가 `server/`를 빌드해 임시 DB와 가짜 캐릭터 서버(`frontend/scripts/e2e/`)로 띄우고 웹 개발 서버와 함께 빈 포트에서 Chrome(WebGPU)으로 확인한다: 관리자가 완성 캐릭터를 가져와 검사·공개하고 스튜디오 화면을 열며, 새 회원이 그 미니미로 섬을 걷고 옷장만 보고, 다시 가져오면 공개 그대로 새 버전이 되며, `walk`가 없는 캐릭터는 이유와 함께 실패한다. 로컬 PostgreSQL(55432)과 cargo만 있으면 되고 비용이 들지 않으며, 끝나면 띄운 것과 DB를 지운다. 스크린샷은 인자로 준 폴더(기본 `.data/character-e2e`)에 남긴다.
 - 성능: 서버와 `npx vite preview`(빌드본)가 떠 있으면 `npm run perf`가 이 PC의 GPU(Chrome, WebGPU, vsync 끔)로 섬 로딩 시간·전송량·서 있을 때와 걸을 때의 프레임·메인 스레드 상위 함수를 잰다. 대상 서버에 측정용 계정을 하나 만든다.
 - 빌드는 패키지의 캐릭터 GLB(`gltf/*.glb`) 텍스처를 섬 카메라에 맞게 줄인다(색상 1024px, 그 밖 512px, WebP). 원본은 패키지에 그대로 있다.
 
