@@ -1,6 +1,6 @@
 # 캐릭터 서버
 
-3D SD 캐릭터의 몸·헤어·의상·장비를 만들고 조립하는 FastAPI 서버와 CLI입니다(`src/`, 테스트 `tests/`, DB migration `migrations/`). 작업 화면은 앱의 `/studio`(`frontend/src/character/`)에 있고, 앱은 Rust 서버의 스튜디오 게이트웨이를 거쳐 이 서버를 부릅니다. 운영 지침은 [AGENTS.md](AGENTS.md)에 있습니다. 기존 `/api/world/*`의 생성·GLB 후처리·애니메이션 병합·저장·프록시 API도 유지합니다.
+3D SD 캐릭터의 몸·헤어·의상·장비를 만들고 조립하는 FastAPI 서버와 CLI입니다(`src/`, 테스트 `tests/`, DB migration `migrations/`). 작업 화면은 앱의 `/studio`(`frontend/src/character/`)에 있고, 앱은 Rust 서버의 스튜디오 게이트웨이를 거쳐 이 서버를 부릅니다. 운영 지침은 [AGENTS.md](AGENTS.md)에 있습니다.
 
 ## 캐릭터 만들기
 
@@ -37,7 +37,7 @@ Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다. `backend/.en
 
 `npm run dev:character`가 이 서버(`127.0.0.1:8016`)를 Rust 서버·앱과 함께 띄우고 `backend/.env`의 API 키와 JWT 설정을 게이트웨이에 넘깁니다. 이 서버만 띄울 때는 루트에서 `uv run asset-api`(기본 `API_PORT=8000`)입니다. 로컬 서버는 loopback 전용이고 제어 서버는 단일 worker로 실행합니다. 상태 확인 경로는 `/health`와 `/api/health`입니다.
 
-`/api/world/*`는 JWT 인증이 필요합니다. 로컬호스트에서는 `X-User-Id: 1` 헤더로 개발 사용자로 호출할 수 있습니다.
+API는 JWT(`Authorization: Bearer`, 발급자 `mogaesup`, 대상 `mogaesup-client`) 인증이 필요합니다. 로컬호스트에서는 `X-User-Id: 1` 헤더로 개발 사용자로 호출할 수 있습니다.
 
 ## API 범위
 
@@ -48,27 +48,32 @@ Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다. `backend/.en
 - `scripts/props/generate.py`는 이 서버를 따로 띄우고 `/api/studio/generations*`를 직접 부릅니다.
 - 상태 확인은 `/health`, `/api/health`입니다.
 
-기존 `/api/world/*`(생성·작업·에셋·배치) API도 남아 있지만 앱은 부르지 않습니다. Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있습니다.
+Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있습니다.
 
 ## 구성
 
 - 캐릭터 공장 저장소: `ASSET_S3_BUCKET`, `ASSET_S3_REGION=ap-northeast-2`, `ASSET_S3_PREFIX=assets`, 선택 `ASSET_AWS_PROFILE`. 원본·파츠·생성 응답·작업 기록·GLB는 비공개 S3에 저장합니다. 다운로드는 인증 API가 소유권을 확인한 뒤 15분 서명 URL로 전달합니다. 기존 `data/` 자료는 읽기 호환용으로 보존합니다.
 - 이미지 생성: `OPENAI_API_KEY`, `AVATAR_IMAGE_MODEL=gpt-image-2.5-sunburst`. TLS 1.3 연결이 끊기는 환경은 `AVATAR_IMAGE_TLS_MAX_VERSION=1.2`를 사용합니다.
-- `WORLD_3D_PROVIDER=meshy`와 `MESHY_API_KEY`: `/api/world` Meshy 3D 생성.
 - 캐릭터 공장 3D 공급자: `AVATAR_3D_PROVIDER=meshy|tripo`(기본 meshy). Tripo는 `TRIPO_API_KEY`, 선택 `TRIPO_API_BASE_URL`, `TRIPO_MODEL_VERSION`(기본 `v3.1-20260211`). 키가 둘 다 있으면 파츠 화면에서 요청마다 고릅니다.
 - `BLENDER_CONCURRENCY`(기본 2): 동시에 실행하는 Blender 피팅 수. vCPU 2개당 1이 기준입니다.
 - `ASSET_DETAIL_RENDERS=1`은 파츠별 상세 렌더를, `ASSET_SAVE_MASTER_BLEND=1`은 조립 `master.blend`를 추가로 저장합니다. 기본은 둘 다 끔입니다.
-- `DATABASE_URL` 또는 `DB_HOST` 계열 변수: `/api/world`의 job·asset·placement 영속화. 없으면 프로세스 메모리를 사용합니다.
-- `AWS_S3_BUCKET`·`AWS_S3_DIR`: `/api/world` 생성 모델과 참조 이미지 저장.
-- `WORLD_SKIN_WASM_PATH`: 얼굴 스킨 가중치 후처리용 `gaesup_core.wasm` 경로. 파일이 없으면 해당 단계는 `no_change`로 건너뜁니다.
+- `CHARACTER_DATABASE_URL`: 작업·캐릭터·생성·설계도 기록과 요청 영수증(저장 이름공간의 `.json`)을 S3 대신 PostgreSQL에 둡니다. 아래 "기록 데이터베이스"를 보세요.
 - `ASSET_DATA_ROOT`는 기본 루트 `backend/data/`를, `CHARACTER_OWNER_ID`는 기존 manifest 소유자(기본 1)를, `BLENDER_EXECUTABLE`은 Blender 경로를 지정합니다. 미지정 시 PATH와 Windows 기본 설치 위치를 탐색합니다.
 
-PostgreSQL 스키마는 `backend/migrations/001_postgresql_3d_schema.up.sql`에 있습니다. DB를 사용할 때 서버 시작 전에 적용하세요. API 요청 중에는 스키마를 자동 생성하지 않습니다.
+## 기록 데이터베이스
+
+`CHARACTER_DATABASE_URL`이 있으면 `avatar-factory/`, `avatar-blueprints/`, `characters/` 아래의 `.json` 기록은 `character_records.records`에 저장 접두사(`ASSET_S3_PREFIX`)와 데이터 루트 기준 경로로 들어갑니다. 행은 서버가 쓴 바이트를 그대로 담아 해시가 S3 시절과 같고, JSON이면 `doc`(jsonb)으로도 조회할 수 있습니다(`character_records.jobs` 뷰). GLB·PNG·blend 같은 산출물은 그대로 S3에 둡니다. 1 MiB를 넘는 기록(이미지 응답 영수증)은 바이트를 S3 `<접두사>/record-blobs/<sha256>.json`에 두고 행이 가리킵니다. 변수가 비어 있으면 모든 기록을 예전처럼 S3에 둡니다.
+
+전환은 서버를 멈춘 상태에서 합니다. 가져오기는 S3에 쓰거나 지우지 않고, 같은 행은 건너뛰며, 가져온 뒤 데이터베이스에서 바뀐 행은 덮어쓰지 않고 차이로 보고합니다. 가져오지 않은 접두사의 기록은 빈 목록으로 보이지 않고 거부됩니다.
 
 ```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-  -f backend/migrations/001_postgresql_3d_schema.up.sql
+uv run python -m src.records migrate                      # 스키마(backend/migrations) 적용, 반복 실행 가능
+uv run python -m src.records import --prefix assets --dry-run
+uv run python -m src.records import --prefix assets
+uv run python -m src.records status
 ```
+
+되돌릴 때는 서버를 멈추고 `uv run python -m src.records export --prefix assets`로 전환 뒤 생기거나 바뀐 기록을 S3에 다시 쓴 다음 `CHARACTER_DATABASE_URL`을 비웁니다. 운영 컨테이너는 이 값을 provider secret(JSON)에서 받습니다. `scripts/dev.ps1 -Character`는 compose PostgreSQL(127.0.0.1:55432)에 `mogaesup_character`를 만들고 스키마를 적용해 이 서버에만 넘깁니다.
 
 ## 빌드
 
@@ -99,3 +104,7 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
 3. 스택 파라미터 `PublicStudio=true`, `CloudFrontPrefixListId=<위 값>`, `InstanceType=c7i.xlarge`로 배포합니다.
 
 `StudioUrl` 출력(`https://….cloudfront.net`)이 Rust 서버의 `FACTORY_URL`입니다. 80 포트는 CloudFront만 받고, 그 앞의 CloudFront Function(`server/scripts/lock-studio.py`)이 게이트웨이 키나 주인 IP만 통과시킵니다. 스택을 다시 배포하면 이 함수가 떨어지므로 스크립트를 다시 실행합니다. 실행 중인 컨테이너는 다음 배포 때 secret을 다시 읽습니다.
+
+### 쉬면 끄기
+
+인스턴스는 2시간 동안 요청이 없으면 스스로 꺼지고(`systemctl poweroff`, EBS라 중지되며 Elastic IP는 남습니다), 앱 서버가 다음 스튜디오 요청 때 켭니다(`STUDIO_INSTANCE_ID`, `server/src/studio_power.rs`). `infra/idle-stop.sh`를 `asset-studio-idle.timer`가 5분마다 돌리고, 판단은 `journalctl -u asset-studio-idle`에 남습니다. 켠 지 30분 안, 배포 중, `/api/health`의 `paid_requests`·`running_tasks`가 0이 아니거나 읽히지 않으면 끄지 않습니다. 쉰 시간은 nginx가 남긴 마지막 요청(`/var/log/asset-studio/activity.log`, 상태 확인·`version.json` 제외), 마지막으로 일을 본 때, 컨테이너 시작, 부팅 중 늦은 것부터 잽니다. `deploy-on-instance.sh`가 배포마다 설치·갱신하며, 배포 없이 한 번 설치하려면 SSM으로 스크립트를 보내 `bash idle-stop.sh install`을 실행합니다. 설정은 `/etc/asset-studio-idle.env`(`IDLE_STOP_MINUTES=120`, `IDLE_BOOT_GRACE_MINUTES=30`, 계속 켜 두려면 `IDLE_STOP=off`)입니다.

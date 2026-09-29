@@ -50,9 +50,8 @@ def start_api() -> subprocess.Popen:
         **os.environ,
         'ASSET_AUTO_RESUME': '0',
         'ASSET_S3_PREFIX': 'mogaesup-props',
-        # The studio flow never needs the signight database; make any stray use fail fast instead of touching it.
-        'DB_HOST': '127.0.0.1',
-        'DB_PORT': '9',
+        # Props are a sandbox: their records stay in S3 under their own prefix, never in the studio's record database.
+        'CHARACTER_DATABASE_URL': '',
     }
     log = open(HERE / 'api.log', 'wb')
     process = subprocess.Popen(

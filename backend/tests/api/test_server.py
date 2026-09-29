@@ -1,24 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from src.api import server
 
 # The Rust server's studio gateway forwards exactly these families (server/src/factory.rs).
 GATEWAY_PREFIXES = ("/api/avatar-factory/", "/api/studio/", "/api/avatar-blueprints/", "/api/characters")
-
-WORLD_OPERATIONS = {
-    ("POST", "/api/world/textures/generate"),
-    ("POST", "/api/world/generate"),
-    ("GET", "/api/world/jobs/{job_id}"),
-    ("GET", "/api/world/jobs/{job_id}/stream"),
-    ("GET", "/api/world/animations/catalog"),
-    ("GET", "/api/world/assets"),
-    ("PATCH", "/api/world/assets/{asset_id}"),
-    ("DELETE", "/api/world/assets/{asset_id}"),
-    ("GET", "/api/world/assets/{asset_id}/model"),
-    ("GET", "/api/world/assets/{asset_id}/animations/{clip_index}/model"),
-    ("POST", "/api/world/placements"),
-    ("GET", "/api/world/placements/latest"),
-}
 
 CHARACTER_OPERATIONS = {
     ("GET", "/api/characters"),
@@ -84,12 +71,13 @@ def operations() -> set[tuple[str, str]]:
     }
 
 
-def test_app_serves_only_health_world_and_gateway_routes():
+def test_app_serves_only_health_and_gateway_routes():
     paths = {path for _, path in operations()}
 
     assert {"/health", "/api/health"} <= paths
-    assert all(path in {"/health", "/api/health"} or path.startswith(("/api/world/", *GATEWAY_PREFIXES))
-               for path in paths)
+    assert all(path in {"/health", "/api/health"} or path.startswith(GATEWAY_PREFIXES) for path in paths)
+    # The legacy world API and its external database left with nothing calling them.
+    assert not any(path.startswith("/api/world") for path in paths)
     # The standalone studio screen's avatar API and CORS left with the move behind the gateway.
     assert not any(path.startswith("/api/avatars") for path in paths)
     assert not any(middleware.cls.__name__ == "CORSMiddleware" for middleware in server.app.user_middleware)
@@ -99,15 +87,13 @@ def test_app_keeps_routes_that_callers_depend_on():
     current = operations()
 
     assert {("GET", "/health"), ("GET", "/api/health")} <= current
-    assert WORLD_OPERATIONS <= current
     assert CHARACTER_OPERATIONS <= current
     assert FACTORY_OPERATIONS <= current
     assert CALLER_OPERATIONS <= current
 
 
-def test_health_reports_optional_database(monkeypatch):
-    monkeypatch.setattr(server.db, "is_configured", lambda: False)
-    monkeypatch.setattr(server.db, "ping", lambda: {"configured": False, "ok": False})
+def test_health_without_a_record_database_pings_nothing(monkeypatch):
+    monkeypatch.setattr(server.record_store, "ping", lambda: pytest.fail("no database is configured"))
 
     health = server.health()
 
@@ -118,9 +104,9 @@ def test_health_reports_optional_database(monkeypatch):
 
 
 def test_health_degrades_without_exposing_database_errors(monkeypatch):
+    monkeypatch.setenv("CHARACTER_DATABASE_URL", "postgresql://fixture@127.0.0.1:9/records")
     monkeypatch.setattr(server, "_DB_STATUS", {"value": None, "at": 0.0, "running": False})
-    monkeypatch.setattr(server.db, "is_configured", lambda: True)
-    monkeypatch.setattr(server.db, "ping", lambda: {
+    monkeypatch.setattr(server.record_store, "ping", lambda: {
         "configured": True, "ok": False, "error": "connection to db.internal failed for user fixture"})
 
     server._refresh_database_status()

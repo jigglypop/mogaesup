@@ -73,5 +73,4 @@ def recover(pipeline, character_id, user_id, operation_id, revision):
         if "busy" in str(exc):
             raise PipelineError("busy", "다른 요청이 작업 잠금을 확인 중입니다. 잠시 후 다시 확인해 주세요.") from exc
         raise
-    pipeline.sync_storage(character_id, user_id)
     return pipeline.public_operation(operation)

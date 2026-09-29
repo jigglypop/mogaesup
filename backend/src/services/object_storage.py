@@ -1,4 +1,9 @@
-"""S3 is durable storage; filesystem paths are logical keys or Blender scratch files."""
+"""S3 is durable storage; filesystem paths are logical keys or Blender scratch files.
+
+With CHARACTER_DATABASE_URL set, the `.json` records of the same namespaces live in PostgreSQL
+(src.services.record_store) and only binary artifacts stay in S3. The database alone then decides
+whether a record exists: JSON objects that the import left in S3 are never read or listed again.
+"""
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
@@ -12,6 +17,8 @@ from pathlib import Path as LocalPath, PurePosixPath
 import stat
 from threading import RLock
 import time
+
+from src.services import record_store
 
 _working = ContextVar('asset_workspaces', default=())
 _cache = {}
@@ -81,9 +88,39 @@ def _location(path):
         return None
     if path.name.endswith(('.lock', '.lock.guard', '.tmp')) or '.locks' in relative.parts:
         return None
-    prefix = os.getenv('ASSET_S3_PREFIX', 'assets').strip('/')
-    key = '/'.join(filter(None, (prefix, relative.as_posix())))
+    key = '/'.join(filter(None, (_prefix(), relative.as_posix())))
     return bucket, key
+
+
+def _prefix():
+    return os.getenv('ASSET_S3_PREFIX', 'assets').strip('/')
+
+
+def _logical(path):
+    """(storage prefix, path below the data root) of a stored path, or None."""
+    location = _location(path)
+    if not location:
+        return None
+    prefix = _prefix()
+    return prefix, location[1][len(prefix) + 1:] if prefix else location[1]
+
+
+def _record(path):
+    """The (prefix, path) key of a JSON record kept in the record database, or None."""
+    if LocalPath(path).suffix != '.json' or not record_store.configured():
+        return None
+    return _logical(path)
+
+
+def _record_key(key):
+    """An S3 key whose file now lives in the record database; S3 listings skip it."""
+    return key.endswith('.json') and record_store.configured()
+
+
+def record_blob_key(prefix, digest):
+    """Content-addressed S3 key for the bytes of a record above record_store.INLINE_LIMIT.
+    It sits outside the mapped namespaces, so no listing of a job ever sees it."""
+    return '/'.join(filter(None, (prefix, 'record-blobs', f'{digest}.json')))
 
 
 def _s3():
@@ -179,13 +216,49 @@ def _put(path, content, *, exclusive=False):
         mark_changed(path)  # A reader that started before completion must not cache the old value.
 
 
-def _put_object(path, content, *, exclusive=False):
-    bucket, key = _location(path)
+def _upload(bucket, key, content, mime, *, exclusive=False):
     digest = hashlib.sha256(content).digest()
-    mime = _content_type(path)
     _s3().put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime,
                      Metadata={'sha256': digest.hex()}, ChecksumSHA256=base64.b64encode(digest).decode('ascii'),
                      ServerSideEncryption='AES256', **({'IfNoneMatch': '*'} if exclusive else {}))
+
+
+def _put_record(record, content, *, exclusive=False):
+    prefix, path = record
+    digest = hashlib.sha256(content).hexdigest()
+    if len(content) <= record_store.INLINE_LIMIT:
+        record_store.put(prefix, path, content=content, size=len(content), sha256=digest, exclusive=exclusive)
+        return
+    record_store.require(prefix)
+    blob = record_blob_key(prefix, digest)
+    # Bytes first, row second: a row never points at a blob that is not there yet.
+    _upload(os.getenv('ASSET_S3_BUCKET', '').strip(), blob, content, 'application/json')
+    record_store.put(prefix, path, blob_key=blob, size=len(content), sha256=digest, exclusive=exclusive)
+
+
+def _read_record(record):
+    """The record's bytes, or None when the database has no such record."""
+    found = record_store.fetch(*record)
+    if found is None:
+        return None
+    meta, content = found
+    if content is not None:
+        return content
+    response = _s3().get_object(Bucket=os.getenv('ASSET_S3_BUCKET', '').strip(), Key=meta.blob_key)
+    with response['Body'] as body:
+        content = body.read()
+    if hashlib.sha256(content).hexdigest() != meta.sha256:
+        raise ValueError('Stored record bytes do not match their record')
+    return content
+
+
+def _put_object(path, content, *, exclusive=False):
+    record = _record(path)
+    if record:
+        _put_record(record, content, exclusive=exclusive)
+        return
+    bucket, key = _location(path)
+    _upload(bucket, key, content, _content_type(path), exclusive=exclusive)
     with _cache_lock:
         _cache.pop((bucket, key), None)
         _content_cache.pop((bucket, key), None)
@@ -217,12 +290,16 @@ class _Upload(io.BytesIO):
         self.exclusive = exclusive
 
     def close(self):
-        if not self.closed:
+        if self.closed:
+            return
+        try:
             if self.exclusive:
                 _put(self.path, self.getvalue(), exclusive=True)
             else:
                 self.path.write_bytes(self.getvalue())
-        super().close()
+        finally:
+            # A failed write is reported once; garbage collection must not send it again.
+            super().close()
 
 
 class StoredPath(type(LocalPath())):
@@ -230,6 +307,10 @@ class StoredPath(type(LocalPath())):
     def read_bytes(self):
         if not _location(self) or _is_working(self):
             return LocalPath(self).read_bytes()
+        record = _record(self)
+        if record:
+            content = _read_record(record)
+            return LocalPath(self).read_bytes() if content is None else content
         if not _listed(self):
             return LocalPath(self).read_bytes()
         bucket, key = _location(self)
@@ -278,6 +359,9 @@ class StoredPath(type(LocalPath())):
     def is_file(self):
         if not _location(self) or _is_working(self):
             return LocalPath(self).is_file()
+        record = _record(self)
+        if record:
+            return record_store.head(*record) is not None or LocalPath(self).is_file()
         if not _listed(self):
             return LocalPath(self).is_file()
         return bool(_head(self)) or LocalPath(self).is_file()
@@ -291,11 +375,25 @@ class StoredPath(type(LocalPath())):
         location = _location(self)
         if not location or _is_working(self):
             return False
-        return bool(_s3().list_objects_v2(Bucket=location[0], Prefix=location[1].rstrip('/')+'/', MaxKeys=1).get('Contents'))
+        prefix = location[1].rstrip('/')+'/'
+        if record_store.configured():
+            namespace, directory = _logical(self)
+            if record_store.exists_under(namespace, directory.rstrip('/')+'/'):
+                return True
+            # A record path is never a directory of artifacts: exists() on a missing record stays off S3.
+            return not _record(self) and _holds_artifacts(location[0], prefix)
+        return bool(_s3().list_objects_v2(Bucket=location[0], Prefix=prefix, MaxKeys=1).get('Contents'))
 
     def stat(self, *, follow_symlinks=True):
         if not _location(self) or _is_working(self):
             return LocalPath(self).stat(follow_symlinks=follow_symlinks)
+        record = _record(self)
+        if record:
+            meta = record_store.head(*record)
+            if not meta:
+                return LocalPath(self).stat(follow_symlinks=follow_symlinks)
+            timestamp = meta.updated_at.timestamp()
+            return os.stat_result((stat.S_IFREG | 0o444, 0, 0, 1, 0, 0, meta.size, timestamp, timestamp, timestamp))
         if not _listed(self):
             return LocalPath(self).stat(follow_symlinks=follow_symlinks)
         head = _head(self)
@@ -321,16 +419,19 @@ class StoredPath(type(LocalPath())):
         found = {StoredPath(p) for p in LocalPath(self).glob(pattern)}
         location = _location(self)
         if location and not _is_working(self):
-            prefix = location[1].rstrip('/')+'/'
-            for key in _keys(location[0], prefix):
-                relative = key[len(prefix):]
-                if '..' in PurePosixPath(relative).parts:
-                    continue
-                patterns = [pattern]
-                while patterns[-1].startswith('**/'):
-                    patterns.append(patterns[-1][3:])
-                if any(PurePosixPath(relative).match(p) for p in patterns) and ('**' in pattern or len(PurePosixPath(relative).parts) == len(PurePosixPath(pattern).parts)):
-                    found.add(self/relative)
+            records = record_store.configured()
+            # Only records can match a pattern ending in .json: no S3 listing for those.
+            if not (records and pattern.endswith('.json')):
+                prefix = location[1].rstrip('/')+'/'
+                for key in _keys(location[0], prefix):
+                    if not _record_key(key) and _glob_match(key[len(prefix):], pattern):
+                        found.add(self/key[len(prefix):])
+            if records:
+                namespace, directory = _logical(self)
+                directory = directory.rstrip('/')+'/'
+                for path in record_store.listing(namespace, directory):
+                    if _glob_match(path[len(directory):], pattern):
+                        found.add(self/path[len(directory):])
         yield from sorted(found)
 
     def rglob(self, pattern):
@@ -341,6 +442,16 @@ class StoredPath(type(LocalPath())):
         if not _location(self) or _is_working(self):
             LocalPath(self).replace(target)
             return target
+        source, destination = _record(self), None if _is_working(target) else _record(target)
+        if source and destination and source[0] == destination[0]:
+            mark_changed(self); mark_changed(target)
+            try:
+                record_store.move(source[0], source[1], destination[1])
+                return target
+            except FileNotFoundError:
+                pass  # Not in the database: a legacy local file, copied below like any other.
+            finally:
+                mark_changed(self); mark_changed(target)
         target.write_bytes(self.read_bytes())
         self.unlink()
         return target
@@ -356,6 +467,12 @@ class StoredPath(type(LocalPath())):
         location = _location(self)
         if not location or _is_working(self):
             return LocalPath(self).unlink(missing_ok=missing_ok)
+        record = _record(self)
+        if record:
+            # Bytes above INLINE_LIMIT stay in their content-addressed blob; other rows may share it.
+            if record_store.delete(*record) is None and not missing_ok:
+                raise FileNotFoundError(str(self))
+            return
         if not missing_ok and not _head(self):
             raise FileNotFoundError(str(self))
         _s3().delete_object(Bucket=location[0], Key=location[1])
@@ -369,6 +486,24 @@ class StoredPath(type(LocalPath())):
                     keys.discard(location[1])
 
 
+def _glob_match(relative, pattern):
+    if '..' in PurePosixPath(relative).parts:
+        return False
+    patterns = [pattern]
+    while patterns[-1].startswith('**/'):
+        patterns.append(patterns[-1][3:])
+    return any(PurePosixPath(relative).match(p) for p in patterns) and (
+        '**' in pattern or len(PurePosixPath(relative).parts) == len(PurePosixPath(pattern).parts))
+
+
+def _holds_artifacts(bucket, prefix):
+    """True when S3 holds a file under the prefix other than JSON left behind by the record import."""
+    for page in _s3().get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
+        if any(not _record_key(item['Key']) for item in page.get('Contents', [])):
+            return True
+    return False
+
+
 def child_names(path):
     """Immediate child directory names, local and stored, without listing their contents."""
     path = StoredPath(path)
@@ -377,8 +512,17 @@ def child_names(path):
     location = _location(path)
     if location and not _is_working(path):
         prefix = location[1].rstrip('/')+'/'
+        listed = set()
         for page in _s3().get_paginator('list_objects_v2').paginate(Bucket=location[0], Prefix=prefix, Delimiter='/'):
-            names.update(item['Prefix'][len(prefix):].rstrip('/') for item in page.get('CommonPrefixes', []))
+            listed.update(item['Prefix'][len(prefix):].rstrip('/') for item in page.get('CommonPrefixes', []))
+        if record_store.configured():
+            namespace, directory = _logical(path)
+            stored = record_store.children(namespace, directory.rstrip('/')+'/')
+            # A directory that S3 lists only for its imported JSON no longer exists.
+            listed = {name for name in listed
+                      if name in stored or name in names or _holds_artifacts(location[0], f'{prefix}{name}/')}
+            names |= stored
+        names |= listed
     return sorted(names)
 
 
@@ -395,7 +539,9 @@ def copy_file(source, target):
 def _server_copy(source, target):
     """Copy inside S3 without moving the bytes through this host; False to fall back."""
     origin, destination = _location(source), _location(target)
-    if not origin or not destination or _is_working(source) or _is_working(target) or not _listed(source):
+    if not origin or not destination or _is_working(source) or _is_working(target):
+        return False
+    if _record(source) or _record(target) or not _listed(source):
         return False
     from botocore.exceptions import BotoCoreError, ClientError
     mark_changed(target)
@@ -424,7 +570,16 @@ def read_byte_range(path, start, length, *, etag=None):
     if start < 0 or not 0 < length <= 4 * 1024 * 1024:
         raise ValueError('Invalid metadata range')
     location = _location(path)
-    if location and not _is_working(path):
+    record = _record(path) if location and not _is_working(path) else None
+    found = record_store.fetch(*record) if record else None
+    if found:
+        meta = found[0]
+        identity = f'"{meta.sha256}:{meta.version}"'
+        if etag and identity != etag:
+            raise ValueError('Model changed during metadata read')
+        content = StoredPath(path).read_bytes()[start:start + length]
+        total, checksum = meta.size, meta.sha256
+    elif location and not _is_working(path) and not record:
         response = _s3().get_object(Bucket=location[0], Key=location[1],
             Range=f'bytes={start}-{start + length - 1}', **({'IfMatch': etag} if etag else {}))
         with response['Body'] as body:
@@ -455,7 +610,12 @@ def publish_checkpoint(path):
 
 def sha256(path):
     path = StoredPath(path)
-    head = _head(path) if not _is_working(path) else None
+    record = _record(path) if not _is_working(path) else None
+    if record:
+        meta = record_store.head(*record)
+        if meta:
+            return meta.sha256
+    head = _head(path) if not _is_working(path) and not record else None
     if head and head.get('ChecksumSHA256') and head.get('ChecksumType', 'FULL_OBJECT') == 'FULL_OBJECT':
         return base64.b64decode(head['ChecksumSHA256'], validate=True).hex()
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -470,10 +630,20 @@ def copy_tree(source, target):
 
 
 def artifact_response(path, **kwargs):
-    from fastapi.responses import FileResponse, RedirectResponse
+    from fastapi.responses import FileResponse, RedirectResponse, Response
     path = StoredPath(path)
     location = _location(path)
-    if location and _head(path):
+    record = _record(path)
+    found = record_store.fetch(*record) if record else None
+    if found and found[1] is not None:
+        headers = {'Cache-Control': 'private, no-store'}
+        if kwargs.get('filename'):
+            from urllib.parse import quote
+            headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{quote(kwargs['filename'])}"
+        return Response(found[1], media_type=kwargs.get('media_type') or _content_type(path), headers=headers)
+    if found:
+        location = location[0], found[0].blob_key
+    if found or (location and not record and _head(path)):
         params = {'Bucket': location[0], 'Key': location[1],
                   'ResponseContentType': kwargs.get('media_type') or _content_type(path)}
         if kwargs.get('filename'):

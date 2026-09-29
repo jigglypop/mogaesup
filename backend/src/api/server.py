@@ -1,4 +1,4 @@
-"""FastAPI application exposing only the 3D world API."""
+"""FastAPI application for the character server: the studio gateway's API families and health."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from src.paths import load_environment
 
 load_environment()
 
-from src import db
 from src.api.observability import (
     attach_request_id,
     ensure_request_id,
@@ -26,7 +25,6 @@ from src.api.observability import (
     unhandled_exception_handler,
     validation_exception_handler,
 )
-from src.api.world import router as world_router
 from src.api.characters import router as character_router, pipeline_error_handler
 from src.api.avatar_factory import router as factory_router
 from src.api.avatar_part_batches import router as part_batch_router
@@ -37,6 +35,7 @@ from src.services.character_pipeline import PipelineError
 from src.services.runtime_activity import ActivityMiddleware, snapshot as activity_snapshot
 from src.auth import is_public_path
 from src.runtime_identity import runtime_identity
+from src.services import record_store
 
 
 logger = logging.getLogger(__name__)
@@ -53,8 +52,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="3D Asset API",
-    description="3D world asset generation, storage, and delivery",
+    title="Character API",
+    description="Character production, storage, and delivery behind the studio gateway",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -101,19 +100,20 @@ _DB_STATUS_LOCK = threading.Lock()
 def _public_database_status(value: dict) -> dict:
     """/health is public: report the state only, never the driver's error text."""
     if value.get("error"):
-        logger.warning("database health check failed: %s", value["error"])
+        logger.warning("record database health check failed: %s", value["error"])
     return {key: value[key] for key in ("configured", "ok") if key in value}
 
 
 def _refresh_database_status() -> None:
-    value = _public_database_status(db.ping())
+    value = _public_database_status(record_store.ping())
     with _DB_STATUS_LOCK:
         _DB_STATUS.update(value=value, at=time.monotonic(), running=False)
 
 
 def _database_status() -> dict:
-    if not db.is_configured():
-        return _public_database_status(db.ping())
+    """The record database (CHARACTER_DATABASE_URL) is the only database this server uses."""
+    if not record_store.configured():
+        return {"configured": False, "ok": False}
     # An unreachable database host takes seconds to fail; /health answers from the last check
     # and refreshes it in the background so local launchers can still identify this server.
     with _DB_STATUS_LOCK:
@@ -121,7 +121,7 @@ def _database_status() -> dict:
         if (value is None or time.monotonic() - _DB_STATUS["at"] >= 30) and not _DB_STATUS["running"]:
             _DB_STATUS["running"] = True
             threading.Thread(target=_refresh_database_status, name="db-health", daemon=True).start()
-    return value or {"configured": db.is_configured(), "ok": None, "checking": True}
+    return value or {"configured": True, "ok": None, "checking": True}
 
 
 def health() -> dict:
@@ -146,7 +146,6 @@ def api_health() -> dict:
 # Outermost: a request stays counted until its background tasks finish (see /health activity).
 app.add_middleware(ActivityMiddleware)
 
-app.include_router(world_router, prefix="/api")
 app.include_router(character_router, prefix="/api")
 app.include_router(factory_router, prefix="/api")
 app.include_router(part_batch_router, prefix="/api")

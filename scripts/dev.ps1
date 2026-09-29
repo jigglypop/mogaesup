@@ -7,8 +7,10 @@ character server behind the server's studio gateway.
 Each service starts hidden with its log in .data/dev/<name>.log; one already listening on its port is kept as it is.
 With -Character the character server (backend/, from the root uv environment) runs on 127.0.0.1:8016 with auto-resume
 off, and the Rust server gets FACTORY_URL plus the API key and JWT settings from backend/.env (read here, never
-printed), so /admin imports and /studio work end to end. Admins may change studio records (FACTORY_ACCESS=write); paid
-studio work stays blocked unless -Paid, capped at -PaidMonthly requests. backend/.env holds production keys: only use
+printed), so /admin imports and /studio work end to end. The character server alone gets CHARACTER_DATABASE_URL: its
+records live in mogaesup_character on the compose PostgreSQL, created and migrated here; copy the records of its
+storage prefix in once with `uv run python -m src.records import --prefix <prefix>` while it is stopped. Admins may
+change studio records (FACTORY_ACCESS=write); paid studio work stays blocked unless -Paid, capped at -PaidMonthly requests. backend/.env holds production keys: only use
 -Character when you mean to reach them, and -Paid when you mean to spend. -Stop ends what this script started.
 
 .EXAMPLE
@@ -76,6 +78,7 @@ function Start-DevProcess([string]$Name, [int]$Port, [string]$File, [string[]]$A
 $factoryKeys = @('FACTORY_URL', 'FACTORY_API_KEY', 'FACTORY_JWT_SECRET', 'FACTORY_JWT_ISSUER', 'FACTORY_JWT_AUDIENCE', 'FACTORY_ACCESS', 'FACTORY_PAID_MONTHLY', 'ASSET_AUTO_RESUME')
 $saved = @{}
 foreach ($key in $factoryKeys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }
+$savedRecords = [Environment]::GetEnvironmentVariable('CHARACTER_DATABASE_URL', 'Process')
 try {
   $serverArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'server\scripts\start-rust-server.ps1'))
   if ($Character) {
@@ -85,7 +88,23 @@ try {
     }
     # Stages a previous run left unfinished are not resumed by a dev start: that would be paid work nobody asked for.
     $env:ASSET_AUTO_RESUME = '0'
+    if (-not (Test-Listening 8016)) {
+      # Character records live in a local database (mogaesup_character) on the compose PostgreSQL.
+      $ErrorActionPreference = 'Continue'
+      & docker compose -f (Join-Path $root 'server\docker-compose.yml') up -d --wait postgres
+      $ErrorActionPreference = 'Stop'
+      if ($LASTEXITCODE -ne 0) { throw 'Local PostgreSQL (docker compose) did not start.' }
+      $password = if ($env:POSTGRES_PASSWORD) { $env:POSTGRES_PASSWORD } else { 'postgres-dev' }
+      $env:CHARACTER_DATABASE_URL = "postgresql://postgres:$password@127.0.0.1:55432/mogaesup_character"
+      & uv run python -m src.records migrate --create-database
+      if ($LASTEXITCODE -ne 0) { throw 'Character record database migration failed.' }
+      # A prefix whose records were never imported is refused; status names the import command.
+      $prefix = if ($values.ContainsKey('ASSET_S3_PREFIX')) { $values['ASSET_S3_PREFIX'] } else { 'assets' }
+      & uv run python -m src.records status --prefix $prefix
+    }
     Start-DevProcess 'character' 8016 'uv' @('run', 'python', '-m', 'uvicorn', 'src.api.server:app', '--host', '127.0.0.1', '--port', '8016')
+    # The record database is the character server's alone.
+    [Environment]::SetEnvironmentVariable('CHARACTER_DATABASE_URL', $savedRecords, 'Process')
     $env:FACTORY_API_KEY = $values['API_KEY']
     $env:FACTORY_JWT_SECRET = $values['JWT_SECRET']
     if ($values['JWT_ISSUER']) { $env:FACTORY_JWT_ISSUER = $values['JWT_ISSUER'] }
@@ -99,6 +118,7 @@ try {
 } finally {
   # The children have their copies; this shell does not keep the secrets.
   foreach ($key in $factoryKeys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
+  [Environment]::SetEnvironmentVariable('CHARACTER_DATABASE_URL', $savedRecords, 'Process')
 }
 
 $checks = @()

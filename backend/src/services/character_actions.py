@@ -170,5 +170,3 @@ def execute(pipeline: CharacterPipeline, character_id: str, user_id: int, operat
         status = "recovery_required" if provider.get("status") == "submission_uncertain" or uncertain else "failed"
         operation.update(status=status, updated_at=now(), error={"code": code, "message": message})
         _write_json(path, operation)
-    finally:
-        pipeline.sync_storage(character_id, user_id)

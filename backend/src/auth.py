@@ -10,14 +10,8 @@ from fastapi import HTTPException, Request, status
 
 logger = logging.getLogger(__name__)
 
-_ROLE_TO_LEVEL: dict[str, int] = {
-    "L1": 1, "ROOT": 1,
-    "L2": 2, "ADMIN": 2,
-    "L3": 3, "COORDINATOR": 3, "CHAIR": 3, "MANAGER": 3,
-    "L4": 4, "VICE_CHAIR": 4, "VICE_COORDINATOR": 4, "LEADER": 4,
-    "L5": 5, "MEMBER": 5,
-    "L6": 6, "USER": 6,
-}
+# The Rust server's studio gateway signs its operator tokens with roles ["ADMIN"] (server/src/factory.rs).
+_ADMIN_LEVEL = 2
 
 _DEFAULT_PUBLIC_PATHS = (
     "/health",
@@ -28,15 +22,15 @@ _DEFAULT_PUBLIC_PATHS = (
 class UserContext:
     __slots__ = ("user_id", "username", "roles", "level")
 
-    def __init__(self, user_id: int, username: str, roles: list[str], level: Optional[int] = None):
+    def __init__(self, user_id: int, username: str, roles: list[str]):
         self.user_id = user_id
         self.username = username
         self.roles = roles
-        self.level = level if level is not None else _compute_level(roles)
+        self.level = _compute_level(roles)
+
 
 def _compute_level(roles: Iterable[str]) -> Optional[int]:
-    levels = [_ROLE_TO_LEVEL[r.upper()] for r in roles if r and r.upper() in _ROLE_TO_LEVEL]
-    return min(levels) if levels else None
+    return _ADMIN_LEVEL if any(str(role).upper() == "ADMIN" for role in roles) else None
 
 
 _PLACEHOLDER_SECRET_MARKERS = (
@@ -75,17 +69,12 @@ def _resolve_secret() -> bytes:
 
 
 def _bearer_token(request: Request) -> str:
+    """The Authorization header only; tokens in query strings end up in access logs."""
     header = request.headers.get("authorization") or ""
-    if header:
-        parts = header.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() == "bearer":
-            return parts[1].strip()
-        return header.strip()
-    try:
-        query_token = request.query_params.get("access_token") or request.query_params.get("token") or ""
-    except KeyError:
-        query_token = ""
-    return query_token.strip()
+    parts = header.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return header.strip()
 
 
 def _public_path_patterns() -> list[str]:
@@ -117,15 +106,16 @@ def _local_dev_user(request: Request) -> Optional[UserContext]:
         user_id = int(raw_user_id)
     except ValueError:
         return None
-    return UserContext(user_id=user_id, username=f"dev:{user_id}", roles=["ROOT", "ADMIN"], level=1)
+    return UserContext(user_id=user_id, username=f"dev:{user_id}", roles=["ADMIN"])
 
 
 def _decode_claims(token: str) -> dict:
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing JWT")
     secret = _resolve_secret()
-    issuer = (os.getenv("JWT_ISSUER") or "signight").strip()
-    audience = (os.getenv("JWT_AUDIENCE") or "signight-client").strip()
+    # Same defaults as the Rust server's FACTORY_JWT_ISSUER / FACTORY_JWT_AUDIENCE (server/src/config.rs).
+    issuer = (os.getenv("JWT_ISSUER") or "mogaesup").strip()
+    audience = (os.getenv("JWT_AUDIENCE") or "mogaesup-client").strip()
     try:
         claims = pyjwt.decode(
             token,
@@ -177,22 +167,6 @@ def _extract_roles(claims: dict) -> list[str]:
     return []
 
 
-def _extract_level(claims: dict) -> Optional[int]:
-    raw = claims.get("level")
-    if not raw:
-        return None
-    s = str(raw).strip().upper()
-    if s.startswith("L"):
-        try:
-            return int(s[1:])
-        except ValueError:
-            return None
-    try:
-        return int(s)
-    except ValueError:
-        return None
-
-
 def get_current_user(request: Request) -> UserContext:
     """FastAPI Depends 용. JWT 를 검증하고 UserContext 반환."""
     dev_user = _local_dev_user(request)
@@ -202,6 +176,4 @@ def get_current_user(request: Request) -> UserContext:
     claims = _decode_claims(token)
     user_id = _extract_user_id(claims)
     username = str(claims.get("sub") or "")
-    roles = _extract_roles(claims)
-    level = _extract_level(claims)
-    return UserContext(user_id=user_id, username=username, roles=roles, level=level)
+    return UserContext(user_id=user_id, username=username, roles=_extract_roles(claims))

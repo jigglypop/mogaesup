@@ -49,10 +49,6 @@ class CharacterPipeline:
         self.port, self.owner = port, owner
         self.instance = uuid.uuid4().hex
 
-    def sync_storage(self, character_id, user_id):
-        from src.services.character_store import sync_after_change
-        sync_after_change(self, character_id, user_id)
-
     def resolve(self, value: str) -> Path:
         path = Path(value)
         if not path.is_absolute():
@@ -277,7 +273,6 @@ class CharacterPipeline:
             run.mkdir(parents=True, exist_ok=True)
             control.update(values)
             _write_json(run / "control.json", control)
-        self.sync_storage(character_id, user_id)
         return self.detail(character_id, user_id)
 
     def create(self, name: str, height: float | None, user_id: int):
@@ -289,7 +284,6 @@ class CharacterPipeline:
                                        "owner_id": user_id, "required_parts": ["body", "outfit_base"]})
             self.manifest.parent.mkdir(parents=True, exist_ok=True)
             _write_json(self.manifest, data)
-        self.sync_storage(character_id, user_id)
         return self.detail(character_id, user_id)
 
     def upload(self, character_id, user_id, content: bytes, kind: str, revision: str):
@@ -329,7 +323,6 @@ class CharacterPipeline:
                 control.pop("parts_blend", None)
                 control.pop("rest_render", None)
             _write_json(run / "control.json", control)
-        self.sync_storage(character_id, user_id)
         return self.detail(character_id, user_id)
 
     def artifact(self, character_id, user_id, artifact_id):
@@ -371,7 +364,6 @@ class CharacterPipeline:
             value["image_sha256"] = _digest(reference) if reference else None
             path.parent.mkdir(parents=True, exist_ok=False)
             _write_json(path, value)
-        self.sync_storage(character_id, user_id)
         return self.public_operation(value), True
 
     def operation(self, character_id, user_id, operation_id):
