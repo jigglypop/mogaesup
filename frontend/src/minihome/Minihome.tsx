@@ -39,6 +39,7 @@ import { StatusPanel } from './StatusPanel';
 import { useStored } from './stored';
 import { createVillage } from './village';
 import { createMinihomeRuntime, MINIHOME_WORLD_ID } from './world';
+import { WorldKeyboard } from './WorldKeyboard';
 import { WorldLoading } from './WorldLoading';
 
 // Catalog models and saved islands carry page-relative `gltf/...` URLs; anchor them at the site root for `/@username`.
@@ -283,6 +284,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
             </EditContext.Provider>
           </div>
           <WorldLoading />
+          <WorldKeyboard enabled={!decorating} />
 
           {decorating && session ? (
             <>

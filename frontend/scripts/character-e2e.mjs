@@ -520,8 +520,8 @@ if (browser) {
     'walked',
     'member walks the island with the keyboard',
     async () => {
-      // Keys move the player while the world has focus, as after tabbing into it.
-      await member.locator('.mg-world-canvas canvas').focus();
+      // Nothing focused: the island hands the keyboard to the world by itself (WorldKeyboard), no click needed.
+      await member.evaluate(() => document.activeElement?.blur?.());
       await until(() => position(), 10_000, 'a position from the island');
       const before = position();
       const from = memberSent.length;
