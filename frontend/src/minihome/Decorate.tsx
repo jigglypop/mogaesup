@@ -12,7 +12,7 @@ import {
 
 import type { CatalogItem } from '../api/types';
 import { Icon } from '../ui/icons';
-import { FURNITURE, ISLAND_FLOORS, LIVING, NATURE, SHELVES, type ModelPiece, type Piece, type Shelf } from './edit/catalog';
+import { FARM, FURNITURE, GARDEN, ISLAND_FLOORS, LIVING, NATURE, SHELVES, type ModelPiece, type Piece, type Shelf } from './edit/catalog';
 import { useEditState } from './edit/context';
 import { EditIcon, PieceIcon } from './edit/icons';
 import { EIGHTHS, SelectionInspector, Stepper, Turns } from './edit/Inspector';
@@ -123,7 +123,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
   }, [session]);
 
   const studio = useMemo(() => studioItems.map(studioPiece), [studioItems]);
-  const pieces = useMemo(() => [...FURNITURE, ...LIVING, ...NATURE, ...studio], [studio]);
+  const pieces = useMemo(() => [...FURNITURE, ...LIVING, ...NATURE, ...GARDEN, ...FARM, ...studio], [studio]);
   const current = pieces.find((item) => item.key === piece);
   const selected = selectedId ? objects.find((object) => object.id === selectedId) : undefined;
 
@@ -164,8 +164,9 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
   );
 
   const tiles = (() => {
-    if (shelf === 'furniture' || shelf === 'living' || shelf === 'nature') {
-      const list = shelf === 'furniture' ? FURNITURE : shelf === 'living' ? LIVING : NATURE;
+    const shelves: Partial<Record<Shelf, Piece[]>> = { furniture: FURNITURE, living: LIVING, nature: NATURE, garden: GARDEN, farm: FARM };
+    const list = shelves[shelf];
+    if (list) {
       return list.filter((item) => matches(item.label)).map(pieceButton);
     }
     if (shelf === 'studio') {
