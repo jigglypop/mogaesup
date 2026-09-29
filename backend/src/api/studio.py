@@ -228,13 +228,6 @@ def expressions(job_id: str, version: str, user: UserContext = Depends(get_curre
     return AvatarExpressions(factory, user.user_id, job_id, version).listing()
 
 
-@router.post('/bodies/{job_id}/{version}/expressions/head-parts')
-def derive_expression_heads(job_id: str, version: str, user: UserContext = Depends(get_current_user),
-                            factory=Depends(get_factory)):
-    AvatarExpressions(factory, user.user_id, job_id, version)
-    raise PipelineError('head_replacement_removed', '머리 분리 대신 현재 몸에 표정 텍스처를 적용하세요.', 410)
-
-
 @router.get('/bodies/{job_id}/{version}/expression-heads/{name}')
 def expression_base_head_artifact(job_id: str, version: str, name: Literal['body-without-head.glb', 'base-head.glb'],
                                   user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):

@@ -41,20 +41,14 @@ Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다. `backend/.en
 
 ## API 범위
 
-- `POST /api/world/textures/generate`
-- `POST /api/world/generate`
-- `GET /api/world/jobs/{job_id}`
-- `GET /api/world/jobs/{job_id}/stream`
-- `GET /api/world/animations/catalog`
-- `GET /api/world/assets`
-- `PATCH /api/world/assets/{asset_id}`
-- `DELETE /api/world/assets/{asset_id}`
-- `GET /api/world/assets/{asset_id}/model`
-- `GET /api/world/assets/{asset_id}/animations/{clip_index}/model`
-- `POST /api/world/placements`
-- `GET /api/world/placements/latest`
+앱은 Rust 서버의 스튜디오 게이트웨이(`server/src/factory.rs`)를 거쳐서만 이 서버를 부릅니다.
 
-캐릭터 공장 API는 `/api/avatar-factory/*`입니다. Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있습니다.
+- `/api/avatar-factory/*`, `/api/studio/*`, `/api/avatar-blueprints/*`, `/api/characters/*`: 스튜디오 화면(`frontend/src/character/`)이 쓰는 API입니다. 게이트웨이가 같은 경로로 받아 권한과 유료 한도를 확인한 뒤 운영자로 서명해 넘깁니다.
+- 완성 캐릭터 목록과 카탈로그 가져오기(`server/src/studio.rs`, `server/src/imports.rs`)는 Rust 서버가 `/api/avatar-factory/jobs*`, `/api/studio/catalog`, `/api/studio/bodies/*`와 조립 모델·썸네일을 직접 읽습니다. 브라우저는 모델·썸네일을 관리자용 `/api/factory/*`(이 서버의 `/api/*`로 전달)로 받습니다.
+- `scripts/props/generate.py`는 이 서버를 따로 띄우고 `/api/studio/generations*`를 직접 부릅니다.
+- 상태 확인은 `/health`, `/api/health`입니다.
+
+기존 `/api/world/*`(생성·작업·에셋·배치) API도 남아 있지만 앱은 부르지 않습니다. Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있습니다.
 
 ## 구성
 
@@ -81,7 +75,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
 ```bash
 uv build --package asset-3d-api
 docker build -f backend/Dockerfile -t asset-3d-api .
-docker run --rm -p 8000:8000 --env-file backend/.env asset-3d-api
+docker run --rm -p 8000:8000 --env-file backend/.env -e API_HOST=0.0.0.0 asset-3d-api
 ```
 
 

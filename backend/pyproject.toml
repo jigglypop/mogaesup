@@ -21,7 +21,6 @@ dependencies = [
 
 [project.scripts]
 asset-api = "src.cli:api"
-asset-dev = "src.cli:dev"
 asset-editor = "src.editor_cli:main"
 asset-quality = "src.quality_cli:main"
 

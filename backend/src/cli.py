@@ -11,11 +11,3 @@ def api() -> None:
     load_dotenv()
     configure_logging()
     run_api()
-
-
-def dev() -> None:
-    from main import run_api
-
-    load_dotenv()
-    configure_logging()
-    run_api(reload=True)

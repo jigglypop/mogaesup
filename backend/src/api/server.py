@@ -11,7 +11,6 @@ import time
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 
@@ -21,7 +20,6 @@ load_environment()
 
 from src import db
 from src.api.observability import (
-    REQUEST_ID_HEADER,
     attach_request_id,
     ensure_request_id,
     request_logging_middleware,
@@ -30,7 +28,6 @@ from src.api.observability import (
 )
 from src.api.world import router as world_router
 from src.api.characters import router as character_router, pipeline_error_handler
-from src.api.avatars import router as avatar_router
 from src.api.avatar_factory import router as factory_router
 from src.api.avatar_part_batches import router as part_batch_router
 from src.api.avatar_blueprints import router as blueprint_router
@@ -44,12 +41,6 @@ from src.runtime_identity import runtime_identity
 
 logger = logging.getLogger(__name__)
 _RUNTIME = runtime_identity()
-
-
-def _cors_origins() -> list[str]:
-    raw = os.getenv("CORS_ORIGINS", "*")
-    origins = [item.strip() for item in raw.replace("\n", ",").split(",") if item.strip()]
-    return origins or ["*"]
 
 
 @asynccontextmanager
@@ -94,17 +85,9 @@ async def auth_middleware(request: Request, call_next):
     )
 
 
-# The middleware added last runs first. The API-key check sits inside CORS and request
-# logging so its 401 responses carry CORS headers and are logged like any other response.
+# The middleware added last runs first. The API-key check sits inside request logging
+# so its 401 responses are logged like any other response.
 app.middleware("http")(auth_middleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=[REQUEST_ID_HEADER],
-)
 app.middleware("http")(request_logging_middleware)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
@@ -165,7 +148,6 @@ app.add_middleware(ActivityMiddleware)
 
 app.include_router(world_router, prefix="/api")
 app.include_router(character_router, prefix="/api")
-app.include_router(avatar_router, prefix="/api")
 app.include_router(factory_router, prefix="/api")
 app.include_router(part_batch_router, prefix="/api")
 app.include_router(blueprint_router, prefix="/api")

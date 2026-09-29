@@ -11,7 +11,7 @@ def test_app_preserves_world_routes_and_adds_character_control():
     assert "/api/health" in paths
     assert "/api/world/generate" in paths
     assert all(
-        path in {"/health", "/api/health", "/api/characters"} or path.startswith(("/api/world/", "/api/characters/", "/api/avatars/", "/api/avatar-factory/", "/api/avatar-blueprints/"))
+        path in {"/health", "/api/health", "/api/characters"} or path.startswith(("/api/world/", "/api/characters/", "/api/avatar-factory/", "/api/avatar-blueprints/"))
         for path in paths
     )
 
@@ -72,10 +72,6 @@ def test_app_preserves_world_routes_and_adds_character_control():
         ("POST", "/api/characters/{character_id}/actions/{action_id}"),
         ("GET", "/api/characters/{character_id}/operations/{operation_id}"),
         ("POST", "/api/characters/{character_id}/operations/{operation_id}/recover"),
-        ("GET", "/api/avatars/catalog"),
-        ("GET", "/api/avatars/assets/{asset_id}/model"),
-        ("GET", "/api/avatars/me"),
-        ("PUT", "/api/avatars/me"),
     }
 
 
