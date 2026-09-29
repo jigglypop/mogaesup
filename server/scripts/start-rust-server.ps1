@@ -34,4 +34,11 @@ $env:COOKIE_SECURE = 'false'
 $env:MODEL_STORE = Join-Path $projectRoot 'data/local/models'
 if ($FactoryUrl) { $env:FACTORY_URL = $FactoryUrl }
 if (-not $env:RUST_LOG) { $env:RUST_LOG = 'info' }
-& cargo run
+# Runs a copy of the build, so cargo can rebuild and test while this server runs.
+& cargo build
+if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
+$bin = Join-Path $projectRoot 'data/local/bin'
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
+$exe = Join-Path $bin 'mogaesup-server.exe'
+Copy-Item -LiteralPath (Join-Path $projectRoot 'target/debug/mogaesup-server.exe') -Destination $exe -Force
+& $exe
