@@ -72,6 +72,14 @@ class GenerationInput(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     size: Literal[256, 512, 1024] = 512
     reference_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{24}$')
+    # Props only; omitted means AVATAR_3D_PROVIDER (default meshy). Frozen on the job when it is accepted.
+    provider: Literal['meshy', 'tripo'] | None = None
+
+
+class ResumeInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    # Only for a prop whose 3D step no provider accepted (or may have): sends that step to this provider.
+    provider: Literal['meshy', 'tripo'] | None = None
 
 
 class IllustrationSelectionInput(BaseModel):
@@ -101,10 +109,10 @@ def generate_asset(body: GenerationInput, background: BackgroundTasks, idempoten
 
 
 @router.post('/generations/{job_id}/resume', status_code=202)
-def resume_asset(job_id: str, background: BackgroundTasks,
+def resume_asset(job_id: str, background: BackgroundTasks, body: ResumeInput | None = None,
                  user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = StudioGenerations(factory, user.user_id)
-    record, dispatch = service.resume(job_id)
+    record, dispatch = service.resume(job_id, body.provider if body else None)
     if dispatch:
         background.add_task(service.execute, job_id)
     return record

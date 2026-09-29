@@ -1,0 +1,294 @@
+"""Studio prop generations with Tripo image_to_model beside Meshy, and the provider-switch resume rule.
+
+Every provider is an httpx.MockTransport: Tripo's task API and model CDN, Meshy's image-to-3D. The OpenAI image
+and the short-lived S3 URL of the stored image are faked at the service boundary.
+"""
+import io
+import json
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+import httpx
+from PIL import Image
+import pytest
+
+from api.test_characters import rigged_glb
+from src.api import studio as studio_api
+from src.api.avatar_factory import get_factory
+from src.api.characters import pipeline_error_handler
+from src.auth import UserContext, get_current_user
+from src.services import studio_generations as module
+from src.services.asset_editor import _write_json
+from src.services.avatar_factory import AvatarFactory
+from src.services.character_pipeline import PipelineError, read_json
+
+TRIPO = 'https://api.tripo3d.ai/v2/openapi'
+MESHY = 'https://api.meshy.ai/openapi/v1/image-to-3d'
+MODEL_URL = 'https://tripo-data.invalid/model.glb'
+MESHY_MODEL_URL = 'https://assets.meshy.invalid/model.glb'
+IMAGE_URL = 'https://assets.invalid/provider-inputs/image.png'
+ACCEPTED = {'code': 0, 'data': {'task_id': 'tripo-task-1'}}
+SUCCESS = {'code': 0, 'data': {'status': 'success', 'progress': 100, 'output': {'pbr_model': MODEL_URL}}}
+RUNNING = {'code': 0, 'data': {'status': 'running', 'progress': 40}}
+MESHY_SUCCESS = {'status': 'SUCCEEDED', 'progress': 100, 'model_urls': {'glb': MESHY_MODEL_URL}}
+
+
+def png():
+    stream = io.BytesIO(); Image.new('RGBA', (24, 24), 'orange').save(stream, format='PNG'); return stream.getvalue()
+
+
+def body(provider=None, kind='prop'):
+    value = {'kind': kind, 'category': 'furniture' if kind == 'prop' else 'wood', 'name': '의자',
+             'prompt': '나무 의자 한 개', 'size': 512}
+    return {**value, 'provider': provider} if provider else value
+
+
+def reply(value):
+    """A reply for the transport: an exception is raised, a dict is JSON, a Response is returned as is."""
+    if isinstance(value, Exception):
+        raise value
+    return value if isinstance(value, httpx.Response) else httpx.Response(200, json=value)
+
+
+@pytest.fixture
+def studio(tmp_path, monkeypatch, storage_configured):
+    for name in ('OPENAI_API_KEY', 'MESHY_API_KEY', 'TRIPO_API_KEY'):
+        monkeypatch.setenv(name, 'fixture-key')
+    calls = {'images': 0, 'meshy': [], 'tripo': [], 'polls': 0, 'downloads': 0}
+    # Each list is consumed in order; its last reply repeats.
+    replies = {'tripo_submit': [ACCEPTED], 'tripo_task': [SUCCESS], 'meshy_submit': [httpx.Response(402, json={})],
+               'meshy_task': [MESHY_SUCCESS]}
+
+    def next_reply(name):
+        queue = replies[name]
+        return reply(queue.pop(0) if len(queue) > 1 else queue[0])
+
+    def transport(request):
+        url = str(request.url)
+        if url in (MODEL_URL, MESHY_MODEL_URL):
+            assert 'authorization' not in request.headers
+            calls['downloads'] += 1
+            return httpx.Response(200, content=rigged_glb())
+        for base, provider in ((TRIPO+'/task', 'tripo'), (MESHY, 'meshy')):
+            if url.startswith(base):
+                assert request.headers['authorization'] == 'Bearer fixture-key'
+                if request.method == 'POST':
+                    calls[provider].append(json.loads(request.content))
+                    return next_reply(provider+'_submit')
+                calls['polls'] += 1
+                return next_reply(provider+'_task')
+        raise AssertionError(f'unexpected provider request {request.method} {url}')
+
+    client_type = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: client_type(**kwargs, transport=httpx.MockTransport(transport)))
+
+    def image(prompt, model, base, **kwargs):
+        calls['images'] += 1
+        return png()
+    monkeypatch.setattr(module, 'generate_image', image)
+    monkeypatch.setattr(module, 'provider_image', lambda path, content, mime: {'url': IMAGE_URL})
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: None)
+    factory = AvatarFactory(tmp_path)
+    return module.StudioGenerations(factory, 1), calls, replies, factory
+
+
+def run(service, provider=None, key='fixture-prop-1'):
+    record, dispatch = service.create(key, body(provider))
+    assert dispatch
+    service.execute(record['id'])
+    return service.get(record['id'])
+
+
+def test_tripo_prop_is_polled_downloaded_and_saved_like_meshy(studio):
+    service, calls, replies, _ = studio
+    replies['tripo_task'] = [RUNNING, SUCCESS]
+    listing = service.listing('prop')['capabilities']
+    assert listing['ready'] and listing['providers'] == ['meshy', 'tripo'] and listing['default_provider'] == 'meshy'
+    public = run(service, 'tripo')
+    assert public['status'] == 'complete' and public['provider'] == 'tripo' and public['task_id'] == 'tripo-task-1'
+    [submitted] = calls['tripo']
+    assert submitted['type'] == 'image_to_model' and submitted['file'] == {'type': 'png', 'url': IMAGE_URL}
+    assert submitted['texture'] is True and submitted['pbr'] is True
+    assert submitted['face_limit'] == module.PROP_FACE_LIMIT
+    assert calls['polls'] == 2 and calls['downloads'] == 1 and calls['images'] == 1 and not calls['meshy']
+    assert {item['name'] for item in public['artifacts']} == {'image.png', 'source.glb', 'model.glb'}
+    assert public['gpu']['requested_target_polygons'] == module.PROP_FACE_LIMIT
+    directory = service.directory(public['id'])
+    task = read_json(directory/'tripo/character.json')
+    assert task['provider'] == 'tripo' and task['status'] == 'SUCCEEDED' and 'file' not in task['generation_settings']
+    assert read_json(directory/'tripo/generation-artifacts.json')['generated']['sha256']
+    assert not (directory/'meshy').exists()
+    assert service.artifact(public['id'], 'model.glb').read_bytes()
+    # A finished job is never sent again, whatever provider a replay or a resume names.
+    assert service.resume(public['id'], 'meshy')[1] is False
+    replay, dispatch = service.create('fixture-prop-1', body('meshy'))
+    assert not dispatch and replay['provider'] == 'tripo' and replay['status'] == 'complete'
+    assert len(calls['tripo']) == 1 and not calls['meshy']
+
+
+def test_default_provider_comes_from_the_environment(studio, monkeypatch):
+    service, calls, _, _ = studio
+    monkeypatch.setenv('AVATAR_3D_PROVIDER', 'tripo')
+    assert run(service)['provider'] == 'tripo' and len(calls['tripo']) == 1
+    monkeypatch.delenv('TRIPO_API_KEY')
+    with pytest.raises(PipelineError) as error:
+        service.create('fixture-prop-2', body('tripo'))
+    assert error.value.code == 'provider_unavailable' and error.value.status == 503
+    with pytest.raises(PipelineError) as error:
+        service.create('fixture-texture-1', body('meshy', kind='texture'))
+    assert error.value.code == 'invalid_provider'
+
+
+@pytest.mark.parametrize('refusal, code, text', [
+    (httpx.Response(200, json={'code': 2010, 'message': 'provider text'}), 'insufficient_credits', 'Tripo 크레딧 부족'),
+    (httpx.Response(403, json={'code': 2010, 'message': 'provider text'}), 'insufficient_credits', 'Tripo 크레딧 부족'),
+    (httpx.Response(200, json={'code': 2008, 'message': 'provider text'}), 'content_refused', 'Tripo 콘텐츠 정책'),
+])
+def test_tripo_refusal_blocks_and_only_an_explicit_resume_sends_again(studio, refusal, code, text):
+    service, calls, replies, _ = studio
+    replies['tripo_submit'] = [refusal]
+    public = run(service, 'tripo')
+    job = public['id']; directory = service.directory(job)
+    assert public['status'] == 'blocked' and text in public['error'] and 'provider text' not in public['error']
+    assert public['can_resume'] is False and public['can_change_provider'] is True and public['task_id'] is None
+    task = read_json(directory/'tripo/character.json')
+    assert task['status'] == 'submission_rejected'
+    assert module.model_problem(task, directory/'tripo')['code'] == code
+    assert service.resume(job)[1] is False and len(calls['tripo']) == 1
+    # e.g. after a top-up: the refused attempt is archived and only the 3D step is sent again.
+    replies['tripo_submit'] = [ACCEPTED]
+    resumed, dispatch = service.resume(job, 'tripo')
+    assert dispatch and resumed['status'] == 'accepted' and resumed['error'] is None
+    assert resumed['model_attempts'][0]['provider'] == 'tripo'
+    assert resumed['model_attempts'][0]['status'] == 'submission_rejected'
+    assert resumed['model_attempts'][0]['provider_code'] == json.loads(refusal.content)['code']
+    assert read_json(directory/'tripo/attempts/1/archive.json')['status'] == 'submission_rejected'
+    service.execute(job)
+    assert service.get(job)['status'] == 'complete'
+    assert len(calls['tripo']) == 2 and calls['images'] == 1 and not calls['meshy']
+
+
+@pytest.mark.parametrize('failed, code, text', [
+    ({'code': 0, 'data': {'status': 'failed', 'error_code': 2008}}, 'content_refused', '같은 그림은 다시 거절되므로'),
+    ({'code': 0, 'data': {'status': 'failed'}}, 'FAILED', 'Tripo 3D 생성 작업이 실패했습니다'),
+    ({'code': 0, 'data': {'status': 'banned'}}, 'FAILED', 'Tripo 3D 생성 작업이 실패했습니다'),
+])
+def test_failed_tripo_task_locks_the_provider(studio, failed, code, text):
+    service, calls, replies, _ = studio
+    replies['tripo_task'] = [failed]
+    public = run(service, 'tripo')
+    job = public['id']
+    assert public['status'] == 'blocked' and text in public['error'] and public['task_id'] == 'tripo-task-1'
+    assert public['can_resume'] is False and public['can_change_provider'] is False
+    task = read_json(service.directory(job)/'tripo/character.json')
+    assert module.model_problem(task)['code'] == code
+    for provider in ('meshy', 'tripo'):
+        with pytest.raises(PipelineError) as error:
+            service.resume(job, provider)
+        assert error.value.code == 'provider_locked' and error.value.status == 409
+    assert service.resume(job)[1] is False
+    assert len(calls['tripo']) == 1 and not calls['meshy'] and not calls['downloads']
+
+
+@pytest.mark.parametrize('outcome', [httpx.ReadTimeout('lost'), httpx.Response(500, json={})])
+def test_uncertain_tripo_submit_is_never_sent_again(studio, outcome):
+    service, calls, replies, _ = studio
+    replies['tripo_submit'] = [outcome]
+    public = run(service, 'tripo')
+    job = public['id']
+    assert public['status'] == 'blocked' and '접수 여부를 확인하지 못했습니다' in public['error']
+    assert read_json(service.directory(job)/'tripo/character.json')['status'] == 'submission_uncertain'
+    assert public['can_resume'] is False and public['can_change_provider'] is False
+    assert service.resume(job)[1] is False
+    for provider in ('meshy', 'tripo'):
+        with pytest.raises(PipelineError) as error:
+            service.resume(job, provider)
+        assert error.value.code == 'provider_locked'
+    service.execute(job)
+    assert len(calls['tripo']) == 1 and not calls['meshy']
+
+
+def test_meshy_credit_refusal_keeps_the_image_and_resumes_with_tripo(studio):
+    service, calls, _, _ = studio
+    public = run(service)
+    job = public['id']; directory = service.directory(job)
+    # Records accepted before provider choice carry no provider: they are Meshy's.
+    record = read_json(directory/'record.json'); assert record.pop('provider') == 'meshy'
+    _write_json(directory/'record.json', record)
+    public = service.get(job)
+    assert public['status'] == 'blocked' and public['provider'] == 'meshy' and 'Meshy 크레딧 부족' in public['error']
+    assert public['can_resume'] is False and public['can_change_provider'] is True
+    # A replay naming Tripo gets the saved job (the provider is not part of the fingerprint) and starts nothing.
+    replay, dispatch = service.create('fixture-prop-1', body('tripo'))
+    assert not dispatch and replay['id'] == job and replay['provider'] == 'meshy'
+    resumed, dispatch = service.resume(job, 'tripo')
+    assert dispatch and resumed['provider'] == 'tripo' and resumed['status'] == 'accepted'
+    [attempt] = resumed['model_attempts']
+    assert attempt['provider'] == 'meshy' and attempt['status'] == 'submission_rejected' and attempt['http_status'] == 402
+    service.execute(job)
+    public = service.get(job)
+    assert public['status'] == 'complete' and public['task_id'] == 'tripo-task-1'
+    assert calls['images'] == 1 and len(calls['meshy']) == 1 and len(calls['tripo']) == 1
+    assert read_json(directory/'meshy/character.json')['http_status'] == 402
+    assert read_json(directory/'record.json')['tripo_base'] == TRIPO
+
+
+def test_meshy_credit_refusal_resumes_with_meshy_after_a_top_up(studio):
+    service, calls, replies, _ = studio
+    public = run(service)
+    job = public['id']; directory = service.directory(job)
+    assert public['status'] == 'blocked' and public['can_change_provider'] is True
+    replies['meshy_submit'] = [{'result': 'meshy-task-1'}]
+    # Naming the frozen provider on a job blocked by a refused 3D request sends only that step again.
+    resumed, dispatch = service.resume(job, 'meshy')
+    assert dispatch and resumed['provider'] == 'meshy' and resumed['model_attempts'][0]['http_status'] == 402
+    assert read_json(directory/'meshy/attempts/1/archive.json')['http_status'] == 402
+    service.execute(job)
+    public = service.get(job)
+    assert public['status'] == 'complete' and public['task_id'] == 'meshy-task-1'
+    assert public['gpu']['requested_target_polygons'] == 2000
+    assert calls['images'] == 1 and len(calls['meshy']) == 2 and not calls['tripo'] and calls['downloads'] == 1
+
+
+def test_provider_switch_is_refused_once_a_task_was_accepted(studio):
+    service, calls, replies, _ = studio
+    replies['tripo_task'] = [httpx.ReadTimeout('poll lost'), SUCCESS]
+    public = run(service, 'tripo')
+    job = public['id']
+    assert public['status'] == 'paused' and public['can_resume'] is True and public['can_change_provider'] is False
+    with pytest.raises(PipelineError) as error:
+        service.resume(job, 'meshy')
+    assert error.value.code == 'provider_locked' and error.value.status == 409
+    # Naming the frozen provider on a paused job is a plain resume: it polls the accepted task.
+    resumed, dispatch = service.resume(job, 'tripo')
+    assert dispatch and not resumed['model_attempts']
+    service.execute(job)
+    assert service.get(job)['status'] == 'complete'
+    assert len(calls['tripo']) == 1 and not calls['meshy'] and calls['polls'] == 2
+
+
+def test_resume_route_takes_an_optional_provider(studio):
+    service, calls, _, factory = studio
+    app = FastAPI()
+    app.include_router(studio_api.router, prefix='/api')
+    app.add_exception_handler(PipelineError, pipeline_error_handler)
+    app.dependency_overrides[get_factory] = lambda: factory
+    app.dependency_overrides[get_current_user] = lambda: UserContext(1, 'tester', [])
+    with TestClient(app) as client:
+        created = client.post('/api/studio/generations', json=body('meshy'), headers={'Idempotency-Key': 'fixture-api-1'})
+        assert created.status_code == 202, created.text
+        job = created.json()['id']
+        assert client.get(f'/api/studio/generations/{job}').json()['can_change_provider'] is True
+        assert client.post(f'/api/studio/generations/{job}/resume', json={'provider': 'other'}).status_code == 422
+        plain = client.post(f'/api/studio/generations/{job}/resume')
+        assert plain.status_code == 202 and plain.json()['status'] == 'blocked'
+        switched = client.post(f'/api/studio/generations/{job}/resume', json={'provider': 'tripo'})
+        assert switched.status_code == 202 and switched.json()['provider'] == 'tripo'
+        public = client.get(f'/api/studio/generations/{job}').json()
+        assert public['status'] == 'complete' and public['can_change_provider'] is False
+        again = client.post(f'/api/studio/generations/{job}/resume', json={'provider': 'meshy'})
+        assert again.status_code == 202 and again.json()['status'] == 'complete'
+        texture = client.post('/api/studio/generations', json=body('tripo', kind='texture'),
+                              headers={'Idempotency-Key': 'fixture-api-2'})
+        assert texture.status_code == 422 and texture.json()['error']['code'] == 'invalid_provider'
+    assert len(calls['meshy']) == 1 and len(calls['tripo']) == 1 and calls['images'] == 1

@@ -217,6 +217,24 @@ def generate_multiview_part(directory: Path, images: list[Path], client: httpx.C
     return _submit(directory, value, endpoint, payload, client)
 
 
+def generate_tripo_image(directory: Path, image: Path, image_url: str, client: httpx.Client, *,
+                         face_limit: int | None = None) -> dict:
+    """One Tripo image_to_model submission of a stored PNG, sent by its short-lived URL."""
+    from src.services.model_providers import tripo_image_payload
+    if (directory/'character.json').exists():
+        raise ValueError('Existing run: recover or refresh, never resubmit')
+    with Image.open(io.BytesIO(image.read_bytes())) as reference:
+        if reference.format != 'PNG':
+            raise ValueError('Prepared PNG required')
+        reference.verify()
+    payload = tripo_image_payload(image_url, face_limit=face_limit)
+    value = {'stage': 'generation', 'status': 'submission_uncertain', 'profile': payload['model_version'],
+             'provider': 'tripo', 'generation_endpoint': '/task', 'sources': [{'image_sha256': _digest(image)}],
+             'isolated_part': True, 'generation_settings': {k: v for k, v in payload.items() if k != 'file'},
+             'preserve_download_detail': True}
+    return _submit(directory, value, '/task', payload, client)
+
+
 def rig_model(directory: Path, model: Path, height: float, client: httpx.Client, *, body_type: str = "humanoid") -> dict:
     """Rig an existing textured assembly without regenerating its source parts.
 

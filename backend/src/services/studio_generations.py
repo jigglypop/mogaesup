@@ -1,4 +1,9 @@
-"""Owner-scoped prompt assets with one saved attempt per paid provider stage."""
+"""Owner-scoped prompt assets with one saved attempt per paid provider stage.
+
+A prop's 3D provider (Meshy or Tripo) is frozen on the record when the job is accepted; its receipts live in
+`<provider>/character.json`. Only while no 3D task was accepted or left uncertain may a resume send the 3D step
+to a provider again, keeping the paid image.
+"""
 import hashlib
 import json
 import os
@@ -11,7 +16,6 @@ import httpx
 from src.services import character_jobs
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
-from src.services.avatar_meshy import client as meshy_client
 from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, generate_image,
                                               generate_standard_part_image, OpenAIImageHTTPError,
                                               image_error_message)
@@ -19,15 +23,19 @@ from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.illustration_motion import FORMATS, MOTION_REVISION, encode, render_frames
 from src.services.illustration_rig import build_rig
 from src.services.illustration_vector import VECTOR_REVISION, trace_illustration
-from src.services.meshy_status import task_problem
+from src.services.model_providers import (LABELS, PROVIDERS, base_url, client as provider_client,
+                                          configured as provider_keys, model_problem, resolve_provider)
 from src.services.process_identity import identity, state as process_state
-from src.services.object_storage import copy_file
+from src.services.object_storage import copy_file, provider_image
 from src.services.studio_materials import texture_maps, prop_model
 
 from src.services.studio_prompts import DEFAULTS as PROMPT_DEFAULTS, StudioPrompts
 
 DEFAULTS = {kind: PROMPT_DEFAULTS[kind] for kind in ('prop', 'texture', 'illustration')}
 ILLUSTRATION_PROMPT_REVISION = 'illustration-character-v1'
+PROP_FACE_LIMIT = 8000  # Tripo face_limit for one island prop.
+# The provider answered these with a definite refusal or never received them: nothing was accepted or paid.
+UNSENT = ('submission_rejected', 'submission_not_sent')
 _WORKERS = {}
 
 
@@ -43,9 +51,13 @@ class StudioGenerations:
 
     @staticmethod
     def capabilities(kind):
+        keys = provider_keys()
         ready = bool(os.getenv('ASSET_S3_BUCKET', '').strip() and os.getenv('OPENAI_API_KEY', '').strip()
-                     and (kind in ('texture', 'illustration') or os.getenv('MESHY_API_KEY', '').strip()))
-        return {'ready': ready, 'reason': None if ready else '생성 서비스 연결 대기'}
+                     and (kind in ('texture', 'illustration') or any(keys.values())))
+        result = {'ready': ready, 'reason': None if ready else '생성 서비스 연결 대기'}
+        if kind == 'prop':
+            result.update(providers=[name for name in PROVIDERS if keys[name]], default_provider=resolve_provider())
+        return result
 
     def listing(self, kind):
         items = [self.get(path.parent.name) for path in self.root.glob('*/record.json')
@@ -60,9 +72,12 @@ class StudioGenerations:
         return record
 
     @staticmethod
-    def _resume_reason(directory, record):
-        if record['status'] == 'complete':
-            return False, None
+    def _run(directory, record):
+        """The prop's 3D receipts; records from before provider choice are Meshy's."""
+        return directory/(record.get('provider') or 'meshy')
+
+    @staticmethod
+    def _image_reason(directory, record):
         if 'image.png' not in record['files']:
             if (directory/'image-provider.response.json').is_file():
                 return True, None
@@ -72,12 +87,24 @@ class StudioGenerations:
             request = read_json(directory/'image-provider.request.json')
             if request and request.get('submission') != 'not_sent':
                 return False, '이미지 응답을 확인하지 못했습니다. 저장된 요청을 유지하며 유료 요청을 반복하지 않습니다.'
-        if record['kind'] == 'prop':
-            task = read_json(directory/'meshy/character.json')
-            problem = task_problem(task, 'generation')
+        return True, None
+
+    def _resume_reason(self, directory, record):
+        if record['status'] == 'complete':
+            return False, None
+        resumable, reason = self._image_reason(directory, record)
+        if resumable and record['kind'] == 'prop':
+            run = self._run(directory, record)
+            problem = model_problem(read_json(run/'character.json'), run)
             if problem:
                 return False, problem['message']
-        return True, None
+        return resumable, reason
+
+    @staticmethod
+    def _model_unstarted(directory):
+        """No provider accepted a 3D task or may have: sending the 3D step again cannot pay twice."""
+        tasks = [read_json(directory/name/'character.json') for name in PROVIDERS]
+        return all(not task or (task.get('status') in UNSENT and not task.get('task_id')) for task in tasks)
 
     def get(self, job_id):
         directory = self.directory(job_id); record = self._record(job_id)
@@ -86,10 +113,16 @@ class StudioGenerations:
         status = record['status']
         if not alive and status in ('accepted', 'running'):
             status = 'paused' if resumable else 'blocked'
-        task = read_json(directory/'meshy/character.json') if record['kind'] == 'prop' else {}
+        prop = record['kind'] == 'prop'
+        task = read_json(self._run(directory, record)/'character.json') if prop else {}
         return {**{key: record.get(key) for key in ('id', 'request_key', 'kind', 'category', 'name', 'prompt',
                     'size', 'stage', 'created_at', 'gpu', 'reference_id', 'vector', 'rig', 'motions')}, 'status': status,
+                'provider': (record.get('provider') or 'meshy') if prop else None,
+                'model_attempts': record.get('model_attempts', []) if prop else None,
                 'can_resume': bool(resumable and (not alive or status == 'accepted')),
+                'can_change_provider': bool(prop and status in ('paused', 'blocked')
+                                            and self._image_reason(directory, record)[0]
+                                            and self._model_unstarted(directory)),
                 'error': record.get('error') or (reason if not alive else None),
                 'task_id': task.get('task_id'), 'progress': task.get('progress'),
                 'artifacts': [{'name': name, 'sha256': sha, 'url': f'/api/studio/generations/{job_id}/artifacts/{name}'}
@@ -99,10 +132,15 @@ class StudioGenerations:
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
         payload = dict(payload)
+        # The 3D provider is how the job runs, not what it makes: it stays out of the fingerprint, so a replay
+        # naming another provider gets the saved job with the provider it was accepted with.
+        requested = payload.pop('provider', None)
         if payload.get('reference_id') is None:
             payload.pop('reference_id', None)
         if payload['kind'] not in DEFAULTS or payload['category'] not in DEFAULTS[payload['kind']]:
             raise PipelineError('invalid_category', '기물·재질 종류를 다시 선택하세요.', 422)
+        if payload['kind'] != 'prop' and requested is not None:
+            raise PipelineError('invalid_provider', '3D 생성 제공자는 기물 생성에서만 고릅니다.', 422)
         if payload['kind'] == 'illustration' and payload.get('size') != 1024:
             raise PipelineError('invalid_size', '2D 원화는 1024px로 생성합니다.', 422)
         if payload['kind'] != 'illustration' and 'reference_id' in payload:
@@ -120,6 +158,7 @@ class StudioGenerations:
                 return self.get(job_id), previous['status'] == 'accepted'
             if not self.capabilities(payload['kind'])['ready']:
                 raise PipelineError('provider_unavailable', 'S3·이미지·3D 생성 서비스 연결을 확인하세요.', 503)
+            provider = self._provider_ready(requested) if payload['kind'] == 'prop' else None
             directory.mkdir(parents=True, exist_ok=True)
             reference = None
             if payload['kind'] == 'illustration' and payload.get('reference_id'):
@@ -143,6 +182,10 @@ class StudioGenerations:
                       'image_model': os.getenv('AVATAR_IMAGE_MODEL', DEFAULT_MODEL),
                       'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
                       'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/')}
+            if provider:
+                record['provider'] = provider
+                if provider == 'tripo':
+                    record['tripo_base'] = base_url('tripo')
             if provider_prompt is not None:
                 record.update(provider_prompt=provider_prompt,
                               provider_prompt_sha256=hashlib.sha256(provider_prompt.encode()).hexdigest(),
@@ -150,15 +193,53 @@ class StudioGenerations:
             _write_json(directory/'record.json', record)
         return self.get(job_id), True
 
-    def resume(self, job_id):
+    def resume(self, job_id, provider=None):
+        """Continue a paused job. A named provider that differs from the frozen one, or a job blocked by a
+        refused 3D request, sends the 3D step (only) to that provider again."""
         with _LOCK:
             public = self.get(job_id)
+            if (provider is not None and public['status'] != 'complete'
+                    and (provider != public['provider'] or not public['can_resume'])):
+                self._change_provider(job_id, public, provider)
+                public = self.get(job_id)
             if not public['can_resume']:
                 return public, False
             record = self._record(job_id)
             record.update(status='accepted', process=identity(), error=None)
             self._save(self.directory(job_id), record)
         return self.get(job_id), True
+
+    @staticmethod
+    def _provider_ready(requested):
+        provider = resolve_provider(requested)
+        if not provider_keys()[provider]:
+            raise PipelineError('provider_unavailable', f'{LABELS[provider]} API 설정이 필요합니다.', 503)
+        return provider
+
+    def _change_provider(self, job_id, public, provider):
+        """Callers hold _LOCK. Earlier refused attempts stay as receipts; the image is never requested again."""
+        if public['kind'] != 'prop':
+            raise PipelineError('invalid_provider', '3D 생성 제공자는 기물 생성에서만 고릅니다.', 422)
+        directory = self.directory(job_id)
+        if not public['can_change_provider']:
+            started = not self._model_unstarted(directory)
+            raise PipelineError('provider_locked', '3D 작업이 접수됐거나 접수 여부를 확인하지 못해 다시 요청할 수 없습니다.'
+                                if started else public['error'] or '진행 중인 작업은 제공자를 바꿀 수 없습니다.', 409)
+        provider = self._provider_ready(provider)
+        record = self._record(job_id)
+        previous = self._run(directory, record); task = read_json(previous/'character.json')
+        if task:
+            problem = model_problem(task, previous) or {}
+            record.setdefault('model_attempts', []).append(
+                {'provider': record.get('provider') or 'meshy', 'status': task.get('status'),
+                 'http_status': task.get('http_status'), 'provider_code': problem.get('provider_code'), 'at': now()})
+        run = directory/provider
+        if read_json(run/'character.json'):
+            character_jobs.archive_attempt(run, 'provider_retry')
+        record['provider'] = provider
+        if provider == 'tripo':
+            record['tripo_base'] = base_url('tripo')
+        self._save(directory, record)
 
     @staticmethod
     def _save(directory, record):
@@ -251,14 +332,22 @@ class StudioGenerations:
             lock.release()
 
     def _model(self, directory, record, image):
-        run = directory/'meshy'
-        with meshy_client(record['meshy_base']) as client:
+        provider = record.get('provider') or 'meshy'; run = self._run(directory, record)
+        with provider_client(provider, record) as client:
             task = read_json(run/'character.json')
             if not task:
-                task = character_jobs.generate(run, image, 1.2, client, isolated_part=True)
+                # The receipt is written before the POST; an existing one is only refreshed, never sent again.
+                if provider == 'tripo':
+                    link = provider_image(image, image.read_bytes(), 'image/png')
+                    if not link:
+                        raise PipelineError('storage_required', 'Tripo 3D 생성에는 S3 저장소의 이미지 주소가 필요합니다.', 503)
+                    task = character_jobs.generate_tripo_image(run, image, link['url'], client,
+                                                               face_limit=PROP_FACE_LIMIT)
+                else:
+                    task = character_jobs.generate(run, image, 1.2, client, isolated_part=True)
             deadline = time.monotonic()+1200
             while task.get('status') != 'SUCCEEDED':
-                problem = task_problem(task, 'generation')
+                problem = model_problem(task, run)
                 if problem:
                     raise PipelineError(problem['code'], problem['message'], 409)
                 if time.monotonic() >= deadline:
@@ -273,6 +362,8 @@ class StudioGenerations:
         record['files']['source.glb'] = digest(directory/'source.glb')
         self._save(directory, record)
         record['gpu'] = prop_model(run/'generated.glb', directory/'model.glb', record['size'])
+        if provider == 'tripo':
+            record['gpu']['requested_target_polygons'] = task.get('generation_settings', {}).get('face_limit')
         record['files']['model.glb'] = digest(directory/'model.glb')
 
     def _local_work(self, job_id):
