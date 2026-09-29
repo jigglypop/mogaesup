@@ -97,11 +97,11 @@ async fn 가입하면_섬이_생기고_프로필을_바꾼다() {
         .call(
             "PATCH",
             "/api/homes/me",
-            Some(json!({"statusMessage": "오늘도 느긋하게", "mood": 2, "minime": "teacher", "emoji": "👩‍🏫"})),
+            Some(json!({"statusMessage": "오늘도 느긋하게", "mood": 2, "minime": "man", "emoji": "👩‍🏫"})),
             Some(&owner),
         )
         .await;
-    assert_eq!(patched.body["profile"]["minime"], "teacher");
+    assert_eq!(patched.body["profile"]["minime"], "man");
     assert_eq!(patched.body["profile"]["mood"], 2);
     let invalid = app.call("PATCH", "/api/homes/me", Some(json!({"mood": 9})), Some(&owner)).await;
     assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -516,7 +516,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     app.make_admin("operator_f").await;
     assert_eq!(
         app.call("GET", "/api/catalog/items?kind=minime", None, None).await.body["items"].as_array().unwrap().len(),
-        8
+        1
     );
 
     assert_eq!(app.call("GET", LISTING, None, Some(&member)).await.status, StatusCode::FORBIDDEN);
@@ -888,21 +888,18 @@ async fn 미니미는_공개된_카탈로그나_기본_미니미만_고른다() 
 
     // Retiring takes a 미니미 off the picker; a built-in stays pickable because the app ships it.
     let path = "/api/catalog/admin/bulk-status";
-    let bulk =
-        app.call("POST", path, Some(json!({"ids": ["fresh", "teacher"], "status": "retired"})), Some(&admin)).await;
+    let bulk = app.call("POST", path, Some(json!({"ids": ["fresh", "man"], "status": "retired"})), Some(&admin)).await;
     let statuses: Vec<(&str, &str)> = bulk.body["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|item| (item["id"].as_str().unwrap(), item["status"].as_str().unwrap()))
         .collect();
-    assert_eq!(statuses, [("teacher", "retired"), ("fresh", "retired")]);
+    assert_eq!(statuses, [("fresh", "retired"), ("man", "retired")]);
     let public = app.call("GET", "/api/catalog/items?kind=minime", None, None).await;
-    assert!(
-        !public.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "fresh" || item["id"] == "teacher")
-    );
+    assert!(!public.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "fresh" || item["id"] == "man"));
     assert_eq!(pick("fresh").await.body["code"], "invalid_minime");
-    assert_eq!(pick("teacher").await.body["profile"]["minime"], "teacher");
+    assert_eq!(pick("man").await.body["profile"]["minime"], "man");
     let bad = app.call("POST", path, Some(json!({"ids": [], "status": "retired"})), Some(&admin)).await;
     assert_eq!(bad.body["code"], "invalid_ids");
     let bad = app.call("POST", path, Some(json!({"ids": ["fresh"], "status": "gone"})), Some(&admin)).await;

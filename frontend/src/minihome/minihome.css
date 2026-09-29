@@ -238,6 +238,19 @@ p.mg-compose { display: block; font-size: 13px; }
 @media (hover: hover) {
   .mg-interact:hover { background: var(--mg-glass-strong); }
 }
+/* What a resident says when the player talks to it */
+.mg-greeting {
+  justify-self: center;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: min(440px, 100%);
+  padding: 14px 10px 14px 18px;
+  border-radius: var(--mg-r-card);
+}
+.mg-greeting > div { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.mg-greeting b { font-size: 13px; font-weight: 850; color: var(--mg-primary); }
+.mg-greeting p { margin: 0; font-size: 15px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
 /* A finger taps it; the key is for keyboards. */
 @media (hover: none) and (pointer: coarse) {
   .mg-interact { padding: 0 22px; }
@@ -344,6 +357,30 @@ p.mg-compose { display: block; font-size: 13px; }
 .mg-piece span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mg-piece-swatch { width: 48px; height: 48px; border-radius: 14px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08); }
 .mg-drawer .mg-empty { padding: 30px 12px; }
+
+/* 주민 in the decorating drawer: pick one, name it and give it a line; the placed ones below */
+.mg-residents { display: grid; gap: 12px; max-height: min(46vh, 420px); overflow-y: auto; }
+.mg-resident-new { display: grid; gap: 10px; }
+.mg-resident-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.mg-resident-fields .mg-field { flex: 1 1 160px; min-width: 0; height: 38px; }
+.mg-resident-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.mg-resident {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--mg-hair);
+  border-radius: var(--mg-r-card);
+  background: var(--mg-card);
+}
+.mg-resident-thumb { display: grid; place-items: center; width: 44px; height: 44px; font-size: 26px; }
+.mg-resident-thumb img { width: 44px; height: 44px; object-fit: contain; }
+.mg-resident-actions { display: flex; align-items: center; gap: 6px; }
+@media (max-width: 720px) {
+  .mg-resident { grid-template-columns: 36px minmax(0, 1fr); }
+  .mg-resident-actions { grid-column: 1 / -1; justify-content: flex-end; }
+}
 
 /* Performance report, from the settings menu */
 .mh-status {

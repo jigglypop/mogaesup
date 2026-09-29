@@ -15,6 +15,7 @@ use crate::{
     AppState,
     auth::{User, current_user, optional_user, username},
     error::{ApiError, ApiResult, bad, conflict, forbidden, not_found},
+    rebac::{Checker, Object, Subject},
     security::client_address,
 };
 
@@ -68,7 +69,8 @@ fn profile(row: &PgRow) -> HomeProfile {
 
 const HOME_PRIVATE: ApiError = forbidden("home_private", "주인이 공개하지 않은 섬입니다.");
 
-/// The home behind `/@username` if `viewer` may see it: public, the owner, or an 일촌 of an 일촌-only home.
+/// The home behind `/@username` if `viewer` holds `home:<owner>#viewer` (see [`crate::rebac`]): it is public, theirs,
+/// open to 일촌 and they are one, or they were granted it.
 pub async fn visible_home(state: &AppState, name: &str, viewer: Option<&User>) -> ApiResult<(HomeProfile, bool)> {
     let name = username(name)?;
     let row = sqlx::query(&format!("{PROFILE_SELECT} WHERE u.username = $1"))
@@ -78,21 +80,14 @@ pub async fn visible_home(state: &AppState, name: &str, viewer: Option<&User>) -
         .ok_or(not_found("home_not_found", "없는 섬입니다."))?;
     let home = profile(&row);
     let is_owner = viewer.is_some_and(|user| user.id == home.owner_id);
-    let visible = match home.visibility.as_str() {
-        _ if is_owner => true,
-        "public" => true,
-        "ilchon" => match viewer {
-            Some(user) => sqlx::query("SELECT 1 FROM ilchons WHERE user_id = $1 AND friend_id = $2")
-                .bind(user.id)
-                .bind(home.owner_id)
-                .fetch_optional(&state.db)
-                .await?
-                .is_some(),
-            None => false,
-        },
-        _ => false,
-    };
-    if visible { Ok((home, is_owner)) } else { Err(HOME_PRIVATE) }
+    let mut checker = Checker::new(&state.db);
+    checker.know_home(home.owner_id, &home.visibility);
+    let subject = viewer.map_or(Subject::Anonymous, |user| Subject::User(user.id));
+    if checker.check(subject, &Object::home(home.owner_id), "viewer").await? {
+        Ok((home, is_owner))
+    } else {
+        Err(HOME_PRIVATE)
+    }
 }
 
 async fn visits(state: &AppState, owner: Uuid) -> ApiResult<Value> {
@@ -237,6 +232,8 @@ async fn update(
     if changes.visibility.as_deref().is_some_and(|v| !VISIBILITIES.contains(&v)) {
         return Err(bad("invalid_visibility", "공개 범위를 확인해 주세요."));
     }
+    // Picking a 미니미 means walking as it: a look the owner wore comes off.
+    let picked = minime.is_some();
     sqlx::query(
         "UPDATE homes SET title = COALESCE($2, title), status_message = COALESCE($3, status_message),
          mood = COALESCE($4, mood), minime = COALESCE($5, minime), emoji = COALESCE($6, emoji),
@@ -251,6 +248,9 @@ async fn update(
     .bind(changes.visibility)
     .execute(&state.db)
     .await?;
+    if picked {
+        crate::looks::take_off(&state.db, user.id).await?;
+    }
     let home = my_home(&state, &user).await?;
     home_view(&state, home, true).await
 }
@@ -419,6 +419,14 @@ async fn save_world(
     if let Some(problem) = data.as_object().and_then(world_problem) {
         tracing::warn!(problem, user = %user.id, "Rejected world save");
         return Err(bad("invalid_world", "저장할 수 없는 섬 데이터입니다."));
+    }
+    let domains = data.get("domains").and_then(Value::as_object);
+    if let Some(problem) = match domains {
+        Some(domains) => crate::residents::problem(&state.db, domains).await?,
+        None => None,
+    } {
+        tracing::warn!(problem, user = %user.id, "Rejected world save");
+        return Err(bad("invalid_residents", "섬에 둘 수 없는 주민이 있습니다."));
     }
     let row = if body.base_revision == 0 {
         sqlx::query(

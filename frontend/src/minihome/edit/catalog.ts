@@ -8,7 +8,7 @@ import {
 
 import type { EditPart } from './session';
 
-export type Shelf = 'furniture' | 'living' | 'nature' | 'floor' | 'wall' | 'studio';
+export type Shelf = 'furniture' | 'living' | 'nature' | 'floor' | 'wall' | 'studio' | 'residents';
 
 export const SHELVES: { id: Shelf; label: string; part: EditPart }[] = [
   { id: 'furniture', label: '가구', part: 'object' },
@@ -17,6 +17,7 @@ export const SHELVES: { id: Shelf; label: string; part: EditPart }[] = [
   { id: 'floor', label: '바닥', part: 'tile' },
   { id: 'wall', label: '벽', part: 'wall' },
   { id: 'studio', label: '스튜디오에서 만든 것', part: 'object' },
+  { id: 'residents', label: '주민', part: 'object' },
 ];
 
 /** A catalog GLB (or a studio model): placed at its catalog size. */

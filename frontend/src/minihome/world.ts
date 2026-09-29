@@ -7,6 +7,7 @@ import {
   type SaveAdapter,
 } from 'gaesup-world';
 
+import { residentsBinding, type ResidentStore } from './residents';
 import { at, CELL, createVillage, VILLAGE_VERSION } from './village';
 
 type RuntimeErrorSink = NonNullable<NonNullable<Parameters<typeof createGaesupRuntime>[0]>['onError']>;
@@ -35,12 +36,13 @@ const RULES: GameplayEventBlueprint[] = [
   arrive('beach', '🌊 해변 산책 중'),
 ];
 
-/** One home's world: its own runtime and stores, loading and saving through `adapter`. */
-export function createMinihomeRuntime(adapter: SaveAdapter, onError?: RuntimeErrorSink): GaesupRuntime {
+/** One home's world: its own runtime and stores, loading and saving through `adapter`, its residents with the island. */
+export function createMinihomeRuntime(adapter: SaveAdapter, residents: ResidentStore, onError?: RuntimeErrorSink): GaesupRuntime {
   const runtime = createGaesupRuntime({
     worldId: MINIHOME_WORLD_ID,
     plugins: [createBuildingPlugin()],
     saveOptions: { adapter },
+    saveBindings: [residentsBinding(residents)],
     ...(onError ? { onError } : {}),
   });
   runtime.buildingStore.getState().hydrate(createVillage());

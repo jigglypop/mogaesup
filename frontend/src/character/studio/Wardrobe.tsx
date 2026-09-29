@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { NoColorSpace, TextureLoader, type Texture } from 'three';
+import { problemText } from '../../api/client';
+import { lookApi } from '../../api/endpoints';
+import type { Look, LookRequest } from '../../api/types';
+import { useAuth } from '../../auth/AuthProvider';
 import { isDefinitiveRejection } from '../api';
 import { factoryApi, wardrobeUrls, type WardrobeColors, type WardrobeCoverage, type WardrobeOutfit, type WardrobePart } from '../factory/api';
 import { partLabels as labels } from '../factory/parts';
@@ -41,6 +46,8 @@ function unionBits(target: Record<string, Uint8Array>, hidden: Record<string, st
   }
 }
 type PendingSave = { id: string; key: string; revision: string; input: WardrobeOutfit };
+/** How often a look being assembled is asked about. */
+const LOOK_POLL_MS = 1500;
 
 function Preview({ part }: { part: WardrobePart }) {
   const [missing, setMissing] = useState(false);
@@ -49,6 +56,9 @@ function Preview({ part }: { part: WardrobePart }) {
 }
 
 export default function Wardrobe() {
+  const { user } = useAuth();
+  // Saved outfits are the studio's own records: only admins change them.
+  const admin = user?.role === 'admin';
   const bodies = usePolling(factoryApi.wardrobeBodies, 30000);
   const outfits = usePolling(factoryApi.wardrobeOutfits, 30000);
   const [bodyId, setBodyId] = useState('');
@@ -84,6 +94,15 @@ export default function Wardrobe() {
   const [outfitName, setOutfitName] = useState(''), [loadedId, setLoadedId] = useState('');
   const [busy, setBusy] = useState(false), [saveError, setSaveError] = useState('');
   const pendingSave = useRef<PendingSave | null>(null), pendingOutfit = useRef<WardrobeOutfit | null>(null);
+  // The member's own character: saved here, assembled by the server, worn on their island.
+  const [look, setLook] = useState<Look | null>(null), [lookBusy, setLookBusy] = useState(false), [lookError, setLookError] = useState('');
+  const baking = look?.status === 'baking';
+  useEffect(() => { lookApi.mine().then(value => setLook(value.look), () => undefined); }, []);
+  useEffect(() => {
+    if (!baking) return;
+    const timer = setInterval(() => { lookApi.mine().then(value => setLook(value.look), () => undefined); }, LOOK_POLL_MS);
+    return () => clearInterval(timer);
+  }, [baking]);
 
   useEffect(() => {
     setViewer(null); setModelError(''); setClips([]); applied.current = {}; setWorn({}); setAppliedKey(''); setNotice('');
@@ -266,6 +285,33 @@ export default function Wardrobe() {
       setSaveError((reason as Error).message);
     } finally { setBusy(false); }
   }
+  /** What is worn now, as the look the server assembles: the body, a part per slot, hair and garment colours. */
+  function currentLook(): LookRequest | null {
+    if (!body) return null;
+    const worn = Object.entries(applied.current);
+    return {
+      body: { jobId: body.job_id, version: body.version },
+      parts: Object.fromEntries(worn.map(([slotName, part]) => [slotName, { jobId: part.job_id, version: part.version, sha256: part.sha256 }])),
+      hairColor: worn.some(([slotName]) => hairSlots.includes(slotName)) ? hairColor : null,
+      colors: Object.fromEntries(worn
+        .filter(([slotName, part]) => !hairSlots.includes(slotName) && Object.keys(colors[keyOf(part, slotName)] || {}).length)
+        .map(([slotName, part]) => [slotName, colors[keyOf(part, slotName)] || {}])),
+    };
+  }
+  async function saveLook() {
+    const request = currentLook();
+    if (!request || lookBusy) return;
+    setLookBusy(true); setLookError('');
+    try { setLook((await lookApi.save(request)).look); }
+    catch (reason) { setLookError(problemText(reason)); }
+    finally { setLookBusy(false); }
+  }
+  async function wearLook() {
+    setLookBusy(true); setLookError('');
+    try { setLook((await lookApi.wear(true)).look); }
+    catch (reason) { setLookError(problemText(reason)); }
+    finally { setLookBusy(false); }
+  }
   async function remove(id: string) {
     if (!outfits.value || busy) return;
     setBusy(true); setSaveError('');
@@ -339,15 +385,26 @@ export default function Wardrobe() {
             <WardrobeShape key={slotName} part={worn[slotName]!} label={labels[slotName] || slotName} reload={reloadParts}
               replace={next => setWorn(current => ({ ...current, [slotName]: next }))} />)}</ul>
         </div>}
-        <form className="wardrobe-save" onSubmit={event => { event.preventDefault(); void saveOutfit(); }}>
+        <div className="wardrobe-look"><h2>내 캐릭터</h2>
+          <div className="wardrobe-look-row">
+            <button type="button" disabled={lookBusy || baking || !settled || !!wearError} onClick={() => void saveLook()}>{baking ? '입히는 중' : '내 캐릭터로 입기'}</button>
+            {look?.status === 'ready' && (look.worn
+              ? <><span role="status">섬에서 입고 있어요</span>{user && <Link to={`/@${user.username}`}>내 섬으로</Link>}</>
+              : <button type="button" disabled={lookBusy} onClick={() => void wearLook()}>섬에서 입기</button>)}
+            {baking && <span role="status">모델을 만드는 중…</span>}
+          </div>
+          {look?.status === 'failed' && look.error && <p role="alert">{look.error.message}</p>}
+          {lookError && <p role="alert">{lookError}</p>}
+        </div>
+        {admin && <form className="wardrobe-save" onSubmit={event => { event.preventDefault(); void saveOutfit(); }}>
           <label>조합 이름<input value={outfitName} maxLength={60} onChange={event => setOutfitName(event.target.value)} /></label>
           <button disabled={busy || !settled || !outfitName.trim() || !!wearError}>{busy ? '저장 중' : loadedId && outfits.value?.outfits[loadedId]?.name === outfitName.trim() ? '조합 덮어쓰기' : '조합 저장'}</button>
-        </form>
+        </form>}
         {saveError && <p role="alert">{saveError}</p>}
         {savedOutfits.length > 0 && <div className="wardrobe-outfits"><h2>저장한 조합</h2><ul>{savedOutfits.map(([id, outfit]) => <li key={id} className={id === loadedId ? 'loaded' : ''}>
           <strong>{outfit.name}</strong>
           <small>{registered.find(item => item.job_id === outfit.body.job_id)?.name || '등록 해제된 몸'} · 파츠 {Object.keys(outfit.parts).length}개</small>
-          <div><button type="button" disabled={busy || !viewer} onClick={() => wear(id)}>입히기</button><button type="button" disabled={busy} onClick={() => void remove(id)}>삭제</button></div>
+          <div><button type="button" disabled={busy || !viewer} onClick={() => wear(id)}>입히기</button>{admin && <button type="button" disabled={busy} onClick={() => void remove(id)}>삭제</button>}</div>
         </li>)}</ul></div>}
         {outfits.error && <p role="alert">{outfits.error}</p>}
       </section>

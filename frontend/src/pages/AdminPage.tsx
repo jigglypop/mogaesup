@@ -2,13 +2,14 @@ import './admin/admin.css';
 
 import { useCallback, useEffect, useState } from 'react';
 
-import { Link, Navigate, useLocation } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 
 import { ApiRequestError, problemText } from '../api/client';
 import { catalogApi } from '../api/endpoints';
 import { WAKE_RETRY_MS, isStudioAsleep, type StudioSleep } from '../api/studioSleep';
 import type { AdminCatalogItem, CatalogChanges, CatalogImport, CatalogKind, CatalogStatus, FactoryCharacter } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
+import { can } from '../auth/can';
 import { PageShell } from '../shell/Shell';
 import { StudioPowerLine, WakeBanner, useEvery } from '../studio/StudioPower';
 import { Icon } from '../ui/icons';
@@ -19,13 +20,8 @@ import { ImportPanel } from './admin/ImportPanel';
 import { PipelineBoard, type ImportFields } from './admin/PipelineBoard';
 import { PreviewDialog, type PreviewTarget } from './admin/PreviewDialog';
 import { VersionsDialog } from './admin/VersionsDialog';
+import { AdminTabs } from './AdminTabs';
 import { Loading } from './Loading';
-
-const TABS = [
-  { to: '/admin', label: '캐릭터 가져오기' },
-  { to: '/admin/catalog', label: '카탈로그' },
-  { to: '/studio/library', label: '에셋 라이브러리' },
-];
 
 type Notice = { tone: 'ok' | 'error'; text: string };
 
@@ -36,7 +32,8 @@ type Notice = { tone: 'ok' | 'error'; text: string };
 export function AdminPage() {
   const { status, user } = useAuth();
   const { pathname } = useLocation();
-  const isAdmin = user?.role === 'admin';
+  // Catalog editors (moderators and admins included) run this page.
+  const isAdmin = can(user, 'catalog_editor');
   const catalogTab = pathname.startsWith('/admin/catalog');
   const [items, setItems] = useState<AdminCatalogItem[] | null>(null);
   const [characters, setCharacters] = useState<FactoryCharacter[] | null>(null);
@@ -184,13 +181,7 @@ export function AdminPage() {
       <section className="mg-glass mg-panel mg-admin">
         <div className="mg-panel-head">
           <h1 className="mg-title">운영</h1>
-          <nav className="mg-tabs is-fit mg-admin-tabs" aria-label="운영">
-            {TABS.map((tab) => (
-              <Link key={tab.to} to={tab.to} aria-current={(tab.to === '/admin/catalog') === catalogTab && tab.to.startsWith('/admin') ? 'page' : undefined}>
-                {tab.label}
-              </Link>
-            ))}
-          </nav>
+          <AdminTabs />
           <button className="mg-btn is-small" disabled={characters === null && !catalogTab} onClick={refreshAll}>
             <Icon name="rotate" /> 새로고침
           </button>
@@ -236,7 +227,7 @@ export function AdminPage() {
               items={items}
               imports={queue.imports ?? []}
               busy={busy}
-              onImport={(character, fields) => startImport({ ...fields, kind: 'minime', factoryJobId: character.jobId })}
+              onImport={(character, fields) => startImport({ ...fields, factoryJobId: character.jobId })}
               onStatus={setStatus}
               onPreview={setPreview}
               onVersions={setVersionsOf}

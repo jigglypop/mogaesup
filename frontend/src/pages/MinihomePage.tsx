@@ -3,10 +3,11 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
 
 import { ApiRequestError } from '../api/client';
-import { catalogApi, homeApi } from '../api/endpoints';
-import type { CatalogItem, HomeView } from '../api/types';
+import { catalogApi, homeApi, lookApi } from '../api/endpoints';
+import type { CatalogItem, HomeView, Look } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
-import { modelUrl, prefetchModels } from '../minihome/figures';
+import { playerModelUrl } from '../minihome/character';
+import { FALLBACK_MINIME, prefetchModels } from '../minihome/figures';
 import { visitorId } from '../minihome/stored';
 import { PageShell } from '../shell/Shell';
 import { Loading } from './Loading';
@@ -15,7 +16,16 @@ import { Loading } from './Loading';
 const loadMinihome = () => import('../minihome/Minihome');
 const Minihome = lazy(loadMinihome);
 
-type Loaded = { view: HomeView; minimes: CatalogItem[]; furniture: CatalogItem[]; viewerMinime: string };
+type Loaded = {
+  view: HomeView;
+  minimes: CatalogItem[];
+  furniture: CatalogItem[];
+  /** Published 주민, for the island's residents. */
+  npcs: CatalogItem[];
+  viewerMinime: string;
+  /** The signed-in viewer's own look from the wardrobe. */
+  viewerLook: Look | null;
+};
 
 /** `/@username` and, for its owner, `/@username/edit`: loads the home, counts the visit and opens its island. */
 export function MinihomePage({ username, editing }: { username: string; editing: boolean }) {
@@ -37,19 +47,28 @@ export function MinihomePage({ username, editing }: { username: string; editing:
     setProblem(null);
     (async () => {
       const own = viewerName === username;
-      const [view, minimes, furniture] = await Promise.all([
+      const [view, minimes, furniture, npcs, viewerLook] = await Promise.all([
         own ? homeApi.mine() : homeApi.get(username),
         catalogApi.items('minime'),
         catalogApi.items('furniture').catch(() => ({ items: [] })),
+        catalogApi.items('npc').catch(() => ({ items: [] })),
+        viewerName ? lookApi.mine().then(({ look }) => look, () => null) : null,
       ]);
       const [mine, visits] = await Promise.all([
         viewerName && !view.isOwner ? homeApi.get(viewerName).catch(() => null) : null,
         homeApi.visit(username, visitorId()).catch(() => view.visits),
       ]);
       if (controller.signal.aborted) return;
-      const viewerMinime = view.isOwner ? view.profile.minime : (mine?.profile.minime ?? 'man');
-      prefetchModels([minimes.items.find((item) => item.id === viewerMinime)?.modelUrl ?? modelUrl('man')]);
-      setLoaded({ view: { ...view, visits }, minimes: minimes.items, furniture: furniture.items, viewerMinime });
+      const viewerMinime = view.isOwner ? view.profile.minime : (mine?.profile.minime ?? FALLBACK_MINIME);
+      prefetchModels([playerModelUrl(viewerLook, viewerMinime, minimes.items)]);
+      setLoaded({
+        view: { ...view, visits },
+        minimes: minimes.items,
+        furniture: furniture.items,
+        npcs: npcs.items,
+        viewerMinime,
+        viewerLook,
+      });
     })().catch((error: unknown) => {
       if (controller.signal.aborted) return;
       setProblem(
@@ -95,6 +114,9 @@ export function MinihomePage({ username, editing }: { username: string; editing:
         viewerMinime={loaded.viewerMinime}
         minimes={loaded.minimes}
         studioItems={loaded.furniture}
+        npcItems={loaded.npcs}
+        viewerLook={loaded.viewerLook}
+        onLook={(viewerLook) => setLoaded((current) => current && { ...current, viewerLook })}
         editing={editing}
         onView={(view) =>
           setLoaded(

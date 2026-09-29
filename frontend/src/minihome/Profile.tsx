@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
 
-import type { CatalogItem, HomeView, HomeVisibility, ProfileChanges } from '../api/types';
+import type { CatalogItem, HomeView, HomeVisibility, Look, ProfileChanges } from '../api/types';
 import { Icon } from '../ui/icons';
+import { wearsLook } from './character';
 
 const MOODS = [
   { emoji: '😊', label: '행복' },
@@ -93,9 +94,22 @@ export function ProfileHeader({
   );
 }
 
-/** 소개: the island's name, the owner's mood and 미니미, and who may visit. */
-export function About({ view, minimes, onUpdate }: { view: HomeView; minimes: CatalogItem[]; onUpdate: (changes: ProfileChanges) => void }) {
+/** 소개: the island's name, the owner's mood and 미니미 (or their own look from the wardrobe), and who may visit. */
+export function About({
+  view,
+  minimes,
+  look,
+  onUpdate,
+  onWearLook,
+}: {
+  view: HomeView;
+  minimes: CatalogItem[];
+  look: Look | null;
+  onUpdate: (changes: ProfileChanges) => void;
+  onWearLook: () => void;
+}) {
   const { profile, isOwner } = view;
+  const ownLook = wearsLook(look);
   const saveTitle = useCallback((title: string) => onUpdate({ title }), [onUpdate]);
   const saveStatus = useCallback((statusMessage: string) => onUpdate({ statusMessage }), [onUpdate]);
 
@@ -134,8 +148,16 @@ export function About({ view, minimes, onUpdate }: { view: HomeView; minimes: Ca
           <div className="mg-label">
             미니미
             <div className="mg-minimes">
+              {look?.modelUrl && (
+                <button aria-pressed={ownLook} onClick={() => !ownLook && onWearLook()}>
+                  <span aria-hidden="true">
+                    <Icon name="person" />
+                  </span>
+                  <small>내 모습</small>
+                </button>
+              )}
               {minimes.map((item) => (
-                <button key={item.id} aria-pressed={item.id === profile.minime} onClick={() => onUpdate({ minime: item.id, emoji: item.emoji })}>
+                <button key={item.id} aria-pressed={!ownLook && item.id === profile.minime} onClick={() => onUpdate({ minime: item.id, emoji: item.emoji })}>
                   {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" /> : <span aria-hidden="true">{item.emoji}</span>}
                   <small>{item.label}</small>
                 </button>

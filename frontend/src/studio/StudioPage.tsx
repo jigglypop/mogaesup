@@ -8,6 +8,7 @@ import { catalogApi } from '../api/endpoints';
 import { useStudioSleep } from '../api/studioSleep';
 import type { FactoryUsage } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
+import { can } from '../auth/can';
 import { Loading } from '../pages/Loading';
 import { PageShell } from '../shell/Shell';
 import { Icon } from '../ui/icons';
@@ -150,7 +151,8 @@ export default function StudioPage() {
   const sleep = useStudioSleep();
   if (status === 'loading') return <Loading />;
   if (!user) return <Navigate to="/" replace />;
-  const admin = user.role === 'admin';
+  // Operators make and manage; FACTORY_ACCESS on the server still bounds what they can do.
+  const admin = can(user, 'operator');
   const sections: Section[] = [
     { title: '내 캐릭터', locked: false, screens: [{ path: '/studio', label: '옷장' }] },
     { title: '만들기', locked: !admin, screens: MAKE },

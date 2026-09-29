@@ -21,11 +21,13 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::require_admin,
+    auth::require,
     catalog,
     error::{ApiError, ApiResult, bad, conflict, internal, not_found},
     factory::{self, MAX_MODEL_BYTES, Received},
-    glb, slim, studio,
+    glb,
+    rebac::CATALOG_EDITOR,
+    slim, studio,
 };
 
 /// Imports copying at once. Each holds a whole model (up to 64 MB) and decodes its textures to shrink them.
@@ -57,6 +59,9 @@ const NOT_GLB: ApiError = bad("not_glb", "GLB 파일이 아닙니다.");
 const CHECKSUM: ApiError = bad("factory_checksum", "받은 모델이 캐릭터 서버의 기록과 다릅니다. 다시 시도해 주세요.");
 const NOT_PLAYABLE: ApiError =
     bad("not_playable", "미니미로 쓰려면 리깅(스킨)과 idle·walk 애니메이션이 있어야 합니다.");
+const NOT_RESIDENT: ApiError = bad("not_playable", "주민으로 쓰려면 리깅(스킨)과 idle 애니메이션이 있어야 합니다.");
+/** Engine clips a resident needs: it stands where the island's owner put it, so a walk is optional. */
+const RESIDENT_CLIPS: [&str; 1] = ["idle"];
 const RUNNING: ApiError = conflict("import_running", "이 항목은 이미 가져오는 중입니다. 끝난 뒤 다시 시도해 주세요.");
 const NOT_FOUND: ApiError = not_found("import_not_found", "없는 가져오기 작업입니다.");
 const INTERRUPTED: &str = "서버가 다시 시작되어 가져오기가 멈췄습니다. 다시 시도해 주세요.";
@@ -146,7 +151,8 @@ fn thumbnail(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 /// Runs every check on a downloaded model into `report`, then fails on the first hard problem, in this order: not a
-/// GLB, a checksum that differs from the character server's record, a 미니미 without a rig or without idle and walk.
+/// GLB, a checksum that differs from the character server's record, a 미니미 without a rig or without idle and walk, a
+/// resident (`npc`) without a rig or without idle.
 fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report) -> ApiResult<glb::Details> {
     let sha256 = hex::encode(Sha256::digest(bytes));
     let checksum = match expected {
@@ -175,18 +181,20 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
         return Err(NOT_GLB);
     };
     report.check("glb", Level::Ok, format!("GLB 파일 {}", size_text(bytes.len())));
-    let minime = kind == "minime";
-    // What a 미니미 must have is only worth noting on furniture.
-    let must = if minime { Level::Error } else { Level::Info };
+    let resident = kind == "npc";
+    let character = kind == "minime" || resident;
+    // What a character must have is only worth noting on furniture.
+    let must = if character { Level::Error } else { Level::Info };
+    let wanted: &[&'static str] = if resident { &RESIDENT_CLIPS } else { &glb::REQUIRED_CLIPS };
     let summary = details.summary();
     if details.skinned {
         report.check("skin", Level::Ok, format!("리깅(스킨)이 있습니다 · 관절 {}개", details.joints));
     } else {
         report.check("skin", must, "리깅(스킨)이 없습니다.");
     }
-    let missing = summary.missing_clips();
+    let missing = summary.missing(wanted);
     if missing.is_empty() {
-        report.check("clips", Level::Ok, format!("필요한 애니메이션({})이 있습니다.", glb::REQUIRED_CLIPS.join("·")));
+        report.check("clips", Level::Ok, format!("필요한 애니메이션({})이 있습니다.", wanted.join("·")));
     } else {
         report.check("clips", must, format!("필요한 애니메이션이 없습니다: {}", missing.join(", ")));
     }
@@ -205,7 +213,7 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
         report.check("triangles", Level::Ok, format!("삼각형 {}개 · 정점 {}개", details.triangles, details.vertices));
     }
     match details.size {
-        Some([_, height, _]) if !minime || HEIGHT_RANGE.contains(&height) => {
+        Some([_, height, _]) if !character || HEIGHT_RANGE.contains(&height) => {
             report.check("height", Level::Ok, format!("높이 {height:.2} m"));
         }
         Some([_, height, _]) => {
@@ -224,8 +232,8 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
     if checksum == Level::Error {
         return Err(CHECKSUM);
     }
-    if minime && !summary.playable() {
-        return Err(NOT_PLAYABLE);
+    if character && (!summary.skinned || !missing.is_empty()) {
+        return Err(if resident { NOT_RESIDENT } else { NOT_PLAYABLE });
     }
     Ok(details)
 }
@@ -320,7 +328,7 @@ pub async fn enqueue(
     headers: HeaderMap,
     Json(body): Json<ImportBody>,
 ) -> ApiResult<Response> {
-    let admin = require_admin(&state, &headers).await?;
+    let admin = require(&state, &headers, CATALOG_EDITOR).await?;
     let order = Order {
         item: catalog::catalog_id(&body.id)?.to_owned(),
         kind: catalog::kind(&body.kind)?.to_owned(),
@@ -373,7 +381,7 @@ pub async fn list(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, CATALOG_EDITOR).await?;
     let rows = sqlx::query(&format!("{IMPORT_SELECT} ORDER BY i.created_at DESC LIMIT $1"))
         .bind(query.limit.unwrap_or(30).clamp(1, 100))
         .fetch_all(&state.db)
@@ -383,7 +391,7 @@ pub async fn list(
 
 /// `GET /api/catalog/admin/imports/{id}`.
 pub async fn one(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, CATALOG_EDITOR).await?;
     let id = Uuid::parse_str(&id).map_err(|_| NOT_FOUND)?;
     Ok(Json(import_json(&fetch(&state.db, id).await?.ok_or(NOT_FOUND)?)))
 }
@@ -713,7 +721,18 @@ mod tests {
         let mut report = Report::default();
         let sha = hex::encode(Sha256::digest(&statue));
         assert_eq!(verify("minime", &statue, Some(sha.as_str()), &mut report).unwrap_err().code, "not_playable");
-        // Furniture needs neither a rig nor clips.
+        // A resident needs a rig and idle, not a walk; furniture needs neither a rig nor clips.
+        let mut report = Report::default();
+        let error = verify("npc", &statue, None, &mut report).unwrap_err();
+        assert_eq!((error.code, error.message), ("not_playable", NOT_RESIDENT.message));
+        assert!(report.checks.iter().any(|check| check.code == "clips" && check.level == Level::Ok));
+        let standing = glb::join(
+            &json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}], "animations": [{"name": "Idle"}]}),
+            &[],
+        );
+        let mut report = Report::default();
+        assert!(verify("npc", &standing, None, &mut report).is_ok());
+        assert_eq!(verify("minime", &standing, None, &mut Report::default()).unwrap_err().code, "not_playable");
         let mut report = Report::default();
         assert!(verify("furniture", &statue, None, &mut report).is_ok());
         assert!(levels(&report).contains(&("checksum", Level::Warning)));

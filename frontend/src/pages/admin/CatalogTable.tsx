@@ -320,6 +320,7 @@ export function CatalogTable({ items, imports, busy, onPatch, onStatus, onBulk, 
           <option value="all">모든 종류</option>
           <option value="minime">미니미</option>
           <option value="furniture">가구</option>
+          <option value="npc">주민</option>
         </select>
         <select className="mg-field mg-admin-select" aria-label="상태" value={filter.status} onChange={(event) => setFilter({ ...filter, status: event.target.value as CatalogStatus | 'all' })}>
           <option value="all">모든 상태</option>

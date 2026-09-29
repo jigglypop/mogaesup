@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     error::{ApiError, ApiResult, LOGIN_REQUIRED, bad, conflict, forbidden, internal},
+    rebac::{self, Actor, Checker, PERMISSIONS, Permission, ROLE_COLUMN, Subject, Tuple},
     security::{client_address, rate_exceeded, rate_limit, rate_record},
 };
 
@@ -26,6 +27,7 @@ const SESSION_COOKIE: &str = "mogaesup_session";
 const SESSIONS_PER_USER: i64 = 8;
 const SESSION_MAX_AGE_SECONDS: u32 = 30 * 24 * 60 * 60;
 
+/// A signed-in account. `role` is `admin` while it holds `system:mogaesup#admin` (see [`rebac`]), else `user`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
@@ -36,10 +38,6 @@ pub struct User {
 }
 
 impl User {
-    pub fn is_admin(&self) -> bool {
-        self.role == "admin"
-    }
-
     fn from_row(row: &PgRow) -> Self {
         Self {
             id: row.get("id"),
@@ -67,10 +65,10 @@ fn token_hash(headers: &HeaderMap) -> Option<String> {
 
 pub async fn optional_user(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<User>> {
     let Some(token) = token_hash(headers) else { return Ok(None) };
-    let row = sqlx::query(
-        "SELECT u.id, u.username, u.display_name, u.role FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token_hash = $1 AND s.expires_at > now()",
-    )
+    let row = sqlx::query(&format!(
+        "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN} FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = $1 AND s.expires_at > now()"
+    ))
     .bind(token)
     .fetch_optional(&state.db)
     .await?;
@@ -81,9 +79,28 @@ pub async fn current_user(state: &AppState, headers: &HeaderMap) -> ApiResult<Us
     optional_user(state, headers).await?.ok_or(LOGIN_REQUIRED)
 }
 
-pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
+/// The signed-in user, when they hold `permission`; 403 with the permission's own code otherwise.
+pub async fn require(state: &AppState, headers: &HeaderMap, permission: Permission) -> ApiResult<User> {
     let user = current_user(state, headers).await?;
-    if user.is_admin() { Ok(user) } else { Err(forbidden("admin_only", "관리자만 쓸 수 있습니다.")) }
+    if Checker::new(&state.db).allows(Subject::User(user.id), &permission).await? {
+        Ok(user)
+    } else {
+        Err(forbidden(permission.code, permission.message))
+    }
+}
+
+/// `user` as the app keeps it, with the names of the [`PERMISSIONS`] it holds (`permissions`).
+async fn with_permissions(state: &AppState, user: &User) -> ApiResult<Value> {
+    let mut checker = Checker::new(&state.db);
+    let mut held = Vec::new();
+    for permission in PERMISSIONS {
+        if checker.allows(Subject::User(user.id), &permission).await? {
+            held.push(permission.name);
+        }
+    }
+    let mut value = serde_json::to_value(user).map_err(internal)?;
+    value["permissions"] = json!(held);
+    Ok(value)
 }
 
 #[derive(Deserialize)]
@@ -152,18 +169,17 @@ async fn verify_password(state: &AppState, hash: Option<String>, password: Strin
     .map_err(internal)
 }
 
-/// The account and its minihome in one transaction; false when the username is taken.
+/// The account and its minihome in one transaction; false when the username is taken. It holds no permission yet.
 async fn create_account(db: &PgPool, user: &User, password_hash: &str) -> Result<bool, sqlx::Error> {
     let mut tx = db.begin().await?;
     let inserted = sqlx::query(
-        "INSERT INTO users (id, username, display_name, password_hash, role) VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO users (id, username, display_name, password_hash) VALUES ($1, $2, $3, $4)
          ON CONFLICT (username) DO NOTHING",
     )
     .bind(user.id)
     .bind(&user.username)
     .bind(&user.display_name)
     .bind(password_hash)
-    .bind(&user.role)
     .execute(&mut *tx)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -198,6 +214,7 @@ async fn session(state: &AppState, user: User, status: StatusCode) -> ApiResult<
     .execute(&state.db)
     .await?;
     let cookie = session_cookie(state, &token, SESSION_MAX_AGE_SECONDS);
+    let user = with_permissions(state, &user).await?;
     Ok((status, [(header::SET_COOKIE, cookie)], Json(json!({"user": user}))).into_response())
 }
 
@@ -238,10 +255,12 @@ pub async fn login(
     let user_key = format!("login-failed:{name}");
     rate_exceeded(&state, &address_key, 30)?;
     rate_exceeded(&state, &user_key, 50)?;
-    let row = sqlx::query("SELECT id, username, display_name, role, password_hash FROM users WHERE username = $1")
-        .bind(&name)
-        .fetch_optional(&state.db)
-        .await?;
+    let row = sqlx::query(&format!(
+        "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, u.password_hash FROM users u WHERE u.username = $1"
+    ))
+    .bind(&name)
+    .fetch_optional(&state.db)
+    .await?;
     let hash = row.as_ref().map(|r| r.get::<String, _>("password_hash"));
     if !verify_password(&state, hash, body.password).await? {
         rate_record(&state, address_key);
@@ -264,7 +283,11 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
 }
 
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    Ok(Json(json!({"user": optional_user(&state, &headers).await?})))
+    let user = match optional_user(&state, &headers).await? {
+        Some(user) => with_permissions(&state, &user).await?,
+        None => Value::Null,
+    };
+    Ok(Json(json!({"user": user})))
 }
 
 pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
@@ -275,18 +298,34 @@ pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) 
     Ok(Json(json!({"ticket": ticket, "expiresAt": expires_at, "user": user})))
 }
 
-/// Creates the configured operator, or promotes an existing account, so a fresh deployment has an admin.
+async fn user_id(db: &PgPool, name: &str) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM users WHERE username = $1").bind(name).fetch_optional(db).await
+}
+
+/// Creates the configured operator, or takes the existing account of that name (keeping its password), and grants it
+/// `system:mogaesup#admin`, so a fresh deployment has an admin.
 pub async fn bootstrap_admin(state: &AppState, username_raw: &str, password: &str) -> anyhow::Result<()> {
     let name = username(username_raw)?;
-    let promoted =
-        sqlx::query("UPDATE users SET role = 'admin' WHERE username = $1").bind(&name).execute(&state.db).await?;
-    if promoted.rows_affected() > 0 {
-        return Ok(());
+    let id = match user_id(&state.db, &name).await? {
+        Some(id) => id,
+        None => {
+            new_password(password)?;
+            let hash = hash_password(state, password.to_owned()).await?;
+            let user =
+                User { id: Uuid::new_v4(), username: name.clone(), display_name: name.clone(), role: "user".into() };
+            if create_account(&state.db, &user, &hash).await? {
+                user.id
+            } else {
+                // Someone signed up with that name in the meantime.
+                user_id(&state.db, &name).await?.ok_or_else(|| anyhow::anyhow!("bootstrap admin account vanished"))?
+            }
+        }
+    };
+    let granted =
+        rebac::grant(&state.db, &Tuple::admin(id), Actor::server("bootstrap"), "BOOTSTRAP_ADMIN_USERNAME").await?;
+    if granted {
+        tracing::warn!(username = %name, "Bootstrap admin granted");
     }
-    new_password(password)?;
-    let hash = hash_password(state, password.to_owned()).await?;
-    let user = User { id: Uuid::new_v4(), username: name.clone(), display_name: name, role: "admin".into() };
-    create_account(&state.db, &user, &hash).await?;
     Ok(())
 }
 

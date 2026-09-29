@@ -29,7 +29,12 @@ impl Summary {
 
     /// Required clips the model cannot play, in [`REQUIRED_CLIPS`] order.
     pub fn missing_clips(&self) -> Vec<&'static str> {
-        REQUIRED_CLIPS.into_iter().filter(|clip| !self.clips.iter().any(|have| have == clip)).collect()
+        self.missing(&REQUIRED_CLIPS)
+    }
+
+    /// Of `wanted` engine clips, the ones the model cannot play, in `wanted` order.
+    pub fn missing(&self, wanted: &[&'static str]) -> Vec<&'static str> {
+        wanted.iter().copied().filter(|clip| !self.clips.iter().any(|have| have == clip)).collect()
     }
 }
 
@@ -143,7 +148,7 @@ impl Details {
     }
 }
 
-fn index(value: &Value) -> Option<usize> {
+pub(crate) fn index(value: &Value) -> Option<usize> {
     usize::try_from(value.as_u64()?).ok()
 }
 
@@ -172,10 +177,10 @@ fn mesh_counts(json: &Value, mesh: &Value) -> (u64, u64) {
 }
 
 /// Column-major 4×4, as glTF writes node matrices.
-type Matrix = [f64; 16];
-const IDENTITY: Matrix = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
+pub(crate) type Matrix = [f64; 16];
+pub(crate) const IDENTITY: Matrix = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
 
-fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
+pub(crate) fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
     let mut out = [0.0; 16];
     for column in 0..4 {
         for row in 0..4 {
@@ -196,7 +201,7 @@ fn numbers<const N: usize>(value: &Value, default: [f64; N]) -> [f64; N] {
 }
 
 /// A node's own transform: its matrix, or translation × rotation × scale.
-fn local(node: &Value) -> Matrix {
+pub(crate) fn local(node: &Value) -> Matrix {
     if node["matrix"].as_array().is_some_and(|matrix| matrix.len() == 16) {
         return numbers(&node["matrix"], IDENTITY);
     }

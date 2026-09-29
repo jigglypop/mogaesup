@@ -60,3 +60,8 @@
 .wardrobe-shape-fit button[aria-pressed=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .125)}
 .wardrobe-shape-actions{grid-column:2;display:flex;gap:6px}
 .wardrobe-shape p[role=alert]{grid-column:2;margin:0}
+.wardrobe-look{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.wardrobe-look h2{margin:0 0 10px;font-size:14px}
+.wardrobe-look-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.wardrobe-look-row span{color:var(--muted);font-size:12px}
+.wardrobe-look p{margin:8px 0 0;font-size:12px}

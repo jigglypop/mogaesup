@@ -19,6 +19,8 @@ import type {
   IlchonAsk,
   IlchonRequest,
   IlchonStatus,
+  Look,
+  LookRequest,
   ProfileChanges,
   RealtimeTicket,
   Registration,
@@ -87,4 +89,12 @@ export const catalogApi = {
     api<AdminCatalogItem>(`/catalog/admin/items/${segment(id)}/rollback`, { method: 'POST', body: { versionId } }),
   bulkStatus: (ids: string[], status: CatalogStatus) =>
     api<{ items: AdminCatalogItem[] }>('/catalog/admin/bulk-status', { method: 'POST', body: { ids, status } }),
+};
+
+/** The caller's own character from the wardrobe; each member reaches only theirs. */
+export const lookApi = {
+  mine: () => api<{ look: Look | null }>('/looks/me'),
+  /** Saves it and starts assembling it; poll `mine` until it is no longer `baking`. */
+  save: (body: LookRequest) => api<{ look: Look }>('/looks/me', { method: 'PUT', body }),
+  wear: (worn: boolean) => api<{ look: Look }>('/looks/me', { method: 'PATCH', body: { worn } }),
 };

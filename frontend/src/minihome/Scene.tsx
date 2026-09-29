@@ -63,10 +63,12 @@ type SceneProps = SceneSettings & {
   playerRef: RefObject<RapierRigidBody>;
   /** Other people in the live room. */
   visitors?: ReactNode;
+  /** The island's residents. */
+  residents?: ReactNode;
 };
 
-/** The island canvas: the player, the village, visitors and the rule engine's trigger areas. */
-export function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visitors }: SceneProps) {
+/** The island canvas: the player, the village, visitors, residents and the rule engine's trigger areas. */
+export function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visitors, residents }: SceneProps) {
   // A lost GPU device remounts the canvas with a fresh renderer; the island's state lives outside it.
   const canvasKey = useRendererRecovery();
   const worldGi = postProcessing && !!cinematic;
@@ -85,6 +87,7 @@ export function Scene({ quality, postProcessing, cinematic, idleThrottle, player
             <GaesupController rigidBodyRef={playerRef} position={SPAWN} materialPolicy="figure" clickToMove />
             <BuildingController />
             {visitors}
+            {residents}
           </WorldPhysics>
           <InteractionTracker />
           <EditCanvas />

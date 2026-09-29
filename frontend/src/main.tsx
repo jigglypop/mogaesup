@@ -18,8 +18,9 @@ initTheme();
 
 // The character studio brings its own screens and 3D viewer; it loads only when someone opens it.
 const StudioPage = lazy(() => import('./studio/StudioPage'));
-// Only admins open the pipeline board, so members never download it.
+// Only catalog editors open the pipeline board and only admins the permissions, so members never download them.
 const AdminPage = lazy(() => import('./pages/AdminPage').then((module) => ({ default: module.AdminPage })));
+const PermissionsPage = lazy(() => import('./pages/permissions/PermissionsPage'));
 
 /** `/@username` is an island and `/@username/edit` its decorating mode; any other single segment is not a page. */
 function UsernameRoute() {
@@ -41,6 +42,14 @@ if (root) {
             element={
               <Suspense fallback={<Loading />}>
                 <StudioPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/admin/permissions"
+            element={
+              <Suspense fallback={<Loading />}>
+                <PermissionsPage />
               </Suspense>
             }
           />

@@ -13,14 +13,16 @@ use std::{cmp::Reverse, time::Duration};
 
 use crate::{
     AppState,
-    auth::require_admin,
+    auth::require,
     error::{ApiError, ApiResult, bad, not_found},
     factory, imports,
+    rebac::CATALOG_EDITOR,
     studio::{self, Freshness},
     studio_power,
 };
 
-const KINDS: [&str; 2] = ["minime", "furniture"];
+/// 미니미 are what people walk as, 주민 (`npc`) stand on islands, furniture is placed.
+const KINDS: [&str; 3] = ["minime", "furniture", "npc"];
 const STATUSES: [&str; 3] = ["draft", "published", "retired"];
 /// Faces asked for at once for the character listing, and how long the listing waits for all of them; a face that is
 /// late counts as unknown rather than holding the page past CloudFront's 30 s.
@@ -122,7 +124,7 @@ async fn admin_one(db: &PgPool, id: &str) -> ApiResult<Json<Value>> {
 }
 
 async fn admin_items(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, CATALOG_EDITOR).await?;
     Ok(Json(json!({"items": admin_list(&state.db, None).await?})))
 }
 
@@ -172,7 +174,7 @@ async fn update(
     Path(id): Path<String>,
     Json(changes): Json<Changes>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, CATALOG_EDITOR).await?;
     let id = catalog_id(&id)?;
     let updated = sqlx::query(
         "UPDATE catalog_items SET label = COALESCE($2, label), emoji = COALESCE($3, emoji), status = COALESCE($4, status),
@@ -203,7 +205,7 @@ async fn bulk_status(
     headers: HeaderMap,
     Json(body): Json<BulkStatus>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, CATALOG_EDITOR).await?;
     if body.ids.is_empty() || body.ids.len() > MAX_BULK {
         return Err(bad("invalid_ids", "한 번에 바꿀 항목은 1~200개입니다."));
     }
@@ -221,7 +223,7 @@ async fn bulk_status(
 
 /// `GET /api/catalog/admin/items/{id}/versions`: every model the item has shown, newest first.
 async fn versions(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, CATALOG_EDITOR).await?;
     let id = catalog_id(&id)?;
     let current: Option<i64> = sqlx::query_scalar("SELECT version_id FROM catalog_items WHERE id = $1")
         .bind(id)
@@ -273,7 +275,7 @@ async fn rollback(
     Path(id): Path<String>,
     Json(body): Json<Rollback>,
 ) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, CATALOG_EDITOR).await?;
     let id = catalog_id(&id)?;
     let moved = sqlx::query(
         "UPDATE catalog_items i SET model_url = v.model_url, thumbnail_url = v.thumbnail_url, clips = v.clips,
@@ -304,7 +306,7 @@ fn copy_rank(row: &PgRow) -> (u8, Reverse<DateTime<Utc>>) {
 /// character, so a remade job is an update of the same item, and a copy is current only while its job, assembly,
 /// chosen face and stage are the character's latest.
 async fn factory_characters(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let admin = require_admin(&state, &headers).await?;
+    let admin = require(&state, &headers, CATALOG_EDITOR).await?;
     let listing = studio::list(&state, &admin.username).await?;
     let deadline = tokio::time::Instant::now() + FACE_BUDGET;
     let lookups: Vec<_> = listing
@@ -317,8 +319,8 @@ async fn factory_characters(State(state): State<AppState>, headers: HeaderMap) -
         .collect();
     let faces: Vec<Option<Option<String>>> = stream::iter(lookups).buffered(FACE_LOOKUPS).collect().await;
     let rows = sqlx::query(
-        "SELECT i.id, i.label, i.emoji, i.status, i.thumbnail_url, i.source_ref, i.character_id, i.updated_at, v.stage
-         FROM catalog_items i LEFT JOIN catalog_versions v ON v.id = i.version_id WHERE i.source = 'factory'",
+        "SELECT i.id, i.kind, i.label, i.emoji, i.status, i.thumbnail_url, i.source_ref, i.character_id, i.updated_at,
+         v.stage FROM catalog_items i LEFT JOIN catalog_versions v ON v.id = i.version_id WHERE i.source = 'factory'",
     )
     .fetch_all(&state.db)
     .await?;
@@ -354,6 +356,7 @@ async fn factory_characters(State(state): State<AppState>, headers: HeaderMap) -
                 );
                 json!({
                     "id": row.get::<String, _>("id"),
+                    "kind": row.get::<String, _>("kind"),
                     "label": row.get::<String, _>("label"),
                     "emoji": row.get::<String, _>("emoji"),
                     "status": row.get::<String, _>("status"),
@@ -391,7 +394,7 @@ mod tests {
 
     #[test]
     fn only_known_kinds_and_statuses_pass() {
-        assert!(kind("minime").is_ok() && kind("furniture").is_ok());
+        assert!(kind("minime").is_ok() && kind("furniture").is_ok() && kind("npc").is_ok());
         assert_eq!(kind("hat").unwrap_err().code, "invalid_kind");
         assert_eq!(status(Some("gone".into())).unwrap_err().code, "invalid_status");
         assert_eq!(status(None).unwrap(), None);

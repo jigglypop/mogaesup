@@ -13,7 +13,7 @@ import type {
 } from '../../api/types';
 
 export const STATUS_LABEL: Record<CatalogStatus, string> = { draft: '초안', published: '공개', retired: '내림' };
-export const KIND_LABEL: Record<CatalogKind, string> = { minime: '미니미', furniture: '가구' };
+export const KIND_LABEL: Record<CatalogKind, string> = { minime: '미니미', furniture: '가구', npc: '주민' };
 export const SOURCE_LABEL: Record<AdminCatalogItem['source'], string> = { builtin: '기본', factory: '캐릭터 스튜디오' };
 
 export const LEVEL_LABEL: Record<CheckLevel, string> = { ok: '통과', info: '참고', warning: '주의', error: '문제' };

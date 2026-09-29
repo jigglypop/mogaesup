@@ -6,7 +6,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use mogaesup_server::{AppState, MIGRATOR, config::Config, config::Factory, models::Models, router};
+use mogaesup_server::{AppState, MIGRATOR, config::Config, config::Factory, models::Models, rebac, router};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::path::PathBuf;
@@ -125,11 +125,22 @@ impl TestApp {
         reply.cookie.expect("session cookie")
     }
 
-    pub async fn make_admin(&self, username: &str) {
-        sqlx::query("UPDATE users SET role = 'admin' WHERE username = $1")
+    pub async fn user_id(&self, username: &str) -> uuid::Uuid {
+        sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
             .bind(username)
-            .execute(&self.state.db)
+            .fetch_one(&self.state.db)
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Grants `username` the `relation` on `object` (`system:mogaesup`, `group:crew`…), as the server itself.
+    pub async fn grant(&self, username: &str, object: &str, relation: &str) {
+        let subject = rebac::SubjectRef::user(self.user_id(username).await);
+        let tuple = rebac::Tuple::new(rebac::Object::parse(object).unwrap(), relation, subject).unwrap();
+        rebac::grant(&self.state.db, &tuple, rebac::Actor::server("test"), "test").await.unwrap();
+    }
+
+    pub async fn make_admin(&self, username: &str) {
+        self.grant(username, "system:mogaesup", "admin").await;
     }
 }

@@ -16,9 +16,10 @@ use std::{
 
 use crate::{
     AppState,
-    auth::{current_user, require_admin},
+    auth::{current_user, require},
     config::{Factory, FactoryAccess, FactoryToken},
     error::{ApiError, ApiResult, forbidden, internal, not_found},
+    rebac::{ADMIN, OPERATOR, PAID_OPERATOR, STUDIO_VIEWER},
     security::{epoch_seconds, hmac_sha256},
 };
 
@@ -201,16 +202,16 @@ pub fn router() -> Router<AppState> {
     router
 }
 
-/// What a studio request needs from whoever sends it.
+/// What a studio request needs from whoever sends it (permissions are in `rebac`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Need {
     /// Any signed-in member: reading the wardrobe (bodies, parts, colours, previews) and the part models it puts on.
     Member,
-    /// An admin, reading anything else.
-    Admin,
-    /// An admin, changing the studio's records; `FACTORY_ACCESS=write` or more.
+    /// `studio_viewer` (an operator or a catalog editor), reading anything else.
+    Read,
+    /// `operator`, changing the studio's records; `FACTORY_ACCESS=write` or more.
     Write,
-    /// An admin, starting work that can cost money; `FACTORY_ACCESS=paid` and budget left this month.
+    /// `paid_operator`, starting work that can cost money; `FACTORY_ACCESS=paid` and budget left this month.
     Paid,
 }
 
@@ -237,7 +238,7 @@ fn need(method: &Method, path: &str) -> Need {
             ["avatar-factory", "jobs", _, "native-parts", _, file] => file.ends_with(".glb"),
             _ => false,
         };
-        return if member { Need::Member } else { Need::Admin };
+        return if member { Need::Member } else { Need::Read };
     }
     let free = |pattern: &&[&str]| {
         pattern.len() == segments.len() && pattern.iter().zip(&segments).all(|(want, got)| *want == "*" || want == got)
@@ -274,7 +275,9 @@ async fn studio(
     let need = need(&method, &path);
     let user = match need {
         Need::Member => current_user(&state, &headers).await?,
-        _ => require_admin(&state, &headers).await?,
+        Need::Read => require(&state, &headers, STUDIO_VIEWER).await?,
+        Need::Write => require(&state, &headers, OPERATOR).await?,
+        Need::Paid => require(&state, &headers, PAID_OPERATOR).await?,
     };
     let factory = factory(&state)?;
     let paid = need == Need::Paid;
@@ -325,7 +328,7 @@ async fn studio(
 
 /// `GET /api/catalog/admin/factory-usage`: how far the studio reaches from here, and this month's paid requests.
 pub async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, STUDIO_VIEWER).await?;
     let Some(factory) = state.config.factory.as_ref() else {
         return Ok(Json(json!({"connected": false})));
     };
@@ -337,7 +340,8 @@ pub async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     })))
 }
 
-/// The character server's `/api/*` for admins, signed in as its operator. Bodies stream both ways.
+/// The character server's `/api/*`, signed in as its operator: reads (model previews on /admin) for `studio_viewer`,
+/// anything else for admins. Bodies stream both ways.
 async fn proxy(
     State(state): State<AppState>,
     method: Method,
@@ -346,8 +350,9 @@ async fn proxy(
     RawQuery(query): RawQuery,
     body: Body,
 ) -> ApiResult<Response> {
-    let admin = require_admin(&state, &headers).await?;
-    forward(&state, &admin.username, method, &headers, &path, query, body).await
+    let read = matches!(method, Method::GET | Method::HEAD);
+    let user = require(&state, &headers, if read { STUDIO_VIEWER } else { ADMIN }).await?;
+    forward(&state, &user.username, method, &headers, &path, query, body).await
 }
 
 /// Sends one request to the character server's `/api/{path}` as the operator and streams its answer back.

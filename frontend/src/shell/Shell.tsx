@@ -8,6 +8,7 @@ import { problemText } from '../api/client';
 import { socialApi } from '../api/endpoints';
 import type { IlchonRequest } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
+import { can } from '../auth/can';
 import { Icon, type IconName } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
 
@@ -66,7 +67,7 @@ export function Rail() {
         ]
       : []),
     { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
-    ...(user?.role === 'admin'
+    ...(can(user, 'catalog_editor')
       ? [{ label: '운영', icon: 'shield' as const, to: '/admin', active: pathname.startsWith('/admin'), divided: true }]
       : []),
   ];

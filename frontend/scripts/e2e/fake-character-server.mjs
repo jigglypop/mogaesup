@@ -4,7 +4,8 @@
 // API key and gateway key the Rust server signs with; anything unsigned, or a path it does not know, is noted in
 // `problems`. Nothing here costs money.
 // The models come from a figure gaesup-world ships, rewritten the way the character server delivers them: plain
-// geometry and PNG maps, rigged, with idle, walk and run clips.
+// geometry and PNG maps, rigged, with idle, walk and run clips. The wardrobe has one part on that figure's bones: a red
+// hat on its head bone, the way the studio fits parts to a registered body.
 // Usage: node scripts/e2e/fake-character-server.mjs [port]   (prints the settings the Rust server needs; forked, it
 // talks to its parent instead)
 import { createHash, createHmac, randomBytes } from 'node:crypto';
@@ -12,9 +13,9 @@ import { createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { NodeIO } from '@gltf-transform/core';
+import { Logger, NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { dequantize, textureCompress, unpartition } from '@gltf-transform/functions';
+import { dequantize, prune, textureCompress, unpartition } from '@gltf-transform/functions';
 import { MeshoptDecoder } from 'meshoptimizer';
 import sharp from 'sharp';
 
@@ -50,7 +51,48 @@ async function models() {
   const second = await write();
   for (const clip of document.getRoot().listAnimations()) if (/walk/i.test(clip.getName())) clip.dispose();
   const face = Buffer.from(document.getRoot().listMaterials()[0].getBaseColorTexture().getImage());
-  return { first, second, noWalk: await write(), face };
+  const noWalk = await write();
+  return { first, second, noWalk, face, hat: await hatPart(document, write) };
+}
+
+/**
+ * A wardrobe part for the figure: its skinned mesh swapped for a box over the top of the head, weighted to the head
+ * bone, without clips, tagged with its slot like the studio's fitted parts. Its bones are the body's, at rest where the
+ * body's stand, so the wardrobe (and the server that assembles looks) accepts it.
+ */
+async function hatPart(document, write) {
+  const root = document.getRoot();
+  for (const clip of root.listAnimations()) clip.dispose();
+  const node = root.listNodes().find((candidate) => candidate.getMesh() && candidate.getSkin());
+  const mesh = node.getMesh();
+  const joints = node.getSkin().listJoints();
+  const named = joints.findIndex((joint) => /head/i.test(joint.getName()));
+  const head = named >= 0 ? named : joints.reduce((top, joint, at) => (joint.getWorldTranslation()[1] > joints[top].getWorldTranslation()[1] ? at : top), 0);
+  const positions = mesh.listPrimitives()[0].getAttribute('POSITION');
+  const [low, high] = [positions.getMin([]), positions.getMax([])];
+  const height = high[1] - low[1];
+  const [cx, cz] = [(low[0] + high[0]) / 2, (low[2] + high[2]) / 2];
+  const [rx, rz] = [(high[0] - low[0]) * 0.22, (high[2] - low[2]) * 0.4];
+  const [y0, y1] = [high[1] - height * 0.12, high[1] + height * 0.05];
+  const corners = [];
+  for (const y of [y0, y1]) for (const [x, z] of [[-rx, -rz], [rx, -rz], [rx, rz], [-rx, rz]]) corners.push(cx + x, y, cz + z);
+  const faces = [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7];
+  const buffer = root.listBuffers()[0];
+  const accessor = (type, array) => document.createAccessor().setType(type).setArray(array).setBuffer(buffer);
+  const material = document.createMaterial('hat').setBaseColorFactor([0.93, 0.26, 0.22, 1]).setMetallicFactor(0).setRoughnessFactor(0.9);
+  const box = document
+    .createPrimitive()
+    .setAttribute('POSITION', accessor('VEC3', new Float32Array(corners)))
+    .setAttribute('JOINTS_0', accessor('VEC4', new Uint16Array(Array.from({ length: 8 }, () => [head, 0, 0, 0]).flat())))
+    .setAttribute('WEIGHTS_0', accessor('VEC4', new Float32Array(Array.from({ length: 8 }, () => [1, 0, 0, 0]).flat())))
+    .setIndices(accessor('SCALAR', new Uint16Array(faces)))
+    .setMaterial(material);
+  for (const primitive of mesh.listPrimitives()) primitive.dispose();
+  mesh.addPrimitive(box);
+  node.setExtras({ standard_slot: 'hat' });
+  document.setLogger(new Logger(Logger.Verbosity.WARN));
+  await document.transform(prune({ keepLeaves: true }));
+  return write();
 }
 
 /** What the studio's model-stats answer counts, read from a GLB's JSON chunk. */
@@ -88,7 +130,7 @@ const picture = (color) =>
  * version with its own face, as remaking it in the studio would.
  */
 export async function startFakeCharacterServer({ port = 0 } = {}) {
-  const { first, second, noWalk, face: faceMap } = await models();
+  const { first, second, noWalk, face: faceMap, hat } = await models();
   const keys = {
     apiKey: randomBytes(18).toString('hex'),
     gatewayKey: randomBytes(18).toString('hex'),
@@ -290,6 +332,24 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       reason: '서버 설정 필요: OpenAI 키, Meshy 키',
     })),
   };
+  /** The wardrobe's one part: a hat fitted to the hero's body in a job of its own. */
+  const hatPartEntry = {
+    job_id: hex('hat'),
+    version: hex('hat:v1'),
+    slot: 'hat',
+    name: 'E2E 빨간 모자',
+    character_name: null,
+    fit_method: 'uniform-slot-v1',
+    fit_check: null,
+    shape: null,
+    sha256: sha256(hat),
+    created_at: created(22),
+  };
+  const hatPreview = await picture('#e5534b');
+  /** The hat is one colour region: its whole surface, in the mask's red channel. */
+  const hatMask = await sharp({ create: { width: 64, height: 64, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } })
+    .png()
+    .toBuffer();
   const wardrobeBody = {
     job_id: hero.id,
     version: bodyVersion,
@@ -305,6 +365,10 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
   const routes = [
     ['avatar-factory/jobs', () => [200, { jobs: jobs.map(record) }]],
     ['avatar-factory/jobs/:job', ({ job }) => job && [200, record(job)]],
+    [
+      `avatar-factory/jobs/${hatPartEntry.job_id}/native-parts/${hatPartEntry.version}/hat.glb`,
+      () => ({ file: hat, type: 'model/gltf-binary' }),
+    ],
     [
       'avatar-factory/jobs/:job/artifacts/body-front.png',
       ({ job }) => job && { file: frontOf(job) ?? hero.versions[bodyVersion].front, type: 'image/png' },
@@ -367,7 +431,29 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
         },
       ],
     ],
-    ['avatar-factory/wardrobe/bodies/:job/parts', ({ job }) => job === hero && [200, { body: wardrobeBody, parts: [] }]],
+    [
+      'avatar-factory/wardrobe/bodies/:job/parts',
+      ({ job }) => job === hero && [200, { body: wardrobeBody, parts: [hatPartEntry] }],
+    ],
+    // A hat hides no skin; its colour is one region.
+    [
+      'avatar-factory/wardrobe/bodies/:job/coverage/:part/:slot',
+      ({ job, part, slot }) =>
+        job === hero && part === hatPartEntry.job_id && [200, { slot, hidden: {}, triangles: {}, covers_bottom: false }],
+    ],
+    [
+      'avatar-factory/wardrobe/colors/:part/:slot',
+      ({ part, slot }) =>
+        part === hatPartEntry.job_id && [200, { slot, material: 0, regions: [{ index: 0, color: '#ed4238', share: 1, light: 0.4 }] }],
+    ],
+    [
+      'avatar-factory/wardrobe/colors/:part/:slot/mask',
+      ({ part }) => part === hatPartEntry.job_id && { file: hatMask, type: 'image/png' },
+    ],
+    [
+      'avatar-factory/wardrobe/previews/:part/:slot',
+      ({ part }) => part === hatPartEntry.job_id && { file: hatPreview, type: 'image/png' },
+    ],
     ['avatar-factory/wardrobe/outfits', () => [200, { revision: '0', outfits: {} }]],
     [
       'studio/catalog',

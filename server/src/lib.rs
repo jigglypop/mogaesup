@@ -6,7 +6,12 @@ pub mod factory;
 pub mod glb;
 pub mod homes;
 pub mod imports;
+pub mod look_bake;
+pub mod looks;
 pub mod models;
+pub mod permissions;
+pub mod rebac;
+pub mod residents;
 pub mod rooms;
 pub mod security;
 pub mod slim;
@@ -76,6 +81,8 @@ pub fn router(state: AppState) -> Router {
         .merge(social::router())
         .merge(catalog::router())
         .merge(factory::router())
+        .merge(looks::router())
+        .merge(permissions::router())
         .layer(middleware::from_fn_with_state(state.clone(), security::protect))
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http())

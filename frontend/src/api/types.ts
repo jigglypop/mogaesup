@@ -2,11 +2,16 @@
 
 export type Role = 'user' | 'admin';
 
+/** What the server checks (`server/src/rebac.rs`); admins hold every one. */
+export type PermissionName = 'admin' | 'paid_operator' | 'operator' | 'moderator' | 'catalog_editor' | 'studio_viewer';
+
 export type User = {
   id: string;
   username: string;
   displayName: string;
   role: Role;
+  /** Sent with sign-in and `/auth/me`. */
+  permissions?: PermissionName[];
 };
 
 export type Credentials = { username: string; password: string };
@@ -109,7 +114,8 @@ export type IlchonStatus = {
   request: IlchonRequest | null;
 };
 
-export type CatalogKind = 'minime' | 'furniture';
+/** 미니미 are what people walk as, 주민 (`npc`) stand on islands, furniture is placed. */
+export type CatalogKind = 'minime' | 'furniture' | 'npc';
 export type CatalogStatus = 'draft' | 'published' | 'retired';
 
 export type CatalogItem = {
@@ -143,6 +149,8 @@ export type CatalogFreshness = 'current' | 'newJob' | 'newVersion' | 'newFace' |
 /** The catalog item copying a studio character, as the character listing shows it. */
 export type ImportedCopy = {
   id: string;
+  /** Missing from servers older than 주민. */
+  kind?: CatalogKind;
   label: string;
   emoji: string;
   status: CatalogStatus;
@@ -281,4 +289,29 @@ export type CatalogVersion = {
   importId: string | null;
   createdBy: string | null;
   createdAt: string;
+};
+
+/** A wardrobe part a look wears: the very file the wardrobe listed. */
+export type LookPartRef = { jobId: string; version: string; sha256: string };
+
+/** What a member dressed their character in: a wardrobe body, a part per slot, hair and garment region colours. */
+export type LookRequest = {
+  body: { jobId: string; version: string };
+  parts: Record<string, LookPartRef>;
+  hairColor: string | null;
+  /** Per garment slot, region index ("0"–"3") to `#rrggbb`. */
+  colors: Record<string, Record<string, string>>;
+};
+
+/**
+ * A member's own character. The server assembles the request into one model; `modelUrl` is the last one it finished,
+ * kept while a newer request is `baking` or after one `failed`. The island wears it while `worn` is on.
+ */
+export type Look = {
+  request: LookRequest;
+  status: 'baking' | 'ready' | 'failed';
+  worn: boolean;
+  modelUrl: string | null;
+  error: { code: string; message: string } | null;
+  updatedAt: string;
 };

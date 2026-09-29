@@ -18,6 +18,8 @@ import { EditIcon, PieceIcon } from './edit/icons';
 import { EIGHTHS, SelectionInspector, Stepper, Turns } from './edit/Inspector';
 import { degreesOf } from './edit/objects';
 import type { EditPart, EditSession, EditTool } from './edit/session';
+import type { ResidentStore } from './residents';
+import { ResidentsShelf } from './ResidentsShelf';
 
 type BuildingStoreApi = ReturnType<typeof useBuildingStoreApi>;
 
@@ -69,6 +71,9 @@ type DecorateProps = {
   session: EditSession;
   /** Furniture the admins copied in from the character studio. */
   studioItems: CatalogItem[];
+  /** The island's residents, and the published 주민 the owner may add. */
+  residents: ResidentStore;
+  npcItems: CatalogItem[];
   onReset: () => void;
 };
 
@@ -76,7 +81,7 @@ type DecorateProps = {
  * 꾸미기: the island's decorating tools over gaesup-world's building store. 선택 picks placed objects to move, turn,
  * copy or remove; 놓기, 칠하기 and 지우기 are the engine's tools, working on the drawer's objects, floors or walls.
  */
-export function Decorate({ session, studioItems, onReset }: DecorateProps) {
+export function Decorate({ session, studioItems, residents, npcItems, onReset }: DecorateProps) {
   const store = useBuildingStoreApi();
   const tool = useEditState(session, (state) => state.tool);
   const part = useEditState(session, (state) => state.part);
@@ -126,6 +131,8 @@ export function Decorate({ session, studioItems, onReset }: DecorateProps) {
     setShelf(next);
     setQuery('');
     session.setPart(SHELVES.find((item) => item.id === next)!.part);
+    // Residents are placed from the drawer; a click on the island must not drop the last chosen piece.
+    if (next === 'residents') session.setTool('select');
   };
   /** Picking a floor or wall means using it: the select tool gives way to placing, painting and erasing stay. */
   const toPlace = () => {
@@ -386,7 +393,11 @@ export function Decorate({ session, studioItems, onReset }: DecorateProps) {
             <input value={query} placeholder="물건 찾기" aria-label="물건 찾기" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => event.stopPropagation()} />
           </label>
         </div>
-        <div className="mg-pieces">{tiles}</div>
+        {shelf === 'residents' ? (
+          <ResidentsShelf session={session} residents={residents} items={npcItems} query={query} />
+        ) : (
+          <div className="mg-pieces">{tiles}</div>
+        )}
       </section>
     </>
   );

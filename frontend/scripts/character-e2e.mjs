@@ -3,7 +3,10 @@
 // behind its studio gateway, and this app's dev server (scripts/e2e/dev-server.mjs) in front, all on spare ports and in
 // processes of their own. Then an admin imports a finished studio character into the 미니미 catalog and publishes it, and
 // opens the studio; a new member walks their island as that character and opens the wardrobe; a re-import keeps the item
-// public as a new version, and a character without a walk clip is refused with a readable reason. Whatever happens, it
+// public as a new version, and a character without a walk clip is refused with a readable reason. That character comes in
+// as a 주민 instead; the member stands it on their island with a greeting, and a visitor reads the greeting through the
+// interact button. The member dresses their character in the wardrobe, and their island (and its live room) wears the
+// look; an island that picked a packaged figure the site no longer ships walks as the fallback. Whatever happens, it
 // stops what it started and drops its database; what a run killed outright leaves, the next run removes.
 // Usage: node scripts/character-e2e.mjs [screenshotDir]   (needs the local PostgreSQL at 127.0.0.1:55432, cargo and Chrome)
 import { fork, spawn } from 'node:child_process';
@@ -29,6 +32,11 @@ const ADMIN = { username: 'e2e_admin', password: randomBytes(9).toString('hex') 
 const MEMBER = { username: 'e2e_member', displayName: '이투이', password: randomBytes(9).toString('hex') };
 const ITEM = 'e2e-hero';
 const REFUSED_ITEM = 'e2e-no-walk';
+const NPC_ITEM = 'e2e-npc';
+const RESIDENT = { name: '모개 이장', greeting: '모개숲에 온 걸 환영해!' };
+const HAT = 'E2E 빨간 모자';
+const HAT_COLOR = '#3366ff';
+const FALLBACK_USER = { username: 'e2e_fallback', displayName: '옛날 섬', password: randomBytes(9).toString('hex') };
 
 const began = Date.now();
 mkdirSync(SHOTS, { recursive: true });
@@ -122,6 +130,8 @@ async function step(id, label, work, needs = []) {
 }
 
 let serverLog = '';
+/** The throwaway database, for the steps that set up a state the app itself no longer makes. */
+let databaseUrl = '';
 let fake;
 let browser;
 let WEB = '';
@@ -191,6 +201,7 @@ try {
     await sql(admin, `CREATE DATABASE ${database}`);
   });
   cleanups.push(() => sql(`${POSTGRES}/postgres`, `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`));
+  databaseUrl = `${POSTGRES}/${database}`;
 
   fake = await setup('fake character server', startFake);
 
@@ -617,6 +628,193 @@ if (browser) {
       return item.errorMessage;
     },
     ['admin'],
+  );
+
+  /** Signs a new person up and waits for their island. */
+  const signUp = async (page, who) => {
+    await page.goto(WEB);
+    await page.getByRole('tab', { name: '가입하기' }).click();
+    await page.locator('input[name=username]').fill(who.username);
+    await page.locator('input[name=displayName]').fill(who.displayName);
+    await page.locator('input[name=password]').fill(who.password);
+    await page.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
+    await page.waitForURL(`**/@${who.username}`);
+    await worldReady(page);
+  };
+  /** Response statuses of every load of `path` on the page so far. */
+  const loads = (page, path) =>
+    page.evaluate(
+      (wanted) =>
+        performance
+          .getEntriesByType('resource')
+          .filter((entry) => new URL(entry.name).pathname === wanted)
+          .map((entry) => entry.responseStatus),
+      path,
+    );
+
+  await step(
+    'npc',
+    'admin imports the character that never walks as a 주민 and publishes it',
+    async () => {
+      await admin.goto(`${WEB}/admin`);
+      const card = board().locator('article', { hasText: names.noWalk });
+      await card.getByRole('button', { name: '가져오기', exact: true }).click();
+      await card.getByRole('radio', { name: '주민', exact: true }).click();
+      await card.locator('input[name=id]').fill(NPC_ITEM);
+      const item = await importFrom(card, '가져오기 시작');
+      if (item.status !== 'done') throw new Error(`import ${item.status}: ${item.errorMessage}`);
+      if (item.kind !== 'npc') throw new Error(`imported as ${item.kind}`);
+      if (levels(item.report, 'error').length) throw new Error('the report lists problems');
+      const patched = admin.waitForResponse(
+        (response) => response.url().endsWith(`/api/catalog/admin/items/${NPC_ITEM}`) && response.request().method() === 'PATCH',
+      );
+      const drafts = admin.getByRole('region', { name: '초안', exact: true });
+      await drafts.locator('article', { hasText: NPC_ITEM }).getByRole('button', { name: '공개', exact: true }).click();
+      if ((await patched).status() !== 200) throw new Error('publishing failed');
+      const { items } = await json(admin, '/api/catalog/items?kind=npc');
+      if (!items.some((entry) => entry.id === NPC_ITEM)) throw new Error('the 주민 is not public');
+      const { items: minimes } = await json(admin, '/api/catalog/items?kind=minime');
+      if (minimes.some((entry) => entry.id === NPC_ITEM)) throw new Error('the 주민 is offered as a 미니미');
+      await admin.getByRole('region', { name: '공개', exact: true }).getByText('주민').first().waitFor();
+    },
+    ['admin'],
+  );
+
+  await step(
+    'placed',
+    'the member stands the 주민 on their island with a greeting and saves the island',
+    async () => {
+      await member.goto(`${WEB}/@${MEMBER.username}`);
+      await worldReady(member);
+      // Decorating starts where the player stands, at the island's arrival point.
+      await member.getByRole('link', { name: '꾸미기' }).first().click();
+      await member.waitForURL(`**/@${MEMBER.username}/edit`);
+      const drawer = member.getByRole('region', { name: '놓을 것' });
+      await drawer.getByRole('tab', { name: '주민', exact: true }).click();
+      await drawer.getByRole('radio', { name: names.noWalk }).click();
+      await drawer.getByLabel('새 주민 이름').fill(RESIDENT.name);
+      await drawer.getByLabel('새 주민 인사말').fill(RESIDENT.greeting);
+      await drawer.getByRole('button', { name: '섬에 두기' }).click();
+      await drawer.getByRole('list', { name: '섬의 주민' }).getByRole('listitem').first().waitFor();
+      const saved = member.waitForResponse(
+        (response) => response.url().endsWith('/api/homes/me/world') && response.request().method() === 'PUT',
+      );
+      await member.getByRole('button', { name: '저장', exact: true }).click();
+      const response = await saved;
+      if (response.status() !== 200) throw new Error(`saving answered ${response.status()}: ${await response.text()}`);
+      const [resident] = JSON.parse(response.request().postData() ?? '{}').data?.domains?.residents?.residents ?? [];
+      if (resident?.npc !== NPC_ITEM || resident.greeting !== RESIDENT.greeting)
+        throw new Error(`the island saved ${JSON.stringify(resident)}`);
+      await member.waitForTimeout(2000);
+      await shoot(member, 'owner-residents');
+      return `at ${resident.position.join(', ')}`;
+    },
+    ['npc', 'member'],
+  );
+
+  await step(
+    'greeted',
+    'a visitor meets the 주민 on the island and reads its greeting through the interact button',
+    async () => {
+      const { page: visitor } = await person('visitor');
+      await visitor.goto(`${WEB}/@${MEMBER.username}`);
+      await worldReady(visitor);
+      const talk = visitor.locator('.mg-interact', { hasText: `${RESIDENT.name}에게 말 걸기` });
+      await talk.waitFor({ timeout: 60_000 });
+      await talk.click();
+      await visitor.locator('.mg-greeting', { hasText: RESIDENT.name }).getByText(RESIDENT.greeting).waitFor();
+      await visitor.waitForTimeout(800);
+      await shoot(visitor, 'visitor-greeting');
+      await visitor.getByRole('button', { name: '인사 닫기' }).click();
+      await visitor.locator('.mg-greeting').waitFor({ state: 'detached' });
+      await visitor.context().close();
+    },
+    ['placed'],
+  );
+
+  let lookUrl = '';
+  await step(
+    'look',
+    'the member dresses their character in the wardrobe and saves it as their look',
+    async () => {
+      await member.goto(`${WEB}/studio`);
+      await member
+        .getByRole('button', { name: 'walk', exact: true })
+        .and(member.locator(':enabled'))
+        .waitFor({ timeout: 60_000 });
+      await member.locator('.wardrobe-card', { hasText: HAT }).click();
+      await member.locator('.wardrobe-worn li', { hasText: HAT }).waitFor();
+      // The hat's one colour region, repainted blue.
+      await member.locator('.wardrobe-colors input[type=color]').first().fill(HAT_COLOR);
+      const wear = member.getByRole('button', { name: '내 캐릭터로 입기' });
+      await wear.and(member.locator(':enabled')).waitFor({ timeout: 60_000 });
+      const queued = member.waitForResponse(
+        (response) => response.url().endsWith('/api/looks/me') && response.request().method() === 'PUT',
+      );
+      await wear.click();
+      const response = await queued;
+      if (response.status() !== 202) throw new Error(`saving the look answered ${response.status()}: ${await response.text()}`);
+      await member.getByText('섬에서 입고 있어요').waitFor({ timeout: IMPORT_MS });
+      const { look } = await json(member, '/api/looks/me');
+      if (look.status !== 'ready' || !look.worn || !/^\/models\/[0-9a-f]{64}\.glb$/.test(look.modelUrl ?? ''))
+        throw new Error(`look ${JSON.stringify({ status: look.status, worn: look.worn, modelUrl: look.modelUrl, error: look.error })}`);
+      if (Object.keys(look.request.parts).join() !== 'hat') throw new Error(`the look wears ${Object.keys(look.request.parts)}`);
+      if (look.request.colors.hat?.['0'] !== HAT_COLOR) throw new Error(`the look's colours ${JSON.stringify(look.request.colors)}`);
+      if (look.report?.recoloredMaterials !== 1) throw new Error(`the look was baked with ${JSON.stringify(look.report)}`);
+      lookUrl = look.modelUrl;
+      await shoot(member, 'member-look-wardrobe');
+      return lookUrl;
+    },
+    ['member'],
+  );
+
+  await step(
+    'look-worn',
+    'the island walks the member in their look and tells the live room so',
+    async () => {
+      const from = memberSent.length;
+      await member.goto(`${WEB}/@${MEMBER.username}`);
+      await worldReady(member);
+      const statuses = await loads(member, lookUrl);
+      if (!statuses.includes(200)) throw new Error(`the island did not load ${lookUrl} (${statuses.join(', ') || 'no request'})`);
+      const join = await until(
+        () => memberSent.slice(from).find((message) => message.type === 'Join'),
+        30_000,
+        'joining the live room',
+      );
+      if (!String(join.modelUrl).endsWith(lookUrl)) throw new Error(`the live room was told ${join.modelUrl}`);
+      await member.getByRole('tab', { name: '소개' }).click();
+      await member.locator('.mg-minimes button[aria-pressed=true]', { hasText: '내 모습' }).waitFor();
+      await member.getByRole('tab', { name: '방명록' }).click();
+      await member.waitForTimeout(1500);
+      await shoot(member, 'member-look-island');
+    },
+    ['look'],
+  );
+
+  await step(
+    'fallback',
+    'an island still wearing a packaged figure the site dropped walks as the fallback',
+    async () => {
+      const { page: other } = await person('fallback');
+      await signUp(other, FALLBACK_USER);
+      await sql(
+        databaseUrl,
+        `UPDATE homes SET minime = 'trainer_red' WHERE owner_id = (SELECT id FROM users WHERE username = '${FALLBACK_USER.username}')`,
+      );
+      await other.reload();
+      await worldReady(other);
+      const statuses = await loads(other, '/gltf/man.glb');
+      if (!statuses.includes(200)) throw new Error(`the island did not load the fallback (${statuses.join(', ') || 'no request'})`);
+      if ((await loads(other, '/gltf/trainer_red.glb')).length) throw new Error('the island asked for the dropped figure');
+      const dropped = await other.request.get(`${WEB}/gltf/trainer_red.glb`);
+      if ((dropped.headers()['content-type'] ?? '').includes('gltf')) throw new Error('the site still serves a dropped figure');
+      const { items } = await json(other, '/api/catalog/items?kind=minime');
+      const packaged = items.filter((item) => item.source === 'builtin').map((item) => item.id);
+      if (packaged.join() !== 'man') throw new Error(`packaged 미니미 offered: ${packaged.join(', ')}`);
+      await other.context().close();
+    },
+    ['member'],
   );
 }
 

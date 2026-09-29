@@ -16,23 +16,25 @@ import {
   useGaesupStoreApi,
 } from 'gaesup-world';
 
-import { homeApi } from '../api/endpoints';
-import type { CatalogItem, HomeView, ProfileChanges, User } from '../api/types';
+import { homeApi, lookApi } from '../api/endpoints';
+import type { CatalogItem, HomeView, Look, ProfileChanges, User } from '../api/types';
 import { Brand, initialOf, Rail, toneOf, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
+import { playerModelUrl } from './character';
 import { Decorate } from './Decorate';
 import { EditContext, useEditState, useSaver } from './edit/context';
 import { EditBar, EditHelp, SaveBanners } from './edit/EditChrome';
 import { createEditHistory, readParts, sameParts } from './edit/history';
 import { createIslandSaver } from './edit/save';
 import { createEditSession } from './edit/session';
-import { modelUrl } from './figures';
 import { Guestbook } from './Guestbook';
 import { NeighborsTab, useNeighbors } from './Ilchons';
 import { InteractButton } from './InteractButton';
 import { ChatBar, LiveAvatars, LiveRoom, usePresence } from './live';
 import { createHomeSaveAdapter } from './persistence';
 import { About, minimeOf, ProfileHeader } from './Profile';
+import { createGreetingStore, createResidentStore } from './residents';
+import { ResidentGreeting, ResidentsWorld } from './ResidentsWorld';
 import { Scene, type SceneSettings } from './Scene';
 import { SettingsMenu } from './Settings';
 import { StatusPanel } from './StatusPanel';
@@ -142,27 +144,34 @@ export type MinihomeProps = {
   minimes: CatalogItem[];
   /** Furniture copied in from the character studio, for the decorating drawer. */
   studioItems: CatalogItem[];
+  /** Published 주민: residents the island draws, and the owner may add. */
+  npcItems: CatalogItem[];
+  /** The viewer's own look from the wardrobe, which they walk as while they wear it. */
+  viewerLook: Look | null;
+  onLook: (look: Look | null) => void;
   /** The owner's decorating mode, at `/@username/edit`. */
   editing: boolean;
   onView: (view: HomeView) => void;
 };
 
 /** One home's island. Its runtime is this home's alone; mount it under a `key` per home. */
-export default function Minihome({ view, viewer, viewerMinime, minimes, studioItems, editing, onView }: MinihomeProps) {
+export default function Minihome({ view, viewer, viewerMinime, minimes, studioItems, npcItems, viewerLook, onLook, editing, onView }: MinihomeProps) {
   const { profile, isOwner } = view;
   const navigate = useNavigate();
   const [saved, setSaved] = useState(false);
   // The island's runtime and, around it, its saving, undo history and (for the owner) decorating session.
   const [world] = useState(() => {
     const adapter = createHomeSaveAdapter({ username: profile.username, worldId: MINIHOME_WORLD_ID, writable: isOwner });
-    const runtime = createMinihomeRuntime(adapter, (error, context) => console.error(`[island ${context.source}]`, error));
+    const residents = createResidentStore();
+    const greetings = createGreetingStore();
+    const runtime = createMinihomeRuntime(adapter, residents, (error, context) => console.error(`[island ${context.source}]`, error));
     const saver = createIslandSaver({ system: runtime.save, adapter, writable: isOwner });
     const history = createEditHistory(runtime.buildingStore);
     const labels = new Map(studioItems.map((item) => [item.id, item.label]));
     const session = isOwner ? createEditSession(runtime, history, labels) : null;
-    return { runtime, saver, history, session };
+    return { runtime, saver, history, session, residents, greetings };
   });
-  const { runtime, saver, session } = world;
+  const { runtime, saver, session, residents, greetings } = world;
   useEffect(() => {
     const { history } = world;
     let alive = true;
@@ -177,11 +186,13 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const unwatch = runtime.buildingStore.subscribe((state, previous) => {
       if (!sameParts(readParts(state), readParts(previous))) saver.changed();
     });
+    const unwatchResidents = world.residents.subscribe(saver.changed);
     // Rule flags (a chat's choices) change outside the building store; a slow look catches them.
     const poll = window.setInterval(saver.changed, 5000);
     return () => {
       alive = false;
       unwatch();
+      unwatchResidents();
       window.clearInterval(poll);
       // Leaving the page in the app (another island, 둘러보기) keeps unsaved edits: save them, then let the world go.
       const pending = saver.flush();
@@ -206,7 +217,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const [performance, setPerformance] = useState(false);
   const neighbors = useNeighbors(view, viewer);
   const decorating = editing && isOwner;
-  const characterUrl = minimes.find((item) => item.id === viewerMinime)?.modelUrl ?? modelUrl('man');
+  const characterUrl = playerModelUrl(viewerLook, viewerMinime, minimes);
   const urls = useMemo(() => ({ characterUrl }), [characterUrl]);
   const playerRef = useRef<RapierRigidBody>(null!);
   const changeSettings = useCallback(
@@ -215,10 +226,17 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   );
   const updateProfile = useCallback(
     (changes: ProfileChanges) => {
-      homeApi.update(changes).then(onView, (error: unknown) => console.error(error));
+      homeApi.update(changes).then((updated) => {
+        onView(updated);
+        // Picking a 미니미 takes the look off (the server does the same).
+        if (changes.minime && viewerLook?.worn) onLook({ ...viewerLook, worn: false });
+      }, (error: unknown) => console.error(error));
     },
-    [onView],
+    [onView, onLook, viewerLook],
   );
+  const wearLook = useCallback(() => {
+    lookApi.wear(true).then(({ look }) => onLook(look), (error: unknown) => console.error(error));
+  }, [onLook]);
   const home = `/@${profile.username}`;
   const save = useCallback(
     () =>
@@ -280,7 +298,12 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
           <div className="mg-world-canvas">
             {/* The canvas reads the decorating session for its in-world tools (R3F bridges the context). */}
             <EditContext.Provider value={decorating ? session : null}>
-              <Scene {...settings} playerRef={playerRef} visitors={<LiveAvatars playerRef={playerRef} />} />
+              <Scene
+                {...settings}
+                playerRef={playerRef}
+                visitors={<LiveAvatars playerRef={playerRef} />}
+                residents={<ResidentsWorld runtime={runtime} residents={residents} items={npcItems} greetings={greetings} />}
+              />
             </EditContext.Provider>
           </div>
           <WorldLoading />
@@ -291,7 +314,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
               <EditBar view={view} session={session} saver={saver} onSave={saveNow} onExit={exit} />
               <Rail />
               {saverState.phase === 'ready' || editActive ? (
-                <Decorate session={session} studioItems={studioItems} onReset={resetIsland} />
+                <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} />
               ) : (
                 <p className="mg-edit-wait mg-glass" role="status">
                   {saverState.phase === 'loading' ? '섬을 불러오는 중이에요. 다 불러오면 꾸밀 수 있어요.' : '섬을 불러와야 꾸밀 수 있어요.'}
@@ -335,7 +358,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                   <div className="mg-side-body" role="tabpanel">
                     {tab === 'guestbook' && <Guestbook username={profile.username} viewer={viewer} />}
                     {tab === 'neighbors' && <NeighborsTab view={view} viewer={viewer} neighbors={neighbors} />}
-                    {tab === 'about' && <About view={view} minimes={minimes} onUpdate={updateProfile} />}
+                    {tab === 'about' && <About view={view} minimes={minimes} look={viewerLook} onUpdate={updateProfile} onWearLook={wearLook} />}
                   </div>
                 </aside>
               ) : (
@@ -348,6 +371,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
               )}
 
               <div className="mg-world-bottom">
+                <ResidentGreeting greetings={greetings} />
                 <InteractButton />
                 <ChatBar signedIn={!!viewer} />
                 <KeyHints keys={KEYS} />

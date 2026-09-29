@@ -1,11 +1,12 @@
 import { useState, type FormEvent } from 'react';
 
-import type { AdminCatalogItem, CatalogImport, CatalogStatus, FactoryCharacter } from '../../api/types';
+import type { AdminCatalogItem, CatalogImport, CatalogKind, CatalogStatus, FactoryCharacter } from '../../api/types';
 import { Icon } from '../../ui/icons';
 import {
   CATALOG_ID,
   CHARACTER_FILTERS,
   FRESHNESS_LABEL,
+  KIND_LABEL,
   SOURCE_LABEL,
   STAGE_LABEL,
   STATUS_LABEL,
@@ -22,8 +23,10 @@ import {
 import { ImportProgress, ThumbButton } from './parts';
 import type { PreviewTarget } from './PreviewDialog';
 
-/** What the import form sends: a new item's id, name and emoji, or an existing item's to update it. */
-export type ImportFields = { id: string; label: string; emoji: string };
+/** What the import form sends: a new item's id, name, emoji and kind (a 미니미 people walk as, or a 주민 islands stand), or an existing item's to update it. */
+export type ImportFields = { id: string; label: string; emoji: string; kind: CatalogKind };
+/** The kinds a finished character can become. */
+const CHARACTER_KINDS: CatalogKind[] = ['minime', 'npc'];
 
 type ImportFormProps = {
   character: FactoryCharacter;
@@ -34,6 +37,7 @@ type ImportFormProps = {
 function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
   const imported = character.imported;
   const [mode, setMode] = useState<'update' | 'new'>(imported ? 'update' : 'new');
+  const [kind, setKind] = useState<CatalogKind>('minime');
   const [problem, setProblem] = useState('');
   const [sending, setSending] = useState(false);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -42,8 +46,8 @@ function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
     const field = (key: string) => String(form.get(key) ?? '').trim();
     const fields =
       mode === 'update' && imported
-        ? { id: imported.id, label: imported.label, emoji: imported.emoji }
-        : { id: field('id'), label: field('label'), emoji: field('emoji') };
+        ? { id: imported.id, label: imported.label, emoji: imported.emoji, kind: imported.kind ?? 'minime' }
+        : { id: field('id'), label: field('label'), emoji: field('emoji'), kind };
     const issue = !CATALOG_ID.test(fields.id)
       ? '카탈로그 ID는 영문 소문자·숫자·밑줄·하이픈 2~64자예요'
       : (textProblem(fields.label, 30) ?? textProblem(fields.emoji, 16));
@@ -71,6 +75,16 @@ function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
         </p>
       ) : (
         <>
+          <div className="mg-label">
+            종류
+            <div className="mg-tabs is-fit mg-admin-seg" role="radiogroup" aria-label="종류">
+              {CHARACTER_KINDS.map((option) => (
+                <button key={option} type="button" role="radio" aria-checked={kind === option} onClick={() => setKind(option)}>
+                  {KIND_LABEL[option]}
+                </button>
+              ))}
+            </div>
+          </div>
           <label className="mg-label">
             카탈로그 ID
             <input className="mg-field" name="id" required pattern="[a-z0-9][a-z0-9_\-]{1,63}" defaultValue={suggestedId(character)} autoCapitalize="off" spellCheck={false} />
@@ -134,7 +148,7 @@ function CharacterCard({
           </small>
           {imported ? (
             <small className={imported.current ? 'mg-admin-good' : 'mg-warn-text'}>
-              <code>{imported.id}</code> · {STATUS_LABEL[imported.status]} ·{' '}
+              <code>{imported.id}</code> · {KIND_LABEL[imported.kind ?? 'minime']} · {STATUS_LABEL[imported.status]} ·{' '}
               {imported.current ? '최신' : `새 버전 있음 — ${FRESHNESS_LABEL[imported.freshness]}`}
             </small>
           ) : (
@@ -289,7 +303,7 @@ export function PipelineBoard({ characters, factoryProblem, items, imports, busy
             <div>
               <b>{item.label}</b>
               <small>
-                {SOURCE_LABEL[item.source]} · {item.kind === 'minime' ? `섬 ${item.usage.toLocaleString('ko-KR')}곳에서 사용` : '가구'}
+                {SOURCE_LABEL[item.source]} · {item.kind === 'minime' ? `섬 ${item.usage.toLocaleString('ko-KR')}곳에서 사용` : KIND_LABEL[item.kind]}
               </small>
               {activeImportFor(imports, { itemId: item.id }) && <small className="mg-warn-text">새 모델을 가져오는 중</small>}
             </div>

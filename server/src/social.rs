@@ -16,6 +16,7 @@ use crate::{
     auth::{current_user, optional_user},
     error::{ApiResult, bad, conflict, forbidden, not_found},
     homes::{Page, visible_home},
+    rebac::{Checker, MODERATOR, Subject},
 };
 
 pub fn router() -> Router<AppState> {
@@ -67,6 +68,11 @@ async fn guestbook(
             .await?
             .get("total");
     let viewer_id = viewer.map(|user| user.id);
+    // Moderators may remove any entry; secret ones stay unreadable to them.
+    let moderator = match viewer_id {
+        Some(id) if !is_owner => Checker::new(&state.db).allows(Subject::User(id), &MODERATOR).await?,
+        _ => false,
+    };
     let entries: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -79,7 +85,7 @@ async fn guestbook(
                 "body": if !secret || is_owner || mine { row.get::<String, _>("body") } else { String::new() },
                 "secret": secret,
                 "createdAt": row.get::<DateTime<Utc>, _>("created_at"),
-                "canDelete": is_owner || mine,
+                "canDelete": is_owner || mine || moderator,
             })
         })
         .collect();
@@ -128,7 +134,8 @@ async fn remove(State(state): State<AppState>, headers: HeaderMap, Path(id): Pat
             .fetch_optional(&state.db)
             .await?
             .ok_or(not_found("entry_not_found", "없는 글입니다."))?;
-    if viewer.id != row.get::<Uuid, _>("home_owner_id") && viewer.id != row.get::<Uuid, _>("author_id") {
+    let party = viewer.id == row.get::<Uuid, _>("home_owner_id") || viewer.id == row.get::<Uuid, _>("author_id");
+    if !party && !Checker::new(&state.db).allows(Subject::User(viewer.id), &MODERATOR).await? {
         return Err(forbidden("forbidden", "주인이나 글쓴이만 지울 수 있습니다."));
     }
     sqlx::query("UPDATE guestbook_entries SET deleted_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;

@@ -1,0 +1,151 @@
+/* 권한 (/admin/permissions): people and their roles, roles and their holders, groups, the change log. Glass tokens
+   only; one column on phones, 40px touch targets on touch screens. */
+
+.mg-perm { display: grid; gap: 14px; }
+.mg-perm .mg-panel-head { margin-bottom: 8px; }
+.mg-perm-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.mg-perm-reason { display: flex; align-items: center; gap: 8px; flex: 1 1 280px; min-width: 0; font-size: 12px; font-weight: 750; color: var(--mg-muted); }
+.mg-perm-reason span { flex: none; }
+.mg-perm-reason .mg-field { height: 36px; min-width: 0; }
+
+.mg-perm-who { display: grid; gap: 1px; min-width: 0; text-align: left; }
+.mg-perm-who b { font-size: 14px; font-weight: 800; overflow-wrap: anywhere; }
+.mg-perm-who small { font-size: 12px; color: var(--mg-muted); overflow-wrap: anywhere; }
+.mg-perm-note { font-size: 13px; }
+.mg-perm-count { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
+.mg-perm-count b { color: var(--mg-ink); }
+
+/* People */
+.mg-perm-people { display: grid; grid-template-columns: minmax(240px, 340px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.mg-perm-finder { display: grid; gap: 10px; min-width: 0; }
+.mg-perm-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.mg-perm-list button {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--mg-hair);
+  border-radius: 14px;
+  background: var(--mg-card);
+  color: var(--mg-ink);
+  text-align: left;
+}
+.mg-perm-list button:hover { border-color: var(--mg-hair-strong); }
+.mg-perm-list button[aria-pressed='true'] { border: 2px solid var(--mg-primary); background: var(--mg-primary-soft); }
+
+.mg-perm-person { display: grid; gap: 12px; padding: 16px; min-width: 0; }
+.mg-perm-person-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mg-perm-person-head .mg-perm-who { margin-right: auto; }
+.mg-perm-person-head .mg-perm-who b { font-size: 17px; }
+
+.mg-perm-roles, .mg-perm-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.mg-perm-roles li, .mg-perm-rows li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  background: var(--mg-tint);
+}
+.mg-perm-role { display: grid; gap: 1px; flex: 1 1 160px; min-width: 0; }
+.mg-perm-role b { font-size: 14px; font-weight: 800; }
+.mg-perm-role small { font-size: 12px; color: var(--mg-muted); }
+.mg-perm-rows li > span { flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+
+.mg-perm-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mg-perm-inline .mg-field { flex: 1 1 160px; width: auto; min-width: 0; height: 36px; }
+.mg-perm-inline.mg-card { padding: 10px; }
+
+.mg-perm-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 4px 0 12px;
+  border-radius: 999px;
+  background: var(--mg-primary-soft);
+  color: var(--mg-ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+.mg-perm-tag.is-role { background: var(--mg-good-soft); }
+.mg-perm-tag button {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--mg-muted);
+}
+.mg-perm-tag button:hover:not(:disabled) { background: var(--mg-glass-strong); color: var(--mg-bad); }
+.mg-perm-tag svg { width: 14px; height: 14px; }
+
+/* Explanations and expansions */
+.mg-perm-trace { display: grid; gap: 8px; padding: 12px; border-radius: 14px; background: var(--mg-tint); min-width: 0; }
+.mg-perm-trace > p { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.mg-perm-path { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.mg-perm summary { cursor: pointer; font-size: 12px; font-weight: 800; color: var(--mg-muted); min-height: 28px; }
+.mg-perm-tree, .mg-perm-tree ul { list-style: none; margin: 0; padding: 0; }
+.mg-perm-tree ul { margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--mg-hair-strong); }
+.mg-perm-tree li { padding: 2px 0; font-size: 13px; }
+.mg-perm-tree li > span { overflow-wrap: anywhere; }
+.mg-perm-tree li.is-ok > span { color: var(--mg-good); font-weight: 750; }
+.mg-perm-tree li.is-ok > span::before { content: '✓ '; }
+.mg-perm-tree li.is-no > span { color: var(--mg-muted); }
+.mg-perm-tree li.is-user > span, .mg-perm-tree li.is-userset > span { font-weight: 750; }
+.mg-perm-tree li.is-limit > span { color: var(--mg-warn); }
+
+.mg-perm-roles-view { display: grid; gap: 10px; min-width: 0; }
+.mg-perm-holders { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px; }
+.mg-perm-holders li { padding: 8px 12px; border-radius: 14px; background: var(--mg-card); border: 1px solid var(--mg-hair); }
+
+/* Groups */
+.mg-perm-groups { display: grid; gap: 12px; }
+.mg-perm-group-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.mg-perm-group { display: grid; gap: 10px; padding: 14px; align-content: start; min-width: 0; }
+.mg-perm-group > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mg-perm-group > header b { font-size: 15px; font-weight: 800; overflow-wrap: anywhere; }
+.mg-perm-group > header small { font-size: 12px; color: var(--mg-muted); font-weight: 700; }
+.mg-perm-group .mg-admin-select { flex: 1 1 140px; }
+
+/* Log */
+.mg-perm-log { display: grid; gap: 10px; justify-items: start; }
+.mg-perm-audit { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; width: 100%; }
+.mg-perm-audit li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--mg-card);
+  border: 1px solid var(--mg-hair);
+}
+.mg-perm-audit li > b { font-size: 13px; font-weight: 750; overflow-wrap: anywhere; }
+.mg-perm-audit li > small { grid-column: 2; font-size: 12px; color: var(--mg-muted); overflow-wrap: anywhere; }
+.mg-perm-person .mg-perm-audit li { grid-template-columns: minmax(0, 1fr); }
+.mg-perm-person .mg-perm-audit li > small { grid-column: 1; }
+
+@media (max-width: 900px) {
+  .mg-perm-people { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 720px), (pointer: coarse) {
+  .mg-perm-reason .mg-field, .mg-perm-inline .mg-field { height: 40px; }
+  .mg-perm-tag { height: 40px; }
+  .mg-perm-tag button { width: 34px; height: 34px; }
+  .mg-perm summary { min-height: 40px; display: flex; align-items: center; }
+}
+
+@media (max-width: 720px) {
+  .mg-perm-reason { flex-basis: 100%; }
+  .mg-perm-person { padding: 12px; }
+  .mg-perm-roles .mg-admin-actions { margin-left: auto; }
+  .mg-perm-group-list { grid-template-columns: minmax(0, 1fr); }
+  .mg-perm-inline > .mg-btn { flex: 1 1 auto; }
+}

@@ -18,9 +18,10 @@ use std::{
 
 use crate::{
     AppState,
-    auth::require_admin,
+    auth::require,
     config::StudioInstance,
     error::{ApiError, ApiResult, conflict, not_found},
+    rebac::STUDIO_VIEWER,
     security::hmac_sha256,
 };
 
@@ -395,7 +396,7 @@ fn unreadable(error: PowerError) -> ApiError {
 
 /// `GET /api/catalog/admin/studio-power`: whether this server can start the studio, and its instance's state.
 pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
+    require(&state, &headers, STUDIO_VIEWER).await?;
     let Some(inner) = state.power.0.as_ref() else {
         return Ok(Json(json!({"configured": false})));
     };
@@ -405,7 +406,7 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
 
 /// `POST /api/catalog/admin/studio-power`: starts the studio's instance when it is stopped.
 pub async fn start(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let admin = require_admin(&state, &headers).await?;
+    let admin = require(&state, &headers, STUDIO_VIEWER).await?;
     let inner = state.power.0.as_ref().ok_or(UNCONFIGURED)?;
     let current = inner.describe().await.map_err(unreadable)?;
     let current = match current.as_str() {
