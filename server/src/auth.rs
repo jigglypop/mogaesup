@@ -12,7 +12,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, postgres::PgRow};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ use crate::{
     security::{client_address, rate_exceeded, rate_limit, rate_record},
 };
 
-pub const SESSION_COOKIE: &str = "mogaesup_session";
+const SESSION_COOKIE: &str = "mogaesup_session";
 const SESSIONS_PER_USER: i64 = 8;
 const SESSION_MAX_AGE_SECONDS: u32 = 30 * 24 * 60 * 60;
 
@@ -39,10 +39,19 @@ impl User {
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
     }
+
+    fn from_row(row: &PgRow) -> Self {
+        Self {
+            id: row.get("id"),
+            username: row.get("username"),
+            display_name: row.get("display_name"),
+            role: row.get("role"),
+        }
+    }
 }
 
 /// The session token's hash, from a well-formed session cookie.
-pub fn token_hash(headers: &HeaderMap) -> Option<String> {
+fn token_hash(headers: &HeaderMap) -> Option<String> {
     let prefix = format!("{SESSION_COOKIE}=");
     let token = headers
         .get_all(header::COOKIE)
@@ -65,12 +74,7 @@ pub async fn optional_user(state: &AppState, headers: &HeaderMap) -> ApiResult<O
     .bind(token)
     .fetch_optional(&state.db)
     .await?;
-    Ok(row.map(|row| User {
-        id: row.get("id"),
-        username: row.get("username"),
-        display_name: row.get("display_name"),
-        role: row.get("role"),
-    }))
+    Ok(row.as_ref().map(User::from_row))
 }
 
 pub async fn current_user(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
@@ -117,7 +121,7 @@ fn new_password(password: &str) -> ApiResult<()> {
     Ok(())
 }
 
-pub async fn hash_password(state: &AppState, password: String) -> ApiResult<String> {
+async fn hash_password(state: &AppState, password: String) -> ApiResult<String> {
     let permit = state.hashing.clone().acquire_owned().await.map_err(internal)?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -165,11 +169,7 @@ async fn create_account(db: &PgPool, user: &User, password_hash: &str) -> Result
     if inserted.rows_affected() == 0 {
         return Ok(false);
     }
-    sqlx::query("INSERT INTO homes (owner_id, title) VALUES ($1, $2)")
-        .bind(user.id)
-        .bind(format!("{}의 섬", user.display_name))
-        .execute(&mut *tx)
-        .await?;
+    crate::homes::create(&mut *tx, user).await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -252,13 +252,7 @@ pub async fn login(
             "아이디 또는 비밀번호가 올바르지 않습니다.",
         ));
     }
-    let row = row.expect("verified rows exist");
-    let user = User {
-        id: row.get("id"),
-        username: row.get("username"),
-        display_name: row.get("display_name"),
-        role: row.get("role"),
-    };
+    let user = User::from_row(&row.expect("verified rows exist"));
     session(&state, user, StatusCode::OK).await
 }
 
@@ -283,14 +277,14 @@ pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) 
 
 /// Creates the configured operator, or promotes an existing account, so a fresh deployment has an admin.
 pub async fn bootstrap_admin(state: &AppState, username_raw: &str, password: &str) -> anyhow::Result<()> {
-    let name = username(username_raw).map_err(|e| anyhow::anyhow!(e.message))?;
+    let name = username(username_raw)?;
     let promoted =
         sqlx::query("UPDATE users SET role = 'admin' WHERE username = $1").bind(&name).execute(&state.db).await?;
     if promoted.rows_affected() > 0 {
         return Ok(());
     }
-    new_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
-    let hash = hash_password(state, password.to_owned()).await.map_err(|e| anyhow::anyhow!(e.message))?;
+    new_password(password)?;
+    let hash = hash_password(state, password.to_owned()).await?;
     let user = User { id: Uuid::new_v4(), username: name.clone(), display_name: name, role: "admin".into() };
     create_account(&state.db, &user, &hash).await?;
     Ok(())

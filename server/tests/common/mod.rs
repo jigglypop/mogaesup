@@ -20,13 +20,36 @@ fn admin_url() -> String {
         .unwrap_or_else(|_| "postgres://postgres:postgres-dev@127.0.0.1:55432/postgres".into())
 }
 
+/// An empty throwaway database on the test PostgreSQL; `remove` drops it.
+pub struct TestDb {
+    pub name: String,
+    pub pool: PgPool,
+    admin: PgPool,
+}
+
+impl TestDb {
+    pub async fn create() -> Self {
+        let admin =
+            PgPoolOptions::new().max_connections(2).connect(&admin_url()).await.expect("test Postgres on 55432");
+        let name = format!("test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE {name}")).execute(&admin).await.unwrap();
+        let url = admin_url().rsplit_once('/').map(|(base, _)| format!("{base}/{name}")).unwrap();
+        let pool = PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
+        Self { name, pool, admin }
+    }
+
+    pub async fn remove(self) {
+        self.pool.close().await;
+        sqlx::query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name)).execute(&self.admin).await.unwrap();
+    }
+}
+
 /// The server on a throwaway database with every migration applied; `cleanup` drops it.
 pub struct TestApp {
     pub router: Router,
     pub state: AppState,
     pub model_dir: PathBuf,
-    database: String,
-    admin: PgPool,
+    db: TestDb,
 }
 
 pub struct Reply {
@@ -39,14 +62,9 @@ pub struct Reply {
 
 impl TestApp {
     pub async fn new(factory: Option<Factory>) -> Self {
-        let admin =
-            PgPoolOptions::new().max_connections(2).connect(&admin_url()).await.expect("test Postgres on 55432");
-        let database = format!("test_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE DATABASE {database}")).execute(&admin).await.unwrap();
-        let url = admin_url().rsplit_once('/').map(|(base, _)| format!("{base}/{database}")).unwrap();
-        let db = PgPoolOptions::new().max_connections(5).connect(&url).await.unwrap();
-        MIGRATOR.run(&db).await.unwrap();
-        let model_dir = std::env::temp_dir().join(&database);
+        let db = TestDb::create().await;
+        MIGRATOR.run(&db.pool).await.unwrap();
+        let model_dir = std::env::temp_dir().join(&db.name);
         let config = Config {
             origins: vec![ORIGIN.into()],
             cookie_secure: false,
@@ -54,16 +72,12 @@ impl TestApp {
             models: Models::open(model_dir.to_str().unwrap()).unwrap(),
             factory,
         };
-        let state = AppState::new(db, config);
-        Self { router: router(state.clone()), state, model_dir, database, admin }
+        let state = AppState::new(db.pool.clone(), config);
+        Self { router: router(state.clone()), state, model_dir, db }
     }
 
     pub async fn cleanup(self) {
-        self.state.db.close().await;
-        sqlx::query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.database))
-            .execute(&self.admin)
-            .await
-            .unwrap();
+        self.db.remove().await;
         let _ = std::fs::remove_dir_all(&self.model_dir);
     }
 

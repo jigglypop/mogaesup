@@ -3,13 +3,13 @@
 //! The client drops server messages it does not know, so nothing else is ever sent.
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{
         Path, Query, State, WebSocketUpgrade,
         ws::{CloseFrame, Message, WebSocket},
     },
-    http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, StatusCode},
+    response::Response,
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -28,8 +28,9 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::User,
+    error::{ApiError, ApiResult, conflict},
     homes::visible_home,
-    security::{constant_time_eq, hmac_sha256},
+    security::{FOREIGN_ORIGIN, constant_time_eq, epoch_seconds, hmac_sha256, same_origin},
 };
 
 const TICKET_TTL_SECONDS: u64 = 60;
@@ -62,10 +63,6 @@ struct TicketClaims {
     name: String,
     exp: u64,
     nonce: String,
-}
-
-fn epoch_seconds() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// A single-use, one-minute ticket: a browser cannot put a cookie or header on a WebSocket, so it carries this instead.
@@ -118,11 +115,10 @@ struct PlayerState {
     model_url: Option<String>,
 }
 
+/// What an Update may change. A peer's name comes from its ticket, so a `name` it sends is ignored.
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PartialState {
-    #[serde(skip_serializing)]
-    name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,6 +218,11 @@ enum Flow {
     Close(u16, &'static str),
 }
 
+/// A frame that is not a valid message: tolerated a few times a second, then the peer is dropped.
+fn malformed(invalid: &mut RateWindow, now: Instant) -> Flow {
+    if invalid.allow(now, INVALID_PER_SECOND) { Flow::Continue } else { Flow::Close(4400, "malformed messages") }
+}
+
 fn text(message: &Value) -> Message {
     Message::Text(message.to_string().into())
 }
@@ -264,19 +265,14 @@ impl Rooms {
         used.insert(receipt, claims.exp).is_none().then_some(claims)
     }
 
-    fn register(
-        &self,
-        room: &str,
-        name: String,
-        tx: mpsc::Sender<Message>,
-    ) -> Result<Registration, (StatusCode, &'static str)> {
+    fn register(&self, room: &str, name: String, tx: mpsc::Sender<Message>) -> ApiResult<Registration> {
         let mut hub = self.hub();
         if hub.connections >= SERVER_CAPACITY {
-            return Err((StatusCode::SERVICE_UNAVAILABLE, "실시간 서버가 가득 찼습니다."));
+            return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "room", "실시간 서버가 가득 찼습니다."));
         }
         let peers = hub.rooms.entry(room.to_owned()).or_default();
         if peers.len() >= ROOM_CAPACITY {
-            return Err((StatusCode::CONFLICT, "이 섬에 사람이 가득 찼습니다."));
+            return Err(conflict("room", "이 섬에 사람이 가득 찼습니다."));
         }
         let id = Uuid::new_v4().to_string();
         peers.insert(
@@ -317,13 +313,7 @@ impl Rooms {
         if !peer.messages.allow(now, MESSAGES_PER_SECOND) {
             return Flow::Close(4429, "too many messages");
         }
-        let Ok(message) = serde_json::from_str::<ClientMessage>(raw) else {
-            return if peer.invalid.allow(now, INVALID_PER_SECOND) {
-                Flow::Continue
-            } else {
-                Flow::Close(4400, "malformed messages")
-            };
-        };
+        let Ok(message) = serde_json::from_str::<ClientMessage>(raw) else { return malformed(&mut peer.invalid, now) };
         match message {
             ClientMessage::Ping { ts } => {
                 let _ = peer.tx.try_send(text(&json!({"type": "Pong", "ts": ts})));
@@ -331,11 +321,7 @@ impl Rooms {
             ClientMessage::Leave => return Flow::Close(1000, "left"),
             ClientMessage::Join { color, model_url: model, .. } => {
                 if !label(&color) || model.as_deref().is_some_and(|url| !model_url(url)) {
-                    return if peer.invalid.allow(now, INVALID_PER_SECOND) {
-                        Flow::Continue
-                    } else {
-                        Flow::Close(4400, "malformed messages")
-                    };
+                    return malformed(&mut peer.invalid, now);
                 }
                 let rejoin = peer.state.is_some();
                 let previous = peer.state.take();
@@ -361,19 +347,14 @@ impl Rooms {
                     broadcast(room, id, &json!({"type": "PlayerJoined", "client_id": id, "state": state}));
                 }
             }
-            ClientMessage::Update { state: mut changes } => {
+            ClientMessage::Update { state: changes } => {
                 let Some(state) = peer.state.as_mut() else { return Flow::Continue };
                 if !changes.valid() {
-                    return if peer.invalid.allow(now, INVALID_PER_SECOND) {
-                        Flow::Continue
-                    } else {
-                        Flow::Close(4400, "malformed messages")
-                    };
+                    return malformed(&mut peer.invalid, now);
                 }
                 if !peer.updates.allow(now, UPDATES_PER_SECOND) {
                     return Flow::Continue;
                 }
-                changes.name = None;
                 if let Some(value) = changes.color.clone() {
                     state.color = value;
                 }
@@ -406,11 +387,7 @@ impl Rooms {
                     || said.chars().count() > MAX_CHAT_CHARS
                     || ack_id.as_deref().is_some_and(|a| !label(a))
                 {
-                    return if peer.invalid.allow(now, INVALID_PER_SECOND) {
-                        Flow::Continue
-                    } else {
-                        Flow::Close(4400, "malformed messages")
-                    };
+                    return malformed(&mut peer.invalid, now);
                 }
                 if !peer.chats.allow(now, CHATS_PER_SECOND) {
                     return Flow::Continue;
@@ -464,9 +441,8 @@ struct TicketQuery {
     ticket: String,
 }
 
-fn refuse(status: StatusCode, code: &str, message: &str) -> Response {
-    (status, Json(json!({"code": code, "message": message}))).into_response()
-}
+const BAD_TICKET: ApiError =
+    ApiError::new(StatusCode::UNAUTHORIZED, "ticket", "실시간 인증 티켓이 올바르지 않거나 만료되었습니다.");
 
 async fn upgrade(
     State(state): State<AppState>,
@@ -474,28 +450,20 @@ async fn upgrade(
     Path(name): Path<String>,
     Query(query): Query<TicketQuery>,
     ws: WebSocketUpgrade,
-) -> Response {
-    let origin = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok());
-    if !origin.is_some_and(|origin| state.config.origins.iter().any(|value| value == origin)) {
-        return refuse(StatusCode::FORBIDDEN, "origin", "허용되지 않은 요청 출처입니다.");
+) -> ApiResult<Response> {
+    if !same_origin(&state, &headers) {
+        return Err(FOREIGN_ORIGIN);
     }
-    let Some(claims) = state.rooms.verify(&state.config.ticket_secret, &query.ticket) else {
-        return refuse(StatusCode::UNAUTHORIZED, "ticket", "실시간 인증 티켓이 올바르지 않거나 만료되었습니다.");
-    };
+    let claims = state.rooms.verify(&state.config.ticket_secret, &query.ticket).ok_or(BAD_TICKET)?;
     let visitor = User { id: claims.sub, username: claims.username, display_name: claims.name, role: "user".into() };
-    let home = match visible_home(&state, &name, Some(&visitor)).await {
-        Ok((home, _)) => home,
-        Err(error) => return error.into_response(),
-    };
+    let (home, _) = visible_home(&state, &name, Some(&visitor)).await?;
     let (tx, rx) = mpsc::channel(OUTBOUND_CAPACITY);
     let display = if visitor.display_name.is_empty() { visitor.username } else { visitor.display_name };
-    let registration = match state.rooms.register(&home.username, display, tx) {
-        Ok(registration) => registration,
-        Err((status, message)) => return refuse(status, "room", message),
-    };
-    ws.max_message_size(MAX_MESSAGE_BYTES)
+    let registration = state.rooms.register(&home.username, display, tx)?;
+    Ok(ws
+        .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| connection(socket, registration, rx))
+        .on_upgrade(move |socket| connection(socket, registration, rx)))
 }
 
 async fn send(socket: &mut WebSocket, message: Message) -> bool {

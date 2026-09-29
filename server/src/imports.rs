@@ -11,7 +11,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
-use image::{ImageFormat, ImageReader, Limits};
+use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -136,16 +136,10 @@ fn check_target(kind: &str, source: &str, wanted: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// The character server's front render at picker size, with its size; None when it cannot be read. `image` reads it
-/// within fixed bounds.
+/// The character server's front render at picker size, with its size; None when it cannot be read within fixed bounds.
 fn thumbnail(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let mut reader = ImageReader::with_format(Cursor::new(png), ImageFormat::Png);
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(4096);
-    limits.max_image_height = Some(4096);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
-    let picture = reader.decode().ok()?.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
+    let picture =
+        slim::decode(png, ImageFormat::Png, 4096, 64 * 1024 * 1024)?.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
     let mut out = Cursor::new(Vec::new());
     picture.write_to(&mut out, ImageFormat::Png).ok()?;
     Some((out.into_inner(), picture.width(), picture.height()))
@@ -517,7 +511,7 @@ impl Task {
     /// The model, with the share received so far written to the import about once a second.
     async fn download(&self, path: &str) -> ApiResult<Vec<u8>> {
         let received = Received::default();
-        let fetch = factory::fetch_file_counted(&self.state, &self.username, path, MAX_MODEL_BYTES, Some(&received));
+        let fetch = factory::fetch_file(&self.state, &self.username, path, MAX_MODEL_BYTES, Some(&received));
         tokio::pin!(fetch);
         let mut tick = tokio::time::interval(DOWNLOAD_TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -540,7 +534,7 @@ impl Task {
 
     /// The front render at picker size, stored. A picture the character server cannot give is only a warning.
     async fn picture(&self, path: &str, report: &mut Report) -> ApiResult<Option<String>> {
-        let fetched = factory::fetch_file(&self.state, &self.username, path, MAX_PICTURE_BYTES).await;
+        let fetched = factory::fetch_file(&self.state, &self.username, path, MAX_PICTURE_BYTES, None).await;
         let (picture, reason) = match fetched {
             Ok(png) => (
                 tokio::task::spawn_blocking(move || thumbnail(&png)).await.map_err(internal)?,
@@ -704,7 +698,7 @@ mod tests {
         // No rig, no walk, and bytes the character server's record does not match: all three are reported, and the
         // checksum decides.
         let statue =
-            glb::build(&json!({"asset": {"version": "2.0"}, "animations": [{"name": "Idle"}, {"name": "Sit"}]}));
+            glb::join(&json!({"asset": {"version": "2.0"}, "animations": [{"name": "Idle"}, {"name": "Sit"}]}), &[]);
         let mut report = Report::default();
         let error = verify("minime", &statue, Some("0".repeat(64).as_str()), &mut report).unwrap_err();
         assert_eq!(error.code, "factory_checksum");

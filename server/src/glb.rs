@@ -1,5 +1,6 @@
 //! What a GLB carries, read from its JSON chunk: whether it is rigged, and which animations gaesup-world can play.
-//! [`details`] also measures it for the import report: geometry, rest-pose size and the embedded textures.
+//! [`details`] also measures it for the import report: geometry, rest-pose size and the embedded textures. [`split`] and
+//! [`join`] take the container apart and put it back together.
 
 use image::ImageReader;
 use serde::Serialize;
@@ -66,7 +67,7 @@ fn word(bytes: &[u8], at: usize) -> Option<u32> {
 
 /// The JSON chunk of a whole binary glTF 2.0 file, and its binary chunk when the next chunk is one (empty otherwise;
 /// chunks of other kinds are ignored, as the format asks).
-fn read(bytes: &[u8]) -> Option<(Value, &[u8])> {
+pub fn split(bytes: &[u8]) -> Option<(Value, &[u8])> {
     if word(bytes, 0)? != MAGIC || word(bytes, 4)? != VERSION || word(bytes, 8)? as usize != bytes.len() {
         return None;
     }
@@ -96,11 +97,6 @@ fn summarize(json: &Value) -> Summary {
     clips.sort();
     clips.dedup();
     Summary { skinned, clips }
-}
-
-/// None unless `bytes` is a whole binary glTF 2.0 file whose first chunk is its JSON.
-pub fn inspect(bytes: &[u8]) -> Option<Summary> {
-    read(bytes).map(|(json, _)| summarize(&json))
 }
 
 /// One image the model embeds; sizes are None when it is not in the binary chunk or its header cannot be read.
@@ -323,9 +319,10 @@ fn textures(json: &Value, bin: &[u8]) -> Vec<Texture> {
         .collect()
 }
 
-/// Everything the import report shows about a GLB; None when [`inspect`] would refuse it.
+/// Everything the import report shows about a GLB; None unless `bytes` is a whole binary glTF 2.0 file whose first
+/// chunk is its JSON.
 pub fn details(bytes: &[u8]) -> Option<Details> {
-    let (json, bin) = read(bytes)?;
+    let (json, bin) = split(bytes)?;
     let Summary { skinned, clips } = summarize(&json);
     let (triangles, vertices, size) = placed(&json);
     let count = |key: &str| json[key].as_array().map_or(0, Vec::len);
@@ -355,15 +352,9 @@ pub fn details(bytes: &[u8]) -> Option<Details> {
     })
 }
 
-#[cfg(test)]
-pub fn build(json: &serde_json::Value) -> Vec<u8> {
-    build_with(json, &[])
-}
-
-/// A GLB of `json` and, when there is any, a binary chunk of `bin`.
-#[cfg(test)]
-pub fn build_with(json: &serde_json::Value, bin: &[u8]) -> Vec<u8> {
-    let mut chunk = serde_json::to_vec(json).unwrap();
+/// A GLB of `json` and, when there is any, a binary chunk of `bin`, each padded to four bytes.
+pub fn join(json: &Value, bin: &[u8]) -> Vec<u8> {
+    let mut chunk = serde_json::to_vec(json).unwrap_or_default();
     while !chunk.len().is_multiple_of(4) {
         chunk.push(b' ');
     }
@@ -372,7 +363,7 @@ pub fn build_with(json: &serde_json::Value, bin: &[u8]) -> Vec<u8> {
         data.push(0);
     }
     let total = 12 + 8 + chunk.len() + if data.is_empty() { 0 } else { 8 + data.len() };
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(total);
     for value in [MAGIC, VERSION, total as u32, chunk.len() as u32, JSON_CHUNK] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -400,27 +391,29 @@ mod tests {
         assert_eq!(engine_clip("dance"), None);
     }
 
+    fn summary(json: &Value) -> Summary {
+        details(&join(json, &[])).unwrap().summary()
+    }
+
     #[test]
     fn a_rigged_model_with_idle_and_walk_is_playable() {
-        let rigged = json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}],
-            "animations": [{"name": "Idle"}, {"name": "Walking"}, {"name": "Running"}, {"name": "Walking"}]});
-        let summary = inspect(&build(&rigged)).unwrap();
-        assert_eq!(summary.clips, ["idle", "run", "walk"]);
-        assert!(summary.playable());
+        let rigged = summary(&json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}],
+            "animations": [{"name": "Idle"}, {"name": "Walking"}, {"name": "Running"}, {"name": "Walking"}]}));
+        assert_eq!(rigged.clips, ["idle", "run", "walk"]);
+        assert!(rigged.playable());
         let statue = json!({"asset": {"version": "2.0"}, "animations": [{"name": "idle"}, {"name": "walk"}]});
-        assert!(!inspect(&build(&statue)).unwrap().playable());
+        assert!(!summary(&statue).playable());
         let still = json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}], "animations": [{"name": "Idle"}]});
-        let still = inspect(&build(&still)).unwrap();
+        let still = summary(&still);
         assert!(!still.playable());
         assert_eq!(still.missing_clips(), ["walk"]);
     }
 
     #[test]
     fn anything_but_a_whole_glb_is_refused() {
-        let bytes = build(&json!({"asset": {"version": "2.0"}}));
-        assert!(inspect(&bytes).is_some());
-        assert!(inspect(&bytes[..bytes.len() - 1]).is_none());
-        assert!(inspect(b"not a model at all").is_none());
+        let bytes = join(&json!({"asset": {"version": "2.0"}}), &[]);
+        assert!(details(&bytes).is_some());
+        assert!(details(&bytes[..bytes.len() - 1]).is_none());
         assert!(details(b"not a model at all").is_none());
     }
 
@@ -451,7 +444,7 @@ mod tests {
             "images": [{"bufferView": 0, "mimeType": "image/png"}, {"uri": "outside.png"}],
             "animations": [{"name": "Armature|Idle"}, {"name": "Dance"}, {}],
         });
-        let details = details(&build_with(&json, &picture)).unwrap();
+        let details = details(&join(&json, &picture)).unwrap();
         assert_eq!((details.triangles, details.vertices), (12 + 12 + 28, 90));
         let [width, height, depth] = details.size.unwrap();
         assert!((height - 1.7).abs() < 1e-6, "{height}");
@@ -468,7 +461,7 @@ mod tests {
     #[test]
     fn a_model_without_positions_has_no_size() {
         let json = json!({"asset": {"version": "2.0"}, "nodes": [{"mesh": 0}], "meshes": [{"primitives": [{"attributes": {}}]}]});
-        let details = details(&build(&json)).unwrap();
+        let details = details(&join(&json, &[])).unwrap();
         assert_eq!(details.size, None);
         assert_eq!(details.triangles, 0);
     }

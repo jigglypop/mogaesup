@@ -15,7 +15,7 @@ use crate::{
     AppState,
     auth::{current_user, optional_user},
     error::{ApiResult, bad, conflict, forbidden, not_found},
-    homes::visible_home,
+    homes::{Page, visible_home},
 };
 
 pub fn router() -> Router<AppState> {
@@ -40,12 +40,6 @@ fn card(row: &PgRow, prefix: &str) -> Value {
     })
 }
 
-#[derive(Deserialize)]
-struct Page {
-    limit: Option<i64>,
-    before: Option<DateTime<Utc>>,
-}
-
 async fn guestbook(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -54,7 +48,7 @@ async fn guestbook(
 ) -> ApiResult<Json<Value>> {
     let viewer = optional_user(&state, &headers).await?;
     let (home, is_owner) = visible_home(&state, &name, viewer.as_ref()).await?;
-    let limit = page.limit.unwrap_or(20).clamp(1, 50);
+    let limit = page.limit();
     let rows = sqlx::query(
         "SELECT g.id AS entry_id, g.body, g.secret, g.created_at, u.id, u.username, u.display_name, h.emoji
          FROM guestbook_entries g JOIN users u ON u.id = g.author_id LEFT JOIN homes h ON h.owner_id = u.id
@@ -62,7 +56,7 @@ async fn guestbook(
          ORDER BY g.created_at DESC LIMIT $3",
     )
     .bind(home.owner_id)
-    .bind(page.before.unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(1)))
+    .bind(page.before())
     .bind(limit)
     .fetch_all(&state.db)
     .await?;
@@ -198,7 +192,7 @@ fn request_json(row: &PgRow) -> Value {
     })
 }
 
-/// The other person behind `/@username`, who must exist and not be the caller.
+/// The person behind `/@username`, who must exist; the caller may be that person.
 async fn other(state: &AppState, name: &str) -> ApiResult<Uuid> {
     let name = crate::auth::username(name)?;
     let row = sqlx::query("SELECT id FROM users WHERE username = $1")
@@ -209,14 +203,20 @@ async fn other(state: &AppState, name: &str) -> ApiResult<Uuid> {
     Ok(row.get("id"))
 }
 
+/// Where the caller stands with someone (`self`, `none`, `requested`, `received` or `ilchon`), with the 일촌 or the
+/// pending request behind it.
+fn relation(relation: &str, ilchon: Option<Value>, request: Option<Value>) -> Json<Value> {
+    Json(json!({"relation": relation, "ilchon": ilchon, "request": request}))
+}
+
 async fn status(State(state): State<AppState>, headers: HeaderMap, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let viewer = current_user(&state, &headers).await?;
     let other = other(&state, &name).await?;
     if other == viewer.id {
-        return Ok(Json(json!({"relation": "self", "ilchon": null, "request": null})));
+        return Ok(relation("self", None, None));
     }
     if let Some(ilchon) = find_ilchon(&state.db, viewer.id, other).await? {
-        return Ok(Json(json!({"relation": "ilchon", "ilchon": ilchon, "request": null})));
+        return Ok(relation("ilchon", Some(ilchon), None));
     }
     let pending = sqlx::query(&format!(
         "{REQUEST_SELECT} WHERE (r.from_id = $1 AND r.to_id = $2) OR (r.from_id = $2 AND r.to_id = $1)"
@@ -225,13 +225,13 @@ async fn status(State(state): State<AppState>, headers: HeaderMap, Path(name): P
     .bind(other)
     .fetch_optional(&state.db)
     .await?;
-    Ok(Json(match pending {
-        None => json!({"relation": "none", "ilchon": null, "request": null}),
+    Ok(match pending {
+        None => relation("none", None, None),
         Some(row) => {
-            let relation = if row.get::<Uuid, _>("f_id") == viewer.id { "requested" } else { "received" };
-            json!({"relation": relation, "ilchon": null, "request": request_json(&row)})
+            let side = if row.get::<Uuid, _>("f_id") == viewer.id { "requested" } else { "received" };
+            relation(side, None, Some(request_json(&row)))
         }
-    }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -354,8 +354,7 @@ async fn accept(
     .await?;
     sqlx::query("DELETE FROM ilchon_requests WHERE id = $1").bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    let ilchon = find_ilchon(&state.db, viewer.id, from).await?;
-    Ok(Json(json!({"relation": "ilchon", "ilchon": ilchon, "request": null})))
+    Ok(relation("ilchon", find_ilchon(&state.db, viewer.id, from).await?, None))
 }
 
 async fn dismiss(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult<StatusCode> {

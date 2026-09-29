@@ -15,7 +15,7 @@ use crate::{
     AppState,
     auth::require_admin,
     error::{ApiError, ApiResult, bad, not_found},
-    imports,
+    factory, imports,
     studio::{self, Freshness},
 };
 
@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/catalog/admin/imports", get(imports::list))
         .route("/api/catalog/admin/imports/{id}", get(imports::one))
         .route("/api/catalog/admin/factory-characters", get(factory_characters))
+        .route("/api/catalog/admin/factory-usage", get(factory::usage))
 }
 
 const ITEM_COLUMNS: &str =

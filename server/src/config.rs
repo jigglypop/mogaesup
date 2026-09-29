@@ -19,7 +19,8 @@ pub struct Factory {
 }
 
 /// How far the studio screens reach through this server. Each level includes the ones before it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FactoryAccess {
     /// Reading only: browsing the wardrobe and the admins' libraries.
     Read,

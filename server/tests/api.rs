@@ -8,10 +8,11 @@ use axum::{
     response::IntoResponse,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use common::{ORIGIN, TestApp};
+use common::{ORIGIN, TestApp, TestDb};
 use mogaesup_server::{
     MIGRATOR,
     config::{Factory, FactoryAccess, FactoryToken},
+    glb,
 };
 use serde_json::{Value, json};
 use std::{
@@ -255,36 +256,10 @@ async fn 일촌을_맺으면_일촌_공개_홈을_볼_수_있다() {
     app.cleanup().await;
 }
 
-/// A GLB of a JSON chunk and, when `bin` is not empty, a binary chunk.
-fn glb_with(json: Value, bin: &[u8]) -> Vec<u8> {
-    let mut chunk = serde_json::to_vec(&json).unwrap();
-    while !chunk.len().is_multiple_of(4) {
-        chunk.push(b' ');
-    }
-    let mut data = bin.to_vec();
-    while !data.len().is_multiple_of(4) {
-        data.push(0);
-    }
-    let total = 12 + 8 + chunk.len() + if data.is_empty() { 0 } else { 8 + data.len() };
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&0x4654_6c67u32.to_le_bytes());
-    bytes.extend_from_slice(&2u32.to_le_bytes());
-    bytes.extend_from_slice(&(total as u32).to_le_bytes());
-    bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(b"JSON");
-    bytes.extend_from_slice(&chunk);
-    if !data.is_empty() {
-        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(b"BIN\0");
-        bytes.extend_from_slice(&data);
-    }
-    bytes
-}
-
 /// Rigged, with the clips the character server's Meshy delivery names; `name` makes each copy's bytes its own.
 fn character_glb(name: &str) -> Vec<u8> {
-    glb_with(
-        json!({"asset": {"version": "2.0", "generator": name}, "skins": [{"joints": [0]}],
+    glb::join(
+        &json!({"asset": {"version": "2.0", "generator": name}, "skins": [{"joints": [0]}],
             "animations": [{"name": "idle"}, {"name": "walk"}, {"name": "run"}, {"name": "sit"}]}),
         &[],
     )
@@ -292,7 +267,7 @@ fn character_glb(name: &str) -> Vec<u8> {
 
 /// Animated but without a skin: nothing a 미니미 can be.
 fn statue_glb() -> Vec<u8> {
-    glb_with(json!({"asset": {"version": "2.0"}, "animations": [{"name": "idle"}, {"name": "walk"}]}), &[])
+    glb::join(&json!({"asset": {"version": "2.0"}, "animations": [{"name": "idle"}, {"name": "walk"}]}), &[])
 }
 
 /// A rigged 1.7 m figure: one triangle under a centimetre-scale root, with an 1100 px colour map the import shrinks.
@@ -300,8 +275,8 @@ fn textured_glb() -> Vec<u8> {
     let mut picture = std::io::Cursor::new(Vec::new());
     image::RgbImage::new(1100, 1100).write_to(&mut picture, image::ImageFormat::Png).unwrap();
     let picture = picture.into_inner();
-    glb_with(
-        json!({
+    glb::join(
+        &json!({
             "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
             "nodes": [{"name": "Armature", "scale": [0.01, 0.01, 0.01], "children": [1]}, {"mesh": 0, "skin": 0}],
             "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
@@ -476,19 +451,22 @@ async fn fake_factory(seen: Seen, studio: Studio) -> String {
     url
 }
 
-async fn factory_app(seen: &Seen, studio: Studio) -> TestApp {
-    let url = fake_factory(seen.clone(), studio).await;
+/// Settings for the fake character server at `url`: read-only, with an operator token, an API key and a gateway key.
+fn factory(url: String) -> Factory {
     let token =
         FactoryToken { key: vec![3; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
-    TestApp::new(Some(Factory {
+    Factory {
         url,
         api_key: Some("factory-key".into()),
         token: Some(token),
         access: FactoryAccess::Read,
         paid_monthly: 0,
         gateway_key: Some("gate".into()),
-    }))
-    .await
+    }
+}
+
+async fn factory_app(seen: &Seen, studio: Studio) -> TestApp {
+    TestApp::new(Some(factory(fake_factory(seen.clone(), studio).await))).await
 }
 
 const IMPORT: &str = "/api/catalog/admin/import";
@@ -840,14 +818,9 @@ async fn 서버가_다시_뜨면_멈춘_가져오기를_실패로_적는다() {
 
 #[tokio::test]
 async fn 버전을_두기_전에_가져온_항목은_지금_모델이_첫_버전이_된다() {
-    use sqlx::{Row, migrate::Migrate, postgres::PgPoolOptions};
-    let url = std::env::var("TEST_ADMIN_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres-dev@127.0.0.1:55432/postgres".into());
-    let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
-    let name = format!("test_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {name}")).execute(&admin).await.unwrap();
-    let db_url = format!("{}/{name}", url.rsplit_once('/').unwrap().0);
-    let db = PgPoolOptions::new().max_connections(2).connect(&db_url).await.unwrap();
+    use sqlx::{Row, migrate::Migrate};
+    let test_db = TestDb::create().await;
+    let db = &test_db.pool;
     // Found by name, so the check survives a renumbering of the file.
     let pipeline = MIGRATOR.iter().find(|m| m.description == "catalog pipeline").unwrap().version;
     let mut conn = db.acquire().await.unwrap();
@@ -864,12 +837,12 @@ async fn 버전을_두기_전에_가져온_항목은_지금_모델이_첫_버전
     .await
     .unwrap();
     drop(conn);
-    MIGRATOR.run(&db).await.unwrap();
+    MIGRATOR.run(db).await.unwrap();
     let row = sqlx::query(
         "SELECT v.model_url, v.thumbnail_url, v.source_ref, v.clips, i.status FROM catalog_items i
          JOIN catalog_versions v ON v.id = i.version_id WHERE i.id = 'legacy'",
     )
-    .fetch_one(&db)
+    .fetch_one(db)
     .await
     .unwrap();
     assert_eq!(row.get::<String, _>("model_url"), "/models/old.glb");
@@ -877,10 +850,9 @@ async fn 버전을_두기_전에_가져온_항목은_지금_모델이_첫_버전
     assert_eq!(row.get::<Option<String>, _>("source_ref").as_deref(), Some("job_0/v1/smile"));
     assert_eq!(row.get::<Vec<String>, _>("clips"), ["idle", "walk"]);
     assert_eq!(row.get::<String, _>("status"), "published");
-    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_versions").fetch_one(&db).await.unwrap();
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_versions").fetch_one(db).await.unwrap();
     assert_eq!(versions, 1, "built-in items get no versions");
-    db.close().await;
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).execute(&admin).await.unwrap();
+    test_db.remove().await;
 }
 
 #[tokio::test]
@@ -944,18 +916,7 @@ async fn 미니미는_공개된_카탈로그나_기본_미니미만_고른다() 
 #[tokio::test]
 async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통과한다() {
     let seen = Seen::default();
-    let url = fake_factory(seen.clone(), Studio::standard()).await;
-    let token =
-        FactoryToken { key: vec![5; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
-    let app = TestApp::new(Some(Factory {
-        url,
-        api_key: None,
-        token: Some(token),
-        access: FactoryAccess::Read,
-        paid_monthly: 0,
-        gateway_key: Some("gate".into()),
-    }))
-    .await;
+    let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_g", "회원").await;
     let admin = app.register("operator_g", "운영자").await;
     app.make_admin("operator_g").await;
@@ -974,10 +935,7 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
 
 async fn studio_app(seen: &Seen, access: FactoryAccess, paid_monthly: i64) -> TestApp {
     let url = fake_factory(seen.clone(), Studio::standard()).await;
-    let token =
-        FactoryToken { key: vec![7; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
-    TestApp::new(Some(Factory { url, api_key: None, token: Some(token), access, paid_monthly, gateway_key: None }))
-        .await
+    TestApp::new(Some(Factory { access, paid_monthly, ..factory(url) })).await
 }
 
 #[tokio::test]

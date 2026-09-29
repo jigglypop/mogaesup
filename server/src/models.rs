@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Where the site serves stored files.
-pub const URL_PREFIX: &str = "/models";
+const URL_PREFIX: &str = "/models";
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// File kinds the store takes, by extension.
 const TYPES: [(&str, &str); 4] =
@@ -33,7 +33,7 @@ pub struct Models {
     attributes: bool,
 }
 
-pub fn content_type(extension: &str) -> Option<&'static str> {
+fn content_type(extension: &str) -> Option<&'static str> {
     TYPES.iter().find(|(known, _)| *known == extension).map(|(_, kind)| *kind)
 }
 
@@ -42,6 +42,14 @@ fn stored_name(file: &str) -> Option<(&str, &'static str)> {
     let (sha, extension) = file.split_once('.')?;
     let valid = sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     Some((sha, content_type(extension).filter(|_| valid)?))
+}
+
+/// Whether `url` is the site path of a stored model: `/models/<sha256>.glb`.
+pub fn is_model_url(url: &str) -> bool {
+    url.strip_prefix(URL_PREFIX)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .and_then(stored_name)
+        .is_some_and(|(_, kind)| kind == "model/gltf-binary")
 }
 
 impl Models {

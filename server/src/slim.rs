@@ -7,58 +7,13 @@ use image::{DynamicImage, ImageFormat, ImageReader, Limits, codecs::jpeg::JpegEn
 use serde_json::Value;
 use std::{collections::HashMap, io::Cursor};
 
-const MAGIC: u32 = 0x4654_6c67; // "glTF"
-const JSON_CHUNK: u32 = 0x4e4f_534a; // "JSON"
-const BIN_CHUNK: u32 = 0x004e_4942; // "BIN\0"
+use crate::glb::{join, split};
+
 /// Base colour and emissive maps.
 const COLOR_EDGE: u32 = 1024;
 /// Normal, metallic-roughness and occlusion maps.
 const DETAIL_EDGE: u32 = 512;
 const JPEG_QUALITY: u8 = 88;
-
-fn word(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-}
-
-/// The JSON and binary chunks of a GLB.
-fn split(bytes: &[u8]) -> Option<(Value, &[u8])> {
-    if word(bytes, 0)? != MAGIC || word(bytes, 8)? as usize != bytes.len() || word(bytes, 16)? != JSON_CHUNK {
-        return None;
-    }
-    let json_end = 20 + word(bytes, 12)? as usize;
-    let json = serde_json::from_slice(bytes.get(20..json_end)?).ok()?;
-    if json_end == bytes.len() {
-        return Some((json, &[]));
-    }
-    if word(bytes, json_end + 4)? != BIN_CHUNK {
-        return None;
-    }
-    let bin_start = json_end + 8;
-    Some((json, bytes.get(bin_start..bin_start + word(bytes, json_end)? as usize)?))
-}
-
-fn join(json: &Value, bin: &[u8]) -> Vec<u8> {
-    let mut chunk = serde_json::to_vec(json).unwrap_or_default();
-    while !chunk.len().is_multiple_of(4) {
-        chunk.push(b' ');
-    }
-    let mut data = bin.to_vec();
-    while !data.len().is_multiple_of(4) {
-        data.push(0);
-    }
-    let total = 12 + 8 + chunk.len() + if data.is_empty() { 0 } else { 8 + data.len() };
-    let mut out = Vec::with_capacity(total);
-    for value in [MAGIC, 2, total as u32, chunk.len() as u32, JSON_CHUNK] {
-        out.extend_from_slice(&value.to_le_bytes());
-    }
-    out.extend_from_slice(&chunk);
-    if !data.is_empty() {
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&BIN_CHUNK.to_le_bytes());
-        out.extend_from_slice(&data);
-    }
-    out
-}
 
 /// The longest edge each image may keep, by what the materials sample it for; images no material uses keep theirs.
 fn edges(json: &Value) -> Vec<Option<u32>> {
@@ -85,12 +40,13 @@ fn edges(json: &Value) -> Vec<Option<u32>> {
     edges
 }
 
-fn decode(bytes: &[u8], format: ImageFormat) -> Option<DynamicImage> {
+/// The picture in `bytes`, decoded only while it is at most `edge` px a side and needs at most `alloc` bytes.
+pub fn decode(bytes: &[u8], format: ImageFormat, edge: u32, alloc: u64) -> Option<DynamicImage> {
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(512 * 1024 * 1024);
+    limits.max_image_width = Some(edge);
+    limits.max_image_height = Some(edge);
+    limits.max_alloc = Some(alloc);
     reader.limits(limits);
     reader.decode().ok()
 }
@@ -103,7 +59,7 @@ fn reencode(bytes: &[u8], mime: &str, edge: u32) -> Option<(Vec<u8>, &'static st
         "image/jpeg" => ImageFormat::Jpeg,
         _ => return None,
     };
-    let image = decode(bytes, format)?;
+    let image = decode(bytes, format, 8192, 512 * 1024 * 1024)?;
     let shrunk = image.width().max(image.height()) > edge;
     let image = if shrunk { image.resize(edge, edge, FilterType::Triangle) } else { image };
     let opaque = !image.color().has_alpha() || image.to_rgba8().pixels().all(|pixel| pixel[3] == u8::MAX);
@@ -130,7 +86,7 @@ pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let range = |view: &Value| -> Option<std::ops::Range<usize>> {
         let start = usize::try_from(view["byteOffset"].as_u64().unwrap_or(0)).ok()?;
-        Some(start..start + usize::try_from(view["byteLength"].as_u64()?).ok()?)
+        Some(start..start.checked_add(usize::try_from(view["byteLength"].as_u64()?).ok()?)?)
     };
     let edges = edges(&json);
     let mut replaced: HashMap<usize, (Vec<u8>, &'static str, usize)> = HashMap::new();

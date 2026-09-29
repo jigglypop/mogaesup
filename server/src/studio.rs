@@ -96,8 +96,13 @@ fn thumbnail_path(job: &str, version: &str) -> String {
     format!("avatar-factory/jobs/{job}/native-parts/{version}/front.png")
 }
 
+/// The faces made for a sealed assembly, and which one is chosen.
+fn expressions_path(job: &str, version: &str) -> String {
+    format!("studio/bodies/{job}/{version}/expressions")
+}
+
 /// The finished characters in a job listing and studio catalog, newest first.
-pub fn finished(jobs: &Value, catalog: &Value) -> Vec<Character> {
+fn finished(jobs: &Value, catalog: &Value) -> Vec<Character> {
     let mut newest: HashMap<String, Character> = HashMap::new();
     for job in jobs["jobs"].as_array().into_iter().flatten() {
         let (Some(id), Some(version)) =
@@ -145,7 +150,7 @@ pub fn finished(jobs: &Value, catalog: &Value) -> Vec<Character> {
 
 /// Which character each job belongs to: its `character_id`, or the job itself when it has none. Covers every job,
 /// finished or not, so a catalog copy of an older job still finds its character.
-pub fn owners(jobs: &Value) -> HashMap<String, String> {
+fn owners(jobs: &Value) -> HashMap<String, String> {
     jobs["jobs"]
         .as_array()
         .into_iter()
@@ -178,12 +183,12 @@ fn selected(listing: &Value) -> Option<(&str, &Value)> {
 
 /// The face chosen for a sealed assembly: `Some(None)` when none is, None when the character server could not say.
 pub async fn chosen_face(state: &AppState, username: &str, job: &str, version: &str) -> Option<Option<String>> {
-    let listing = fetch_json(state, username, &format!("studio/bodies/{job}/{version}/expressions")).await.ok()?;
+    let listing = fetch_json(state, username, &expressions_path(job, version)).await.ok()?;
     Some(listing.as_ref().and_then(selected).map(|(id, _)| id.to_owned()))
 }
 
 /// A job's sealed assembly and, when its face is chosen, the copy with that face baked in.
-pub fn source_of(job_id: &str, job: &Value, expressions: Option<&Value>) -> ApiResult<Source> {
+fn source_of(job_id: &str, job: &Value, expressions: Option<&Value>) -> ApiResult<Source> {
     let version = text(job, "assembly_version")
         .and_then(segment)
         .ok_or(conflict("factory_not_sealed", "아직 조립이 끝나지 않은 캐릭터입니다."))?;
@@ -208,7 +213,7 @@ pub async fn source(state: &AppState, username: &str, job_id: &str) -> ApiResult
     let job = fetch_json(state, username, &format!("avatar-factory/jobs/{job_id}")).await?.ok_or(JOB_NOT_FOUND)?;
     let version = text(&job, "assembly_version").and_then(segment);
     let expressions = match version {
-        Some(version) => fetch_json(state, username, &format!("studio/bodies/{job_id}/{version}/expressions")).await?,
+        Some(version) => fetch_json(state, username, &expressions_path(job_id, version)).await?,
         None => None,
     };
     source_of(job_id, &job, expressions.as_ref())

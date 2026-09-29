@@ -7,23 +7,30 @@ use axum::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
     AppState,
-    error::{ApiError, ApiResult, internal},
+    error::{ApiError, ApiResult, forbidden, internal},
 };
 
+pub const FOREIGN_ORIGIN: ApiError = forbidden("origin", "허용되지 않은 요청 출처입니다.");
+
+/// Whether the request's Origin is one of the site's own (`APP_ORIGIN`).
+pub fn same_origin(state: &AppState, headers: &HeaderMap) -> bool {
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    origin.is_some_and(|origin| state.config.origins.iter().any(|v| v == origin))
+}
+
 /// Writes must come from the site itself: a matching Origin, not cross-site, and JSON bodies (a cross-site form cannot
-/// send JSON without a preflight). The asset-factory proxy carries uploads, so it only needs the Origin.
+/// send JSON without a preflight). The studio gateway carries uploads, so it only needs the Origin.
 pub async fn protect(State(state): State<AppState>, request: Request, next: Next) -> Response {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         let headers = request.headers();
-        let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
         let cross_site = headers.get("sec-fetch-site").is_some_and(|v| v == "cross-site");
-        if cross_site || !origin.is_some_and(|origin| state.config.origins.iter().any(|v| v == origin)) {
-            return ApiError::new(StatusCode::FORBIDDEN, "origin", "허용되지 않은 요청 출처입니다.").into_response();
+        if cross_site || !same_origin(&state, headers) {
+            return FOREIGN_ORIGIN.into_response();
         }
         let json =
             headers.get(header::CONTENT_TYPE).is_some_and(|v| v.to_str().unwrap_or("").starts_with("application/json"));
@@ -119,6 +126,11 @@ pub fn client_address(headers: &HeaderMap) -> String {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty() && value.len() <= 64)
         .unwrap_or_else(|| "local".into())
+}
+
+/// Now in whole seconds since the Unix epoch, as signed tokens count their expiry.
+pub fn epoch_seconds() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 pub fn hmac_sha256(secret: &[u8], message: &[u8]) -> [u8; 32] {

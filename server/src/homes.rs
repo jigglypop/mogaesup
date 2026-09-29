@@ -8,13 +8,13 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sqlx::{Row, postgres::PgRow};
+use sqlx::{PgExecutor, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
     AppState,
     auth::{User, current_user, optional_user, username},
-    error::{ApiError, ApiResult, bad, conflict, not_found},
+    error::{ApiError, ApiResult, bad, conflict, forbidden, not_found},
     security::client_address,
 };
 
@@ -66,8 +66,7 @@ fn profile(row: &PgRow) -> HomeProfile {
     }
 }
 
-pub const HOME_PRIVATE: ApiError =
-    ApiError::new(StatusCode::FORBIDDEN, "home_private", "주인이 공개하지 않은 섬입니다.");
+const HOME_PRIVATE: ApiError = forbidden("home_private", "주인이 공개하지 않은 섬입니다.");
 
 /// The home behind `/@username` if `viewer` may see it: public, the owner, or an 일촌 of an 일촌-only home.
 pub async fn visible_home(state: &AppState, name: &str, viewer: Option<&User>) -> ApiResult<(HomeProfile, bool)> {
@@ -112,31 +111,48 @@ async fn home_view(state: &AppState, home: HomeProfile, is_owner: bool) -> ApiRe
     Ok(Json(json!({"profile": home, "visits": visits, "isOwner": is_owner})))
 }
 
-async fn my_home(state: &AppState, user: &User) -> ApiResult<HomeProfile> {
+/// Gives `owner` an island named after them, unless they already have one.
+pub async fn create(db: impl PgExecutor<'_>, owner: &User) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO homes (owner_id, title) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-        .bind(user.id)
-        .bind(format!("{}의 섬", user.display_name))
-        .execute(&state.db)
+        .bind(owner.id)
+        .bind(format!("{}의 섬", owner.display_name))
+        .execute(db)
         .await?;
+    Ok(())
+}
+
+async fn my_home(state: &AppState, user: &User) -> ApiResult<HomeProfile> {
+    create(&state.db, user).await?;
     let row =
         sqlx::query(&format!("{PROFILE_SELECT} WHERE h.owner_id = $1")).bind(user.id).fetch_one(&state.db).await?;
     Ok(profile(&row))
 }
 
+/// `?limit=&before=` on a newest-first listing: at most 50 rows (20 unless asked), older than `before`.
 #[derive(Deserialize)]
-struct ListQuery {
+pub struct Page {
     limit: Option<i64>,
     before: Option<DateTime<Utc>>,
 }
 
-async fn list(State(state): State<AppState>, Query(query): Query<ListQuery>) -> ApiResult<Json<Value>> {
+impl Page {
+    pub fn limit(&self) -> i64 {
+        self.limit.unwrap_or(20).clamp(1, 50)
+    }
+
+    pub fn before(&self) -> DateTime<Utc> {
+        self.before.unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(1))
+    }
+}
+
+async fn list(State(state): State<AppState>, Query(page): Query<Page>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(
         "SELECT u.username, u.display_name AS owner_name, h.title, h.status_message, h.emoji, h.updated_at, h.visits_total
          FROM homes h JOIN users u ON u.id = h.owner_id
          WHERE h.visibility = 'public' AND h.updated_at < $1 ORDER BY h.updated_at DESC LIMIT $2",
     )
-    .bind(query.before.unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(1)))
-    .bind(query.limit.unwrap_or(20).clamp(1, 50))
+    .bind(page.before())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await?;
     let homes: Vec<Value> = rows
@@ -351,8 +367,8 @@ pub fn safe_asset_url(value: &str) -> bool {
     {
         return true;
     }
-    if let Some(sha) = value.strip_prefix("/models/").and_then(|v| v.strip_suffix(".glb")) {
-        return sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if crate::models::is_model_url(value) {
+        return true;
     }
     value.strip_prefix('/').unwrap_or(value).strip_prefix("gltf/").is_some_and(|rest| {
         !rest.is_empty()
@@ -373,7 +389,7 @@ fn unsafe_url(value: &Value) -> bool {
 }
 
 /// Why the save envelope may not be stored: the runtime's envelope rules and the asset URL allowlist.
-pub fn world_problem(data: &Map<String, Value>) -> Option<&'static str> {
+fn world_problem(data: &Map<String, Value>) -> Option<&'static str> {
     if data.get("version").and_then(Value::as_i64).is_none_or(|v| v < 1) {
         return Some("version");
     }

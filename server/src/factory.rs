@@ -4,22 +4,22 @@ use axum::{
     extract::{OriginalUri, Path, RawQuery, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::Response,
-    routing::{any, get},
+    routing::any,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use crate::{
     AppState,
     auth::{current_user, require_admin},
     config::{Factory, FactoryAccess, FactoryToken},
-    error::{ApiError, ApiResult, not_found},
-    security::hmac_sha256,
+    error::{ApiError, ApiResult, forbidden, internal, not_found},
+    security::{epoch_seconds, hmac_sha256},
 };
 
 const OPERATOR_TOKEN_SECONDS: u64 = 300;
@@ -49,6 +49,7 @@ const FORWARDED_RESPONSE_HEADERS: [HeaderName; 6] = [
 
 const UNAVAILABLE: ApiError =
     ApiError::new(StatusCode::BAD_GATEWAY, "factory_unavailable", "캐릭터 서버에 연결하지 못했습니다.");
+const TOO_LARGE: ApiError = ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "model_too_large", "모델 파일이 너무 큽니다.");
 
 /// The HMAC key exactly as the character server's `auth.py` (backend/src) derives it: the stripped secret, used decoded when Python's
 /// `base64.b64decode(secret, validate=False)` yields at least 32 bytes, otherwise as its UTF-8 bytes.
@@ -106,7 +107,7 @@ fn python_b64decode(text: &str) -> Option<Vec<u8>> {
 
 /// A five-minute HS256 access token for the character server, as its operator (`owner_id`).
 pub fn operator_token(token: &FactoryToken, username: &str) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = epoch_seconds();
     let claims = json!({
         "sub": token.owner_id.to_string(),
         "userId": token.owner_id,
@@ -151,7 +152,7 @@ fn signed(request: reqwest::RequestBuilder, factory: &Factory, username: &str) -
 
 /// The paths the character studio's screens call; this server answers them under the same names, so the screens run
 /// unchanged inside the app.
-pub const STUDIO_PREFIXES: [&str; 4] = ["avatar-factory", "studio", "avatar-blueprints", "characters"];
+const STUDIO_PREFIXES: [&str; 4] = ["avatar-factory", "studio", "avatar-blueprints", "characters"];
 
 /// Whether `path` (the full request path) belongs to the studio, including the admins' `/api/factory/*`.
 pub fn is_studio_path(path: &str) -> bool {
@@ -164,8 +165,7 @@ pub fn is_studio_path(path: &str) -> bool {
 }
 
 pub fn router() -> Router<AppState> {
-    let mut router =
-        Router::new().route("/api/factory/{*path}", any(proxy)).route("/api/catalog/admin/factory-usage", get(usage));
+    let mut router = Router::new().route("/api/factory/{*path}", any(proxy));
     for prefix in STUDIO_PREFIXES {
         router = router
             .route(&format!("/api/{prefix}"), any(studio))
@@ -176,7 +176,7 @@ pub fn router() -> Router<AppState> {
 
 /// What a studio request needs from whoever sends it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Need {
+enum Need {
     /// Any signed-in member: reading the wardrobe (bodies, parts, colours, previews) and the part models it puts on.
     Member,
     /// An admin, reading anything else.
@@ -202,7 +202,7 @@ const FREE_POSTS: [&[&str]; 9] = [
 ];
 
 /// The policy for one studio request; `path` is below `/api/`, e.g. `avatar-factory/wardrobe/bodies`.
-pub fn need(method: &Method, path: &str) -> Need {
+fn need(method: &Method, path: &str) -> Need {
     let segments: Vec<&str> = path.split('/').collect();
     if matches!(*method, Method::GET | Method::HEAD) {
         let member = match segments.as_slice() {
@@ -218,13 +218,8 @@ pub fn need(method: &Method, path: &str) -> Need {
     if *method == Method::POST && !FREE_POSTS.iter().any(free) { Need::Paid } else { Need::Write }
 }
 
-const READ_ONLY: ApiError =
-    ApiError::new(StatusCode::FORBIDDEN, "factory_read_only", "이 서버에서는 캐릭터 스튜디오를 읽기만 할 수 있습니다.");
-const PAID_OFF: ApiError = ApiError::new(
-    StatusCode::FORBIDDEN,
-    "factory_paid_off",
-    "이 서버에서는 비용이 드는 캐릭터 작업을 시작할 수 없습니다.",
-);
+const READ_ONLY: ApiError = forbidden("factory_read_only", "이 서버에서는 캐릭터 스튜디오를 읽기만 할 수 있습니다.");
+const PAID_OFF: ApiError = forbidden("factory_paid_off", "이 서버에서는 비용이 드는 캐릭터 작업을 시작할 수 없습니다.");
 const BUDGET_SPENT: ApiError =
     ApiError::new(StatusCode::TOO_MANY_REQUESTS, "factory_budget", "이번 달 유료 캐릭터 작업 한도를 다 썼습니다.");
 
@@ -279,7 +274,7 @@ async fn studio(
     } else {
         None
     };
-    let response = forward(&state, factory, &user.username, method, &headers, &path, query, body).await;
+    let response = forward(&state, &user.username, method, &headers, &path, query, body).await;
     if let Some(id) = record {
         let status = response.as_ref().map_or(502, |response| response.status().as_u16());
         let saved = sqlx::query("UPDATE factory_requests SET status = $2 WHERE id = $1")
@@ -294,20 +289,15 @@ async fn studio(
     response
 }
 
-/// `/api/catalog/admin/factory-usage`: how far the studio reaches from here, and this month's paid requests.
-async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+/// `GET /api/catalog/admin/factory-usage`: how far the studio reaches from here, and this month's paid requests.
+pub async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     require_admin(&state, &headers).await?;
     let Some(factory) = state.config.factory.as_ref() else {
         return Ok(Json(json!({"connected": false})));
     };
-    let access = match factory.access {
-        FactoryAccess::Read => "read",
-        FactoryAccess::Write => "write",
-        FactoryAccess::Paid => "paid",
-    };
     Ok(Json(json!({
         "connected": true,
-        "access": access,
+        "access": factory.access,
         "paidThisMonth": paid_this_month(&state).await?,
         "paidMonthly": factory.paid_monthly,
     })))
@@ -323,15 +313,12 @@ async fn proxy(
     body: Body,
 ) -> ApiResult<Response> {
     let admin = require_admin(&state, &headers).await?;
-    let factory = factory(&state)?;
-    forward(&state, factory, &admin.username, method, &headers, &path, query, body).await
+    forward(&state, &admin.username, method, &headers, &path, query, body).await
 }
 
 /// Sends one request to the character server's `/api/{path}` as the operator and streams its answer back.
-#[allow(clippy::too_many_arguments)]
 async fn forward(
     state: &AppState,
-    factory: &Factory,
     username: &str,
     method: Method,
     headers: &HeaderMap,
@@ -339,6 +326,7 @@ async fn forward(
     query: Option<String>,
     body: Body,
 ) -> ApiResult<Response> {
+    let factory = factory(state)?;
     if path.split('/').any(|segment| segment == ".." || segment.is_empty()) {
         return Err(not_found("not_found", "찾을 수 없습니다."));
     }
@@ -349,17 +337,14 @@ async fn forward(
             request = request.header(name, value.clone());
         }
     }
-    let upstream = signed(request, factory, username).send().await.map_err(|error| {
-        tracing::warn!(%error, "Character server request failed");
-        UNAVAILABLE
-    })?;
+    let upstream = signed(request, factory, username).send().await.map_err(unavailable)?;
     let mut response = Response::builder().status(upstream.status().as_u16());
     for name in FORWARDED_RESPONSE_HEADERS {
         if let Some(value) = upstream.headers().get(name.as_str()) {
             response = response.header(name, value.as_bytes());
         }
     }
-    response.body(Body::from_stream(upstream.bytes_stream())).map_err(crate::error::internal)
+    response.body(Body::from_stream(upstream.bytes_stream())).map_err(internal)
 }
 
 fn unavailable(error: reqwest::Error) -> ApiError {
@@ -374,14 +359,9 @@ pub struct Received {
     pub total: AtomicUsize,
 }
 
-/// A file under the character server's `/api/`, at most `limit` bytes. Its files answer with a presigned S3 redirect,
-/// followed here without the operator token or key.
-pub async fn fetch_file(state: &AppState, username: &str, api_path: &str, limit: usize) -> ApiResult<Vec<u8>> {
-    fetch_file_counted(state, username, api_path, limit, None).await
-}
-
-/// [`fetch_file`], counting what has arrived into `received` as it streams in.
-pub async fn fetch_file_counted(
+/// A file under the character server's `/api/`, at most `limit` bytes, counting what has arrived into `received` as it
+/// streams in. Its files answer with a presigned S3 redirect, followed here without the operator token or key.
+pub async fn fetch_file(
     state: &AppState,
     username: &str,
     api_path: &str,
@@ -408,7 +388,7 @@ pub async fn fetch_file_counted(
         return Err(UNAVAILABLE);
     }
     if response.content_length().is_some_and(|length| length as usize > limit) {
-        return Err(too_large());
+        return Err(TOO_LARGE);
     }
     if let (Some(received), Some(length)) = (received, response.content_length()) {
         received.total.store(length as usize, Ordering::Relaxed);
@@ -418,7 +398,7 @@ pub async fn fetch_file_counted(
     while let Some(chunk) = stream.next().await {
         bytes.extend_from_slice(&chunk.map_err(unavailable)?);
         if bytes.len() > limit {
-            return Err(too_large());
+            return Err(TOO_LARGE);
         }
         if let Some(received) = received {
             received.bytes.store(bytes.len(), Ordering::Relaxed);
@@ -451,10 +431,6 @@ pub async fn fetch_json(state: &AppState, username: &str, api_path: &str) -> Api
         }
     }
     Err(UNAVAILABLE)
-}
-
-pub const fn too_large() -> ApiError {
-    ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "model_too_large", "모델 파일이 너무 큽니다.")
 }
 
 #[cfg(test)]
