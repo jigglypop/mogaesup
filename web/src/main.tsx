@@ -8,7 +8,6 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom';
 
 import { AuthProvider } from './auth/AuthProvider';
-import { AdminPage } from './pages/AdminPage';
 import { AuthPage } from './pages/AuthPage';
 import { ExplorePage } from './pages/ExplorePage';
 import { Loading } from './pages/Loading';
@@ -19,6 +18,8 @@ initTheme();
 
 // The character studio brings its own screens and 3D viewer; it loads only when someone opens it.
 const StudioPage = lazy(() => import('./studio/StudioPage'));
+// Only admins open the pipeline board, so members never download it.
+const AdminPage = lazy(() => import('./pages/AdminPage').then((module) => ({ default: module.AdminPage })));
 
 /** `/@username` is an island and `/@username/edit` its decorating mode; any other single segment is not a page. */
 function UsernameRoute() {
@@ -43,7 +44,14 @@ if (root) {
               </Suspense>
             }
           />
-          <Route path="/admin/*" element={<AdminPage />} />
+          <Route
+            path="/admin/*"
+            element={
+              <Suspense fallback={<Loading />}>
+                <AdminPage />
+              </Suspense>
+            }
+          />
           <Route path="/:slug/*" element={<UsernameRoute />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

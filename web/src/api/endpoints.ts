@@ -1,8 +1,12 @@
 import { api } from './client';
 import type {
+  AdminCatalogItem,
   CatalogChanges,
+  CatalogImport,
   CatalogItem,
   CatalogKind,
+  CatalogStatus,
+  CatalogVersion,
   Credentials,
   FactoryCharacter,
   FactoryImport,
@@ -66,10 +70,18 @@ export const socialApi = {
 
 export const catalogApi = {
   items: (kind?: CatalogKind) => api<{ items: CatalogItem[] }>(`/catalog/items${kind ? `?kind=${kind}` : ''}`),
-  adminItems: () => api<{ items: CatalogItem[] }>('/catalog/admin/items'),
+  adminItems: () => api<{ items: AdminCatalogItem[] }>('/catalog/admin/items'),
   patch: (id: string, body: CatalogChanges) =>
-    api<CatalogItem>(`/catalog/admin/items/${segment(id)}`, { method: 'PATCH', body }),
-  importFactory: (body: FactoryImport) => api<CatalogItem>('/catalog/admin/import', { method: 'POST', body }),
+    api<AdminCatalogItem>(`/catalog/admin/items/${segment(id)}`, { method: 'PATCH', body }),
+  /** Queues a copy and answers at once; follow it with `importStatus` or `imports`. */
+  importFactory: (body: FactoryImport) => api<CatalogImport>('/catalog/admin/import', { method: 'POST', body }),
   factoryCharacters: () => api<{ characters: FactoryCharacter[] }>('/catalog/admin/factory-characters'),
   factoryUsage: () => api<FactoryUsage>('/catalog/admin/factory-usage'),
+  imports: (limit = 30) => api<{ imports: CatalogImport[] }>(`/catalog/admin/imports?limit=${limit}`),
+  importStatus: (id: string) => api<CatalogImport>(`/catalog/admin/imports/${segment(id)}`),
+  versions: (id: string) => api<{ versions: CatalogVersion[] }>(`/catalog/admin/items/${segment(id)}/versions`),
+  rollback: (id: string, versionId: number) =>
+    api<AdminCatalogItem>(`/catalog/admin/items/${segment(id)}/rollback`, { method: 'POST', body: { versionId } }),
+  bulkStatus: (ids: string[], status: CatalogStatus) =>
+    api<{ items: AdminCatalogItem[] }>('/catalog/admin/bulk-status', { method: 'POST', body: { ids, status } }),
 };

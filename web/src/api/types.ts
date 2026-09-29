@@ -138,6 +138,22 @@ export type FactoryImport = Pick<CatalogItem, 'id' | 'kind' | 'label' | 'emoji'>
   sortOrder?: number;
 };
 
+/** Why a catalog copy is behind its character: remade in another job, sealed again, another face, or a later stage. */
+export type CatalogFreshness = 'current' | 'newJob' | 'newVersion' | 'newFace' | 'newStage';
+
+/** The catalog item copying a studio character, as the character listing shows it. */
+export type ImportedCopy = {
+  id: string;
+  label: string;
+  emoji: string;
+  status: CatalogStatus;
+  thumbnailUrl: string | null;
+  sourceRef: string | null;
+  /** The copy is of the character's latest job, assembly, face and stage. */
+  current: boolean;
+  freshness: CatalogFreshness;
+};
+
 /** A finished character on the character server (gaesup-character). */
 export type FactoryCharacter = {
   jobId: string;
@@ -149,11 +165,116 @@ export type FactoryCharacter = {
   createdAt: string | null;
   /** The front render, through the admin proxy. */
   thumbnailUrl: string;
-  /** The catalog item holding it; `current` when that copy is of the latest sealed version. */
-  imported: { id: string; status: CatalogStatus; current: boolean } | null;
+  /** The chosen face (expression id); null when none is chosen or the character server could not say. */
+  face: string | null;
+  faceKnown: boolean;
+  /** `job/version[/face]`: what an import would copy now. */
+  sourceRef: string;
+  /** The playable model an import would copy, through the admin proxy. */
+  modelUrl: string;
+  /** The item copying this character (matched by character, so a remade job is the same item). */
+  imported: ImportedCopy | null;
+  /** Other items copying the same character. */
+  otherItems: string[];
 };
 
 /** How far the studio screens reach through the server (`FACTORY_ACCESS`), and this month's paid requests. */
 export type FactoryUsage =
   | { connected: false }
   | { connected: true; access: 'read' | 'write' | 'paid'; paidThisMonth: number; paidMonthly: number };
+
+/** Admin listing rows: the item, where it came from, its versions and how many homes wear it. */
+export type AdminCatalogItem = CatalogItem & {
+  characterId: string | null;
+  versionId: number | null;
+  versionCount: number;
+  /** Homes whose 미니미 this is (0 for furniture). */
+  usage: number;
+  updatedAt: string;
+};
+
+export type ImportStatus = 'queued' | 'running' | 'done' | 'failed';
+export type ImportStep = 'queued' | 'source' | 'download' | 'verify' | 'slim' | 'store' | 'thumbnail' | 'save' | 'done';
+export type CheckLevel = 'ok' | 'info' | 'warning' | 'error';
+export type ReportCheck = { code: string; level: CheckLevel; message: string };
+
+/** One image a model embeds; sizes are null when the server could not read them. */
+export type ModelTexture = {
+  image: number;
+  mime: string | null;
+  width: number | null;
+  height: number | null;
+  bytes: number | null;
+};
+
+/** Everything an import checked; kept with the import and the version it made. */
+export type ImportReport = {
+  checks: ReportCheck[];
+  source?: {
+    jobId: string;
+    version: string;
+    face: string | null;
+    stage: string | null;
+    characterId: string | null;
+    modelPath: string;
+  };
+  file?: { sha256: string; expectedSha256: string | null; bytes: number; webBytes: number | null; slimmed: boolean | null };
+  model?: {
+    skinned: boolean;
+    joints: number;
+    clips: string[];
+    animations: string[];
+    meshes: number;
+    materials: number;
+    triangles: number;
+    vertices: number;
+    /** Width, height and depth in metres. */
+    size: [number, number, number] | null;
+    textures: ModelTexture[];
+  };
+  /** The stored copy's textures, after shrinking. */
+  webTextures?: ModelTexture[];
+  thumbnail?: { ok: boolean; width?: number; height?: number };
+  outcome?: 'created' | 'updated' | 'unchanged';
+};
+
+/** A copy from the character server running in the background; poll it until `done` or `failed`. */
+export type CatalogImport = {
+  id: string;
+  itemId: string;
+  kind: CatalogKind;
+  label: string;
+  emoji: string;
+  factoryJobId: string;
+  characterId: string | null;
+  /** The item existed when the import was queued: an update. */
+  replaces: boolean;
+  status: ImportStatus;
+  step: ImportStep;
+  progress: number;
+  detail: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  report: ImportReport | null;
+  versionId: number | null;
+  requestedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+};
+
+/** A model a catalog item has shown; any of them can be put back. */
+export type CatalogVersion = {
+  id: number;
+  current: boolean;
+  modelUrl: string;
+  thumbnailUrl: string | null;
+  clips: string[];
+  sourceRef: string | null;
+  characterId: string | null;
+  stage: string | null;
+  report: ImportReport | null;
+  importId: string | null;
+  createdBy: string | null;
+  createdAt: string;
+};
