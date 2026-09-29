@@ -3,7 +3,6 @@ import { useEffect, useState, type ReactNode } from 'react';
 import {
   FRAME_PHASES,
   useGameTime,
-  useNPCStore,
   usePerformanceReport,
   type FramePhase,
 } from 'gaesup-world';
@@ -69,7 +68,6 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
     if (frames.fps > 0) setHistory((previous) => [...previous.slice(1 - HISTORY), frames.fps]);
   }, [frames]);
 
-  const npcs = useNPCStore((state) => state.instances.size);
   const tiles = useBuildingStore((state) => [...state.tileGroups.values()].reduce((sum, group) => sum + group.tiles.length, 0));
   const walls = useBuildingStore((state) => [...state.wallGroups.values()].reduce((sum, group) => sum + group.walls.length, 0));
   const objects = useBuildingStore((state) => state.objects.length);
@@ -177,7 +175,6 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
 
       <Section title="월드">
         <div className="mh-metrics">
-          <Metric label="주민 NPC" value={number(npcs)} unit="명" />
           <Metric label="바닥 타일" value={number(tiles)} />
           <Metric label="벽" value={number(walls)} />
           <Metric label="배치 오브젝트" value={number(objects)} />

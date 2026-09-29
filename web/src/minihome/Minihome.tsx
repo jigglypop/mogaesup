@@ -1,4 +1,5 @@
 import './minihome.css';
+import './edit/edit.css';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -13,23 +14,26 @@ import {
   InteractionPrompt,
   ToastHost,
   useAmbientBgm,
-  useAutoSave,
   useGameTime,
   useGaesupStoreApi,
-  useLoadOnMount,
   type WorldQuality,
 } from 'gaesup-world';
-import { useBuildingStoreApi } from 'gaesup-world/building';
 
 import { homeApi } from '../api/endpoints';
 import type { CatalogItem, HomeView, ProfileChanges, User } from '../api/types';
 import { Brand, initialOf, Rail, toneOf, TopActions, usePopover } from '../shell/Shell';
 import { Icon } from '../ui/icons';
-import { Decorate, useBuildingHistory } from './Decorate';
+import { Decorate } from './Decorate';
+import { EditContext, useEditState, useHistory, useSaver } from './edit/context';
+import { SaveBanners, SaveStatus, ShortcutHelp } from './edit/EditChrome';
+import { createEditHistory, readParts, sameParts } from './edit/history';
+import { createIslandSaver, type IslandSaver } from './edit/save';
+import { createEditSession, type EditSession } from './edit/session';
+import { useEditKeys } from './edit/useEditKeys';
 import { Guestbook } from './Guestbook';
 import { NeighborsTab, useNeighbors } from './Ilchons';
 import { ChatBar, LiveAvatars, LiveRoom, usePresence } from './live';
-import { createHomeSaveAdapter, isSaveConflict } from './persistence';
+import { createHomeSaveAdapter } from './persistence';
 import { About, minimeOf, ProfileHeader } from './Profile';
 import { Scene, type SceneSettings } from './Scene';
 import { StatusPanel } from './StatusPanel';
@@ -63,8 +67,25 @@ const KEYS = [
   ['WASD', '이동'],
   ['클릭', '가기'],
   ['드래그', '시점'],
-  ['E', '대화'],
 ] as const;
+/** The same, for a finger; CSS shows whichever list fits the device's pointer. */
+const TOUCH_KEYS = [
+  ['탭', '가기'],
+  ['드래그', '시점'],
+] as const;
+
+function KeyHints({ keys, touch = false }: { keys: typeof KEYS | typeof TOUCH_KEYS; touch?: boolean }) {
+  return (
+    <div className={`mg-keys${touch ? ' is-touch' : ''}`} aria-label="조작">
+      {keys.map(([key, label]) => (
+        <span key={key} className="mg-kbd">
+          <kbd>{key}</kbd>
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
 const QUALITY: { value: WorldQuality & string; label: string }[] = [
   { value: 'auto', label: '자동' },
   { value: 'high', label: '높음' },
@@ -82,13 +103,6 @@ function TimeChip() {
       {time.hour < 12 ? '오전' : '오후'} {hour}:{String(time.minute).padStart(2, '0')}
     </span>
   );
-}
-
-/** Loads the island once and, for its owner, keeps saving it; lives under the world so it uses this runtime's save system. */
-function Persistence({ autosave }: { autosave: boolean }) {
-  useLoadOnMount();
-  useAutoSave({ enabled: autosave, intervalMs: 60_000 });
-  return null;
 }
 
 function Bgm({ enabled }: { enabled: boolean }) {
@@ -146,7 +160,7 @@ function SettingsMenu({ settings, onChange, bgm, onBgm, onPerformance }: Setting
           <Switch label="후처리" hint="블룸·톤매핑. 켤 때만 불러와요" checked={settings.postProcessing} onChange={(postProcessing) => onChange({ postProcessing })} />
           <Switch
             label="고품질 조명"
-            hint="튀는 빛과 반사를 더해요. WebGPU에서만, 후처리와 함께 켜져요"
+            hint="섬에 튄 햇빛과 하늘빛(월드 GI), 반사를 더해요. WebGPU에서만, 후처리와 함께 켜져요"
             checked={settings.postProcessing && !!settings.cinematic}
             onChange={(cinematic) => onChange(cinematic ? { cinematic, postProcessing: true } : { cinematic })}
           />
@@ -207,44 +221,36 @@ export type MinihomeProps = {
   onView: (view: HomeView) => void;
 };
 
-function EditBar({ view, onSave, onExit }: { view: HomeView; onSave: () => void; onExit: () => void }) {
-  const store = useBuildingStoreApi();
-  const history = useBuildingHistory(store);
-  useEffect(() => {
-    const keys = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
-      const key = event.key.toLowerCase();
-      if (key === 'z' && !event.shiftKey) history.undo();
-      else if ((key === 'z' && event.shiftKey) || key === 'y') history.redo();
-      else if (key === 's') onSave();
-      else return;
-      event.preventDefault();
-    };
-    window.addEventListener('keydown', keys);
-    return () => window.removeEventListener('keydown', keys);
-  }, [history, onSave]);
+type EditBarProps = { view: HomeView; session: EditSession; saver: IslandSaver; onSave: () => void; onExit: () => void };
+
+/** The decorating top bar: save state, undo and redo, leaving and saving; it also owns the decorating shortcuts. */
+function EditBar({ view, session, saver, onSave, onExit }: EditBarProps) {
+  const history = useHistory(session.history);
+  const saving = useSaver(saver).saving;
+  useEditKeys(session, { save: onSave });
   return (
     <header className="mg-topbar">
       <div className="mg-topbar-left">
         <Brand />
-        <span className="mg-pill mg-glass">
-          {view.profile.title}
+        <span className="mg-pill mg-glass mg-edit-title">
+          <span>{view.profile.title}</span>
           <span className="mg-badge is-draft">꾸미는 중</span>
         </span>
       </div>
       <div className="mg-topbar-right">
+        <SaveStatus saver={saver} />
         <span className="mg-pill mg-glass mg-undo">
-          <button className="mg-icon-btn is-quiet" aria-label="되돌리기" disabled={!history.canUndo} onClick={history.undo}>
+          <button className="mg-icon-btn is-quiet" aria-label="되돌리기" title="되돌리기 (Ctrl+Z)" disabled={!history.canUndo} onClick={history.undo}>
             <Icon name="undo" />
           </button>
-          <button className="mg-icon-btn is-quiet" aria-label="다시 하기" disabled={!history.canRedo} onClick={history.redo}>
+          <button className="mg-icon-btn is-quiet" aria-label="다시 하기" title="다시 하기 (Ctrl+Shift+Z)" disabled={!history.canRedo} onClick={history.redo}>
             <Icon name="redo" />
           </button>
         </span>
         <button className="mg-btn" onClick={onExit}>
           나가기
         </button>
-        <button className="mg-btn is-primary" onClick={onSave}>
+        <button className="mg-btn is-primary" title="저장 (Ctrl+S)" disabled={saving} onClick={onSave}>
           저장
         </button>
       </div>
@@ -252,35 +258,66 @@ function EditBar({ view, onSave, onExit }: { view: HomeView; onSave: () => void;
   );
 }
 
+/** Shortcut help for the session, opened by ? or the toolbar. */
+function EditHelp({ session }: { session: EditSession }) {
+  const open = useEditState(session, (state) => state.help);
+  return open ? <ShortcutHelp onClose={() => session.setHelp(false)} /> : null;
+}
+
 /** One home's island. Its runtime is this home's alone; mount it under a `key` per home. */
 export default function Minihome({ view, viewer, viewerMinime, minimes, studioItems, editing, onView }: MinihomeProps) {
   const { profile, isOwner } = view;
   const navigate = useNavigate();
-  const [conflict, setConflict] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [runtime] = useState(() =>
-    createMinihomeRuntime(
-      createHomeSaveAdapter({ username: profile.username, worldId: MINIHOME_WORLD_ID, writable: isOwner }),
-      (error, context) => {
-        if (isSaveConflict(error)) setConflict(true);
-        else console.error(`[island ${context.source}]`, error);
-      },
-    ),
-  );
+  // The island's runtime and, around it, its saving, undo history and (for the owner) decorating session.
+  const [world] = useState(() => {
+    const adapter = createHomeSaveAdapter({ username: profile.username, worldId: MINIHOME_WORLD_ID, writable: isOwner });
+    const runtime = createMinihomeRuntime(adapter, (error, context) => console.error(`[island ${context.source}]`, error));
+    const saver = createIslandSaver({ system: runtime.save, adapter, writable: isOwner });
+    const history = createEditHistory(runtime.buildingStore);
+    const labels = new Map(studioItems.map((item) => [item.id, item.label]));
+    const session = isOwner ? createEditSession(runtime, history, labels) : null;
+    return { runtime, saver, history, session };
+  });
+  const { runtime, saver, session } = world;
   useEffect(() => {
-    runtime.setup().catch((error: unknown) => console.error(error));
+    const { history } = world;
+    let alive = true;
+    // Undo starts from the loaded island, never from the village the runtime begins with.
+    runtime
+      .setup()
+      .then(() => (alive ? saver.load() : false))
+      .then((loaded) => {
+        if (loaded && alive) history.start();
+      })
+      .catch((error: unknown) => console.error(error));
+    const unwatch = runtime.buildingStore.subscribe((state, previous) => {
+      if (!sameParts(readParts(state), readParts(previous))) saver.changed();
+    });
+    // Rule flags (a chat's choices) change outside the building store; a slow look catches them.
+    const poll = window.setInterval(saver.changed, 5000);
     return () => {
-      runtime.dispose().catch((error: unknown) => console.error(error));
+      alive = false;
+      unwatch();
+      window.clearInterval(poll);
+      // Leaving the page in the app (another island, 둘러보기) keeps unsaved edits: save them, then let the world go.
+      const pending = saver.flush();
+      saver.dispose();
+      history.stop();
+      world.session?.dispose();
+      void pending.finally(() => runtime.dispose().catch((error: unknown) => console.error(error)));
     };
-  }, [runtime]);
+  }, [world, runtime, saver]);
+  const saverState = useSaver(saver);
+  const editActive = useEditState(session, (state) => state.active);
 
   const [settings, setSettings] = useStored<SceneSettings>('scene', {
     quality: 'auto',
     postProcessing: false,
     idleThrottle: true,
   });
-  // On a phone the panel covers most of the world, so it starts folded there.
-  const [panelOpen, setPanelOpen] = useStored<boolean>('panel', !matchMedia('(max-width: 720px)').matches);
+  // On a phone, upright or on its side, the panel covers most of the world, so it starts folded there.
+  const [panelOpen, setPanelOpen] = useStored<boolean>('panel', !matchMedia('(max-width: 720px), (max-height: 500px)').matches);
   const [tab, setTab] = useState<PanelTab>('guestbook');
   const [bgm, setBgm] = useState(false);
   const [performance, setPerformance] = useState(false);
@@ -302,43 +339,81 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const home = `/@${profile.username}`;
   const save = useCallback(
     () =>
-      runtime.save.save().then(
-        () => {
-          setSaved(true);
-          return true;
-        },
-        (error: unknown) => {
-          if (isSaveConflict(error)) setConflict(true);
-          else console.error(error);
-          return false;
-        },
-      ),
-    [runtime],
+      saver.save().then((ok) => {
+        if (ok) setSaved(true);
+        return ok;
+      }),
+    [saver],
   );
+  const saveNow = useCallback(() => void save(), [save]);
+  // Leaving saves first; with nothing unsaved (or nothing that can be saved yet) it just leaves.
+  const exit = () => {
+    const state = saver.getState();
+    if (state.phase !== 'ready' || (!state.dirty && !state.saving)) navigate(home);
+    else void save().then((ok) => ok && navigate(home));
+  };
   useEffect(() => {
     if (!saved) return undefined;
     const timer = setTimeout(() => setSaved(false), 2200);
     return () => clearTimeout(timer);
   }, [saved]);
+  // Finishing decorating saves what is left, rather than waiting for the autosave.
+  useEffect(() => {
+    if (!decorating) return undefined;
+    return () => void saver.flush();
+  }, [decorating, saver]);
+  // Hiding the tab saves; closing or reloading it with edits still unsaved asks first.
+  const unsaved = decorating && (saverState.dirty || saverState.saving);
+  useEffect(() => {
+    if (!isOwner) return undefined;
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') void saver.flush();
+    };
+    const leaving = (event: BeforeUnloadEvent) => {
+      void saver.flush();
+      if (unsaved) event.preventDefault();
+    };
+    document.addEventListener('visibilitychange', hidden);
+    window.addEventListener('pagehide', saver.flush);
+    window.addEventListener('beforeunload', leaving);
+    return () => {
+      document.removeEventListener('visibilitychange', hidden);
+      window.removeEventListener('pagehide', saver.flush);
+      window.removeEventListener('beforeunload', leaving);
+    };
+  }, [isOwner, saver, unsaved]);
   const resetIsland = () => runtime.buildingStore.getState().hydrate(createVillage());
+  const reloaded = () => {
+    world.history.stop();
+    world.history.start();
+  };
 
   return (
     <GaesupWorld runtime={runtime} urls={urls} cameraOption={CAMERA}>
-      <Persistence autosave={isOwner && !conflict} />
       <Bgm enabled={bgm} />
       <CameraOcclusion fade={settings.cameraFade ?? true} />
       <LiveRoom username={profile.username} viewer={viewer} characterUrl={characterUrl} playerRef={playerRef}>
         <div className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`}>
           <div className="mg-world-canvas">
-            <Scene {...settings} playerRef={playerRef} visitors={<LiveAvatars playerRef={playerRef} />} />
+            {/* The canvas reads the decorating session for its in-world tools (R3F bridges the context). */}
+            <EditContext.Provider value={decorating ? session : null}>
+              <Scene {...settings} playerRef={playerRef} visitors={<LiveAvatars playerRef={playerRef} />} />
+            </EditContext.Provider>
           </div>
           <WorldLoading />
 
-          {decorating ? (
+          {decorating && session ? (
             <>
-              <EditBar view={view} onSave={() => void save()} onExit={() => void save().then((ok) => ok && navigate(home))} />
+              <EditBar view={view} session={session} saver={saver} onSave={saveNow} onExit={exit} />
               <Rail />
-              <Decorate studioItems={studioItems} onReset={resetIsland} />
+              {saverState.phase === 'ready' || editActive ? (
+                <Decorate session={session} studioItems={studioItems} onReset={resetIsland} />
+              ) : (
+                <p className="mg-edit-wait mg-glass" role="status">
+                  {saverState.phase === 'loading' ? '섬을 불러오는 중이에요. 다 불러오면 꾸밀 수 있어요.' : '섬을 불러와야 꾸밀 수 있어요.'}
+                </p>
+              )}
+              <EditHelp session={session} />
             </>
           ) : (
             <>
@@ -390,14 +465,8 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
 
               <div className="mg-world-bottom">
                 <ChatBar signedIn={!!viewer} />
-                <div className="mg-keys" aria-label="조작">
-                  {KEYS.map(([key, label]) => (
-                    <span key={key} className="mg-kbd">
-                      <kbd>{key}</kbd>
-                      {label}
-                    </span>
-                  ))}
-                </div>
+                <KeyHints keys={KEYS} />
+                <KeyHints keys={TOUCH_KEYS} touch />
               </div>
               {performance && <StatusPanel onClose={() => setPerformance(false)} />}
             </>
@@ -408,14 +477,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
               <Icon name="check" /> 섬을 저장했어요
             </p>
           )}
-          {conflict && (
-            <div className="mg-conflict mg-glass" role="alert">
-              <span>다른 곳에서 섬을 먼저 저장했어요. 여기서 꾸민 내용은 저장되지 않아요.</span>
-              <button className="mg-btn is-primary is-small" onClick={() => window.location.reload()}>
-                새로 불러오기
-              </button>
-            </div>
-          )}
+          <SaveBanners saver={saver} editing={decorating} onReloaded={reloaded} />
           <InteractionPrompt enabled={!decorating} />
           <DialogBox />
           <ToastHost position="top-center" />

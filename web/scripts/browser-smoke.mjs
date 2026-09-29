@@ -1,5 +1,6 @@
 // Opens the web app in Chromium against the running server: sign up, reach the new island, wait for its first
-// complete frame, decorate and save it, then visit it as a second member, talk, and leave a guestbook entry.
+// complete frame, decorate it (place a chair, move it with the select tool, undo and redo, checking each saved island),
+// then visit it as a second member, talk, and leave a guestbook entry.
 // Usage: node scripts/browser-smoke.mjs [webUrl] [screenshotDir]
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -64,17 +65,56 @@ await step('island reaches its first complete frame', async () => {
   await owner.waitForTimeout(1500);
   await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-home.png') });
 });
-await step('owner decorates and saves the island', async () => {
+/** Saves with the 저장 button and returns where the pieces this run placed stand in the saved island. */
+async function saveAndRead(page) {
+  const response = saved(page);
+  await page.getByRole('button', { name: '저장', exact: true }).click();
+  const answer = await response;
+  if (answer instanceof Error) throw answer;
+  if (answer.status() !== 200) throw new Error(`save answered ${answer.status()}`);
+  const objects = answer.request().postDataJSON()?.data?.domains?.building?.objects ?? [];
+  return objects
+    .filter((object) => object.id.startsWith('obj-'))
+    .map((object) => `${object.config?.modelId}@${object.position.x},${object.position.z}`)
+    .join(' ');
+}
+const same = (label, actual, expected) => {
+  if (actual !== expected) throw new Error(`${label}: expected "${expected}", saved "${actual}"`);
+};
+let placedAt = '';
+let movedTo = '';
+let chairSpot = { x: 0, y: 0 };
+await step('owner decorates: places a chair and saves the island', async () => {
   await owner.getByRole('link', { name: '꾸미기' }).click();
   await owner.waitForURL(`**/@${ownerName}/edit`);
   // The island stays loaded: decorating is a mode of the same world.
   await owner.locator('.mg-drawer').waitFor();
   await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-decorate.png') });
-  const response = saved(owner);
-  await owner.getByRole('button', { name: '저장' }).click();
-  const answer = await response;
-  if (answer instanceof Error) throw answer;
-  if (answer.status() !== 200) throw new Error(`save answered ${answer.status()}`);
+  await owner.getByRole('button', { name: '의자' }).click();
+  const canvas = await owner.locator('.mg-world-canvas canvas').boundingBox();
+  const spot = { x: canvas.x + canvas.width / 2, y: canvas.y + canvas.height * 0.45 };
+  await owner.mouse.click(spot.x, spot.y);
+  await owner.getByRole('button', { name: '되돌리기' }).and(owner.locator(':enabled')).waitFor({ timeout: 10_000 });
+  placedAt = await saveAndRead(owner);
+  if (!placedAt.startsWith('chair-basic@')) throw new Error(`no chair in the saved island: "${placedAt}"`);
+  chairSpot = spot;
+});
+await step('owner moves the chair with the select tool, then undoes and redoes it', async () => {
+  const spot = chairSpot;
+  await owner.getByRole('button', { name: /^선택/ }).click();
+  await owner.mouse.click(spot.x, spot.y);
+  await owner.locator('.mg-inspector header b', { hasText: '의자' }).waitFor({ timeout: 10_000 });
+  await owner.mouse.move(spot.x, spot.y);
+  await owner.mouse.down();
+  for (let i = 1; i <= 10; i++) await owner.mouse.move(spot.x + i * 16, spot.y + i * 3);
+  await owner.mouse.up();
+  movedTo = await saveAndRead(owner);
+  if (movedTo === placedAt) throw new Error(`the chair did not move from ${placedAt}`);
+  await owner.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'owner-moved.png') });
+  await owner.getByRole('button', { name: '되돌리기' }).click();
+  same('undo', await saveAndRead(owner), placedAt);
+  await owner.getByRole('button', { name: '다시 하기' }).click();
+  same('redo', await saveAndRead(owner), movedTo);
   await owner.getByRole('button', { name: '나가기' }).click();
   await owner.waitForURL(`**/@${ownerName}`);
   await owner.locator('.mg-side').waitFor();

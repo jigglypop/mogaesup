@@ -6,7 +6,7 @@ import { ApiRequestError } from '../api/client';
 import { catalogApi, homeApi } from '../api/endpoints';
 import type { CatalogItem, HomeView } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
-import { modelUrl, prefetchModels, RESIDENT_MODELS } from '../minihome/figures';
+import { modelUrl, prefetchModels } from '../minihome/figures';
 import { visitorId } from '../minihome/stored';
 import { PageShell } from '../shell/Shell';
 import { Loading } from './Loading';
@@ -25,10 +25,9 @@ export function MinihomePage({ username, editing }: { username: string; editing:
   // Only a different person should reload the home, not a new user object for the same one.
   const viewerName = user?.username ?? null;
 
-  // The island's code and its residents download while the home's data is still on its way, not after it.
+  // The island's code downloads while the home's data is still on its way, not after it.
   useEffect(() => {
     void loadMinihome();
-    prefetchModels(RESIDENT_MODELS.map(modelUrl));
   }, []);
 
   useEffect(() => {

@@ -1,19 +1,4 @@
-/** Model files the island always draws, and where the site serves them; this module stays free of the engine. */
-
-/** The residents' models (`gltf/<id>.glb`). `Resident.model` takes only these, so the list cannot drift. */
-export const RESIDENT_MODELS = [
-  'teacher',
-  'docter',
-  'nurse',
-  'man',
-  'mountain',
-  'police',
-  'police2',
-  'boy',
-  'glass',
-  'fish',
-] as const;
-export type ResidentModel = (typeof RESIDENT_MODELS)[number];
+/** Where the site serves models and pictures; this module stays free of the engine. */
 
 export const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 export const modelUrl = (id: string) => asset(`gltf/${id}.glb`);

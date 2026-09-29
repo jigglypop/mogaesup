@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
 
-import { Vector3 } from 'three';
-
-import { useTeleport } from 'gaesup-world';
-
 import type { CatalogItem, HomeView, HomeVisibility, ProfileChanges } from '../api/types';
 import { Icon } from '../ui/icons';
-import { RESIDENTS } from './world';
 
 const MOODS = [
   { emoji: '😊', label: '행복' },
@@ -98,10 +93,9 @@ export function ProfileHeader({
   );
 }
 
-/** 소개: the island's name, the owner's mood and 미니미, who may visit, and the residents to walk to. */
+/** 소개: the island's name, the owner's mood and 미니미, and who may visit. */
 export function About({ view, minimes, onUpdate }: { view: HomeView; minimes: CatalogItem[]; onUpdate: (changes: ProfileChanges) => void }) {
   const { profile, isOwner } = view;
-  const { teleport, canTeleport } = useTeleport();
   const saveTitle = useCallback((title: string) => onUpdate({ title }), [onUpdate]);
   const saveStatus = useCallback((statusMessage: string) => onUpdate({ statusMessage }), [onUpdate]);
 
@@ -156,29 +150,6 @@ export function About({ view, minimes, onUpdate }: { view: HomeView; minimes: Ca
         </section>
       )}
 
-      <p className="mg-list-count">
-        섬 주민 <b>{RESIDENTS.length}</b>
-      </p>
-      <ul className="mg-people">
-        {RESIDENTS.map((resident) => (
-          <li key={resident.id}>
-            <span className="mg-avatar" aria-hidden="true">
-              {resident.emoji}
-            </span>
-            <div>
-              <b>{resident.name}</b>
-              <small>{resident.intro}</small>
-            </div>
-            <button
-              className="mg-btn is-small"
-              disabled={!canTeleport}
-              onClick={() => teleport(new Vector3(resident.spot[0], 0.2, resident.spot[1] + 2.4), undefined, { dropHeight: 2 })}
-            >
-              찾아가기
-            </button>
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }
