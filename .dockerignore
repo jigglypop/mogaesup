@@ -1,18 +1,23 @@
+# The character server image (backend/Dockerfile, backend/infra/Dockerfile) builds from the repository root or from the
+# release archive that backend/infra/prepare-aws.ps1 packs; only backend/, the uv workspace files and infra go in.
 .git
 .venv
 .codex
-logs
-tests
-backend/tests
-*.py[cod]
-.env*
-data
-dist
+.data
+frontend
+server
+scripts
+docs
+gaesup-world
+node_modules
 **/node_modules
+**/tests
 **/__pycache__
 **/.pytest_cache
 **/*.egg-info
+**/*.py[cod]
+**/.env*
+backend/data
 backend/build
-frontend/dist
-frontend/test-results
-frontend/playwright-report
+backend/dist
+logs

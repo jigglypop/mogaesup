@@ -6,8 +6,11 @@ param(
   [switch]$Upload
 )
 $ErrorActionPreference = 'Stop'
-$repo = Split-Path $PSScriptRoot -Parent
-$artifactRoot = Join-Path $repo 'dist/aws'
+# The release keeps the layout the instance scripts expect (backend/, infra/, the uv workspace files at its root);
+# in this repository infra/ lives under backend/ and the workspace files at the repository root.
+$backend = Split-Path $PSScriptRoot -Parent
+$root = Split-Path $backend -Parent
+$artifactRoot = Join-Path $backend 'dist/aws'
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 if (-not (Get-Command aws -ErrorAction SilentlyContinue)) { throw 'AWS CLI is required.' }
 if (-not (Get-Command tar -ErrorAction SilentlyContinue)) { throw 'tar is required.' }
@@ -35,11 +38,8 @@ $validation = Invoke-Aws @('cloudformation', 'validate-template', '--template-bo
 $archive = Join-Path $artifactRoot 'studio.tar.gz'
 $archiveTemp = Join-Path $artifactRoot 'studio.tar.gz.tmp'
 if (Test-Path -LiteralPath $archiveTemp) { Remove-Item -LiteralPath $archiveTemp -Force }
-Push-Location $repo
-try {
-  & tar -czf $archiveTemp --exclude='node_modules' --exclude='__pycache__' --exclude='*.egg-info' --exclude='build' --exclude='dist' --exclude='test-results' --exclude='playwright-report' --exclude='.env*' backend/src backend/assets backend/pyproject.toml backend/main.py backend/README.md frontend/src frontend/public frontend/index.html frontend/avatar.html frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/vite.config.ts pyproject.toml uv.lock infra .dockerignore
-  if ($LASTEXITCODE -ne 0) { throw 'Release archive failed.' }
-} finally { Pop-Location }
+& tar -czf $archiveTemp --exclude='node_modules' --exclude='__pycache__' --exclude='*.egg-info' --exclude='build' --exclude='dist' --exclude='test-results' --exclude='playwright-report' --exclude='.env*' -C $root backend/src backend/assets backend/pyproject.toml backend/main.py backend/README.md pyproject.toml uv.lock .dockerignore -C $backend infra
+if ($LASTEXITCODE -ne 0) { throw 'Release archive failed.' }
 $entries = @(& tar -tzf $archiveTemp)
 if ($LASTEXITCODE -ne 0) { throw 'Release archive inspection failed.' }
 $forbidden = @($entries | Where-Object { $_ -match '(^|/)(\.env($|\.)|provider\.json$|credentials$|\.aws/)' })

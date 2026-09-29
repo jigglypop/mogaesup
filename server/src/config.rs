@@ -3,7 +3,7 @@ use std::env;
 
 use crate::models::Models;
 
-/// Where the character server (gaesup-character) listens, and how this server signs in to it as the operator.
+/// Where the character server (backend/) listens, and how this server signs in to it as the operator.
 #[derive(Clone)]
 pub struct Factory {
     pub url: String,

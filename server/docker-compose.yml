@@ -1,4 +1,4 @@
-# Local PostgreSQL for the server and its tests. Port 55432 matches gaesup-character's CHARACTER_DATABASE_URL.
+# Local PostgreSQL for the server and its tests. Port 55432 matches the character server's CHARACTER_DATABASE_URL (backend/.env).
 name: mogaesup-server
 
 services:

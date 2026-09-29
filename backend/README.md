@@ -1,10 +1,10 @@
-# gaesup-character
+# 캐릭터 서버
 
-3D SD 캐릭터의 몸·헤어·의상·장비를 만들고 조립합니다. 코드는 `backend/`(FastAPI·CLI·테스트·migration)와 `frontend/`(TypeScript·Vite·Three.js)로 나뉩니다. 운영 지침은 [AGENTS.md](AGENTS.md)에 있습니다. 기존 `/api/world/*`의 생성·GLB 후처리·애니메이션 병합·저장·프록시 API도 유지합니다.
+3D SD 캐릭터의 몸·헤어·의상·장비를 만들고 조립하는 FastAPI 서버와 CLI입니다(`src/`, 테스트 `tests/`, DB migration `migrations/`). 작업 화면은 앱의 `/studio`(`frontend/src/character/`)에 있고, 앱은 Rust 서버의 스튜디오 게이트웨이를 거쳐 이 서버를 부릅니다. 운영 지침은 [AGENTS.md](AGENTS.md)에 있습니다. 기존 `/api/world/*`의 생성·GLB 후처리·애니메이션 병합·저장·프록시 API도 유지합니다.
 
 ## 캐릭터 만들기
 
-루트에서 `./start-local.ps1`을 실행하고 **http://127.0.0.1:5273/** 을 엽니다. 첫 화면은 **캐릭터 › 사진으로 전체 생성**입니다.
+저장소 루트에서 `npm run dev:character`로 띄우고(비용이 드는 작업은 `scripts/dev.ps1 -Character -Paid`) 관리자로 **http://127.0.0.1:5180/studio** 를 엽니다. 첫 화면은 **캐릭터 › 사진으로 전체 생성**입니다.
 
 1. 사진을 올리고 생성 버튼을 누릅니다. 공통 기본 몸이 지정돼 있으면 그 몸에 사진의 파츠를 입히고, 없으면 사진에서 새 몸을 만듭니다. 버튼 아래에 유료 이미지 수와 3D 생성 수가 표시됩니다.
 2. 공통 규격 원본 → 파츠 이미지 → 3D 파츠 → 리깅·동작 → 피팅·조립 → 기본 표정 순서로 자동 진행됩니다.
@@ -29,21 +29,13 @@
 - 업로드 직후 응답 없이 끊긴 이미지 요청과 `429`·`503` 응답은 같은 요청을 최대 2회 다시 보냅니다. 각 시도는 요청 영수증의 `auto_retries`에 남습니다.
 - 3D 공급자가 받지 않은 요청(연결 실패, `429`·`503`)은 파츠마다 최대 3회 다시 제출합니다. 이전 시도는 `parts/<slot>/attempts/`에 보존합니다.
 - 서버가 다시 시작되면 멈춘 단계를 자동으로 이어갑니다(`ASSET_AUTO_RESUME=0`으로 끔). 접수 여부를 확인할 수 없는 유료 요청은 다시 보내지 않고 재요청 버튼으로 남깁니다.
-- `start-local.ps1`은 같은 작업 공간의 이전 API가 진행 중인 유료 요청을 마칠 때까지 기다린 뒤, 같은 포트에서 새 코드로 교체합니다.
+- `scripts/dev.ps1`은 자동 재개를 끈 채 띄우고, 포트에 이미 떠 있는 서버는 건드리지 않습니다.
 
 ## 시작하기
 
-Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다. `.env.example`을 `.env`로 복사하고 키를 채웁니다. 캐릭터 생성에는 `OPENAI_API_KEY`, `MESHY_API_KEY` 또는 `TRIPO_API_KEY`, `ASSET_S3_BUCKET`과 Blender가 필요합니다.
+Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다. `backend/.env.example`을 `backend/.env`로 복사하고 키를 채웁니다. 캐릭터 생성에는 `OPENAI_API_KEY`, `MESHY_API_KEY` 또는 `TRIPO_API_KEY`, `ASSET_S3_BUCKET`과 Blender가 필요합니다. 설치는 저장소 루트에서 `uv sync`(루트 uv 워크스페이스의 멤버가 이 폴더)입니다.
 
-```bash
-cp .env.example .env
-uv sync
-cd frontend && npm ci
-```
-
-Windows에서는 루트의 `./start-local.ps1`이 API(기본 8016, `.env.local`에 저장된 포트 우선)와 UI(5273)를 함께 실행하고 연결을 확인한 뒤 주소를 출력합니다.
-
-직접 실행할 때는 `uv run asset-api`(기본 `API_PORT=8000`)로 API를 띄우고, `.env.local`에 `LOCAL_BACKEND_URL=http://127.0.0.1:8000`을 적은 뒤 `frontend/`에서 `npm run dev`를 실행합니다. Vite 프록시가 서버 측에서 개발 사용자와 `API_KEY` 헤더를 붙이며 키는 브라우저 번들에 들어가지 않습니다. 로컬 개발 서버는 loopback 전용이고 제어 서버는 단일 worker로 실행합니다. 상태 확인 경로는 `/health`와 `/api/health`입니다.
+`npm run dev:character`가 이 서버(`127.0.0.1:8016`)를 Rust 서버·앱과 함께 띄우고 `backend/.env`의 API 키와 JWT 설정을 게이트웨이에 넘깁니다. 이 서버만 띄울 때는 루트에서 `uv run asset-api`(기본 `API_PORT=8000`)입니다. 로컬 서버는 loopback 전용이고 제어 서버는 단일 worker로 실행합니다. 상태 확인 경로는 `/health`와 `/api/health`입니다.
 
 `/api/world/*`는 JWT 인증이 필요합니다. 로컬호스트에서는 `X-User-Id: 1` 헤더로 개발 사용자로 호출할 수 있습니다.
 
@@ -75,7 +67,7 @@ Windows에서는 루트의 `./start-local.ps1`이 API(기본 8016, `.env.local`�
 - `DATABASE_URL` 또는 `DB_HOST` 계열 변수: `/api/world`의 job·asset·placement 영속화. 없으면 프로세스 메모리를 사용합니다.
 - `AWS_S3_BUCKET`·`AWS_S3_DIR`: `/api/world` 생성 모델과 참조 이미지 저장.
 - `WORLD_SKIN_WASM_PATH`: 얼굴 스킨 가중치 후처리용 `gaesup_core.wasm` 경로. 파일이 없으면 해당 단계는 `no_change`로 건너뜁니다.
-- `ASSET_DATA_ROOT`는 기본 루트 `data/`를, `CHARACTER_OWNER_ID`는 기존 manifest 소유자(기본 1)를, `BLENDER_EXECUTABLE`은 Blender 경로를 지정합니다. 미지정 시 PATH와 Windows 기본 설치 위치를 탐색합니다.
+- `ASSET_DATA_ROOT`는 기본 루트 `backend/data/`를, `CHARACTER_OWNER_ID`는 기존 manifest 소유자(기본 1)를, `BLENDER_EXECUTABLE`은 Blender 경로를 지정합니다. 미지정 시 PATH와 Windows 기본 설치 위치를 탐색합니다.
 
 PostgreSQL 스키마는 `backend/migrations/001_postgresql_3d_schema.up.sql`에 있습니다. DB를 사용할 때 서버 시작 전에 적용하세요. API 요청 중에는 스키마를 자동 생성하지 않습니다.
 
@@ -89,10 +81,9 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
 ```bash
 uv build --package asset-3d-api
 docker build -f backend/Dockerfile -t asset-3d-api .
-docker run --rm -p 8000:8000 --env-file .env asset-3d-api
+docker run --rm -p 8000:8000 --env-file backend/.env asset-3d-api
 ```
 
-프론트는 `frontend/`에서 `npm run build`로 타입 검사와 번들을 확인합니다.
 
 ## 조립 결과 비교
 
@@ -104,7 +95,7 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
 
 ## AWS 배포
 
-`infra/ec2.yaml` 스택은 기본적으로 SSM 포트 포워딩(`Access` 출력)으로만 접속합니다. 인터넷에서 쓰려면:
+`infra/ec2.yaml` 스택(`gaesup-asset-studio`)의 컨테이너는 이 서버의 API만 냅니다(화면은 앱의 `/studio`). 릴리스는 `infra/prepare-aws.ps1 -Upload`가 인스턴스 스크립트가 기대하는 배치(`backend/`, `infra/`, 루트의 uv 워크스페이스 파일)로 묶어 S3에 올리고, `infra/deploy-aws.ps1`이 SSM으로 인스턴스에 배포합니다. 기본은 SSM 포트 포워딩(`Access` 출력)으로만 접속합니다. 앱 서버가 인터넷으로 부르려면:
 
 1. provider secret(JSON)의 선택 키: `TRIPO_API_KEY`, `AVATAR_3D_PROVIDER`, `BLENDER_CONCURRENCY`.
 2. 리전의 CloudFront 관리형 prefix list ID를 확인합니다.
@@ -113,4 +104,4 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
    ```
 3. 스택 파라미터 `PublicStudio=true`, `CloudFrontPrefixListId=<위 값>`, `InstanceType=c7i.xlarge`로 배포합니다.
 
-`StudioUrl` 출력(`https://….cloudfront.net`)으로 바로 씁니다. 80 포트는 CloudFront만 받습니다. 실행 중인 컨테이너는 다음 배포 때 secret을 다시 읽습니다.
+`StudioUrl` 출력(`https://….cloudfront.net`)이 Rust 서버의 `FACTORY_URL`입니다. 80 포트는 CloudFront만 받고, 그 앞의 CloudFront Function(`server/scripts/lock-studio.py`)이 게이트웨이 키나 주인 IP만 통과시킵니다. 스택을 다시 배포하면 이 함수가 떨어지므로 스크립트를 다시 실행합니다. 실행 중인 컨테이너는 다음 배포 때 secret을 다시 읽습니다.

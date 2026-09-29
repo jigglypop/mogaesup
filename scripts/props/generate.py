@@ -1,4 +1,4 @@
-"""Generate the island's props with gaesup-character's studio pipeline (OpenAI image -> Meshy image-to-3D).
+"""Generate the island's props with the character server's studio pipeline (OpenAI image -> Meshy image-to-3D).
 
 Paid: about one high-quality image plus ~30 Meshy credits per item. Run it yourself from the repo root:
 
@@ -27,7 +27,7 @@ import httpx
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[2]
-CHARACTER = ROOT / 'gaesup-character'
+BACKEND = ROOT / 'backend'
 HERE = Path(__file__).resolve().parent
 OUT = HERE / 'out'
 PORT = 8016
@@ -51,7 +51,7 @@ def start_api() -> subprocess.Popen:
     log = open(HERE / 'api.log', 'wb')
     process = subprocess.Popen(
         [sys.executable, '-m', 'uvicorn', 'src.api.server:app', '--host', '127.0.0.1', '--port', str(PORT)],
-        cwd=CHARACTER, env=env, stdout=log, stderr=subprocess.STDOUT,
+        cwd=BACKEND, env=env, stdout=log, stderr=subprocess.STDOUT,
     )
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
@@ -120,7 +120,7 @@ def main() -> None:
         raise SystemExit('pass --only <ids> or --all')
     if not items:
         raise SystemExit('no matching manifest items')
-    api_key = (dotenv_values(CHARACTER / '.env').get('API_KEY') or '').strip()
+    api_key = (dotenv_values(BACKEND / '.env').get('API_KEY') or '').strip()
     OUT.mkdir(exist_ok=True)
     process = start_api()
     try:

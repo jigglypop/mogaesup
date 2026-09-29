@@ -1,4 +1,4 @@
-# The engine's working clone; the app takes gaesup-world from npm. gaesup-character is a submodule.
+# The engine's working clone; the app takes gaesup-world from npm.
 /gaesup-world/
 
 node_modules/
@@ -17,3 +17,12 @@ coverage/
 .idea/
 .DS_Store
 .venv/
+
+# Character server (backend/)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+*.egg-info/
+backend/data/
+backend/build/

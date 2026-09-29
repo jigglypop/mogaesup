@@ -1,4 +1,4 @@
-//! Finished characters on the character server (gaesup-character), picked the way its own studio picks them: sealed
+//! Finished characters on the character server (backend/), picked the way its own studio picks them: sealed
 //! `character_parts` assemblies not uploaded as-is, the newest job per character, minus what the operator deleted or
 //! archived. A character's playable file is the copy with the selected face baked in when there is one.
 

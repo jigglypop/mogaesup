@@ -1,13 +1,26 @@
-# The monorepo's Python environment: the character server (gaesup-character/backend) installed from the submodule, so
-# `uv sync` at the root sets up what the local pipeline runs (scripts/dev.ps1, scripts/props/generate.py).
+# The monorepo's Python environment: a uv workspace whose one member is the character server (backend/), so
+# `uv sync` at the root sets up what backend tests, scripts/dev.ps1 and scripts/props/generate.py run.
 [project]
 name = "mogaesup"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = ["asset-3d-api"]
 
+[project.optional-dependencies]
+blender = ["asset-3d-api[blender]"]
+
 [tool.uv]
 package = false
 
+[tool.uv.workspace]
+members = ["backend"]
+
 [tool.uv.sources]
-asset-3d-api = { path = "gaesup-character/backend", editable = true }
+asset-3d-api = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+testpaths = ["backend/tests"]

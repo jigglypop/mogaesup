@@ -6,7 +6,7 @@ FactoryGatewaySecret). A CloudFront Function on the studio's viewer requests let
 and answers everything else 403. The key is read from Secrets Manager and never printed.
 
 The association is made outside the studio's own stack: a later deploy of gaesup-asset-studio drops it, so run this
-again after one (or add the function to gaesup-character's infra/ec2.yaml).
+again after one (or add the function to backend/infra/ec2.yaml).
 
 Usage: python scripts/lock-studio.py --allow-ip 203.0.113.7 [--allow-ip ...]
        python scripts/lock-studio.py --unlock

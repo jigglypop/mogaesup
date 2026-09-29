@@ -333,16 +333,8 @@ def _build_glb(doc: dict[str, Any], binary: bytes) -> bytes:
 
 def _skin_wasm_path() -> pathlib.Path | None:
     configured = os.getenv("WORLD_SKIN_WASM_PATH", "").strip()
-    candidates = [pathlib.Path(configured)] if configured else []
-    root = pathlib.Path(__file__).resolve().parents[3]
-    candidates.extend([
-        root / "frontend" / "public" / "wasm" / "gaesup_core.wasm",
-        root / "gaesup-world" / "public" / "wasm" / "gaesup_core.wasm",
-    ])
-    for path in candidates:
-        if path.is_file():
-            return path
-    return None
+    path = pathlib.Path(configured) if configured else None
+    return path if path and path.is_file() else None
 
 
 def _skin_wasm_exports() -> dict[str, Any] | None:

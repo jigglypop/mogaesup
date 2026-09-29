@@ -65,7 +65,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', default='target/x86_64-unknown-linux-musl/release/mogaesup-server')
     parser.add_argument('--origin', default='https://mogaesup.com', help='Comma-separated site origins the server accepts')
-    parser.add_argument('--factory-url', default='', help='Character server base URL for admins (gaesup-character)')
+    parser.add_argument('--factory-url', default='', help='Character server base URL for admins (backend/)')
     parser.add_argument('--factory-access', default='read', choices=('read', 'write', 'paid'),
                         help='What the studio screens may do through the server (FACTORY_ACCESS)')
     parser.add_argument('--factory-paid-monthly', type=int, default=0, help='Paid studio requests allowed a month')

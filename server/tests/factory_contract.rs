@@ -13,7 +13,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-/// Loads gaesup-character's own `auth.py` and runs each token through the checks its API applies.
+/// Loads the character server's own `auth.py` (backend/src) and runs each token through the checks its API applies.
 const CHECK: &str = r#"
 import json, os, sys
 sys.path.insert(0, os.environ["AUTH_PY_DIR"])
@@ -45,15 +45,15 @@ fn token(secret: &str) -> FactoryToken {
 
 #[test]
 fn 운영자_토큰은_캐릭터_서버의_auth_py가_받아들인다() {
-    let character = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gaesup-character");
-    let auth_dir = character.join("backend/src");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let auth_dir = root.join("backend/src");
     if !auth_dir.join("auth.py").is_file() || Command::new("uv").arg("--version").output().is_err() {
-        eprintln!("건너뜀: gaesup-character/backend/src/auth.py 또는 uv가 없습니다");
+        eprintln!("건너뜀: backend/src/auth.py 또는 uv가 없습니다");
         return;
     }
     // Python's lenient base64 changed in 3.13, so the check runs on the interpreter and packages the server pins.
-    let python = std::fs::read_to_string(character.join(".python-version")).unwrap().trim().to_owned();
-    let lock = std::fs::read_to_string(character.join("uv.lock")).unwrap().replace("\r\n", "\n");
+    let python = std::fs::read_to_string(root.join(".python-version")).unwrap().trim().to_owned();
+    let lock = std::fs::read_to_string(root.join("uv.lock")).unwrap().replace("\r\n", "\n");
     let raw: Vec<u8> = (0..64).collect();
     let dashes: Vec<u8> = [0xfb, 0xff, 0xbf].repeat(16);
     let secrets = [

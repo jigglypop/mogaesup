@@ -50,7 +50,7 @@ const FORWARDED_RESPONSE_HEADERS: [HeaderName; 6] = [
 const UNAVAILABLE: ApiError =
     ApiError::new(StatusCode::BAD_GATEWAY, "factory_unavailable", "캐릭터 서버에 연결하지 못했습니다.");
 
-/// The HMAC key exactly as gaesup-character's `auth.py` derives it: the stripped secret, used decoded when Python's
+/// The HMAC key exactly as the character server's `auth.py` (backend/src) derives it: the stripped secret, used decoded when Python's
 /// `base64.b64decode(secret, validate=False)` yields at least 32 bytes, otherwise as its UTF-8 bytes.
 pub fn hmac_key(secret: &str) -> Vec<u8> {
     let secret = secret.trim();

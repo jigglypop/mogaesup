@@ -5,12 +5,11 @@ character server behind the server's studio gateway.
 
 .DESCRIPTION
 Each service starts hidden with its log in .data/dev/<name>.log; one already listening on its port is kept as it is.
-With -Character the character API (gaesup-character/backend from the root uv environment) runs on 127.0.0.1:8016 with
-auto-resume off, and the Rust server gets FACTORY_URL plus the API key and JWT settings from gaesup-character/.env
-(read here, never printed), so /admin imports and /studio work end to end. Admins may change studio records
-(FACTORY_ACCESS=write); paid studio work stays blocked unless -Paid, capped at -PaidMonthly requests.
-gaesup-character/.env holds production keys: only use -Character when you mean to reach them, and -Paid when you mean
-to spend. -Stop ends what this script started.
+With -Character the character server (backend/, from the root uv environment) runs on 127.0.0.1:8016 with auto-resume
+off, and the Rust server gets FACTORY_URL plus the API key and JWT settings from backend/.env (read here, never
+printed), so /admin imports and /studio work end to end. Admins may change studio records (FACTORY_ACCESS=write); paid
+studio work stays blocked unless -Paid, capped at -PaidMonthly requests. backend/.env holds production keys: only use
+-Character when you mean to reach them, and -Paid when you mean to spend. -Stop ends what this script started.
 
 .EXAMPLE
 scripts/dev.ps1
@@ -81,7 +80,7 @@ try {
   $serverArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'server\scripts\start-rust-server.ps1'))
   if ($Character) {
     $values = @{}
-    foreach ($line in Get-Content -LiteralPath (Join-Path $root 'gaesup-character\.env')) {
+    foreach ($line in Get-Content -LiteralPath (Join-Path $root 'backend\.env')) {
       if ($line -match '^\s*([A-Z0-9_]+)\s*=\s*(.*)$') { $values[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'") }
     }
     # Stages a previous run left unfinished are not resumed by a dev start: that would be paid work nobody asked for.

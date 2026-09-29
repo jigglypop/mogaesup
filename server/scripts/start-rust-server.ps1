@@ -2,7 +2,7 @@
 param(
   [int]$ApiPort = 8080,
   [string]$AppOrigin = 'http://127.0.0.1:5180,http://localhost:5180',
-  # gaesup-character's API for /admin, e.g. http://127.0.0.1:8000. FACTORY_JWT_SECRET and friends pass through
+  # The character server's API (backend/) for /admin, e.g. http://127.0.0.1:8000. FACTORY_JWT_SECRET and friends pass through
   # from the calling environment when the character server checks tokens.
   [string]$FactoryUrl = ''
 )

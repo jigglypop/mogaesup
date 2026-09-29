@@ -53,8 +53,8 @@ if ! docker inspect "$service_name" >/dev/null 2>&1 && docker inspect "$rollback
   fi
 fi
 
-# Replace the running release only once it reports no paid requests and no background work,
-# as start-local.ps1 does. A release that cannot be reached is replaced as before. The default
+# Replace the running release only once it reports no paid requests and no background work.
+# A release that cannot be reached is replaced as before. The default
 # drain leaves room for the image build and health check inside the 900 s SSM command timeout.
 drain_deadline=$((SECONDS + ${ASSET_DEPLOY_DRAIN_SECONDS:-420}))
 while docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; do

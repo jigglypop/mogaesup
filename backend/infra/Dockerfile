@@ -1,10 +1,3 @@
-FROM node:22-bookworm-slim AS ui
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm ci
-COPY frontend/ ./
-RUN npm run build
-
 FROM python:3.12-slim-bookworm
 ARG BLENDER_VERSION=4.5.3
 RUN apt-get update && apt-get install -y --no-install-recommends nginx curl xz-utils libx11-6 libxxf86vm1 libxi6 libxrender1 libxfixes3 libxkbcommon0 libsm6 libice6 libgl1 libegl1 libgomp1 && rm -rf /var/lib/apt/lists/*
@@ -15,7 +8,6 @@ WORKDIR /app
 COPY backend/ ./backend/
 COPY pyproject.toml uv.lock ./
 RUN pip install --no-cache-dir uv==0.11.9 && uv sync --frozen --no-dev
-COPY --from=ui /app/frontend/dist /app/frontend/dist
 COPY infra/nginx.conf /etc/nginx/nginx.conf
 COPY infra/entrypoint.py /app/entrypoint.py
 ENV PYTHONPATH=/app/backend ASSET_DATA_ROOT=/app/data BLENDER_EXECUTABLE=/usr/local/bin/blender
