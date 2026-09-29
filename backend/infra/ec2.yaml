@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Gaesup asset studio with S3 durability, SSM administration, optional static public site, and optional HTTPS studio
+Parameters:
+  VpcId: {Type: 'AWS::EC2::VPC::Id'}
+  SubnetId: {Type: 'AWS::EC2::Subnet::Id'}
+  AssetBucket:
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  ReleaseKey:
+    Type: String
+    AllowedPattern: '^releases/studio/[0-9a-f]{64}\.tar\.gz$'
+  ProviderSecretArn:
+    Type: String
+    AllowedPattern: '^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+  PublicSiteOrigin:
+    Type: String
+    Default: ''
+    Description: Optional HTTPS origin. When set, port 80 serves static UI and runtime SEO files while /api remains private.
+    AllowedPattern: '^$|^https://[A-Za-z0-9.-]+(?::[0-9]+)?$'
+  PublicStudio:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: When true, a CloudFront HTTPS address serves the whole studio, and port 80 accepts CloudFront only.
+  CloudFrontPrefixListId:
+    Type: String
+    Default: ''
+    Description: Managed prefix list com.amazonaws.global.cloudfront.origin-facing in this Region. Required when PublicStudio is true.
+    AllowedPattern: '^$|^pl-[0-9a-f]+$'
+  InstanceType: {Type: String, Default: t3.large, AllowedValues: [t3.large, t3.xlarge, c7i.large, c7i.xlarge]}
+  ImageId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+Rules:
+  PublicStudioOrigin:
+    RuleCondition: !Equals [!Ref PublicStudio, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref CloudFrontPrefixListId, '']]
+        AssertDescription: CloudFrontPrefixListId is required when PublicStudio is true
+Conditions:
+  HasPublicSite: !Not [!Equals [!Ref PublicSiteOrigin, '']]
+  HasPublicStudio: !Equals [!Ref PublicStudio, 'true']
+  HasOpenHttp: !And [!Condition HasPublicSite, !Not [!Condition HasPublicStudio]]
+  IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: 'sts:AssumeRole'}]
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore']
+      Policies:
+        - PolicyName: StudioStorage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:ListBucket']
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}'
+                Condition: {StringLike: {'s3:prefix': ['assets/*', 'releases/*']}}
+              - Effect: Allow
+                Action: ['s3:GetObject', 's3:PutObject']
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/assets/*'
+              - Effect: Allow
+                Action: ['s3:GetObject']
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/releases/studio/*'
+              - Effect: Allow
+                Action: ['secretsmanager:GetSecretValue']
+                Resource: !Ref ProviderSecretArn
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: {Roles: [!Ref InstanceRole]}
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSM administration with optional public static HTTP
+      VpcId: !Ref VpcId
+      SecurityGroupEgress: [{IpProtocol: '-1', CidrIp: 0.0.0.0/0}]
+  PublicHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasOpenHttp
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+      Description: Public static site only; nginx denies API paths
+  CloudFrontHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasPublicStudio
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourcePrefixListId: !Ref CloudFrontPrefixListId
+      Description: CloudFront origin requests
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Profile
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 1}
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref SecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 60, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      Tags: [{Key: Name, Value: gaesup-asset-studio}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          # curl-minimal already provides curl; installing the full package conflicts with it.
+          dnf install -y docker
+          systemctl enable --now docker
+          install -d -m 700 /opt/asset-studio
+          cat > /etc/asset-studio.env <<'CONFIG'
+          ASSET_S3_BUCKET='${AssetBucket}'
+          AWS_REGION='${AWS::Region}'
+          PROVIDER_SECRET_ARN='${ProviderSecretArn}'
+          PUBLIC_SITE_ORIGIN='${PublicSiteOrigin}'
+          PUBLIC_STUDIO='${PublicStudio}'
+          CONFIG
+          chmod 600 /etc/asset-studio.env
+          release_sha="$(basename '${ReleaseKey}' .tar.gz)"
+          exec 8>/var/lock/asset-studio-prepare.lock
+          flock -n 8 || { echo 'another release preparation is active' >&2; exit 3; }
+          incoming="/opt/asset-studio/incoming/$release_sha"
+          install -d -m 700 "$incoming/source"
+          aws s3 cp 's3://${AssetBucket}/${ReleaseKey}' "$incoming/release.tar.gz" --region '${AWS::Region}' --checksum-mode ENABLED --only-show-errors
+          printf '%s  %s\n' "$release_sha" "$incoming/release.tar.gz" | sha256sum -c -
+          tar -xzf "$incoming/release.tar.gz" -C "$incoming/source"
+          printf '%s\n' "$release_sha" > "$incoming/source/.release-sha256"
+          /bin/bash "$incoming/source/infra/deploy-on-instance.sh" '${ReleaseKey}' "$release_sha" "$incoming/source"
+  StudioAddress:
+    # Fixed address so the CloudFront origin name survives instance stop and start.
+    Type: AWS::EC2::EIP
+    Condition: HasPublicStudio
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Instance
+      Tags: [{Key: Name, Value: gaesup-asset-studio}]
+  StudioCachePolicy:
+    # Authorization must be part of the cache key for CloudFront to forward it on GET;
+    # DefaultTTL 0 keeps API responses uncached unless the origin asks otherwise.
+    Type: AWS::CloudFront::CachePolicy
+    Condition: HasPublicStudio
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-studio'
+        MinTTL: 0
+        DefaultTTL: 0
+        MaxTTL: 31536000
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization]}
+          CookiesConfig: {CookieBehavior: none}
+          QueryStringsConfig: {QueryStringBehavior: all}
+  StudioDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: HasPublicStudio
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Gaesup asset studio
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200
+        ViewerCertificate: {CloudFrontDefaultCertificate: true}
+        Origins:
+          - Id: studio
+            DomainName: !If
+              - IsUsEast1
+              - !Sub ['ec2-${Address}.compute-1.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
+              - !Sub ['ec2-${Address}.${AWS::Region}.compute.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginReadTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: studio
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: !Ref StudioCachePolicy
+          # Managed-AllViewerExceptHostHeader
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+Outputs:
+  InstanceId: {Value: !Ref Instance}
+  Access: {Value: !Sub 'aws ssm start-session --target ${Instance} --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080'}
+  PublicSite:
+    Condition: HasPublicSite
+    Value: !Ref PublicSiteOrigin
+  StudioUrl:
+    Condition: HasPublicStudio
+    Value: !Sub 'https://${StudioDistribution.DomainName}'

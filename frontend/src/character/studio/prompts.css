@@ -1,0 +1,27 @@
+.prompt-manager{max-width:1560px}
+.prompt-manager .workspace-heading{gap:16px;flex-wrap:wrap}
+.prompt-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.prompt-actions>span,.prompt-scope,.prompt-rule{font-size:13px;color:var(--muted);line-height:1.7}
+.prompt-manager button:disabled{opacity:.45;cursor:default}
+.prompt-manager button.prompt-save{background:rgb(var(--accent-rgb) / .157);border-color:var(--accent)}
+.prompt-groups{display:flex;gap:8px;flex-wrap:wrap;margin:22px 0}
+.prompt-groups button{display:flex;align-items:center;gap:8px}
+.prompt-groups button[aria-pressed=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .125)}
+.prompt-groups span{font-size:11px;color:var(--muted)}
+.prompt-groups i{font-size:10px;color:var(--accent-text)}
+.prompt-layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:20px;align-items:start}
+.prompt-list,.prompt-editor{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--glass);padding:22px;min-width:0}
+.prompt-list nav{display:flex;flex-direction:column;gap:6px;margin-top:18px}
+.prompt-list nav button{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;padding:12px}
+.prompt-list nav button[aria-current=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .094)}
+.prompt-list nav span,.prompt-editor-heading>span,.prompt-editor-footer>span{font-size:11px;color:var(--muted)}
+.prompt-list nav strong{font-size:13px}
+.prompt-editor-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.prompt-editor-heading h2{margin:0;font-size:20px}
+.prompt-editor>label{display:block;margin:22px 0 10px}
+.prompt-editor textarea{display:block;box-sizing:border-box;width:100%;min-height:390px;resize:vertical;padding:16px;line-height:1.95;font-size:14px;letter-spacing:0;white-space:pre-wrap}
+.prompt-editor-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;flex-wrap:wrap}
+.prompt-editor details{border-top:1px solid var(--line);margin-top:24px;padding-top:18px;font-size:13px}
+.prompt-editor summary{cursor:pointer;color:var(--muted)}
+.prompt-editor details p{white-space:pre-wrap;line-height:1.9}
+@media(max-width:800px){.prompt-layout{grid-template-columns:1fr}.prompt-list nav{flex-direction:row;flex-wrap:wrap}.prompt-list nav button{flex:1;min-width:125px}.prompt-editor textarea{min-height:360px}.prompt-groups button{flex:1;justify-content:center}}

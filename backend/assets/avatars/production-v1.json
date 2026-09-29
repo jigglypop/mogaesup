@@ -1,0 +1,85 @@
+{
+  "id": "sd-factory-v1",
+  "revision": 22,
+  "rest_pose": "T",
+  "units": "metres",
+  "axes": {"right": "+X", "up": "+Y", "front": "+Z", "anatomical_left": "+X"},
+  "origin": "floor_between_feet",
+  "body_height_m": 1.2,
+  "runtime": {
+    "revision": "part-derivatives-v1",
+    "part_triangles": {"body": 24000, "hair": 40000, "hairFront": 20000, "hairBack": 24000, "hat": 8000, "top": 18000, "bottom": 12000, "shoes": 8000, "weapon": 8000, "tool": 6000, "glasses": 3000},
+    "texture_max_edge": 2048,
+    "source_files_preserved": true
+  },
+  "base_body": {
+    "face": "blank smooth egg-shaped head; no eyes, nose, mouth, ears or facial relief",
+    "torso_width_m": 0.22, "torso_depth_m": 0.13,
+    "arm_diameter_m": 0.036, "leg_diameter_m": 0.044,
+    "wrist_diameter_m": 0.028, "ankle_diameter_m": 0.032,
+    "clothing": "thin opaque matte white fitted underlayer with no padding or folds",
+    "color_rgba": [0.86, 0.86, 0.84, 1.0]
+  },
+  "head_height_ratio": [0.54, 0.66],
+  "canvas": {"width": 2048, "height": 2048, "center_x": 1024, "sole_y": 1800, "scalp_y": 300, "pixels_per_metre": 1250},
+  "views": {
+    "front": {"camera": [0, 0, 1], "horizontal": [1, 0, 0]},
+    "side": {"camera": [1, 0, 0], "horizontal": [0, 0, -1]},
+    "back": {"camera": [0, 0, -1], "horizontal": [-1, 0, 0]},
+    "opposite": {"camera": [-1, 0, 0], "horizontal": [0, 0, 1]}
+  },
+  "generated_views": ["front", "side"],
+  "anchors": {
+    "crown": [0, 1.2, 0], "neck": [0, 0.46, 0], "waist": [0, 0.25, 0],
+    "shoulder_left": [0.16, 0.43, 0], "shoulder_right": [-0.16, 0.43, 0],
+    "wrist_left": [0.39, 0.43, 0], "wrist_right": [-0.39, 0.43, 0],
+    "ankle_left": [0.105, 0.07, 0], "ankle_right": [-0.105, 0.07, 0]
+  },
+  "envelopes": {
+    "hair": [[-0.64, 0.05, -0.50], [0.64, 1.32, 0.50]],
+    "head": [[-0.61, 0.32, -0.48], [0.61, 1.46, 0.48]],
+    "body": [[-0.46, 0, -0.30], [0.46, 1.2, 0.34]],
+    "hairBack": [[-0.64, 0.05, -0.50], [0.64, 1.32, 0.33]],
+    "hairFront": [[-0.64, 0.08, -0.31], [0.64, 1.32, 0.50]],
+    "hat": [[-0.75, 0.48, -0.50], [0.75, 1.46, 0.53]],
+    "top": [[-0.46, 0.19, -0.20], [0.46, 0.51, 0.23]],
+    "bottom": [[-0.26, 0.10, -0.22], [0.26, 0.30, 0.24]],
+    "shoes": [[-0.22, -0.012, -0.13], [0.22, 0.15, 0.23]]
+  },
+  "fitting": {
+    "revision": "uniform-parts-v1-slot",
+    "part_fit": "uniform-slot-v1",
+    "hair_surface_fit": "cavity-reference-v4",
+    "hair_rear_surface": "reference-silhouette-v4",
+    "hair_backing_grid": [65, 65],
+    "hair_cavity_scale_limit": 1.25,
+    "hair_length_profiles": {"source": null, "short": 1.0, "long": 1.7},
+    "method": "shared_size_with_body_cut_lines",
+    "fit_to_body_surface": false,
+    "body_crop": {"opening_inset_m": 0.008, "wrist_inset_m": 0.006},
+    "hair_volume_scale_xz": [1.10, 1.14],
+    "hair_clearance_m": 0.025,
+    "hair_crown_clearance_m": 0.07,
+    "scalp_clearance_m": 0.003,
+    "hat_width_scale": 1.06,
+    "hat_hairline_m": 1.14,
+    "garment_margin_m": {"top": [0.006, 0.008], "bottom": [0.006, 0.008]},
+    "bounds": {
+      "hair": [[-0.585, 0.10, -0.41], [0.585, 1.27, 0.43]],
+      "head": [[-0.51, 0.38, -0.39], [0.51, 1.42, 0.40]],
+      "body": [[-0.39, 0, -0.27], [0.39, 1.2, 0.29]],
+      "hairBack": [[-0.52, 0.10, -0.40], [0.52, 1.27, 0.15]],
+      "hairFront": [[-0.50, 0.43, -0.10], [0.50, 1.27, 0.40]],
+      "hat": [[-0.625, 1.03, -0.43], [0.625, 1.40, 0.45]],
+      "top": [[-0.40, 0.22, -0.128], [0.40, 0.48, 0.148]],
+      "bottom": [[-0.19, 0.095, -0.138], [0.19, 0.27, 0.158]],
+      "shoes": [[-0.17, 0, -0.075], [0.17, 0.13, 0.145]]
+    },
+    "shoe_bounds": {
+      "left": [[0.04, 0, -0.075], [0.17, 0.13, 0.145]],
+      "right": [[-0.17, 0, -0.075], [-0.04, 0.13, 0.145]]
+    }
+  },
+  "tolerances": {"canvas_px": 24, "view_height_px": 32, "clearance_m": 0.002, "max_surface_adjustment_m": 0.015},
+  "release_requires": ["paired_images", "shared_rig", "assembly_files"]
+}

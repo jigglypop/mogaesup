@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: GitHub Actions OIDC role for one Gaesup asset studio instance
+Parameters:
+  GitHubOrganization:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  GitHubRepository:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  GitHubEnvironment:
+    Type: String
+    Default: production
+    AllowedPattern: '^[A-Za-z0-9_.-]+$'
+  OidcProviderArn:
+    Type: String
+    Description: Existing IAM OIDC provider ARN for token.actions.githubusercontent.com
+    AllowedPattern: '^arn:[a-z0-9-]+:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$'
+  AssetBucket:
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  InstanceId:
+    Type: String
+    AllowedPattern: '^i-[0-9a-f]{8,17}$'
+Resources:
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Federated: !Ref OidcProviderArn}
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrganization}/${GitHubRepository}:environment:${GitHubEnvironment}'
+      Policies:
+        - PolicyName: ReleaseAndDeployOneInstance
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetEncryptionConfiguration
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketOwnershipControls
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}'
+              - Effect: Allow
+                Action: 's3:ListBucket'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}'
+                Condition: {StringLike: {'s3:prefix': ['releases/studio/*']}}
+              - Effect: Allow
+                Action: ['s3:GetObject', 's3:PutObject']
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/releases/studio/*'
+              - Effect: Allow
+                Action: 'cloudformation:ValidateTemplate'
+                Resource: '*'
+              - Effect: Allow
+                Action: 'ssm:SendCommand'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${InstanceId}'
+              - Effect: Allow
+                Action: 'ssm:GetCommandInvocation'
+                Resource: '*'
+Outputs:
+  RoleArn: {Value: !GetAtt GitHubDeployRole.Arn}

@@ -1,0 +1,9 @@
+{
+  "source_sha256": "5847b126384dec9a842155ee5d454ce0de81a5ffec2f0f6038253c5e9e70331c",
+  "atlas_sha256": "89984e24a82c7cc04a81638eb02cca2e400f913efbb2fa73eba48498e4f621cd",
+  "provider": "built-in image_gen",
+  "kind": "generated_design_candidate",
+  "alpha": "not_present_checkerboard_requires_mask_review",
+  "prompt": "Design an eight-part modular paper-doll atlas from the reference character.\nUse a 4 column by 2 row grid, transparent background, no text or grid lines.\nTop row: 1 complete common SD body mannequin in an opaque plain bodysuit, bald and blank face;\n2 complete round head with the reference eyes and mouth, without hair or hat;\n3 complete back hair including the hidden crown; 4 front hair and bangs, transparent face opening.\nBottom row: 5 hat with complete rim, without head or hair; 6 top with complete collar, sleeves and waist,\nwithout hands or skirt; 7 bottom with a complete waistband and opaque inner shorts, without legs;\n8 shoes pair with complete hidden tops, without legs.\nUse the SAME approximately 2.5-head-tall front A-pose template for every character. Preserve the reference\nidentity, colors and clothing. Finish the shapes hidden by other pieces; do not merely crop visible fragments.\nKeep neck, shoulder, wrist, waist and ankle connection positions consistent. Provide generous hidden overlap.\nEach part is separate. No combined character. Parts are design candidates for review before 3D generation.",
+  "visual_approval": "pending"
+}

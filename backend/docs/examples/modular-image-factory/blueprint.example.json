@@ -1,0 +1,222 @@
+{
+  "schemaVersion": "ai-character-parts-blueprint/v1",
+  "exampleOnly": true,
+  "characterId": "char_0001",
+  "revision": 1,
+  "status": "draft",
+  "reference": {
+    "source": "user_attached_character_sheet",
+    "path": "reference/original.png",
+    "sha256": null,
+    "analysisMethod": "assistant_visual_reading"
+  },
+  "bodyProfile": {
+    "id": "gaesup_chibi_female_v1",
+    "revision": 1,
+    "sha256": null,
+    "bodySha256": null,
+    "poseHash": null,
+    "cameraHash": null,
+    "anchorsHash": null,
+    "heightM": 1.2,
+    "targetHeadCount": 1.6,
+    "pose": "neutral_a_pose",
+    "armAngleFromDownwardVerticalDeg": 35,
+    "baseClothing": "opaque_neutral_bodysuit_neck_to_wrists_and_ankles",
+    "status": "body_review_required"
+  },
+  "canvas": {
+    "width": 2048,
+    "height": 2048,
+    "centerX": 1024,
+    "baldHeadTopY": 300,
+    "soleY": 1800,
+    "format": "PNG",
+    "colorSpace": "sRGB",
+    "alpha": "straight"
+  },
+  "character": {
+    "style": "premium_3d_chibi",
+    "palette": {
+      "hair": "warm_brown",
+      "eyes": "reddish_brown",
+      "cardigan": "cream",
+      "ribbons": "red_pink",
+      "skirt": "red_brown_plaid",
+      "shoes": "dark_brown",
+      "socks": "white"
+    }
+  },
+  "face": {
+    "mode": "fixed_head_uv_textures",
+    "headSha256": null,
+    "uvTemplateId": "gaesup_chibi_face_v1",
+    "uvTemplateRevision": 1,
+    "uvTemplateSha256": null,
+    "uvOutputSize": [1024, 1024],
+    "projectionMaskSha256": null,
+    "expressions": ["neutral", "smile", "happy", "wink_left", "wink_right", "sad", "angry", "surprised"],
+    "design": {"eyeColor": "reddish_brown", "blush": true},
+    "status": "face_mapping_required"
+  },
+  "parts": [
+    {
+      "itemId": "hair_front_001", "slot": "hair.front", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Rounded brown bangs and side locks; no scalp, face, ribbon or pins",
+      "evidence": {"observed": ["rounded_bangs", "side_locks"], "inferred": ["hidden_attachment_edge"]},
+      "attachment": {"parentItemId": "body", "socket": "scalp_front"},
+      "occupies": ["hair.front"]
+    },
+    {
+      "itemId": "hair_back_001", "slot": "hair.back", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Brown wavy rear hair shell; exclude the ponytail and ribbon",
+      "evidence": {"observed": ["brown_wavy_hair"], "inferred": ["hidden_crown_join"]},
+      "attachment": {"parentItemId": "body", "socket": "scalp_back"},
+      "occupies": ["hair.back"]
+    },
+    {
+      "itemId": "ponytail_001", "slot": "hair.extension", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "High curled brown ponytail, complete root; no red ribbon",
+      "evidence": {"observed": ["high_ponytail", "large_curls"], "inferred": ["root_under_bow"]},
+      "attachment": {"parentItemId": "hair_back_001", "socket": "ponytail_root"},
+      "occupies": ["hair.extension"]
+    },
+    {
+      "itemId": "hair_bow_001", "slot": "accessory.hair", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Large red-pink bow at the ponytail root; no hair",
+      "evidence": {"observed": ["large_red_bow"], "inferred": ["hidden_fastener"]},
+      "attachment": {"parentItemId": "ponytail_001", "socket": "bow_mount"},
+      "occupies": ["accessory.hair:bow_mount"]
+    },
+    {
+      "itemId": "heart_pin_001", "slot": "accessory.hair", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Pink heart hair pin; position resolved on the locked hair template",
+      "evidence": {"observed": ["pink_heart_pin"], "inferred": ["hidden_clip"]},
+      "attachment": {"parentItemId": "hair_front_001", "socket": "heart_pin_mount"},
+      "occupies": ["accessory.hair:heart_pin_mount"]
+    },
+    {
+      "itemId": "cross_pin_001", "slot": "accessory.hair", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Pink X-shaped hair pin; position resolved on the locked hair template",
+      "evidence": {"observed": ["pink_cross_pin"], "inferred": ["hidden_clip"]},
+      "attachment": {"parentItemId": "hair_front_001", "socket": "cross_pin_mount"},
+      "occupies": ["accessory.hair:cross_pin_mount"]
+    },
+    {
+      "itemId": "cardigan_001", "slot": "clothes.top", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Cream cardigan, pink-edged sailor collar, buttons and pink heart details; exclude detachable neck bow, skin and hands",
+      "evidence": {"observed": ["cream_knit", "sailor_collar", "pink_hearts"], "inferred": ["inner_collar", "inside_seams"]},
+      "attachment": {"parentItemId": "body", "socket": "torso"},
+      "occupies": ["clothes.top"]
+    },
+    {
+      "itemId": "neck_bow_001", "slot": "accessory.neck", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Red-pink neck bow only, worn at the cardigan collar",
+      "evidence": {"observed": ["neck_bow"], "inferred": ["hidden_fastener"]},
+      "attachment": {"parentItemId": "cardigan_001", "socket": "collar_bow"},
+      "occupies": ["accessory.neck"]
+    },
+    {
+      "itemId": "skirt_001", "slot": "clothes.bottom", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Red-brown plaid pleated skirt with complete waistband and opaque lining; no legs",
+      "evidence": {"observed": ["plaid", "pleats"], "inferred": ["inner_waistband", "lining"]},
+      "attachment": {"parentItemId": "body", "socket": "waist"},
+      "occupies": ["clothes.bottom"]
+    },
+    {
+      "itemId": "shoe_left_001", "slot": "feet.left", "selected": true,
+      "pairId": "mary_jane_pair_001", "views": ["front", "side", "back"],
+      "design": "Character-left dark brown Mary Jane with white sock and pink bow; no skin or leg",
+      "evidence": {"observed": ["mary_jane", "white_sock", "pink_bow"], "inferred": ["inside_shoe"]},
+      "attachment": {"parentItemId": "body", "socket": "foot_left"},
+      "occupies": ["feet.left"]
+    },
+    {
+      "itemId": "shoe_right_001", "slot": "feet.right", "selected": true,
+      "pairId": "mary_jane_pair_001", "views": ["front", "side", "back"],
+      "design": "Character-right dark brown Mary Jane with white sock and pink bow; no skin or leg",
+      "evidence": {"observed": ["mary_jane", "white_sock", "pink_bow"], "inferred": ["inside_shoe"]},
+      "attachment": {"parentItemId": "body", "socket": "foot_right"},
+      "occupies": ["feet.right"]
+    },
+    {
+      "itemId": "bag_001", "slot": "accessory.bag", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "Brown shoulder bag with strap and gold fittings; exclude detachable bunny charm",
+      "evidence": {"observed": ["brown_bag", "gold_fittings", "shoulder_strap"], "inferred": ["hidden_back_panel"]},
+      "attachment": {"parentItemId": "body", "socket": "bag_shoulder_mount"},
+      "occupies": ["accessory.bag:shoulder"]
+    },
+    {
+      "itemId": "bunny_charm_001", "slot": "accessory.bag", "selected": true,
+      "views": ["front", "side", "back"],
+      "design": "White bunny charm with pink bow; no bag",
+      "evidence": {"observed": ["white_bunny", "pink_bow"], "inferred": ["hidden_attachment_loop"]},
+      "attachment": {"parentItemId": "bag_001", "socket": "charm_ring"},
+      "occupies": ["accessory.bag:charm_ring"]
+    },
+    {
+      "itemId": "baseball_cap_001", "slot": "head.hat", "selected": false,
+      "views": ["front", "side", "back"],
+      "design": "Blue and white baseball cap with bear motif",
+      "evidence": {"observed": ["cap_front_design"], "inferred": ["rear_panels", "inner_band"]},
+      "attachment": {"parentItemId": "body", "socket": "crown"},
+      "occupies": ["head.hat"]
+    },
+    {
+      "itemId": "aviator_hat_001", "slot": "head.hat", "selected": false,
+      "views": ["front", "side", "back"],
+      "design": "Brown fleece-lined aviator hat with goggles",
+      "evidence": {"observed": ["aviator_hat", "goggles"], "inferred": ["rear_seams"]},
+      "attachment": {"parentItemId": "body", "socket": "crown"},
+      "occupies": ["head.hat"]
+    },
+    {
+      "itemId": "bunny_hat_001", "slot": "head.hat", "selected": false,
+      "views": ["front", "side", "back"],
+      "design": "White and pink plush bunny hat with long ear flaps",
+      "evidence": {"observed": ["bunny_hat_front"], "inferred": ["rear_panels"]},
+      "attachment": {"parentItemId": "body", "socket": "crown"},
+      "occupies": ["head.hat"]
+    },
+    {
+      "itemId": "flower_crown_001", "slot": "head.hat", "selected": false,
+      "views": ["front", "side", "back"],
+      "design": "Green foliage crown with white and pink flowers and small red berries",
+      "evidence": {"observed": ["flower_crown"], "inferred": ["hidden_rear_arrangement"]},
+      "attachment": {"parentItemId": "body", "socket": "crown"},
+      "occupies": ["head.hat"]
+    },
+    {
+      "itemId": "staff_001", "slot": "accessory.hand", "selected": false,
+      "views": ["front", "side", "back"],
+      "design": "Dark staff with gold prongs, purple orb and dark bow; no hand",
+      "evidence": {"observed": ["purple_orb_staff"], "inferred": ["hidden_rear_details"]},
+      "attachment": {"parentItemId": "body", "socket": "hand_grip"},
+      "occupies": ["accessory.hand"]
+    }
+  ],
+  "generation": {
+    "provider": "openai",
+    "model": "gpt-image-2.5-sunburst",
+    "promptTemplateRevision": "modular-image-factory/v1",
+    "maxNewRequestsPerImage": 1,
+    "maxNewMeshyTasks": 0
+  },
+  "review": {
+    "status": "pending",
+    "targetSha256": null,
+    "reviewedBy": null,
+    "reviewedAt": null,
+    "notes": "Example only. Resolve original bytes, locked body/UV templates, socket positions and artifact hashes before production."
+  }
+}

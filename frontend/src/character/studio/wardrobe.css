@@ -1,0 +1,62 @@
+.wardrobe{max-width:1560px}
+.wardrobe .workspace-heading select{max-width:320px}
+.wardrobe-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(320px,1fr);align-items:start;gap:22px;margin-top:20px}
+.wardrobe-stage,.wardrobe-closet{min-width:0;padding:18px;border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--glass)}
+.wardrobe-stage{position:sticky;top:12px}
+.wardrobe-scene.meshy-scene{height:600px}
+.wardrobe-hair-color{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.wardrobe-hair-color label{display:flex;align-items:center;gap:8px}
+.wardrobe-hair-color input{width:40px;height:28px;padding:0;border:0;background:transparent}
+.wardrobe-slots{display:flex;gap:6px;flex-wrap:wrap;padding:4px;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--surface-sunken)}
+.workspace-content .wardrobe-slots button{padding:7px 14px;border-color:transparent;background:transparent}
+.wardrobe-slots button[aria-selected=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .125)}
+.wardrobe-slots button span{margin-left:4px;color:var(--muted);font-size:11px}
+.wardrobe-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:14px;max-height:620px;overflow:auto;padding-right:2px}
+.workspace-content .wardrobe-card{display:flex;min-width:0;flex-direction:column;align-items:flex-start;gap:6px;padding:8px;border:1px solid var(--line);border-radius:var(--radius-md);background:#ffffff04;color:var(--text);text-align:left}
+.workspace-content .wardrobe-card[aria-pressed=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .078)}
+.wardrobe-card img,.wardrobe-card-empty{width:100%;aspect-ratio:1;object-fit:contain;border-radius:var(--radius-md);background:var(--surface-sunken)}
+.wardrobe-card-empty{display:grid;place-items:center;color:var(--muted);font-size:11px}
+.wardrobe-card strong{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.wardrobe-card small{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px}
+.wardrobe-worn,.wardrobe-outfits{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.wardrobe-worn h2,.wardrobe-outfits h2{margin:0 0 10px;font-size:14px}
+.wardrobe-worn ul,.wardrobe-outfits ul{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.wardrobe-worn li{display:grid;grid-template-columns:90px minmax(0,1fr) auto;align-items:center;gap:10px;font-size:12px}
+.wardrobe-worn li span{color:var(--muted)}
+.wardrobe-worn li strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.wardrobe-save{display:flex;align-items:flex-end;gap:10px;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.wardrobe-save label{flex:1;min-width:0}
+.wardrobe-outfits li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:4px 12px;padding:10px;border:1px solid var(--line);border-radius:var(--radius-md)}
+.wardrobe-outfits li.loaded{border-color:var(--accent)}
+.wardrobe-outfits li strong{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wardrobe-outfits li small{grid-column:1;color:var(--muted);font-size:11px}
+.wardrobe-outfits li div{grid-column:2;grid-row:1/span 2;display:flex;gap:6px}
+.workspace-content .wardrobe-outfits li button,.workspace-content .wardrobe-worn li button{padding:5px 9px;font-size:11px}
+.wardrobe-empty{color:var(--muted);font-size:12px}
+@media(max-width:1000px){.wardrobe-layout{grid-template-columns:1fr}.wardrobe-stage{position:static}.wardrobe-scene.meshy-scene{height:460px}.wardrobe-cards{max-height:none}}
+@media(max-width:620px){.wardrobe-stage,.wardrobe-closet{padding:14px}.wardrobe-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.wardrobe-save{flex-direction:column;align-items:stretch}.wardrobe-worn li{grid-template-columns:70px minmax(0,1fr) auto}}
+.wardrobe-colors{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.wardrobe-colors h2{margin:0 0 10px;font-size:14px}
+.wardrobe-colors ul{display:grid;gap:10px;margin:0;padding:0;list-style:none}
+.wardrobe-colors li{display:grid;grid-template-columns:90px minmax(0,1fr) auto;align-items:center;gap:10px;font-size:12px}
+.wardrobe-colors li span{color:var(--muted)}
+.wardrobe-swatches{display:flex;flex-wrap:wrap;gap:8px}
+.wardrobe-swatch{position:relative;width:30px;height:30px;border:1px solid var(--line);border-radius:var(--radius-sm);cursor:pointer;box-shadow:inset 0 0 0 2px #00000030}
+.wardrobe-swatch:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.wardrobe-swatch input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.workspace-content .wardrobe-colors li button{padding:5px 9px;font-size:11px}
+.wardrobe-card small.wardrobe-card-fit{color:#f0b9a4;white-space:normal}
+.wardrobe-shapes{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+.wardrobe-shapes h2{margin:0 0 10px;font-size:14px}
+.wardrobe-shapes ul{display:grid;gap:12px;margin:0;padding:0;list-style:none}
+.wardrobe-shape{display:grid;grid-template-columns:90px minmax(0,1fr);gap:8px 10px;align-items:start;font-size:12px}
+.wardrobe-shape>span{color:var(--muted);padding-top:4px}
+.wardrobe-shape-controls{display:grid;gap:8px;min-width:0}
+.wardrobe-shape-controls label{display:grid;grid-template-columns:minmax(0,1fr) 44px;gap:4px 8px;align-items:center;color:var(--muted)}
+.wardrobe-shape-controls input[type=range]{grid-column:1;width:100%;accent-color:var(--accent)}
+.wardrobe-shape-controls output{grid-column:2;text-align:right;color:var(--text)}
+.wardrobe-shape-fit{display:flex;gap:6px}
+.workspace-content .wardrobe-shape-fit button,.workspace-content .wardrobe-shape-actions button{padding:5px 10px;font-size:11px}
+.wardrobe-shape-fit button[aria-pressed=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .125)}
+.wardrobe-shape-actions{grid-column:2;display:flex;gap:6px}
+.wardrobe-shape p[role=alert]{grid-column:2;margin:0}

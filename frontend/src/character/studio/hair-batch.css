@@ -1,0 +1,25 @@
+.hair-batch{margin-top:24px;border-top:1px solid var(--line);padding-top:18px;min-width:0}.hair-batch fieldset{min-width:0}.hair-batch-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.hair-batch input,.hair-batch select{width:100%;min-width:0}.workspace .hair-batch .hair-batch-check{display:flex;flex-direction:row;align-items:center;gap:8px}.hair-batch-check input[type=checkbox]{width:auto}.hair-batch-selection{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:14px}.hair-batch-views{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}.hair-batch-views figure{min-width:0;margin:0}.hair-batch-views img{display:block;width:100%;aspect-ratio:1;object-fit:contain;background:#ffffff06;border-radius:var(--radius-sm)}.hair-batch-views figcaption{text-align:center;font-size:11px;color:var(--muted);margin-top:3px}.hair-batch-item{padding:12px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.hair-batch-item strong,.hair-batch-item small{display:block;margin:6px 0}.hair-batch details{margin-top:18px}.hair-batch summary{font-size:12px;cursor:pointer}.hair-batch .generation-recovery{display:block;margin-top:8px}
+.hair-batch textarea{width:100%;min-width:0;resize:vertical}.hair-batch-four{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}
+@media(max-width:560px){.hair-batch-grid{grid-template-columns:1fr}.hair-batch-selection{align-items:flex-start;flex-direction:column}.hair-batch-four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.character-factory>main.single-part-batch-layout,.studio-main>main.single-part-batch-layout{display:block;max-width:1280px}
+.single-part-batch-layout .single-part-flow{padding:24px}
+.single-part-batch-layout .single-part-flow>label{max-width:560px}
+.single-part-batch-layout .hair-batch{margin-top:18px}
+.hair-batch-panels{display:flex;gap:8px;margin:14px 0}
+.hair-batch-panels button[aria-pressed=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .149)}
+.hair-batch-items{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin:14px 0}
+.hair-batch-items .hair-batch-item{padding:12px;border:1px solid var(--line);border-radius:var(--radius-md)}
+.hair-batch fieldset>label,.hair-batch fieldset>.hair-batch-grid{max-width:600px}
+.hair-batch details>summary{padding:12px;border:1px solid var(--line);border-radius:var(--radius-md)}
+.hair-batch details[open]>summary{margin-bottom:12px;background:#ffffff06}
+.hair-batch-setup{display:grid;grid-template-columns:minmax(0,560px);gap:18px;align-items:start}
+.hair-batch .hair-batch-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}
+.hair-batch .hair-batch-inputs>label{max-width:none}
+.hair-batch-inputs>.hair-batch-items,.hair-batch-inputs>.hair-batch-selection,.hair-batch-inputs>.hair-batch-check,.hair-batch-inputs>small,.hair-batch-inputs>label:has(textarea){grid-column:1/-1}
+@media(max-width:720px){.hair-batch .hair-batch-inputs{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:560px){.single-part-batch-layout .single-part-flow{padding:16px}.hair-batch-items{grid-template-columns:minmax(0,1fr)}}
+.hair-batch-regenerate{display:grid;gap:10px;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:var(--radius-md)}.hair-batch-regenerate .hair-batch-selection{margin-top:0}.hair-batch-facing{margin:0;width:96px}.hair-batch-facing img{display:block;width:100%;aspect-ratio:1;object-fit:contain;background:#ffffff06;border-radius:var(--radius-sm)}.hair-batch-facing figcaption{font-size:11px;color:var(--muted);text-align:center;margin-top:3px}.hair-batch-actions{display:flex;flex-wrap:wrap;gap:8px}
+.hair-batch-item-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;min-width:0}.hair-batch-item-head input[type=checkbox]{width:auto;flex:none}.hair-batch-item-head strong{flex:1;min-width:0;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hair-batch-state{flex:none;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}.hair-batch-state.is-complete{color:var(--text);border-color:var(--accent)}.hair-batch-state.is-paused{color:var(--warning);border-color:rgb(var(--warning-rgb) / .4)}
+.hair-batch-placeholder{width:100%;aspect-ratio:1;background:#ffffff06;border-radius:var(--radius-sm)}
+.hair-batch-item>button{margin-top:8px}
