@@ -23,6 +23,8 @@ const manifest = JSON.parse(readFileSync(join(props, 'manifest.json'), 'utf8'));
 const MAPS = { resize: [512, 512], quality: 86 };
 /** The island's props are matte; generated PBR sets come with metal and gloss that read as black or white patches. */
 const ROUGHNESS = 0.9;
+/** How far past the replaced model's footprint a plant or rock may reach, as a factor. */
+const FOOTPRINT_SLACK = 1.25;
 
 await Promise.all([MeshoptDecoder.ready, MeshoptEncoder.ready]);
 const io = new NodeIO()
@@ -65,7 +67,8 @@ async function fit(item) {
   const scale = !target
     ? item.fit.height ? item.fit.height / turned.size[1] : item.fit.width / Math.max(turned.size[0], turned.size[2])
     : byHeight
-      ? target.size[1] / turned.size[1]
+      ? // Plants and rocks keep the height, but a much wider generated shape may not spread past its neighbours.
+        Math.min(target.size[1] / turned.size[1], FOOTPRINT_SLACK * Math.min(target.size[0] / turned.size[0], target.size[2] / turned.size[2]))
       : Math.min(...[0, 1, 2].map((axis) => target.size[axis] / turned.size[axis]));
   const centre = (box, axis) => (box.min[axis] + box.max[axis]) / 2;
   const goal = target ?? { min: [0, 0, 0], max: [0, 0, 0] };
