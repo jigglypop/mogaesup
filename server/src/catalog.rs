@@ -1,37 +1,44 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::HeaderMap,
     routing::{get, patch, post},
 };
-use image::{ImageFormat, ImageReader, Limits};
+use chrono::{DateTime, Utc};
+use futures_util::{StreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
-use std::io::Cursor;
+use std::{cmp::Reverse, time::Duration};
 
 use crate::{
     AppState,
     auth::require_admin,
-    error::{ApiResult, bad, internal, not_found},
-    factory::{MAX_MODEL_BYTES, fetch_file},
-    glb, slim, studio,
+    error::{ApiError, ApiResult, bad, not_found},
+    imports,
+    studio::{self, Freshness},
 };
 
 const KINDS: [&str; 2] = ["minime", "furniture"];
 const STATUSES: [&str; 3] = ["draft", "published", "retired"];
-/// The 미니미 picker shows pictures this big; the character server renders them at 800 px.
-const THUMBNAIL_EDGE: u32 = 256;
-const MAX_PICTURE_BYTES: usize = 8 * 1024 * 1024;
+/// Faces asked for at once for the character listing, and how long the listing waits for all of them; a face that is
+/// late counts as unknown rather than holding the page past CloudFront's 30 s.
+const FACE_LOOKUPS: usize = 6;
+const FACE_BUDGET: Duration = Duration::from_secs(10);
+const MAX_BULK: usize = 200;
+const ITEM_NOT_FOUND: ApiError = not_found("item_not_found", "없는 카탈로그 항목입니다.");
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/catalog/items", get(items))
         .route("/api/catalog/admin/items", get(admin_items))
         .route("/api/catalog/admin/items/{id}", patch(update))
-        .route("/api/catalog/admin/import", post(import))
+        .route("/api/catalog/admin/items/{id}/versions", get(versions))
+        .route("/api/catalog/admin/items/{id}/rollback", post(rollback))
+        .route("/api/catalog/admin/bulk-status", post(bulk_status))
+        .route("/api/catalog/admin/import", post(imports::enqueue))
+        .route("/api/catalog/admin/imports", get(imports::list))
+        .route("/api/catalog/admin/imports/{id}", get(imports::one))
         .route("/api/catalog/admin/factory-characters", get(factory_characters))
 }
 
@@ -76,12 +83,47 @@ async fn items(State(state): State<AppState>, Query(query): Query<ItemsQuery>) -
     Ok(Json(json!({"items": list(&state.db, kind.as_deref(), true).await?})))
 }
 
-async fn admin_items(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    require_admin(&state, &headers).await?;
-    Ok(Json(json!({"items": list(&state.db, None, false).await?})))
+/// Admin rows: the item, how many homes wear it (미니미 only), how many versions it has, and where it came from.
+const ADMIN_SELECT: &str = "WITH wearing AS (SELECT minime, count(*) AS homes FROM homes GROUP BY minime),
+    history AS (SELECT item_id, count(*) AS versions FROM catalog_versions GROUP BY item_id)
+    SELECT i.id, i.kind, i.label, i.emoji, i.model_url, i.thumbnail_url, i.clips, i.source, i.source_ref, i.status,
+      i.sort_order, i.character_id, i.version_id, i.updated_at,
+      CASE WHEN i.kind = 'minime' THEN COALESCE(w.homes, 0) ELSE 0 END AS usage, COALESCE(h.versions, 0) AS versions
+    FROM catalog_items i LEFT JOIN wearing w ON w.minime = i.id LEFT JOIN history h ON h.item_id = i.id";
+
+fn admin_item(row: &PgRow) -> Value {
+    let mut value = item(row);
+    value["characterId"] = json!(row.get::<Option<String>, _>("character_id"));
+    value["versionId"] = json!(row.get::<Option<i64>, _>("version_id"));
+    value["versionCount"] = json!(row.get::<i64, _>("versions"));
+    value["usage"] = json!(row.get::<i64, _>("usage"));
+    value["updatedAt"] = json!(row.get::<DateTime<Utc>, _>("updated_at"));
+    value
 }
 
-fn catalog_id(value: &str) -> ApiResult<&str> {
+/// Admin rows for `ids`, or for every item.
+async fn admin_list(db: &PgPool, ids: Option<&[String]>) -> Result<Vec<Value>, sqlx::Error> {
+    let rows = sqlx::query(&format!(
+        "{ADMIN_SELECT} WHERE ($1::text[] IS NULL OR i.id = ANY($1)) ORDER BY i.kind, i.sort_order, i.id"
+    ))
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.iter().map(admin_item).collect())
+}
+
+async fn admin_one(db: &PgPool, id: &str) -> ApiResult<Json<Value>> {
+    let ids = [id.to_owned()];
+    let rows = admin_list(db, Some(&ids[..])).await?;
+    rows.into_iter().next().map(Json).ok_or(ITEM_NOT_FOUND)
+}
+
+async fn admin_items(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    require_admin(&state, &headers).await?;
+    Ok(Json(json!({"items": admin_list(&state.db, None).await?})))
+}
+
+pub(crate) fn catalog_id(value: &str) -> ApiResult<&str> {
     let bytes = value.as_bytes();
     let valid = (2..=64).contains(&bytes.len())
         && bytes[0].is_ascii_alphanumeric()
@@ -93,7 +135,11 @@ fn catalog_id(value: &str) -> ApiResult<&str> {
     }
 }
 
-fn label(value: &str, max: usize, code: &'static str) -> ApiResult<String> {
+pub(crate) fn kind(value: &str) -> ApiResult<&str> {
+    if KINDS.contains(&value) { Ok(value) } else { Err(bad("invalid_kind", "종류를 확인해 주세요.")) }
+}
+
+pub(crate) fn label(value: &str, max: usize, code: &'static str) -> ApiResult<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > max {
         return Err(bad(code, "입력한 값의 길이를 확인해 주세요."));
@@ -101,7 +147,7 @@ fn label(value: &str, max: usize, code: &'static str) -> ApiResult<String> {
     Ok(value.to_owned())
 }
 
-fn status(value: Option<String>) -> ApiResult<Option<String>> {
+pub(crate) fn status(value: Option<String>) -> ApiResult<Option<String>> {
     match value {
         Some(status) if !STATUSES.contains(&status.as_str()) => Err(bad("invalid_status", "상태를 확인해 주세요.")),
         other => Ok(other),
@@ -124,131 +170,209 @@ async fn update(
     Json(changes): Json<Changes>,
 ) -> ApiResult<Json<Value>> {
     require_admin(&state, &headers).await?;
-    let row = sqlx::query(&format!(
+    let id = catalog_id(&id)?;
+    let updated = sqlx::query(
         "UPDATE catalog_items SET label = COALESCE($2, label), emoji = COALESCE($3, emoji), status = COALESCE($4, status),
-         sort_order = COALESCE($5, sort_order), updated_at = now() WHERE id = $1 RETURNING {ITEM_COLUMNS}"
-    ))
-    .bind(catalog_id(&id)?)
+         sort_order = COALESCE($5, sort_order), updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
     .bind(changes.label.as_deref().map(|v| label(v, 30, "invalid_label")).transpose()?)
     .bind(changes.emoji.as_deref().map(|v| label(v, 16, "invalid_emoji")).transpose()?)
     .bind(status(changes.status)?)
     .bind(changes.sort_order)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(not_found("item_not_found", "없는 카탈로그 항목입니다."))?;
-    Ok(Json(item(&row)))
+    .execute(&state.db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(ITEM_NOT_FOUND);
+    }
+    admin_one(&state.db, id).await
 }
 
-/// Finished characters on the character server, each with the catalog item that already holds it, if any.
-async fn factory_characters(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let admin = require_admin(&state, &headers).await?;
-    let characters = studio::list(&state, &admin.username).await?;
-    let rows = sqlx::query("SELECT id, status, source_ref FROM catalog_items WHERE source = 'factory'")
-        .fetch_all(&state.db)
+#[derive(Deserialize)]
+struct BulkStatus {
+    ids: Vec<String>,
+    status: String,
+}
+
+/// `POST /api/catalog/admin/bulk-status`: one status for several items at once.
+async fn bulk_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BulkStatus>,
+) -> ApiResult<Json<Value>> {
+    require_admin(&state, &headers).await?;
+    if body.ids.is_empty() || body.ids.len() > MAX_BULK {
+        return Err(bad("invalid_ids", "한 번에 바꿀 항목은 1~200개입니다."));
+    }
+    for id in &body.ids {
+        catalog_id(id)?;
+    }
+    let status = status(Some(body.status))?;
+    sqlx::query("UPDATE catalog_items SET status = $2, updated_at = now() WHERE id = ANY($1) AND status <> $2")
+        .bind(&body.ids)
+        .bind(status)
+        .execute(&state.db)
         .await?;
-    let characters: Vec<Value> = characters
-        .into_iter()
-        .map(|character| {
-            let job = format!("{}/", character.job_id);
-            let imported = rows.iter().find_map(|row| {
-                let source: Option<String> = row.get("source_ref");
-                let source = source.filter(|source| source.starts_with(&job))?;
-                let current = source[job.len()..].split('/').next() == Some(character.version.as_str());
-                Some(json!({"id": row.get::<String, _>("id"), "status": row.get::<String, _>("status"), "current": current}))
-            });
-            let mut value = serde_json::to_value(&character).unwrap_or_default();
-            value["imported"] = imported.unwrap_or(Value::Null);
-            value
+    Ok(Json(json!({"items": admin_list(&state.db, Some(body.ids.as_slice())).await?})))
+}
+
+/// `GET /api/catalog/admin/items/{id}/versions`: every model the item has shown, newest first.
+async fn versions(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    require_admin(&state, &headers).await?;
+    let id = catalog_id(&id)?;
+    let current: Option<i64> = sqlx::query_scalar("SELECT version_id FROM catalog_items WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ITEM_NOT_FOUND)?;
+    let rows = sqlx::query(
+        "SELECT v.id, v.model_url, v.thumbnail_url, v.clips, v.source_ref, v.character_id, v.stage, v.report, v.import_id,
+         u.username AS created_by, v.created_at FROM catalog_versions v LEFT JOIN users u ON u.id = v.created_by
+         WHERE v.item_id = $1 ORDER BY v.id DESC LIMIT 100",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    let versions: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let version: i64 = row.get("id");
+            json!({
+                "id": version,
+                "current": current == Some(version),
+                "modelUrl": row.get::<String, _>("model_url"),
+                "thumbnailUrl": row.get::<Option<String>, _>("thumbnail_url"),
+                "clips": row.get::<Vec<String>, _>("clips"),
+                "sourceRef": row.get::<Option<String>, _>("source_ref"),
+                "characterId": row.get::<Option<String>, _>("character_id"),
+                "stage": row.get::<Option<String>, _>("stage"),
+                "report": row.get::<Option<Value>, _>("report"),
+                "importId": row.get::<Option<uuid::Uuid>, _>("import_id"),
+                "createdBy": row.get::<Option<String>, _>("created_by"),
+                "createdAt": row.get::<DateTime<Utc>, _>("created_at"),
+            })
         })
         .collect();
-    Ok(Json(json!({"characters": characters})))
+    Ok(Json(json!({"versions": versions})))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Import {
-    id: String,
-    kind: String,
-    label: String,
-    emoji: String,
-    factory_job_id: String,
-    status: Option<String>,
-    sort_order: Option<i32>,
+struct Rollback {
+    version_id: i64,
 }
 
-/// The character server's front render, shrunk; None when it cannot be read. `image` reads it within fixed bounds.
-fn thumbnail(png: &[u8]) -> Option<Vec<u8>> {
-    let mut reader = ImageReader::with_format(Cursor::new(png), ImageFormat::Png);
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(4096);
-    limits.max_image_height = Some(4096);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
-    let picture = reader.decode().ok()?.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
-    let mut out = Cursor::new(Vec::new());
-    picture.write_to(&mut out, ImageFormat::Png).ok()?;
-    Some(out.into_inner())
-}
-
-/// Copies a finished character from the character server into the catalog as a draft: its playable model (the copy
-/// with the chosen face, when there is one), checked against the server's record and for a rig with idle and walk,
-/// and its front render. Both go to the model store; publishing the item puts it in the 미니미 picker.
-async fn import(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<Import>) -> ApiResult<Response> {
-    let admin = require_admin(&state, &headers).await?;
-    let id = catalog_id(&body.id)?.to_owned();
-    if !KINDS.contains(&body.kind.as_str()) {
-        return Err(bad("invalid_kind", "종류를 확인해 주세요."));
-    }
-    let label_text = label(&body.label, 30, "invalid_label")?;
-    let emoji = label(&body.emoji, 16, "invalid_emoji")?;
-    let status = status(body.status)?.unwrap_or_else(|| "draft".into());
-    let source = studio::source(&state, &admin.username, &body.factory_job_id).await?;
-    let bytes = fetch_file(&state, &admin.username, &source.model_path, MAX_MODEL_BYTES).await?;
-    if source.model_sha256.as_ref().is_some_and(|expected| *expected != hex::encode(Sha256::digest(&bytes))) {
-        return Err(bad("factory_checksum", "받은 모델이 캐릭터 서버의 기록과 다릅니다. 다시 시도해 주세요."));
-    }
-    let summary = glb::inspect(&bytes).ok_or(bad("not_glb", "GLB 파일이 아닙니다."))?;
-    if body.kind == "minime" && !summary.playable() {
-        return Err(bad("not_playable", "미니미로 쓰려면 리깅(스킨)과 idle·walk 애니메이션이 있어야 합니다."));
-    }
-    let original = bytes.len();
-    let bytes = tokio::task::spawn_blocking(move || slim::slim(&bytes).unwrap_or(bytes)).await.map_err(internal)?;
-    tracing::info!(original, slimmed = bytes.len(), "Catalog model textures sized for the web");
-    let model_url = state.config.models.put("glb", bytes).await?;
-    let picture = match fetch_file(&state, &admin.username, &source.thumbnail_path, MAX_PICTURE_BYTES).await {
-        Ok(png) => thumbnail(&png),
-        Err(_) => None,
-    };
-    let thumbnail_url = match picture {
-        Some(png) => Some(state.config.models.put("png", png).await?),
-        None => None,
-    };
-    let job = studio::segment(&body.factory_job_id).unwrap_or_default();
-    let source_ref = match &source.expression {
-        Some(expression) => format!("{job}/{}/{expression}", source.version),
-        None => format!("{job}/{}", source.version),
-    };
-    let row = sqlx::query(&format!(
-        "INSERT INTO catalog_items (id, kind, label, emoji, model_url, thumbnail_url, clips, source, source_ref, status, sort_order)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'factory', $8, $9, $10)
-         ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, label = excluded.label, emoji = excluded.emoji,
-         model_url = excluded.model_url, thumbnail_url = excluded.thumbnail_url, clips = excluded.clips, source = 'factory',
-         source_ref = excluded.source_ref, status = excluded.status, sort_order = excluded.sort_order, updated_at = now()
-         RETURNING {ITEM_COLUMNS}"
-    ))
-    .bind(&id)
-    .bind(&body.kind)
-    .bind(label_text)
-    .bind(emoji)
-    .bind(model_url)
-    .bind(thumbnail_url)
-    .bind(&summary.clips)
-    .bind(source_ref)
-    .bind(status)
-    .bind(body.sort_order.unwrap_or(100))
-    .fetch_one(&state.db)
+/// `POST /api/catalog/admin/items/{id}/rollback`: the item shows one of its earlier versions again. Its status, order,
+/// name and emoji stay; the files are still in the store because stored files are never deleted.
+async fn rollback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Rollback>,
+) -> ApiResult<Json<Value>> {
+    require_admin(&state, &headers).await?;
+    let id = catalog_id(&id)?;
+    let moved = sqlx::query(
+        "UPDATE catalog_items i SET model_url = v.model_url, thumbnail_url = v.thumbnail_url, clips = v.clips,
+         source_ref = v.source_ref, character_id = COALESCE(v.character_id, i.character_id), version_id = v.id,
+         updated_at = now() FROM catalog_versions v WHERE i.id = $1 AND v.id = $2 AND v.item_id = i.id",
+    )
+    .bind(id)
+    .bind(body.version_id)
+    .execute(&state.db)
     .await?;
-    Ok((StatusCode::CREATED, Json(item(&row))).into_response())
+    if moved.rows_affected() == 0 {
+        return Err(not_found("version_not_found", "이 항목에 없는 버전입니다."));
+    }
+    admin_one(&state.db, id).await
+}
+
+/// Which copy stands for a character when several do: the public one first, then the newest.
+fn copy_rank(row: &PgRow) -> (u8, Reverse<DateTime<Utc>>) {
+    let rank = match row.get::<&str, _>("status") {
+        "published" => 0,
+        "draft" => 1,
+        _ => 2,
+    };
+    (rank, Reverse(row.get("updated_at")))
+}
+
+/// Finished characters on the character server, each with the catalog item that copies it, if any. Items match by
+/// character, so a remade job is an update of the same item, and a copy is current only while its job, assembly,
+/// chosen face and stage are the character's latest.
+async fn factory_characters(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let admin = require_admin(&state, &headers).await?;
+    let listing = studio::list(&state, &admin.username).await?;
+    let deadline = tokio::time::Instant::now() + FACE_BUDGET;
+    let lookups: Vec<_> = listing
+        .characters
+        .iter()
+        .map(|character| {
+            let face = studio::chosen_face(&state, &admin.username, &character.job_id, &character.version);
+            async move { tokio::time::timeout_at(deadline, face).await.ok().flatten() }
+        })
+        .collect();
+    let faces: Vec<Option<Option<String>>> = stream::iter(lookups).buffered(FACE_LOOKUPS).collect().await;
+    let rows = sqlx::query(
+        "SELECT i.id, i.label, i.emoji, i.status, i.thumbnail_url, i.source_ref, i.character_id, i.updated_at, v.stage
+         FROM catalog_items i LEFT JOIN catalog_versions v ON v.id = i.version_id WHERE i.source = 'factory'",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    // Each copy's character: recorded with it, or found through the job it was copied from.
+    let held: Vec<(String, &PgRow)> = rows
+        .iter()
+        .filter_map(|row| {
+            let character = row.get::<Option<String>, _>("character_id").or_else(|| {
+                let source: String = row.get::<Option<String>, _>("source_ref")?;
+                let job = source.split('/').next()?;
+                Some(listing.owners.get(job).cloned().unwrap_or_else(|| job.to_owned()))
+            })?;
+            Some((character, row))
+        })
+        .collect();
+    let characters: Vec<Value> = listing
+        .characters
+        .iter()
+        .zip(faces)
+        .map(|(character, face)| {
+            let key = character.character_id.as_deref().unwrap_or(&character.job_id);
+            let mut copies: Vec<&PgRow> = held.iter().filter(|(held, _)| held == key).map(|(_, row)| *row).collect();
+            copies.sort_by_key(|row| copy_rank(row));
+            let chosen = face.clone().flatten();
+            let imported = copies.first().map(|row| {
+                let freshness = studio::freshness(
+                    row.get::<Option<&str>, _>("source_ref").unwrap_or_default(),
+                    row.get("stage"),
+                    &character.job_id,
+                    &character.version,
+                    face.as_ref().map(Option::as_deref),
+                    &character.stage,
+                );
+                json!({
+                    "id": row.get::<String, _>("id"),
+                    "label": row.get::<String, _>("label"),
+                    "emoji": row.get::<String, _>("emoji"),
+                    "status": row.get::<String, _>("status"),
+                    "thumbnailUrl": row.get::<Option<String>, _>("thumbnail_url"),
+                    "sourceRef": row.get::<Option<String>, _>("source_ref"),
+                    "current": freshness == Freshness::Current,
+                    "freshness": freshness,
+                })
+            });
+            let mut value = serde_json::to_value(character).unwrap_or_default();
+            value["face"] = json!(chosen);
+            value["faceKnown"] = json!(face.is_some());
+            value["sourceRef"] = json!(studio::source_ref(&character.job_id, &character.version, chosen.as_deref()));
+            let model = studio::model_path(&character.job_id, &character.version, chosen.as_deref());
+            value["modelUrl"] = json!(format!("/api/factory/{model}"));
+            value["imported"] = imported.unwrap_or(Value::Null);
+            value["otherItems"] =
+                json!(copies.iter().skip(1).map(|row| row.get::<String, _>("id")).collect::<Vec<_>>());
+            value
+        })
+        .collect();
+    Ok(Json(json!({"characters": characters})))
 }
 
 #[cfg(test)]
@@ -263,14 +387,10 @@ mod tests {
     }
 
     #[test]
-    fn thumbnails_shrink_to_the_picker_size_and_keep_transparency() {
-        let mut canvas = image::RgbaImage::new(800, 600);
-        canvas.put_pixel(400, 300, image::Rgba([255, 0, 0, 255]));
-        let mut png = Cursor::new(Vec::new());
-        canvas.write_to(&mut png, ImageFormat::Png).unwrap();
-        let small = image::load_from_memory(&thumbnail(png.get_ref()).unwrap()).unwrap();
-        assert_eq!((small.width(), small.height()), (256, 192));
-        assert!(small.color().has_alpha());
-        assert!(thumbnail(b"not a picture").is_none());
+    fn only_known_kinds_and_statuses_pass() {
+        assert!(kind("minime").is_ok() && kind("furniture").is_ok());
+        assert_eq!(kind("hat").unwrap_err().code, "invalid_kind");
+        assert_eq!(status(Some("gone".into())).unwrap_err().code, "invalid_status");
+        assert_eq!(status(None).unwrap(), None);
     }
 }

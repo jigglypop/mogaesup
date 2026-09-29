@@ -201,6 +201,19 @@ async fn update(
     if minime.as_deref().is_some_and(|id| !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))) {
         return Err(bad("invalid_minime", "미니미를 확인해 주세요."));
     }
+    // Only what the picker offers: a published catalog 미니미, or a built-in one (always shipped with the app).
+    if let Some(id) = minime.as_deref() {
+        let pickable: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM catalog_items WHERE id = $1 AND kind = 'minime'
+             AND (status = 'published' OR source = 'builtin'))",
+        )
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+        if !pickable {
+            return Err(bad("invalid_minime", "고를 수 없는 미니미입니다."));
+        }
+    }
     let emoji = trimmed(changes.emoji, 1, 16, "invalid_emoji")?;
     if changes.mood.is_some_and(|mood| !(0..MOODS).contains(&mood)) {
         return Err(bad("invalid_mood", "기분을 확인해 주세요."));

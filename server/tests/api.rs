@@ -9,9 +9,16 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::{ORIGIN, TestApp};
-use mogaesup_server::config::{Factory, FactoryAccess, FactoryToken};
+use mogaesup_server::{
+    MIGRATOR,
+    config::{Factory, FactoryAccess, FactoryToken},
+};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[tokio::test]
 async fn 가입_로그인_로그아웃이_세션_쿠키로_이어진다() {
@@ -248,31 +255,76 @@ async fn 일촌을_맺으면_일촌_공개_홈을_볼_수_있다() {
     app.cleanup().await;
 }
 
-/// A GLB of just a JSON chunk.
-fn glb(json: Value) -> Vec<u8> {
+/// A GLB of a JSON chunk and, when `bin` is not empty, a binary chunk.
+fn glb_with(json: Value, bin: &[u8]) -> Vec<u8> {
     let mut chunk = serde_json::to_vec(&json).unwrap();
     while !chunk.len().is_multiple_of(4) {
         chunk.push(b' ');
     }
+    let mut data = bin.to_vec();
+    while !data.len().is_multiple_of(4) {
+        data.push(0);
+    }
+    let total = 12 + 8 + chunk.len() + if data.is_empty() { 0 } else { 8 + data.len() };
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&0x4654_6c67u32.to_le_bytes());
     bytes.extend_from_slice(&2u32.to_le_bytes());
-    bytes.extend_from_slice(&((12 + 8 + chunk.len()) as u32).to_le_bytes());
+    bytes.extend_from_slice(&(total as u32).to_le_bytes());
     bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
     bytes.extend_from_slice(b"JSON");
     bytes.extend_from_slice(&chunk);
+    if !data.is_empty() {
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"BIN\0");
+        bytes.extend_from_slice(&data);
+    }
     bytes
 }
 
-/// Rigged, with the clips the character server's Meshy delivery names.
-fn character_glb() -> Vec<u8> {
-    glb(json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}],
-        "animations": [{"name": "idle"}, {"name": "walk"}, {"name": "run"}, {"name": "sit"}]}))
+/// Rigged, with the clips the character server's Meshy delivery names; `name` makes each copy's bytes its own.
+fn character_glb(name: &str) -> Vec<u8> {
+    glb_with(
+        json!({"asset": {"version": "2.0", "generator": name}, "skins": [{"joints": [0]}],
+            "animations": [{"name": "idle"}, {"name": "walk"}, {"name": "run"}, {"name": "sit"}]}),
+        &[],
+    )
 }
 
 /// Animated but without a skin: nothing a 미니미 can be.
 fn statue_glb() -> Vec<u8> {
-    glb(json!({"asset": {"version": "2.0"}, "animations": [{"name": "idle"}, {"name": "walk"}]}))
+    glb_with(json!({"asset": {"version": "2.0"}, "animations": [{"name": "idle"}, {"name": "walk"}]}), &[])
+}
+
+/// A rigged 1.7 m figure: one triangle under a centimetre-scale root, with an 1100 px colour map the import shrinks.
+fn textured_glb() -> Vec<u8> {
+    let mut picture = std::io::Cursor::new(Vec::new());
+    image::RgbImage::new(1100, 1100).write_to(&mut picture, image::ImageFormat::Png).unwrap();
+    let picture = picture.into_inner();
+    glb_with(
+        json!({
+            "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
+            "nodes": [{"name": "Armature", "scale": [0.01, 0.01, 0.01], "children": [1]}, {"mesh": 0, "skin": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
+            "accessors": [{"componentType": 5126, "type": "VEC3", "count": 3, "min": [-20, 0, -10], "max": [20, 170, 10]}],
+            "skins": [{"joints": [0]}],
+            "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+            "textures": [{"source": 0}],
+            "images": [{"bufferView": 0, "mimeType": "image/png"}],
+            "buffers": [{"byteLength": picture.len()}],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": picture.len()}],
+            "animations": [{"name": "Armature|Idle"}, {"name": "Walking"}],
+        }),
+        &picture,
+    )
+}
+
+/// What the fake character server serves for a job and chosen face.
+fn served_model(job: &str, face: Option<&str>) -> Vec<u8> {
+    match job {
+        "statue" => statue_glb(),
+        "textured" => textured_glb(),
+        _ => character_glb(&format!("{job}/{}", face.unwrap_or("plain"))),
+    }
 }
 
 fn png(width: u32, height: u32) -> Vec<u8> {
@@ -286,10 +338,12 @@ fn sha256(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
-fn factory_job(id: &str, created: &str, model_sha: &str) -> Value {
-    json!({"id": id, "character_id": format!("c_{id}"), "character_name": format!("{id} 캐릭터"), "created_at": created,
+/// A sealed job of `character`, whose plain assembly records the SHA-256 of what the fake serves for it.
+fn factory_job(id: &str, character: &str, created: &str) -> Value {
+    json!({"id": id, "character_id": character, "character_name": format!("{id} 캐릭터"), "created_at": created,
         "production_mode": "character_parts", "assembly_version": "v3", "assembly_origin": "generated_parts_fitted_to_meshy_body",
-        "character_flow": {"stage": "complete"}, "assembly_artifacts": [{"name": "model.glb", "sha256": model_sha}]})
+        "character_flow": {"stage": "complete"},
+        "assembly_artifacts": [{"name": "model.glb", "sha256": sha256(&served_model(id, None))}]})
 }
 
 /// One request the fake character server received.
@@ -305,20 +359,65 @@ struct Call {
 #[derive(Clone, Default)]
 struct Seen(Arc<Mutex<Vec<Call>>>);
 
-/// A character server stand-in with three sealed characters and one still assembling: `job_1` has a chosen face,
-/// `statue` has no rig, `tampered` serves bytes its record does not match. Files redirect to a "presigned" URL.
-async fn fake_factory(seen: Seen) -> String {
+/// The fake character server's records, which a test changes to remake a character or choose another face.
+#[derive(Default)]
+struct StudioState {
+    jobs: Vec<Value>,
+    /// The chosen face per job; jobs without one answer 404 for their expressions.
+    faces: HashMap<String, String>,
+    /// Jobs whose model downloads take this long, so their imports stay running while a test looks.
+    slow: HashMap<String, Duration>,
+}
+
+#[derive(Clone, Default)]
+struct Studio(Arc<Mutex<StudioState>>);
+
+impl Studio {
+    /// Three sealed characters and one still assembling: `job_1` has a chosen face, `statue` has no rig and
+    /// `tampered` serves bytes its record does not match.
+    fn standard() -> Self {
+        let mut tampered = factory_job("tampered", "c_tampered", "2026-09-01T00:00:00Z");
+        tampered["assembly_artifacts"][0]["sha256"] = json!("0".repeat(64));
+        let studio = Self::with(vec![
+            factory_job("job_1", "c_job_1", "2026-09-03T00:00:00Z"),
+            factory_job("statue", "c_statue", "2026-09-02T00:00:00Z"),
+            tampered,
+            json!({"id": "wip", "production_mode": "character_parts", "assembly_version": null, "character_flow": {"stage": "assemble"}}),
+        ]);
+        studio.face("job_1", "smile");
+        studio
+    }
+
+    fn with(jobs: Vec<Value>) -> Self {
+        Self(Arc::new(Mutex::new(StudioState { jobs, ..Default::default() })))
+    }
+
+    fn face(&self, job: &str, face: &str) {
+        self.0.lock().unwrap().faces.insert(job.into(), face.into());
+    }
+
+    fn add(&self, job: Value) {
+        self.0.lock().unwrap().jobs.push(job);
+    }
+
+    fn stage(&self, job: &str, stage: &str) {
+        let mut state = self.0.lock().unwrap();
+        let job = state.jobs.iter_mut().find(|candidate| candidate["id"] == job).unwrap();
+        job["character_flow"]["stage"] = json!(stage);
+    }
+
+    fn slow(&self, job: &str, delay: Duration) {
+        self.0.lock().unwrap().slow.insert(job.into(), delay);
+    }
+}
+
+/// A character server stand-in serving `studio`'s records. Files redirect to a "presigned" URL on the same host.
+async fn fake_factory(seen: Seen, studio: Studio) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let jobs = json!({"jobs": [
-        factory_job("job_1", "2026-09-03T00:00:00Z", &sha256(&character_glb())),
-        factory_job("statue", "2026-09-02T00:00:00Z", &sha256(&statue_glb())),
-        factory_job("tampered", "2026-09-01T00:00:00Z", &"0".repeat(64)),
-        {"id": "wip", "production_mode": "character_parts", "assembly_version": null, "character_flow": {"stage": "assemble"}},
-    ]});
     let url = base.clone();
     let app = Router::new().fallback(move |request: Request| {
-        let (seen, jobs, base) = (seen.clone(), jobs.clone(), base.clone());
+        let (seen, studio, base) = (seen.clone(), studio.clone(), base.clone());
         async move {
             let headers = request.headers();
             let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -329,33 +428,45 @@ async fn fake_factory(seen: Seen) -> String {
                 gateway_key: get("x-gateway-key"),
                 cookie: get("cookie"),
             });
-            let redirect = |file: &str| {
+            let redirect = |file: String| {
                 (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, format!("{base}/signed/{file}"))]).into_response()
             };
             let path = request.uri().path().trim_start_matches('/').to_owned();
             let segments: Vec<&str> = path.split('/').collect();
+            let (jobs, faces, slow) = {
+                let state = studio.0.lock().unwrap();
+                (state.jobs.clone(), state.faces.clone(), state.slow.clone())
+            };
             match segments.as_slice() {
-                ["api", "avatar-factory", "jobs"] => Json(jobs).into_response(),
+                ["api", "avatar-factory", "jobs"] => Json(json!({"jobs": jobs})).into_response(),
                 ["api", "studio", "catalog"] => {
                     Json(json!({"items": {}, "parts": {"job_1:body": {"name": "공장 영웅"}}, "characters": {}}))
                         .into_response()
                 }
-                ["api", "avatar-factory", "jobs", id] => {
-                    match jobs["jobs"].as_array().unwrap().iter().find(|job| job["id"] == *id) {
-                        Some(job) => Json(job.clone()).into_response(),
-                        None => StatusCode::NOT_FOUND.into_response(),
-                    }
+                ["api", "avatar-factory", "jobs", id] => match jobs.iter().find(|job| job["id"] == *id) {
+                    Some(job) => Json(job.clone()).into_response(),
+                    None => StatusCode::NOT_FOUND.into_response(),
+                },
+                ["api", "studio", "bodies", job, _, "expressions"] => match faces.get(*job) {
+                    Some(face) => Json(json!({"selected": face, "items": [{"id": face,
+                        "artifacts": [{"name": "model.glb", "sha256": sha256(&served_model(job, Some(face.as_str())))}]}]}))
+                    .into_response(),
+                    None => StatusCode::NOT_FOUND.into_response(),
+                },
+                ["api", "studio", "bodies", job, _, "expressions", face, "model.glb"] => redirect(format!("{job}/{face}.glb")),
+                ["api", "avatar-factory", "jobs", job, "native-parts", _, "model.glb"] => redirect(format!("{job}/plain.glb")),
+                ["api", "avatar-factory", "jobs", "textured", "native-parts", _, "front.png"] => {
+                    StatusCode::NOT_FOUND.into_response()
                 }
-                ["api", "studio", "bodies", "job_1", "v3", "expressions"] => Json(json!({"selected": "smile",
-                    "items": [{"id": "smile", "artifacts": [{"name": "model.glb", "sha256": sha256(&character_glb())}]}]}))
-                .into_response(),
-                ["api", "studio", "bodies", "job_1", "v3", "expressions", "smile", "model.glb"] => redirect("face.glb"),
-                ["api", "avatar-factory", "jobs", "statue", "native-parts", "v3", "model.glb"] => redirect("statue.glb"),
-                ["api", "avatar-factory", "jobs", _, "native-parts", "v3", "model.glb"] => redirect("plain.glb"),
-                ["api", "avatar-factory", "jobs", _, "native-parts", "v3", "front.png"] => redirect("front.png"),
-                ["signed", "face.glb" | "plain.glb"] => character_glb().into_response(),
-                ["signed", "statue.glb"] => statue_glb().into_response(),
+                ["api", "avatar-factory", "jobs", _, "native-parts", _, "front.png"] => redirect("front.png".into()),
                 ["signed", "front.png"] => png(800, 800).into_response(),
+                ["signed", job, file] => {
+                    if let Some(delay) = slow.get(*job) {
+                        tokio::time::sleep(*delay).await;
+                    }
+                    let face = file.strip_suffix(".glb").filter(|face| *face != "plain");
+                    served_model(job, face).into_response()
+                }
                 ["api", ..] if path.contains("/expressions") => StatusCode::NOT_FOUND.into_response(),
                 _ => Json(json!({"ok": true})).into_response(),
             }
@@ -364,13 +475,12 @@ async fn fake_factory(seen: Seen) -> String {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     url
 }
-#[tokio::test]
-async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소로_가져오고_공개한다() {
-    let seen = Seen::default();
-    let url = fake_factory(seen.clone()).await;
+
+async fn factory_app(seen: &Seen, studio: Studio) -> TestApp {
+    let url = fake_factory(seen.clone(), studio).await;
     let token =
         FactoryToken { key: vec![3; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
-    let app = TestApp::new(Some(Factory {
+    TestApp::new(Some(Factory {
         url,
         api_key: Some("factory-key".into()),
         token: Some(token),
@@ -378,7 +488,50 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
         paid_monthly: 0,
         gateway_key: Some("gate".into()),
     }))
-    .await;
+    .await
+}
+
+const IMPORT: &str = "/api/catalog/admin/import";
+const LISTING: &str = "/api/catalog/admin/factory-characters";
+
+fn import_body(job: &str, id: &str, label: &str) -> Value {
+    json!({"id": id, "kind": "minime", "label": label, "emoji": "🦸", "factoryJobId": job})
+}
+
+/// Polls an import until it is done or failed.
+async fn finished(app: &TestApp, admin: &str, id: &str) -> Value {
+    for _ in 0..1200 {
+        let reply = app.call("GET", &format!("/api/catalog/admin/imports/{id}"), None, Some(admin)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        if matches!(reply.body["status"].as_str(), Some("done" | "failed")) {
+            return reply.body;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("import {id} did not finish");
+}
+
+/// Queues an import, checks it was accepted, and waits for its end.
+async fn import(app: &TestApp, admin: &str, body: Value) -> Value {
+    let queued = app.call("POST", IMPORT, Some(body), Some(admin)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    assert!(matches!(queued.body["status"].as_str(), Some("queued" | "running")), "{:?}", queued.body);
+    finished(app, admin, queued.body["id"].as_str().unwrap()).await
+}
+
+async fn admin_item(app: &TestApp, admin: &str, id: &str) -> Value {
+    let items = app.call("GET", "/api/catalog/admin/items", None, Some(admin)).await;
+    items.body["items"].as_array().unwrap().iter().find(|item| item["id"] == id).cloned().unwrap_or(Value::Null)
+}
+
+fn check<'a>(report: &'a Value, code: &str) -> &'a Value {
+    report["checks"].as_array().unwrap().iter().find(|check| check["code"] == code).unwrap_or(&Value::Null)
+}
+
+#[tokio::test]
+async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소로_가져오고_공개한다() {
+    let seen = Seen::default();
+    let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_f", "회원").await;
     let admin = app.register("operator_f", "운영자").await;
     app.make_admin("operator_f").await;
@@ -387,16 +540,19 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
         8
     );
 
-    let listing = "/api/catalog/admin/factory-characters";
-    assert_eq!(app.call("GET", listing, None, Some(&member)).await.status, StatusCode::FORBIDDEN);
-    let characters = app.call("GET", listing, None, Some(&admin)).await;
+    assert_eq!(app.call("GET", LISTING, None, Some(&member)).await.status, StatusCode::FORBIDDEN);
+    let characters = app.call("GET", LISTING, None, Some(&admin)).await;
     let ids: Vec<&str> =
         characters.body["characters"].as_array().unwrap().iter().map(|c| c["jobId"].as_str().unwrap()).collect();
     assert_eq!(ids, ["job_1", "statue", "tampered"]);
     let first = &characters.body["characters"][0];
     assert_eq!((first["name"].as_str(), first["version"].as_str()), (Some("공장 영웅"), Some("v3")));
     assert_eq!(first["thumbnailUrl"], "/api/factory/avatar-factory/jobs/job_1/native-parts/v3/front.png");
+    assert_eq!((first["face"].as_str(), first["faceKnown"].as_bool()), (Some("smile"), Some(true)));
+    assert_eq!(first["sourceRef"], "job_1/v3/smile");
+    assert_eq!(first["modelUrl"], "/api/factory/studio/bodies/job_1/v3/expressions/smile/model.glb");
     assert_eq!(first["imported"], Value::Null);
+    assert_eq!(characters.body["characters"][1]["face"], Value::Null);
     let calls = seen.0.lock().unwrap().clone();
     assert_eq!(calls[0].api_key.as_deref(), Some("factory-key"));
     assert_eq!(calls[0].gateway_key.as_deref(), Some("gate"));
@@ -405,41 +561,54 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(bearer.split('.').nth(1).unwrap()).unwrap()).unwrap();
     assert_eq!((claims["userId"].as_i64(), claims["roles"][0].as_str()), (Some(1), Some("ADMIN")));
 
-    let import = |job: &str, id: &str| json!({"id": id, "kind": "minime", "label": "공장 영웅", "emoji": "🦸", "factoryJobId": job});
-    let path = "/api/catalog/admin/import";
+    let refused = app.call("POST", IMPORT, Some(import_body("job_1", "hero", "공장 영웅")), Some(&member)).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    let done = import(&app, &admin, import_body("job_1", "factory-hero", "공장 영웅")).await;
     assert_eq!(
-        app.call("POST", path, Some(import("job_1", "hero")), Some(&member)).await.status,
-        StatusCode::FORBIDDEN
+        (done["status"].as_str(), done["step"].as_str(), done["progress"].as_i64()),
+        (Some("done"), Some("done"), Some(100))
     );
-    let imported = app.call("POST", path, Some(import("job_1", "factory-hero")), Some(&admin)).await;
-    assert_eq!(imported.status, StatusCode::CREATED, "{:?}", imported.body);
-    assert_eq!(imported.body["status"], "draft");
-    assert_eq!(imported.body["sourceRef"], "job_1/v3/smile");
-    assert_eq!(imported.body["clips"], json!(["idle", "run", "walk"]));
-    let model_url = imported.body["modelUrl"].as_str().unwrap().to_owned();
-    assert_eq!(model_url, format!("/models/{}.glb", sha256(&character_glb())));
+    assert_eq!((done["itemId"].as_str(), done["replaces"].as_bool()), (Some("factory-hero"), Some(false)));
+    assert_eq!((done["characterId"].as_str(), done["requestedBy"].as_str()), (Some("c_job_1"), Some("operator_f")));
+    let report = &done["report"];
+    assert_eq!(report["outcome"], "created");
+    for code in ["checksum", "glb", "skin", "clips", "thumbnail"] {
+        assert_eq!(check(report, code)["level"], "ok", "{code}: {report}");
+    }
+    assert!(check(report, "unused_clips")["message"].as_str().unwrap().contains("sit"));
+    assert_eq!(report["model"]["animations"], json!(["idle", "walk", "run", "sit"]));
+    assert_eq!(report["source"]["face"], "smile");
+
+    let item = admin_item(&app, &admin, "factory-hero").await;
+    assert_eq!(item["status"], "draft");
+    assert_eq!(item["sourceRef"], "job_1/v3/smile");
+    assert_eq!(item["characterId"], "c_job_1");
+    assert_eq!((item["versionCount"].as_i64(), item["versionId"].as_i64()), (Some(1), done["versionId"].as_i64()));
+    assert_eq!(item["clips"], json!(["idle", "run", "walk"]));
+    let model_url = item["modelUrl"].as_str().unwrap().to_owned();
+    let face_model = served_model("job_1", Some("smile"));
+    assert_eq!(model_url, format!("/models/{}.glb", sha256(&face_model)));
     let signed: Vec<Call> =
         seen.0.lock().unwrap().iter().filter(|call| call.uri.starts_with("/signed/")).cloned().collect();
     assert_eq!(
         signed.iter().map(|call| call.uri.as_str()).collect::<Vec<_>>(),
-        ["/signed/face.glb", "/signed/front.png"]
+        ["/signed/job_1/smile.glb", "/signed/front.png"]
     );
     assert!(signed.iter().all(|call| {
         call.authorization.is_none() && call.api_key.is_none() && call.gateway_key.is_none() && call.cookie.is_none()
     }));
 
     let model = app.call("GET", &model_url, None, None).await;
-    assert_eq!(model.bytes, character_glb());
+    assert_eq!(model.bytes, face_model);
     assert!(model.headers[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
-    let picture = app.call("GET", imported.body["thumbnailUrl"].as_str().unwrap(), None, None).await;
+    let picture = app.call("GET", item["thumbnailUrl"].as_str().unwrap(), None, None).await;
     let picture = image::load_from_memory(&picture.bytes).unwrap();
     assert_eq!((picture.width(), picture.height()), (256, 256));
 
-    let characters = app.call("GET", listing, None, Some(&admin)).await;
-    assert_eq!(
-        characters.body["characters"][0]["imported"],
-        json!({"id": "factory-hero", "status": "draft", "current": true})
-    );
+    let characters = app.call("GET", LISTING, None, Some(&admin)).await;
+    let imported = &characters.body["characters"][0]["imported"];
+    assert_eq!((imported["id"].as_str(), imported["status"].as_str()), (Some("factory-hero"), Some("draft")));
+    assert_eq!((imported["current"].as_bool(), imported["freshness"].as_str()), (Some(true), Some("current")));
     let hidden = app.call("GET", "/api/catalog/items", None, None).await;
     assert!(!hidden.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "factory-hero"));
     app.call("PATCH", "/api/catalog/admin/items/factory-hero", Some(json!({"status": "published"})), Some(&admin))
@@ -447,22 +616,327 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     let shown = app.call("GET", "/api/catalog/items?kind=minime", None, None).await;
     assert!(shown.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "factory-hero"));
 
-    let refused = |job: &'static str| {
-        let app = &app;
-        let admin = admin.clone();
-        async move { app.call("POST", path, Some(import(job, "other")), Some(&admin)).await }
+    // Problems the character server's answers reveal end the import as failed, with what was found.
+    let failed = |job: &'static str| {
+        let (app, admin) = (&app, admin.clone());
+        async move { import(app, &admin, import_body(job, "other", "다른 캐릭터")).await }
     };
-    assert_eq!(refused("statue").await.body["code"], "not_playable");
-    assert_eq!(refused("tampered").await.body["code"], "factory_checksum");
-    assert_eq!(refused("wip").await.body["code"], "factory_not_sealed");
-    assert_eq!(refused("nobody").await.status, StatusCode::NOT_FOUND);
-    assert_eq!(refused("../etc").await.status, StatusCode::NOT_FOUND);
+    let statue = failed("statue").await;
+    assert_eq!((statue["status"].as_str(), statue["errorCode"].as_str()), (Some("failed"), Some("not_playable")));
+    assert_eq!(statue["step"], "verify");
+    assert_eq!(check(&statue["report"], "skin")["level"], "error");
+    assert_eq!(check(&statue["report"], "clips")["level"], "ok");
+    assert_eq!(failed("tampered").await["errorCode"], "factory_checksum");
+    let wip = failed("wip").await;
+    assert_eq!((wip["errorCode"].as_str(), wip["step"].as_str()), (Some("factory_not_sealed"), Some("source")));
+    assert_eq!(failed("nobody").await["errorCode"], "factory_job_not_found");
+    // What needs no character server is refused before anything is queued.
+    let reply = app.call("POST", IMPORT, Some(import_body("../etc", "other", "다른 캐릭터")), Some(&admin)).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    let reply = app.call("POST", IMPORT, Some(import_body("job_1", "Bad Id", "다른 캐릭터")), Some(&admin)).await;
+    assert_eq!(reply.body["code"], "invalid_id");
+    let reply = app.call("POST", IMPORT, Some(import_body("job_1", "man", "청년")), Some(&admin)).await;
+    assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::CONFLICT, Some("builtin_item")));
+    assert_eq!(admin_item(&app, &admin, "other").await, Value::Null);
+
+    let recent = app.call("GET", "/api/catalog/admin/imports?limit=10", None, Some(&admin)).await;
+    let statuses: Vec<(&str, &str)> = recent.body["imports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|import| (import["factoryJobId"].as_str().unwrap(), import["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        statuses,
+        [("nobody", "failed"), ("wip", "failed"), ("tampered", "failed"), ("statue", "failed"), ("job_1", "done")]
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 다시_가져와도_공개_상태와_이름을_지키고_버전을_되돌릴_수_있다() {
+    let seen = Seen::default();
+    let studio = Studio::standard();
+    studio.slow("job_1", Duration::from_millis(400));
+    let app = factory_app(&seen, studio.clone()).await;
+    let admin = app.register("operator_v", "운영자").await;
+    app.make_admin("operator_v").await;
+
+    let queued = app.call("POST", IMPORT, Some(import_body("job_1", "hero", "영웅")), Some(&admin)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED);
+    // One import per item at a time.
+    let again = app.call("POST", IMPORT, Some(import_body("job_1", "hero", "영웅")), Some(&admin)).await;
+    assert_eq!((again.status, again.body["code"].as_str()), (StatusCode::CONFLICT, Some("import_running")));
+    let first = finished(&app, &admin, queued.body["id"].as_str().unwrap()).await;
+    assert_eq!(first["status"], "done", "{first}");
+    let first_url = admin_item(&app, &admin, "hero").await["modelUrl"].as_str().unwrap().to_owned();
+    let changes = json!({"status": "published", "label": "우리 영웅", "emoji": "🐶", "sortOrder": 5});
+    let patched = app.call("PATCH", "/api/catalog/admin/items/hero", Some(changes), Some(&admin)).await;
+    assert_eq!((patched.body["label"].as_str(), patched.body["usage"].as_i64()), (Some("우리 영웅"), Some(0)));
+
+    // The very same copy again changes nothing and adds no version.
+    let same = import(&app, &admin, import_body("job_1", "hero", "딴 이름")).await;
+    assert_eq!((same["replaces"].as_bool(), same["report"]["outcome"].as_str()), (Some(true), Some("unchanged")));
+    assert_eq!(same["versionId"], first["versionId"]);
+
+    // Another face is a new version of the same item, and the listing says so until it is copied.
+    studio.face("job_1", "wink");
+    let listing = app.call("GET", LISTING, None, Some(&admin)).await;
+    let imported = &listing.body["characters"][0]["imported"];
+    assert_eq!((imported["id"].as_str(), imported["freshness"].as_str()), (Some("hero"), Some("newFace")));
+    assert_eq!(imported["current"], false);
+    let updated = import(&app, &admin, import_body("job_1", "hero", "딴 이름")).await;
+    assert_eq!(updated["report"]["outcome"], "updated", "{updated}");
+    let item = admin_item(&app, &admin, "hero").await;
+    assert_eq!(
+        (item["status"].as_str(), item["label"].as_str(), item["emoji"].as_str(), item["sortOrder"].as_i64()),
+        (Some("published"), Some("우리 영웅"), Some("🐶"), Some(5))
+    );
+    assert_eq!(item["sourceRef"], "job_1/v3/wink");
+    assert_eq!(item["versionCount"], 2);
+    let second_url = item["modelUrl"].as_str().unwrap().to_owned();
+    assert_ne!(first_url, second_url);
+    let public = app.call("GET", "/api/catalog/items?kind=minime", None, None).await;
+    assert!(public.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "hero"));
+    let listing = app.call("GET", LISTING, None, Some(&admin)).await;
+    assert_eq!(listing.body["characters"][0]["imported"]["freshness"], "current");
+
+    // A remade job of the same character is an update of the same item.
+    studio.add(factory_job("job_1b", "c_job_1", "2026-09-10T00:00:00Z"));
+    let listing = app.call("GET", LISTING, None, Some(&admin)).await;
+    let remade = &listing.body["characters"][0];
+    assert_eq!(remade["jobId"], "job_1b");
+    assert_eq!(
+        (remade["imported"]["id"].as_str(), remade["imported"]["freshness"].as_str()),
+        (Some("hero"), Some("newJob"))
+    );
+
+    let versions = app.call("GET", "/api/catalog/admin/items/hero/versions", None, Some(&admin)).await;
+    let versions = versions.body["versions"].as_array().unwrap().clone();
+    assert_eq!(versions.len(), 2);
+    assert_eq!((versions[0]["current"].as_bool(), versions[1]["current"].as_bool()), (Some(true), Some(false)));
+    assert_eq!(versions[1]["sourceRef"], "job_1/v3/smile");
+    assert_eq!(versions[1]["createdBy"], "operator_v");
+    assert_eq!(versions[0]["report"]["outcome"], "updated");
+
+    let path = "/api/catalog/admin/items/hero/rollback";
+    let rolled = app.call("POST", path, Some(json!({"versionId": versions[1]["id"]})), Some(&admin)).await;
+    assert_eq!(rolled.status, StatusCode::OK, "{:?}", rolled.body);
+    assert_eq!(
+        (rolled.body["modelUrl"].as_str(), rolled.body["status"].as_str()),
+        (Some(first_url.as_str()), Some("published"))
+    );
+    assert_eq!(
+        (rolled.body["label"].as_str(), rolled.body["sourceRef"].as_str()),
+        (Some("우리 영웅"), Some("job_1/v3/smile"))
+    );
+    assert_eq!(rolled.body["versionId"], versions[1]["id"]);
+    // Both files stay in the store: nothing a version points at is deleted.
+    for url in [&first_url, &second_url] {
+        assert_eq!(app.call("GET", url, None, None).await.status, StatusCode::OK);
+    }
+    let missing = app.call("POST", path, Some(json!({"versionId": 999_999})), Some(&admin)).await;
+    assert_eq!(missing.body["code"], "version_not_found");
+    let foreign = app
+        .call(
+            "POST",
+            "/api/catalog/admin/items/man/rollback",
+            Some(json!({"versionId": versions[0]["id"]})),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변화를_알린다() {
+    let seen = Seen::default();
+    let studio = Studio::with(vec![factory_job("textured", "c_tex", "2026-09-05T00:00:00Z")]);
+    studio.stage("textured", "expressions");
+    let app = factory_app(&seen, studio.clone()).await;
+    let admin = app.register("operator_r", "운영자").await;
+    app.make_admin("operator_r").await;
+
+    let done = import(&app, &admin, import_body("textured", "tex", "텍스처")).await;
+    assert_eq!(done["status"], "done", "{done}");
+    let report = &done["report"];
+    assert_eq!((report["model"]["triangles"].as_i64(), report["model"]["vertices"].as_i64()), (Some(1), Some(3)));
+    let height = report["model"]["size"][1].as_f64().unwrap();
+    assert!((height - 1.7).abs() < 1e-3, "{height}");
+    assert_eq!(check(report, "height")["message"], "높이 1.70 m");
+    assert_eq!(report["model"]["clips"], json!(["idle", "walk"]));
+    assert_eq!(report["model"]["textures"][0]["width"], 1100);
+    assert_eq!(report["webTextures"][0]["width"], 1024);
+    assert_eq!(report["file"]["slimmed"], true);
+    assert!(report["file"]["webBytes"].as_u64().is_some_and(|bytes| bytes > 0));
+    assert_eq!(report["file"]["sha256"], sha256(&textured_glb()));
+    assert_eq!(check(report, "slim")["level"], "ok");
+    assert_eq!(check(report, "texture_size"), &Value::Null);
+    // No front render: a warning, and the item simply has no picture.
+    assert_eq!(check(report, "thumbnail")["level"], "warning");
+    assert_eq!(report["thumbnail"]["ok"], false);
+    assert!(!report["checks"].as_array().unwrap().iter().any(|check| check["level"] == "error"));
+    let item = admin_item(&app, &admin, "tex").await;
+    assert_eq!(item["thumbnailUrl"], Value::Null);
+    let versions = app.call("GET", "/api/catalog/admin/items/tex/versions", None, Some(&admin)).await;
+    assert_eq!(versions.body["versions"][0]["stage"], "expressions");
+    assert_eq!(versions.body["versions"][0]["report"]["model"]["triangles"], 1);
+
+    let listing = app.call("GET", LISTING, None, Some(&admin)).await;
+    assert_eq!(listing.body["characters"][0]["imported"]["freshness"], "current");
+    assert_eq!(listing.body["characters"][0]["faceKnown"], true);
+    // Its face finished baking: the studio moved on, so the copy is no longer the latest.
+    studio.stage("textured", "complete");
+    let listing = app.call("GET", LISTING, None, Some(&admin)).await;
+    assert_eq!(listing.body["characters"][0]["imported"]["freshness"], "newStage");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 서버가_다시_뜨면_멈춘_가져오기를_실패로_적는다() {
+    let app = TestApp::new(None).await;
+    let admin = app.register("operator_i", "운영자").await;
+    app.make_admin("operator_i").await;
+    for (item, status) in [("a1", "running"), ("a2", "queued"), ("a3", "done")] {
+        sqlx::query(
+            "INSERT INTO catalog_imports (id, item_id, kind, label, emoji, factory_job_id, status)
+             VALUES ($1, $2, 'minime', '이름', '🙂', 'job', $3)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(item)
+        .bind(status)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    }
+    assert_eq!(mogaesup_server::imports::interrupt_unfinished(&app.state.db).await.unwrap(), 2);
+    let recent = app.call("GET", "/api/catalog/admin/imports", None, Some(&admin)).await;
+    let mut found: Vec<(String, String, Option<String>)> = recent.body["imports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|import| {
+            let text = |key: &str| import[key].as_str().map(str::to_owned);
+            (text("itemId").unwrap(), text("status").unwrap(), text("errorCode"))
+        })
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("a1".into(), "failed".into(), Some("interrupted".into())),
+            ("a2".into(), "failed".into(), Some("interrupted".into())),
+            ("a3".into(), "done".into(), None),
+        ]
+    );
+    // Without a character server there is nothing to queue.
+    let reply = app.call("POST", IMPORT, Some(import_body("job_1", "hero", "영웅")), Some(&admin)).await;
+    assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("factory_unavailable")));
+    let missing = app.call("GET", "/api/catalog/admin/imports/not-a-uuid", None, Some(&admin)).await;
+    assert_eq!(missing.body["code"], "import_not_found");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 버전을_두기_전에_가져온_항목은_지금_모델이_첫_버전이_된다() {
+    use sqlx::{Row, migrate::Migrate, postgres::PgPoolOptions};
+    let url = std::env::var("TEST_ADMIN_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres-dev@127.0.0.1:55432/postgres".into());
+    let admin = PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+    let name = format!("test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE {name}")).execute(&admin).await.unwrap();
+    let db_url = format!("{}/{name}", url.rsplit_once('/').unwrap().0);
+    let db = PgPoolOptions::new().max_connections(2).connect(&db_url).await.unwrap();
+    // Found by name, so the check survives a renumbering of the file.
+    let pipeline = MIGRATOR.iter().find(|m| m.description == "catalog pipeline").unwrap().version;
+    let mut conn = db.acquire().await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    for migration in MIGRATOR.iter().filter(|m| m.version < pipeline) {
+        conn.apply(migration).await.unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO catalog_items (id, kind, label, emoji, model_url, thumbnail_url, clips, source, source_ref, status)
+         VALUES ('legacy', 'minime', '옛 캐릭터', '🙂', '/models/old.glb', '/models/old.png', '{idle,walk}', 'factory',
+         'job_0/v1/smile', 'published')",
+    )
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    MIGRATOR.run(&db).await.unwrap();
+    let row = sqlx::query(
+        "SELECT v.model_url, v.thumbnail_url, v.source_ref, v.clips, i.status FROM catalog_items i
+         JOIN catalog_versions v ON v.id = i.version_id WHERE i.id = 'legacy'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("model_url"), "/models/old.glb");
+    assert_eq!(row.get::<Option<String>, _>("thumbnail_url").as_deref(), Some("/models/old.png"));
+    assert_eq!(row.get::<Option<String>, _>("source_ref").as_deref(), Some("job_0/v1/smile"));
+    assert_eq!(row.get::<Vec<String>, _>("clips"), ["idle", "walk"]);
+    assert_eq!(row.get::<String, _>("status"), "published");
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_versions").fetch_one(&db).await.unwrap();
+    assert_eq!(versions, 1, "built-in items get no versions");
+    db.close().await;
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).execute(&admin).await.unwrap();
+}
+
+#[tokio::test]
+async fn 미니미는_공개된_카탈로그나_기본_미니미만_고른다() {
+    let app = TestApp::new(None).await;
+    let member = app.register("member_m", "회원").await;
+    let admin = app.register("operator_m", "운영자").await;
+    app.make_admin("operator_m").await;
+    sqlx::query(
+        "INSERT INTO catalog_items (id, kind, label, emoji, model_url, source, status) VALUES
+         ('fresh', 'minime', '새 친구', '🙂', '/models/fresh.glb', 'factory', 'draft'),
+         ('lamp', 'furniture', '등', '💡', '/models/lamp.glb', 'factory', 'published')",
+    )
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let pick = |id: &'static str| {
+        let (app, member) = (&app, member.clone());
+        async move { app.call("PATCH", "/api/homes/me", Some(json!({"minime": id})), Some(&member)).await }
+    };
+    for refused in ["nobody", "fresh", "lamp"] {
+        let reply = pick(refused).await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid_minime")),
+            "{refused}"
+        );
+    }
+    app.call("PATCH", "/api/catalog/admin/items/fresh", Some(json!({"status": "published"})), Some(&admin)).await;
+    assert_eq!(pick("fresh").await.body["profile"]["minime"], "fresh");
+    assert_eq!(admin_item(&app, &admin, "fresh").await["usage"], 1);
+
+    // Retiring takes a 미니미 off the picker; a built-in stays pickable because the app ships it.
+    let path = "/api/catalog/admin/bulk-status";
+    let bulk =
+        app.call("POST", path, Some(json!({"ids": ["fresh", "teacher"], "status": "retired"})), Some(&admin)).await;
+    let statuses: Vec<(&str, &str)> = bulk.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (item["id"].as_str().unwrap(), item["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(statuses, [("teacher", "retired"), ("fresh", "retired")]);
+    let public = app.call("GET", "/api/catalog/items?kind=minime", None, None).await;
     assert!(
-        app.call("GET", "/api/catalog/admin/items", None, Some(&admin)).await.body["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["id"] != "other")
+        !public.body["items"].as_array().unwrap().iter().any(|item| item["id"] == "fresh" || item["id"] == "teacher")
+    );
+    assert_eq!(pick("fresh").await.body["code"], "invalid_minime");
+    assert_eq!(pick("teacher").await.body["profile"]["minime"], "teacher");
+    let bad = app.call("POST", path, Some(json!({"ids": [], "status": "retired"})), Some(&admin)).await;
+    assert_eq!(bad.body["code"], "invalid_ids");
+    let bad = app.call("POST", path, Some(json!({"ids": ["fresh"], "status": "gone"})), Some(&admin)).await;
+    assert_eq!(bad.body["code"], "invalid_status");
+    assert_eq!(
+        app.call("POST", path, Some(json!({"ids": ["fresh"], "status": "draft"})), Some(&member)).await.status,
+        StatusCode::FORBIDDEN
     );
     app.cleanup().await;
 }
@@ -470,7 +944,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
 #[tokio::test]
 async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통과한다() {
     let seen = Seen::default();
-    let url = fake_factory(seen.clone()).await;
+    let url = fake_factory(seen.clone(), Studio::standard()).await;
     let token =
         FactoryToken { key: vec![5; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
     let app = TestApp::new(Some(Factory {
@@ -499,7 +973,7 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
 }
 
 async fn studio_app(seen: &Seen, access: FactoryAccess, paid_monthly: i64) -> TestApp {
-    let url = fake_factory(seen.clone()).await;
+    let url = fake_factory(seen.clone(), Studio::standard()).await;
     let token =
         FactoryToken { key: vec![7; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 };
     TestApp::new(Some(Factory { url, api_key: None, token: Some(token), access, paid_monthly, gateway_key: None }))

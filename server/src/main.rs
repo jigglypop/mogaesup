@@ -1,5 +1,5 @@
 use anyhow::Context;
-use mogaesup_server::{AppState, auth, config::Config, router};
+use mogaesup_server::{AppState, auth, config::Config, imports, router};
 use sqlx::postgres::PgPoolOptions;
 use std::env;
 
@@ -17,6 +17,10 @@ async fn main() -> anyhow::Result<()> {
     // a newer release already migrated. Migrations stay additive.
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
+    let interrupted = imports::interrupt_unfinished(&db).await.context("interrupted catalog imports")?;
+    if interrupted > 0 {
+        tracing::warn!(interrupted, "Catalog imports cut short by the last shutdown were marked failed");
+    }
     let state = AppState::new(db.clone(), Config::from_env()?);
     if let (Ok(username), Ok(password)) = (env::var("BOOTSTRAP_ADMIN_USERNAME"), env::var("BOOTSTRAP_ADMIN_PASSWORD")) {
         auth::bootstrap_admin(&state, &username, &password).await.context("bootstrap admin")?;

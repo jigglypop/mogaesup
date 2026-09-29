@@ -8,12 +8,14 @@ use std::collections::HashMap;
 
 use crate::{
     AppState,
-    error::{ApiResult, conflict, not_found},
+    error::{ApiError, ApiResult, conflict, not_found},
     factory::fetch_json,
 };
 
 /// Character-flow stages of a sealed assembly: faces done, or still being baked.
 const FINISHED_STAGES: [&str; 2] = ["complete", "expressions"];
+
+pub const JOB_NOT_FOUND: ApiError = not_found("factory_job_not_found", "캐릭터 서버에 없는 작업입니다.");
 
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -29,14 +31,39 @@ pub struct Character {
     pub thumbnail_url: String,
 }
 
-/// Where a character's playable model and front render are, and the model's recorded SHA-256.
+/// Where a character's playable model and front render are, the model's recorded SHA-256, and what it was made from.
 #[derive(Debug, PartialEq)]
 pub struct Source {
+    pub job_id: String,
+    pub character_id: Option<String>,
+    pub stage: Option<String>,
     pub version: String,
     pub expression: Option<String>,
     pub model_path: String,
     pub model_sha256: Option<String>,
     pub thumbnail_path: String,
+}
+
+impl Source {
+    /// `job/version` or `job/version/face`: what a catalog copy of this model records as its `source_ref`.
+    pub fn source_ref(&self) -> String {
+        source_ref(&self.job_id, &self.version, self.expression.as_deref())
+    }
+}
+
+pub fn source_ref(job: &str, version: &str, face: Option<&str>) -> String {
+    match face {
+        Some(face) => format!("{job}/{version}/{face}"),
+        None => format!("{job}/{version}"),
+    }
+}
+
+/// The playable model under the character server's `/api/`: the copy with `face` baked in, or the plain assembly.
+pub fn model_path(job: &str, version: &str, face: Option<&str>) -> String {
+    match face {
+        Some(face) => format!("studio/bodies/{job}/{version}/expressions/{face}/model.glb"),
+        None => format!("avatar-factory/jobs/{job}/native-parts/{version}/model.glb"),
+    }
 }
 
 /// Ids the character server hands out, checked before they become path segments.
@@ -116,10 +143,43 @@ pub fn finished(jobs: &Value, catalog: &Value) -> Vec<Character> {
     characters
 }
 
-pub async fn list(state: &AppState, username: &str) -> ApiResult<Vec<Character>> {
+/// Which character each job belongs to: its `character_id`, or the job itself when it has none. Covers every job,
+/// finished or not, so a catalog copy of an older job still finds its character.
+pub fn owners(jobs: &Value) -> HashMap<String, String> {
+    jobs["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|job| {
+            let id = text(job, "id")?;
+            Some((id.to_owned(), text(job, "character_id").unwrap_or(id).to_owned()))
+        })
+        .collect()
+}
+
+/// The finished characters, and the character behind every job id.
+pub struct Listing {
+    pub characters: Vec<Character>,
+    pub owners: HashMap<String, String>,
+}
+
+pub async fn list(state: &AppState, username: &str) -> ApiResult<Listing> {
     let jobs = fetch_json(state, username, "avatar-factory/jobs").await?.unwrap_or_default();
     let catalog = fetch_json(state, username, "studio/catalog").await?.unwrap_or_default();
-    Ok(finished(&jobs, &catalog))
+    Ok(Listing { characters: finished(&jobs, &catalog), owners: owners(&jobs) })
+}
+
+/// The chosen face in an expressions listing, when it is one of the listed faces.
+fn selected(listing: &Value) -> Option<(&str, &Value)> {
+    let id = text(listing, "selected").and_then(segment)?;
+    let item = listing["items"].as_array()?.iter().find(|item| text(item, "id") == Some(id))?;
+    Some((id, item))
+}
+
+/// The face chosen for a sealed assembly: `Some(None)` when none is, None when the character server could not say.
+pub async fn chosen_face(state: &AppState, username: &str, job: &str, version: &str) -> Option<Option<String>> {
+    let listing = fetch_json(state, username, &format!("studio/bodies/{job}/{version}/expressions")).await.ok()?;
+    Some(listing.as_ref().and_then(selected).map(|(id, _)| id.to_owned()))
 }
 
 /// A job's sealed assembly and, when its face is chosen, the copy with that face baked in.
@@ -127,43 +187,71 @@ pub fn source_of(job_id: &str, job: &Value, expressions: Option<&Value>) -> ApiR
     let version = text(job, "assembly_version")
         .and_then(segment)
         .ok_or(conflict("factory_not_sealed", "아직 조립이 끝나지 않은 캐릭터입니다."))?;
-    let selected = expressions.and_then(|listing| {
-        let id = text(listing, "selected").and_then(segment)?;
-        let item = listing["items"].as_array()?.iter().find(|item| text(item, "id") == Some(id))?;
-        Some((id, item))
-    });
-    let (expression, model_path, model_sha256) = match selected {
-        Some((id, item)) => (
-            Some(id.to_owned()),
-            format!("studio/bodies/{job_id}/{version}/expressions/{id}/model.glb"),
-            artifact_sha256(item.get("artifacts"), "model.glb"),
-        ),
-        None => (
-            None,
-            format!("avatar-factory/jobs/{job_id}/native-parts/{version}/model.glb"),
-            artifact_sha256(job.get("assembly_artifacts"), "model.glb"),
-        ),
+    let (expression, model_sha256) = match expressions.and_then(selected) {
+        Some((id, item)) => (Some(id.to_owned()), artifact_sha256(item.get("artifacts"), "model.glb")),
+        None => (None, artifact_sha256(job.get("assembly_artifacts"), "model.glb")),
     };
     Ok(Source {
+        job_id: job_id.to_owned(),
+        character_id: text(job, "character_id").map(str::to_owned),
+        stage: job["character_flow"]["stage"].as_str().map(str::to_owned),
         version: version.to_owned(),
+        model_path: model_path(job_id, version, expression.as_deref()),
         expression,
-        model_path,
         model_sha256,
         thumbnail_path: thumbnail_path(job_id, version),
     })
 }
 
 pub async fn source(state: &AppState, username: &str, job_id: &str) -> ApiResult<Source> {
-    let job_id = segment(job_id).ok_or(not_found("factory_job_not_found", "캐릭터 서버에 없는 작업입니다."))?;
-    let job = fetch_json(state, username, &format!("avatar-factory/jobs/{job_id}"))
-        .await?
-        .ok_or(not_found("factory_job_not_found", "캐릭터 서버에 없는 작업입니다."))?;
+    let job_id = segment(job_id).ok_or(JOB_NOT_FOUND)?;
+    let job = fetch_json(state, username, &format!("avatar-factory/jobs/{job_id}")).await?.ok_or(JOB_NOT_FOUND)?;
     let version = text(&job, "assembly_version").and_then(segment);
     let expressions = match version {
         Some(version) => fetch_json(state, username, &format!("studio/bodies/{job_id}/{version}/expressions")).await?,
         None => None,
     };
     source_of(job_id, &job, expressions.as_ref())
+}
+
+/// How a catalog copy compares with its character's newest finished state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Freshness {
+    Current,
+    /// The character was made again in another job.
+    NewJob,
+    /// The job was sealed again as another assembly.
+    NewVersion,
+    /// Another face was chosen, or one was chosen or dropped.
+    NewFace,
+    /// The character moved on in the studio flow, e.g. its face finished baking.
+    NewStage,
+}
+
+/// Compares a copy's `source_ref` and stage with the character's job, version, chosen face (`None` when unknown, and
+/// then not compared) and stage. Copies made before stages were recorded have none and match any.
+pub fn freshness(
+    stored_ref: &str,
+    stored_stage: Option<&str>,
+    job: &str,
+    version: &str,
+    face: Option<Option<&str>>,
+    stage: &str,
+) -> Freshness {
+    let mut parts = stored_ref.splitn(3, '/');
+    let (stored_job, stored_version, stored_face) = (parts.next(), parts.next(), parts.next());
+    if stored_job != Some(job) {
+        Freshness::NewJob
+    } else if stored_version != Some(version) {
+        Freshness::NewVersion
+    } else if face.is_some_and(|face| face != stored_face) {
+        Freshness::NewFace
+    } else if stored_stage.is_some_and(|stored| stored != stage) {
+        Freshness::NewStage
+    } else {
+        Freshness::Current
+    }
 }
 
 #[cfg(test)]
@@ -209,7 +297,34 @@ mod tests {
         let baked = source_of("j1", &job, Some(&faces)).unwrap();
         assert_eq!(baked.model_path, "studio/bodies/j1/v1/expressions/smile/model.glb");
         assert_eq!((baked.expression.as_deref(), baked.model_sha256.as_deref()), (Some("smile"), Some("bb")));
+        assert_eq!((plain.source_ref(), baked.source_ref()), ("j1/v1".to_owned(), "j1/v1/smile".to_owned()));
+        assert_eq!((baked.character_id.as_deref(), baked.stage.as_deref()), (Some("c1"), Some("complete")));
         let unsealed = json!({"id": "j2"});
         assert_eq!(source_of("j2", &unsealed, None).unwrap_err().code, "factory_not_sealed");
+    }
+
+    #[test]
+    fn every_job_belongs_to_its_character_or_itself() {
+        let jobs =
+            json!({"jobs": [job("old", "c1", "2026-09-01", "assemble"), {"id": "loose"}, {"character_id": "c9"}]});
+        let owners = owners(&jobs);
+        assert_eq!((owners["old"].as_str(), owners["loose"].as_str(), owners.len()), ("c1", "loose", 2));
+    }
+
+    #[test]
+    fn copies_stay_current_until_the_job_version_face_or_stage_moves_on() {
+        use Freshness::*;
+        let check = |stored, stored_stage, face, stage| freshness(stored, stored_stage, "j1", "v2", face, stage);
+        let smile = Some(Some("smile"));
+        assert_eq!(check("j1/v2/smile", Some("complete"), smile, "complete"), Current);
+        assert_eq!(check("j0/v2/smile", Some("complete"), smile, "complete"), NewJob);
+        assert_eq!(check("j1/v1/smile", Some("complete"), smile, "complete"), NewVersion);
+        assert_eq!(check("j1/v2/smile", Some("complete"), Some(Some("wink")), "complete"), NewFace);
+        assert_eq!(check("j1/v2", Some("complete"), smile, "complete"), NewFace);
+        assert_eq!(check("j1/v2/smile", Some("complete"), Some(None), "complete"), NewFace);
+        // A face the character server could not report is not held against the copy.
+        assert_eq!(check("j1/v2/smile", Some("complete"), None, "complete"), Current);
+        assert_eq!(check("j1/v2", Some("expressions"), Some(None), "complete"), NewStage);
+        assert_eq!(check("j1/v2", None, Some(None), "complete"), Current);
     }
 }

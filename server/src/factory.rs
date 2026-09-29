@@ -9,7 +9,10 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     AppState,
@@ -124,6 +127,11 @@ pub fn operator_token(token: &FactoryToken, username: &str) -> String {
 
 fn factory(state: &AppState) -> ApiResult<&Factory> {
     state.config.factory.as_ref().ok_or(UNAVAILABLE)
+}
+
+/// Refuses up front when this server has no character server to reach.
+pub fn configured(state: &AppState) -> ApiResult<()> {
+    factory(state).map(|_| ())
 }
 
 fn signed(request: reqwest::RequestBuilder, factory: &Factory, username: &str) -> reqwest::RequestBuilder {
@@ -359,9 +367,27 @@ fn unavailable(error: reqwest::Error) -> ApiError {
     UNAVAILABLE
 }
 
+/// How much of a download has arrived, and the size the server announced (0 when it did not).
+#[derive(Default)]
+pub struct Received {
+    pub bytes: AtomicUsize,
+    pub total: AtomicUsize,
+}
+
 /// A file under the character server's `/api/`, at most `limit` bytes. Its files answer with a presigned S3 redirect,
 /// followed here without the operator token or key.
 pub async fn fetch_file(state: &AppState, username: &str, api_path: &str, limit: usize) -> ApiResult<Vec<u8>> {
+    fetch_file_counted(state, username, api_path, limit, None).await
+}
+
+/// [`fetch_file`], counting what has arrived into `received` as it streams in.
+pub async fn fetch_file_counted(
+    state: &AppState,
+    username: &str,
+    api_path: &str,
+    limit: usize,
+    received: Option<&Received>,
+) -> ApiResult<Vec<u8>> {
     let factory = factory(state)?;
     let url = format!("{}/api/{api_path}", factory.url);
     let mut response =
@@ -384,12 +410,18 @@ pub async fn fetch_file(state: &AppState, username: &str, api_path: &str, limit:
     if response.content_length().is_some_and(|length| length as usize > limit) {
         return Err(too_large());
     }
+    if let (Some(received), Some(length)) = (received, response.content_length()) {
+        received.total.store(length as usize, Ordering::Relaxed);
+    }
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         bytes.extend_from_slice(&chunk.map_err(unavailable)?);
         if bytes.len() > limit {
             return Err(too_large());
+        }
+        if let Some(received) = received {
+            received.bytes.store(bytes.len(), Ordering::Relaxed);
         }
     }
     Ok(bytes)
