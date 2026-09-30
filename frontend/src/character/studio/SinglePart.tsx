@@ -10,6 +10,7 @@ import { MeshyOptionsEditor } from './MeshyOptionsEditor';
 import { useMeshyOptions, meshyOptionsError } from './meshy-options';
 import { HairBatch } from './HairBatch';
 import { GlbAssetLibrary } from './GlbAssetLibrary';
+import garmentStyles from './garment-styles.json';
 
 const methodOptions: Partial<Record<string, [PartMethod, string][]>> = {
   top: [['worn', '입힌 채 3D 생성'], ['body_shell', '몸에 맞춰 만들기'], ['isolated', '단독 3D 생성']],
@@ -40,6 +41,8 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const [ease, setEase] = useState<'source' | 'regular' | 'loose'>('source');
   const [partMethod, setPartMethod] = useState<PartMethod>(methodOptions[slot]?.[0]?.[0] || 'isolated');
   const [provider, setProvider] = useState<'meshy' | 'tripo'>('meshy');
+  const [partName, setPartName] = useState('');
+  const [brief, setBrief] = useState('');
   const [capabilities, setCapabilities] = useState<FactoryCapabilities>();
   const [busy, setBusy] = useState(false);
   const meshy = useMeshyOptions(slot);
@@ -50,6 +53,14 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const pending = recovery.pending;
   const differentPending = !!pending && pending.input.slot !== slot;
   const inputLocked = busy || meshyUploading || !!pending || !!recovery.error;
+  // Designed garments for this slot: picking one fills its name, brief and lower-garment kind.
+  const styles = garmentStyles.garments.filter(item => item.slot === slot);
+  const chooseStyle = (styleName: string) => {
+    const style = styles.find(item => item.name === styleName);
+    setPartName(style?.name || '');
+    setBrief(style ? `${style.brief} ${garmentStyles.style}` : '');
+    if (style && 'bottom_kind' in style) setBottomKind(style.bottom_kind as 'pants' | 'skirt');
+  };
   const batchMode = slot === 'hair' && inputMode === 'batch' && !pending;
 
   useEffect(() => { setInputMode(slot === 'hair' ? 'batch' : 'generate'); setPartMethod(methodOptions[slot]?.[0]?.[0] || 'isolated'); }, [slot]);
@@ -72,6 +83,8 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
     setEase(pending.input.fit_profile?.ease || 'source');
     if (pending.input.part_method) setPartMethod(pending.input.part_method);
     if (pending.input.model_provider) setProvider(pending.input.model_provider);
+    setPartName(pending.input.part_name || '');
+    setBrief(pending.input.description || '');
   }, [pending?.key]);
 
   async function submit() {
@@ -89,6 +102,8 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
       ...(partMethod !== 'body_shell' ? { meshy_options: meshy.options } : {}),
       ...(methodOptions[slot] ? { part_method: partMethod } : {}),
       ...(partMethod !== 'body_shell' && (capabilities?.model_providers?.length || 0) > 1 ? { model_provider: provider } : {}),
+      ...(partName.trim() ? { part_name: partName.trim() } : {}),
+      ...(brief.trim() ? { description: brief.trim() } : {}),
     } : undefined);
     if (!input) return;
     locked.current = true;
@@ -134,6 +149,10 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
       {(slot === 'top' || slot === 'bottom') && <label>여유<select value={ease} disabled={inputLocked} onChange={event => setEase(event.target.value as typeof ease)}><option value="source">원본대로</option><option value="regular">보통</option><option value="loose">여유 있음</option></select></label>}
       {!batchMode && methodOptions[slot] && <label>만드는 방식<select value={pending?.input.part_method || partMethod} disabled={inputLocked} onChange={event => setPartMethod(event.target.value as PartMethod)}>{methodOptions[slot]!.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}
       {!batchMode && partMethod !== 'body_shell' && (capabilities?.model_providers?.length || 0) > 1 && <label>3D 제공자<select value={pending?.input.model_provider || provider} disabled={inputLocked} onChange={event => setProvider(event.target.value as 'meshy' | 'tripo')}>{capabilities!.model_providers!.map(value => <option key={value} value={value}>{value === 'tripo' ? 'Tripo' : 'Meshy'}</option>)}</select></label>}
+      {!batchMode && styles.length > 0 && <label>스타일<select value={styles.find(item => item.name === partName)?.name || ''} disabled={inputLocked} onChange={event => chooseStyle(event.target.value)}>
+        <option value="">직접 입력</option>{styles.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label>}
+      {!batchMode && <label>이름<input value={pending?.input.part_name ?? partName} maxLength={100} disabled={inputLocked} onChange={event => setPartName(event.target.value)} /></label>}
+      {!batchMode && <label>디자인<textarea value={pending?.input.description ?? brief} maxLength={2000} rows={5} disabled={inputLocked} onChange={event => setBrief(event.target.value)} /></label>}
       {!batchMode && <a className="prompt-management-link" href="/?tab=prompts&promptGroup=parts" target="_blank" rel="noreferrer">프롬프트 관리</a>}
       {!batchMode && partMethod !== 'body_shell' && (pending?.input.model_provider || provider) === 'meshy' && outputSettings}
       {batchMode && <HairBatch baseId={base?.id} version={native?.version} disabled={inputLocked} setup={baseSelector} onJob={result => { onBaseChange(result.base_job_id || result.id); onJob(result); setInputMode('generate'); }} />}

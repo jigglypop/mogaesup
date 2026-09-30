@@ -1,0 +1,32 @@
+{
+  "style": "Style: cute stylized 3D game avatar clothing for a chibi character, clean simplified shapes, soft matte fabric, gentle harmonious colours, no logos, no text, no tiny details.",
+  "garments": [
+    { "slot": "top", "name": "라벤더 오버핏 후드티", "brief": "Oversized pullover hoodie in soft lavender with the hood DOWN, lying flat on the upper back and shoulders, never worn on the head. Front kangaroo pocket, cream drawstrings, ribbed cuffs and hem, relaxed dropped shoulders, long sleeves." },
+    { "slot": "top", "name": "크림 꽈배기 가디건", "brief": "Cropped chunky cable-knit cardigan in warm cream, buttoned up with round pearl buttons, V-neck, puffy long sleeves with ribbed cuffs, ribbed waistband." },
+    { "slot": "top", "name": "바시티 재킷", "brief": "Varsity jacket with a cream wool body and navy blue sleeves, navy-and-cream striped ribbed collar, cuffs and hem, white snap buttons down the front, one round chenille patch with a simple star on the left chest." },
+    { "slot": "top", "name": "민트 패딩 조끼", "brief": "Glossy mint-green puffer vest with horizontal quilted baffles and a stand-up collar, zipped closed, worn over a plain white long-sleeve tee." },
+    { "slot": "top", "name": "세일러 칼라 블라우스", "brief": "Loose white long-sleeve blouse with a large square navy sailor collar trimmed with two thin white stripes and a red ribbon bow at the chest." },
+    { "slot": "top", "name": "아가일 니트 조끼", "brief": "Preppy sage-green argyle knit sweater vest with a V-neck, layered over a crisp white collared long-sleeve shirt with the collar showing." },
+    { "slot": "top", "name": "컬러블록 바람막이", "brief": "Retro colour-block windbreaker anorak in coral, cream and sky-blue panels, half-zip stand collar, elastic cuffs, light nylon with a soft sheen, relaxed fit." },
+    { "slot": "top", "name": "뽀글이 플리스 집업", "brief": "Fluffy boa fleece zip-up jacket in oatmeal cream with chocolate-brown nylon trim on the collar, zipper and chest pocket, relaxed fit, long sleeves." },
+    { "slot": "top", "name": "스트라이프 럭비 셔츠", "brief": "Oversized long-sleeve rugby shirt with wide horizontal stripes in butter yellow and navy, white contrast collar and a short three-button placket." },
+    { "slot": "top", "name": "코듀로이 셔켓", "brief": "Camel corduroy shirt-jacket worn open over a plain white tee, two flap chest pockets, large brown buttons, relaxed fit, long sleeves." },
+    { "slot": "top", "name": "도트 원피스", "brief": "Short-sleeve A-line dress in soft pink with small white polka dots and a white rounded Peter Pan collar, falling to just above the knees." },
+    { "slot": "top", "name": "생활한복 저고리", "brief": "Modern hanbok jeogori top in pastel sky blue with a white collar strip along the crossed V neckline and a long pink ribbon tie at the chest, gently curved wide long sleeves." },
+    { "slot": "bottom", "name": "와이드 카고 팬츠", "brief": "Wide-leg cargo pants in stone beige with large flap side pockets on both thighs and drawstring ankle cuffs, relaxed fit.", "bottom_kind": "pants" },
+    { "slot": "bottom", "name": "체크 플리츠 스커트", "brief": "Pleated mini skirt in a soft muted navy and forest-green tartan check with even knife pleats, reaching mid-thigh.", "bottom_kind": "skirt" },
+    { "slot": "bottom", "name": "그레이 조거 팬츠", "brief": "Heather-grey jogger sweatpants with a white drawstring waist and ribbed ankle cuffs, soft relaxed fit.", "bottom_kind": "pants" },
+    { "slot": "bottom", "name": "연청 와이드 데님", "brief": "Light-wash wide straight-leg denim jeans with a subtle turned-up hem, relaxed fit.", "bottom_kind": "pants" },
+    { "slot": "bottom", "name": "크림 버뮤다 팬츠", "brief": "Cream chino Bermuda shorts reaching the knees with neat turned-up cuffs and front pleats.", "bottom_kind": "pants" },
+    { "slot": "bottom", "name": "세이지 롱 플리츠 스커트", "brief": "Sage-green flowy pleated midi skirt reaching the calves, soft fine pleats.", "bottom_kind": "skirt" },
+    { "slot": "shoes", "name": "파스텔 청키 스니커즈", "brief": "Chunky white sneakers with pastel lilac and mint panels, thick rounded soles and white laces." },
+    { "slot": "shoes", "name": "캔버스 하이탑", "brief": "Cream canvas high-top sneakers with white rubber toe caps, white laces and thick white soles." },
+    { "slot": "shoes", "name": "로퍼와 흰 양말", "brief": "Brown leather penny loafers worn with white crew socks folded at the ankle." },
+    { "slot": "shoes", "name": "노란 레인부츠", "brief": "Glossy yellow rubber rain boots reaching mid-calf with rounded toes and simple pull tabs." },
+    { "slot": "shoes", "name": "메리제인과 프릴 양말", "brief": "Black patent Mary Jane shoes with a single strap and a round buckle, worn with white frilly ankle socks." },
+    { "slot": "hat", "name": "파스텔 버킷햇", "brief": "Soft pastel pink cotton bucket hat with a short downward brim, sitting over the hair." },
+    { "slot": "hat", "name": "곰돌이 귀 비니", "brief": "Warm brown knit beanie with a folded ribbed cuff and two small round bear ears on top, sitting over the hair." },
+    { "slot": "hat", "name": "리본 밀짚모자", "brief": "Natural straw sun hat with a wide round brim and a red ribbon band tied at the side." },
+    { "slot": "hat", "name": "빨간 베레모", "brief": "Soft red wool beret worn slightly tilted to one side, with a tiny stalk on top." }
+  ]
+}

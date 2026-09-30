@@ -58,9 +58,9 @@ class AvatarVariants:
     def create_single_part(self, owner, key, payload, *, frozen_context=None):
         """Accept one saved prompt-backed part replacement.
 
-        The public single-part contract deliberately has no free-form prompt.
-        create() freezes the owner's prompt-library value into the accepted job,
-        while retaining its existing idempotency and recovery behavior.
+        Without a description, create() freezes the owner's prompt-library value into the accepted
+        job; a description (a garment's own design brief) takes its place for this part only. Both
+        keep the existing idempotency and recovery behavior.
         """
         slot = payload['slot']
         variant = {
@@ -83,6 +83,8 @@ class AvatarVariants:
         for field in ('uploaded_views', 'uploaded_model', 'part_name', 'model_provider'):
             if payload.get(field):
                 variant[field] = payload[field]
+        if (payload.get('description') or '').strip():
+            variant['descriptions'] = {slot: payload['description'].strip()}
         if payload.get('part_method'):
             variant['part_methods'] = {slot: payload['part_method']}
         if payload.get('redraw') is not None:
@@ -528,6 +530,8 @@ class AvatarVariants:
                                   {slot: frozen['options'] for slot, frozen in meshy_options.items()}),
                 **({'resume_stage': 'images' if redraw else 'models', 'part_name': payload.get('part_name', '')}
                    if uploaded_views or uploaded_model else {}),
+                # A generated part keeps the name it was asked for, as the wardrobe lists it.
+                **({'part_name': payload['part_name']} if payload.get('part_name') else {}),
                 'limits': {'image_tasks': (0 if (uploaded_views and not redraw) or uploaded_model else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
                            'reference_tasks': 2 if photo_input is not None and state.get('reference_preparation') else 0,
                            'expression_tasks': (0 if payload.get('single_part') else 5 if state.get('default_expressions') else 0),

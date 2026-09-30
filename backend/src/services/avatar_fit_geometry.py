@@ -423,3 +423,43 @@ def clearance(meshes, body, minimum, maximum=None):
                 adjusted += 1; maximum_applied = max(maximum_applied, (destination-world).length)
         obj.data.update()
     return {'adjusted_vertices': adjusted, 'maximum_adjustment_m': maximum_applied}
+
+
+def lift_hood(meshes, body, rig, spec):
+    """Give a raised hood room for the hair worn under it (avatar_hood_room), in place."""
+    import numpy as np
+    from src.services.avatar_hood_room import hood_room
+    _, _, collar = head_region(body, rig, spec)
+    weighted = head_weighted_vertices(body, rig, minimum=.5)
+    scalp, normals, rest, neighbours = [], [], [], []
+    for obj in body:
+        matrix = obj.matrix_world
+        turn = matrix.to_3x3().inverted().transposed()
+        # Without usable Head weights, the skin above the collar is the scalp.
+        head = (weighted.get(obj, set()) if weighted
+                else {vertex.index for vertex in obj.data.vertices if (matrix @ vertex.co).z >= collar})
+        order = {}
+        for vertex in obj.data.vertices:
+            world = matrix @ vertex.co
+            if vertex.index in head:
+                order[vertex.index] = len(scalp)
+                scalp.append(tuple(world))
+                normals.append(tuple((turn @ vertex.normal).normalized()))
+                neighbours.append([])
+            else:
+                rest.append(tuple(world))
+        for edge in obj.data.edges:
+            a, b = (order.get(index) for index in edge.vertices)
+            if a is not None and b is not None:
+                neighbours[a].append(b)
+                neighbours[b].append(a)
+    points = [(obj, vertex, obj.matrix_world @ vertex.co) for obj in meshes for vertex in obj.data.vertices]
+    moves, report = hood_room(np.array([tuple(world) for _, _, world in points]).reshape(-1, 3),
+                              np.array(scalp).reshape(-1, 3), np.array(normals).reshape(-1, 3), neighbours,
+                              np.array(rest).reshape(-1, 3), collar, up=2)
+    for (obj, vertex, world), move in zip(points, moves):
+        if move.any():
+            vertex.co = obj.matrix_world.inverted() @ (world + Vector(move))
+    for obj in meshes:
+        obj.data.update()
+    return report

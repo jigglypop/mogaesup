@@ -8,7 +8,7 @@ export type Catalog = { revision: string; items: Record<string, { name?: string;
 export function isCatalogJobDeleted(job: FactoryJob, catalog?: Catalog) {
   return !!(catalog?.items[job.id]?.deleted || catalog?.characters?.[job.character_id || job.id]?.deleted);
 }
-type SinglePartInput = { base_job_id: string; base_version: string; slot: string; hair_length: 'source' | 'short' | 'long'; bottom_kind: 'source' | 'pants' | 'skirt'; view_mode?: 'front_side' | 'front_side_back'; fit_profile?: FitProfile; meshy_options?: MeshyOptions; part_method?: 'isolated' | 'body_shell' | 'worn'; model_provider?: 'meshy' | 'tripo' };
+type SinglePartInput = { base_job_id: string; base_version: string; slot: string; hair_length: 'source' | 'short' | 'long'; bottom_kind: 'source' | 'pants' | 'skirt'; view_mode?: 'front_side' | 'front_side_back'; fit_profile?: FitProfile; meshy_options?: MeshyOptions; part_method?: 'isolated' | 'body_shell' | 'worn'; model_provider?: 'meshy' | 'tripo'; part_name?: string; description?: string };
 export type Tile = { id: string; surface: string; size: number; seed: number; gpu: { estimated_bytes_with_mips: number }; artifacts: { name: string; url: string }[] };
 export type AnimalView = 'front' | 'left' | 'back' | 'right';
 export type AnimalStages = {

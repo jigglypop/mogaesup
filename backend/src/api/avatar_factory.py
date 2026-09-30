@@ -221,6 +221,8 @@ class SinglePartVariantInput(BaseModel):
     uploaded_views: dict[Literal['front', 'side', 'back'], str] | None = None
     redraw: HairRedrawInput | None = None
     part_name: str | None = Field(default=None, max_length=100)
+    # The part's own design brief; without it the owner's prompt library describes the slot.
+    description: str | None = Field(default=None, max_length=2000)
     part_method: Literal['isolated', 'body_shell', 'worn'] | None = None
     model_provider: Literal['meshy', 'tripo'] | None = None
 

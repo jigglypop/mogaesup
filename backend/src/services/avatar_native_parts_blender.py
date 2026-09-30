@@ -15,7 +15,7 @@ from src.services.avatar_blender_common import (
     camera_setup, render, matte_materials, soft_lighting,
 )
 from src.services.glb import parse_glb
-from src.services.avatar_fit_geometry import measured_fit, normalize_body, body_targets, hair_target, headwear_target, head_region, clearance, place, slim_base_body, bind_body_head, fit_equipment
+from src.services.avatar_fit_geometry import measured_fit, normalize_body, body_targets, hair_target, headwear_target, head_region, clearance, lift_hood, place, slim_base_body, bind_body_head, fit_equipment
 from src.services.avatar_shoe_geometry import fit_shoes_rigid, bind_shoes_rigid, finish_shoes_after_pose
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT
 from src.services.avatar_body_layers import (
@@ -80,6 +80,9 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
     adjustment = clearance(extracted, body, fitting.get('scalp_clearance_m', .003),
                            spec['tolerances'].get('max_surface_adjustment_m', .015))
     slot = part['slot']
+    # A raised hood was registered to the bald head: lift it so hair worn under it stays inside.
+    hood_room = (lift_hood(extracted, body, rig, spec)
+                 if slot == 'top' and report.get('registration', {}).get('hood_vertices') else None)
     skirt = slot == 'bottom' and garment_kind == 'skirt'
     # Measured on the final rest geometry; a failed check is reported, never a blocked assembly.
     limb_fit = {'centring': centring, 'check': check_limbs(extracted, body, rig, slot, garment_kind)}
@@ -97,6 +100,8 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
                    limb_fit=limb_fit, fit_method='worn-extract-v1', available=True)
     if scalp_cap is not None:
         binding['scalp_cap'] = scalp_cap
+    if hood_room is not None:
+        binding['hood_room'] = hood_room
     return extracted, binding
 
 
