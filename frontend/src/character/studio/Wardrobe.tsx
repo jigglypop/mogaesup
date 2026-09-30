@@ -357,8 +357,9 @@ export default function Wardrobe() {
           return <button key={keyOf(part, part.slot)} type="button" className="wardrobe-card" aria-pressed={selected} disabled={!viewer} onClick={() => toggle(part)}>
             <Preview part={part} />
             <strong>{part.name}</strong>
-            <small>{[part.character_name !== part.name ? part.character_name : '', methodLabels[part.fit_method || ''] || ''].filter(Boolean).join(' · ')}</small>
-            {part.fit_check?.status === 'fail' && <small className="wardrobe-card-fit">{part.fit_check.failures.join(' · ')}</small>}
+            {/* Where a part came from and how it was fitted matter to operators, not to someone dressing up. */}
+            {admin && <small>{[part.character_name !== part.name ? part.character_name : '', methodLabels[part.fit_method || ''] || ''].filter(Boolean).join(' · ')}</small>}
+            {admin && part.fit_check?.status === 'fail' && <small className="wardrobe-card-fit">{part.fit_check.failures.join(' · ')}</small>}
           </button>;
         })}</div>
         <div className="wardrobe-worn"><h2>입은 파츠</h2>
