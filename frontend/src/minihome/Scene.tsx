@@ -25,7 +25,9 @@ import {
 } from 'gaesup-world';
 import { BuildingController } from 'gaesup-world/building';
 
+import { MINIME_SCALE } from './character';
 import { EditCanvas } from './edit/EditCanvas';
+import { Shore } from './Shore';
 import { SPAWN } from './village';
 import { AREAS } from './world';
 
@@ -84,8 +86,9 @@ export function Scene({ quality, postProcessing, cinematic, idleThrottle, player
           {worldGi && <WorldGi environment={GI_SKY} />}
           {idleThrottle && <IdleFrameRate />}
           <WorldPhysics>
-            <GaesupController rigidBodyRef={playerRef} position={SPAWN} materialPolicy="figure" clickToMove />
+            <GaesupController rigidBodyRef={playerRef} position={SPAWN} scale={MINIME_SCALE} materialPolicy="figure" clickToMove />
             <BuildingController />
+            <Shore />
             {visitors}
             {residents}
           </WorldPhysics>

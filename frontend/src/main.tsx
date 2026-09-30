@@ -18,9 +18,16 @@ initTheme();
 
 // The character studio brings its own screens and 3D viewer; it loads only when someone opens it.
 const StudioPage = lazy(() => import('./studio/StudioPage'));
+const CharacterPage = lazy(() => import('./studio/CharacterPage'));
 // Only catalog editors open the pipeline board and only admins the permissions, so members never download them.
 const AdminPage = lazy(() => import('./pages/AdminPage').then((module) => ({ default: module.AdminPage })));
 const PermissionsPage = lazy(() => import('./pages/permissions/PermissionsPage'));
+
+/** Old studio addresses: the wardrobe is `/character` now, the factory screens live under `/admin/studio`. */
+function StudioRedirect() {
+  const { '*': rest = '' } = useParams();
+  return <Navigate to={rest ? `/admin/studio/${rest}` : '/character'} replace />;
+}
 
 /** `/@username` is an island and `/@username/edit` its decorating mode; any other single segment is not a page. */
 function UsernameRoute() {
@@ -38,7 +45,16 @@ if (root) {
           <Route path="/" element={<AuthPage />} />
           <Route path="/explore" element={<ExplorePage />} />
           <Route
-            path="/studio/*"
+            path="/character"
+            element={
+              <Suspense fallback={<Loading />}>
+                <CharacterPage />
+              </Suspense>
+            }
+          />
+          <Route path="/studio/*" element={<StudioRedirect />} />
+          <Route
+            path="/admin/studio/*"
             element={
               <Suspense fallback={<Loading />}>
                 <StudioPage />

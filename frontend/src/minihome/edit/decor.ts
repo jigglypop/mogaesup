@@ -2,7 +2,8 @@ import type { ModelPiece } from './catalog';
 
 /**
  * Decor made for the island with the studio's prop pipeline (scripts/props: manifest ids under `decor/`), sized in metres,
- * served from public/gltf/decor with a picture each. Placed like studio models, at scale 1.
+ * served from public/gltf/decor with a picture each. Placed like studio models, at scale 1. Off the drawer until they are
+ * made again in the island's style; pieces already placed keep showing.
  */
 const decor = (id: string, label: string): ModelPiece => ({
   kind: 'model',

@@ -63,7 +63,7 @@ export function Rail() {
     ...(user
       ? [
           { label: '꾸미기', icon: 'brush' as const, to: `${home}/edit`, active: pathname === `${home}/edit` },
-          { label: '캐릭터', icon: 'person' as const, to: '/studio', active: pathname.startsWith('/studio') },
+          { label: '캐릭터', icon: 'person' as const, to: '/character', active: pathname.startsWith('/character') },
         ]
       : []),
     { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
@@ -226,7 +226,7 @@ function UserMenu() {
           <Link role="menuitem" to={`${home}/edit`} onClick={() => setOpen(false)}>
             <Icon name="brush" /> 섬 꾸미기
           </Link>
-          <Link role="menuitem" to="/studio" onClick={() => setOpen(false)}>
+          <Link role="menuitem" to="/character" onClick={() => setOpen(false)}>
             <Icon name="person" /> 내 캐릭터
           </Link>
           <div className="mg-menu-row">

@@ -9,31 +9,30 @@ import { useStudioSleep } from '../api/studioSleep';
 import type { FactoryUsage } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { can } from '../auth/can';
+import { AdminTabs } from '../pages/AdminTabs';
 import { Loading } from '../pages/Loading';
 import { PageShell } from '../shell/Shell';
-import { Icon } from '../ui/icons';
 import { StudioPowerLine, StudioWaking } from './StudioPower';
 
 // The character studio's own screens (src/character), mounted as they are.
-const Wardrobe = lazy(() => import('../character/studio/Wardrobe'));
 const Workspace = lazy(() => import('../character/studio/Workspace').then((module) => ({ default: module.Workspace })));
 
 type Screen = { path: string; label: string; tab?: string; mode?: string; paid?: boolean };
-type Section = { title: string; locked: boolean; screens: Screen[] };
+type Section = { title: string; screens: Screen[] };
 
 /** Each route and the studio screen (its `tab` and `mode` query) it shows. */
 const MAKE: Screen[] = [
-  { path: '/studio/make/photo', label: '사진으로 전체 생성', tab: 'character', mode: 'photo', paid: true },
-  { path: '/studio/make/body', label: '기본몸', tab: 'character', mode: 'body' },
-  { path: '/studio/make/parts', label: '파츠', tab: 'character', mode: 'parts' },
-  { path: '/studio/assets/animals', label: '동물', tab: 'animals', paid: true },
-  { path: '/studio/assets/props', label: '기물', tab: 'props', paid: true },
-  { path: '/studio/assets/textures', label: '바닥 타일', tab: 'textures' },
-  { path: '/studio/assets/emoticons', label: '2D 이모티콘', tab: 'emoticons', paid: true },
+  { path: '/admin/studio/make/photo', label: '사진으로 전체 생성', tab: 'character', mode: 'photo', paid: true },
+  { path: '/admin/studio/make/body', label: '기본몸', tab: 'character', mode: 'body' },
+  { path: '/admin/studio/make/parts', label: '파츠', tab: 'character', mode: 'parts' },
+  { path: '/admin/studio/assets/animals', label: '동물', tab: 'animals', paid: true },
+  { path: '/admin/studio/assets/props', label: '기물', tab: 'props', paid: true },
+  { path: '/admin/studio/assets/textures', label: '바닥 타일', tab: 'textures' },
+  { path: '/admin/studio/assets/emoticons', label: '2D 이모티콘', tab: 'emoticons', paid: true },
 ];
 const MANAGE: Screen[] = [
-  { path: '/studio/library', label: '에셋 라이브러리', tab: 'admin' },
-  { path: '/studio/prompts', label: '프롬프트', tab: 'prompts' },
+  { path: '/admin/studio/library', label: '에셋 라이브러리', tab: 'admin' },
+  { path: '/admin/studio/prompts', label: '프롬프트', tab: 'prompts' },
 ];
 const WORKSPACE_SCREENS = [...MAKE, ...MANAGE];
 
@@ -80,7 +79,7 @@ function WorkspaceFrame({ screen }: { screen: Screen }) {
 }
 
 /** The studio's screens, dark glass, scoped so their stylesheets stay inside. */
-function Stage({ children }: { children: ReactNode }) {
+export function Stage({ children }: { children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const element = ref.current;
@@ -131,73 +130,46 @@ function Connection() {
   );
 }
 
-function Locked() {
-  return (
-    <div className="mg-studio-locked">
-      <Icon name="lock" />
-      <b>운영자만 쓰는 화면이에요</b>
-      <p className="mg-muted">캐릭터와 기물을 만드는 작업은 비용이 들어서 운영자만 열 수 있어요.</p>
-      <Link className="mg-btn is-primary" to="/studio">
-        옷장으로
-      </Link>
-    </div>
-  );
-}
-
-/** `/studio/*`: the character studio inside the app. Everyone dresses their character; admins also make and manage. */
+/**
+ * `/admin/studio/*`: the character factory, for operators only (members dress their character at `/character`). Paid
+ * screens show only to paid operators; the server's permissions and FACTORY_ACCESS still decide every request.
+ */
 export default function StudioPage() {
   const { status, user } = useAuth();
   const { pathname } = useLocation();
   const sleep = useStudioSleep();
   if (status === 'loading') return <Loading />;
   if (!user) return <Navigate to="/" replace />;
-  // Operators make and manage; FACTORY_ACCESS on the server still bounds what they can do.
-  const admin = can(user, 'operator');
+  if (!can(user, 'operator')) return <Navigate to="/character" replace />;
+  const paid = can(user, 'paid_operator');
   const sections: Section[] = [
-    { title: '내 캐릭터', locked: false, screens: [{ path: '/studio', label: '옷장' }] },
-    { title: '만들기', locked: !admin, screens: MAKE },
-    { title: '관리', locked: !admin, screens: MANAGE },
+    { title: '만들기', screens: MAKE.filter((item) => paid || !item.paid) },
+    { title: '관리', screens: MANAGE },
   ];
-  const screen = WORKSPACE_SCREENS.find((item) => pathname === item.path);
-  const wardrobe = pathname === '/studio' || pathname === '/studio/';
-  if (!screen && !wardrobe) return <Navigate to="/studio" replace />;
+  const screen = WORKSPACE_SCREENS.find((item) => pathname === item.path && (paid || !item.paid));
+  if (!screen) return <Navigate to={sections[0]!.screens[0]!.path} replace />;
 
   return (
-    <PageShell title="캐릭터" wide>
+    <PageShell title="캐릭터 공장" wide>
+      <AdminTabs />
       <div className="mg-studio">
-        <nav className="mg-studio-nav mg-glass" aria-label="캐릭터 스튜디오">
+        <nav className="mg-studio-nav mg-glass" aria-label="캐릭터 공장">
           {sections.map((section) => (
             <section key={section.title}>
-              <p>
-                {section.title}
-                {section.locked && <Icon name="lock" />}
-              </p>
+              <p>{section.title}</p>
               {section.screens.map((item) => (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  aria-current={pathname === item.path || (item.path === '/studio' && wardrobe) ? 'page' : undefined}
-                  className={section.locked ? 'is-locked' : undefined}
-                >
+                <Link key={item.path} to={item.path} aria-current={pathname === item.path ? 'page' : undefined}>
                   <span>{item.label}</span>
                   {item.paid && <span className="mg-badge is-paid">유료</span>}
                 </Link>
               ))}
             </section>
           ))}
-          {admin && <Connection />}
+          <Connection />
         </nav>
         <Stage>
           {/* While the studio sleeps its screens stay closed; they open afresh once it answers. */}
-          {sleep && (wardrobe || admin) ? (
-            <StudioWaking sleep={sleep} member={!admin} />
-          ) : wardrobe ? (
-            <Wardrobe />
-          ) : !admin ? (
-            <Locked />
-          ) : (
-            screen && <WorkspaceFrame screen={screen} />
-          )}
+          {sleep ? <StudioWaking sleep={sleep} member={false} /> : <WorkspaceFrame screen={screen} />}
         </Stage>
       </div>
     </PageShell>

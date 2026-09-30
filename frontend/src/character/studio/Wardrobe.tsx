@@ -5,6 +5,7 @@ import { problemText } from '../../api/client';
 import { lookApi } from '../../api/endpoints';
 import type { Look, LookRequest } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
+import { can } from '../../auth/can';
 import { isDefinitiveRejection } from '../api';
 import { factoryApi, wardrobeUrls, type WardrobeColors, type WardrobeCoverage, type WardrobeOutfit, type WardrobePart } from '../factory/api';
 import { partLabels as labels } from '../factory/parts';
@@ -57,8 +58,8 @@ function Preview({ part }: { part: WardrobePart }) {
 
 export default function Wardrobe() {
   const { user } = useAuth();
-  // Saved outfits are the studio's own records: only admins change them.
-  const admin = user?.role === 'admin';
+  // Saved outfits are the studio's own records: only operators change them.
+  const admin = can(user, 'operator');
   const bodies = usePolling(factoryApi.wardrobeBodies, 30000);
   const outfits = usePolling(factoryApi.wardrobeOutfits, 30000);
   const [bodyId, setBodyId] = useState('');

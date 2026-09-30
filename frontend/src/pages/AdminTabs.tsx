@@ -11,9 +11,9 @@ export function AdminTabs() {
     { to: '/admin', label: '캐릭터 가져오기', open: can(user, 'catalog_editor') },
     { to: '/admin/catalog', label: '카탈로그', open: can(user, 'catalog_editor') },
     { to: '/admin/permissions', label: '권한', open: can(user, 'admin') },
-    { to: '/studio/library', label: '에셋 라이브러리', open: can(user, 'operator') },
+    { to: '/admin/studio', label: '캐릭터 공장', open: can(user, 'operator') },
   ].filter((tab) => tab.open);
-  const current = ['/admin/catalog', '/admin/permissions'].find((path) => pathname.startsWith(path)) ?? '/admin';
+  const current = ['/admin/catalog', '/admin/permissions', '/admin/studio'].find((path) => pathname.startsWith(path)) ?? '/admin';
   return (
     <nav className="mg-tabs is-fit mg-admin-tabs" aria-label="운영">
       {tabs.map((tab) => (

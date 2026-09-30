@@ -1,6 +1,6 @@
 # 캐릭터 서버
 
-3D SD 캐릭터의 몸·헤어·의상·장비를 만들고 조립하는 FastAPI 서버와 CLI입니다(`src/`, 테스트 `tests/`, DB migration `migrations/`). 작업 화면은 앱의 `/studio`(`frontend/src/character/`)에 있고, 앱은 Rust 서버의 스튜디오 게이트웨이를 거쳐 이 서버를 부릅니다. 운영 지침은 [AGENTS.md](AGENTS.md)에 있습니다.
+3D SD 캐릭터의 몸·헤어·의상·장비를 만들고 조립하는 FastAPI 서버와 CLI입니다(`src/`, 테스트 `tests/`, DB migration `migrations/`). 작업 화면은 앱의 `/admin/studio`(옷장은 `/character`, 코드는 `frontend/src/character/`)에 있고, 앱은 Rust 서버의 스튜디오 게이트웨이를 거쳐 이 서버를 부릅니다. 운영 지침은 [AGENTS.md](AGENTS.md)에 있습니다.
 
 ## 캐릭터 만들기
 
@@ -94,7 +94,7 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
 
 ## AWS 배포
 
-`infra/ec2.yaml` 스택(`gaesup-asset-studio`)의 컨테이너는 이 서버의 API만 냅니다(화면은 앱의 `/studio`). 릴리스는 `infra/prepare-aws.ps1 -Upload`가 인스턴스 스크립트가 기대하는 배치(`backend/`, `infra/`, 루트의 uv 워크스페이스 파일)로 묶어 S3에 올리고, `infra/deploy-aws.ps1`이 SSM으로 인스턴스에 배포합니다. 기본은 SSM 포트 포워딩(`Access` 출력)으로만 접속합니다. 앱 서버가 인터넷으로 부르려면:
+`infra/ec2.yaml` 스택(`gaesup-asset-studio`)의 컨테이너는 이 서버의 API만 냅니다(화면은 앱의 `/admin/studio`·`/character`). 릴리스는 `infra/prepare-aws.ps1 -Upload`가 인스턴스 스크립트가 기대하는 배치(`backend/`, `infra/`, 루트의 uv 워크스페이스 파일)로 묶어 S3에 올리고, `infra/deploy-aws.ps1`이 SSM으로 인스턴스에 배포합니다. 기본은 SSM 포트 포워딩(`Access` 출력)으로만 접속합니다. 앱 서버가 인터넷으로 부르려면:
 
 1. provider secret(JSON)의 선택 키: `TRIPO_API_KEY`, `AVATAR_3D_PROVIDER`, `BLENDER_CONCURRENCY`.
 2. 리전의 CloudFront 관리형 prefix list ID를 확인합니다.

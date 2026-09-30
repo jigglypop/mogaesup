@@ -1,6 +1,7 @@
 import type { NPCInstanceData, NPCTemplate, RuntimeDomainBinding } from 'gaesup-world';
 
 import type { CatalogItem } from '../api/types';
+import { MINIME_SCALE } from './character';
 
 /**
  * 주민: studio characters the island's owner stands on the island, each with a name and a line it says to whoever talks
@@ -159,7 +160,7 @@ export function residentInstance(resident: Resident): NPCInstanceData {
     name: resident.name,
     position: [...resident.position],
     rotation: [0, resident.rotation, 0],
-    scale: [1, 1, 1],
+    scale: [MINIME_SCALE, MINIME_SCALE, MINIME_SCALE],
     behavior: { mode: 'idle', speed: 0, turnSpeed: TURN_SPEED, faceOnInteract: true, greetAnimation: 'wave' },
   };
 }

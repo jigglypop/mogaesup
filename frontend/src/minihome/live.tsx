@@ -18,6 +18,7 @@ import { defaultMultiplayerConfig, RemotePlayers, useMultiplayer, type Multiplay
 import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
 import { Icon } from '../ui/icons';
+import { MINIME_SCALE } from './character';
 
 type Multiplayer = ReturnType<typeof useMultiplayer>;
 
@@ -31,13 +32,13 @@ const RETRY_LAST_MS = 30_000;
 
 /**
  * Tickets are single use, and the library's own reconnect would offer the spent one again, so it is off: the room
- * reconnects itself with a fresh ticket. Names float just above a 1.7 m 미니미.
+ * reconnects itself with a fresh ticket. Visitors stand as large as the player, names just above their heads.
  */
 const CONFIG: MultiplayerConfig = {
   ...defaultMultiplayerConfig,
   logToConsole: false,
   websocket: { ...defaultMultiplayerConfig.websocket, url: '', reconnectAttempts: 0 },
-  rendering: { ...defaultMultiplayerConfig.rendering, nameTagHeight: 2.1 },
+  rendering: { ...defaultMultiplayerConfig.rendering, characterScale: MINIME_SCALE, nameTagHeight: 1.7 * MINIME_SCALE + 0.4 },
 };
 
 const roomUrl = (username: string, ticket: string) =>

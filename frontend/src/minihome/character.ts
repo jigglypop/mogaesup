@@ -12,3 +12,6 @@ export function playerModelUrl(look: Look | null | undefined, minime: string, mi
 
 /** Whether the look shows on the island now: worn, and with a finished model. */
 export const wearsLook = (look: Look | null | undefined): boolean => !!look?.worn && !!look.modelUrl;
+
+/** How much larger than their files every character stands on the island: the player, visitors and residents alike. */
+export const MINIME_SCALE = 1.5;

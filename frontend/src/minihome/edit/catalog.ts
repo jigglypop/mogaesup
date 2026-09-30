@@ -6,17 +6,14 @@ import {
   type BuildingTreeKind,
 } from 'gaesup-world/building';
 
-import { DECOR_FARM, DECOR_GARDEN, DECOR_NATURE } from './decor';
 import type { EditPart } from './session';
 
-export type Shelf = 'furniture' | 'living' | 'nature' | 'garden' | 'farm' | 'floor' | 'wall' | 'studio' | 'residents';
+export type Shelf = 'furniture' | 'living' | 'nature' | 'floor' | 'wall' | 'studio' | 'residents';
 
 export const SHELVES: { id: Shelf; label: string; part: EditPart }[] = [
   { id: 'furniture', label: '가구', part: 'object' },
   { id: 'living', label: '생활', part: 'object' },
   { id: 'nature', label: '자연', part: 'object' },
-  { id: 'garden', label: '정원', part: 'object' },
-  { id: 'farm', label: '농장', part: 'object' },
   { id: 'floor', label: '바닥', part: 'tile' },
   { id: 'wall', label: '벽', part: 'wall' },
   { id: 'studio', label: '스튜디오에서 만든 것', part: 'object' },
@@ -115,11 +112,7 @@ export const NATURE: Piece[] = [
   }),
   // Nature models a later engine adds still show up, with a plain drawing.
   ...NATURE_MODELS.filter((item) => !NATURE_LOOKS.some(([id]) => id === item.id)).map((item) => modelPiece(item, 'bush')),
-  ...DECOR_NATURE,
 ];
-
-export const GARDEN: Piece[] = DECOR_GARDEN;
-export const FARM: Piece[] = DECOR_FARM;
 
 /** The island's own floors first, so painted ground can go back to lawn. */
 export const ISLAND_FLOORS = [

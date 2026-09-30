@@ -6,7 +6,7 @@
 
 | 폴더 | 역할 |
 | --- | --- |
-| `frontend/` | 프론트엔드 하나. React 19 + Vite 8, 3D 섬은 npm의 `gaesup-world`로 그린다. 글래스 디자인(`--mg-*` 토큰)으로 로그인·가입, 섬(`/@아이디`)과 꾸미기(`/@아이디/edit`), 둘러보기, 운영(`/admin`), 캐릭터 스튜디오(`/studio`, 화면은 `src/character/`) |
+| `frontend/` | 프론트엔드 하나. React 19 + Vite 8, 3D 섬은 npm의 `gaesup-world`로 그린다. 글래스 디자인(`--mg-*` 토큰)으로 로그인·가입, 섬(`/@아이디`)과 꾸미기(`/@아이디/edit`), 둘러보기, 운영(`/admin`), 내 캐릭터 옷장(`/character`), 캐릭터 공장(`/admin/studio`, 화면은 `src/character/`) |
 | `server/` | 웹서버. Rust(axum + sqlx) + PostgreSQL. 회원과 세션 쿠키, 섬 프로필·섬 저장(리비전)·방문자, 방명록·이웃(API 이름은 ilchon), 미니미 카탈로그와 캐릭터 가져오기, 캐릭터 스튜디오 API 중계(권한·유료 한도·기록), 실시간 방(WebSocket, gaesup-world 멀티플레이 프로토콜) |
 | `backend/` | 캐릭터 서버. Python(FastAPI) + Blender. 캐릭터 몸·파츠·의상·기물의 이미지·3D 생성, 리깅, 조립, 검수. AWS 스튜디오 배포는 `backend/infra/`. 자세한 것은 [backend/README.md](backend/README.md) |
 | `scripts/` | 루트 기동(`dev.ps1`)과 섬 기물 생성(`props/`) |
@@ -19,13 +19,13 @@
 
 1. 설치: 루트에서 `npm install`과 `uv sync`.
 2. 기동: `npm run dev`(= `scripts/dev.ps1`). Docker PostgreSQL(127.0.0.1:55432)과 Rust 서버(`127.0.0.1:8080`), 웹(`http://127.0.0.1:5180`, `/api`와 WebSocket을 8080으로 넘긴다)을 숨은 프로세스로 띄우고 로그는 `.data/dev/`에 둔다. 이미 떠 있는 포트는 그대로 쓴다. `npm run dev:stop`이 이 스크립트가 띄운 것을 끈다.
-3. 캐릭터 파이프라인까지: `npm run dev:character`. 캐릭터 서버를 루트 `.venv`로 `127.0.0.1:8016`에 띄우고(멈춘 유료 단계 자동 재개는 끈다), `backend/.env`(`backend/.env.example`에서 만든다)의 API 키와 JWT 설정을 Rust 서버의 스튜디오 게이트웨이에 넘겨 `/admin` 가져오기와 `/studio`가 끝까지 돈다. 관리자는 기록을 바꿀 수 있고(`FACTORY_ACCESS=write`), 비용이 드는 작업은 `scripts/dev.ps1 -Character -Paid`(월 `-PaidMonthly`건)일 때만 열린다. `.env`는 운영 키이니 필요할 때만 쓴다.
+3. 캐릭터 파이프라인까지: `npm run dev:character`. 캐릭터 서버를 루트 `.venv`로 `127.0.0.1:8016`에 띄우고(멈춘 유료 단계 자동 재개는 끈다), `backend/.env`(`backend/.env.example`에서 만든다)의 API 키와 JWT 설정을 Rust 서버의 스튜디오 게이트웨이에 넘겨 `/admin` 가져오기와 `/admin/studio`·`/character`가 끝까지 돈다. 관리자는 기록을 바꿀 수 있고(`FACTORY_ACCESS=write`), 비용이 드는 작업은 `scripts/dev.ps1 -Character -Paid`(월 `-PaidMonthly`건)일 때만 열린다. `.env`는 운영 키이니 필요할 때만 쓴다.
 4. 관리자: 서버를 `BOOTSTRAP_ADMIN_USERNAME`·`BOOTSTRAP_ADMIN_PASSWORD`와 함께 띄우면 그 계정을 만들거나(있으면 비밀번호는 그대로) 관리자 권한을 준다. 그 밖의 역할은 `/admin/permissions`에서 준다. 설정 목록은 `server/.env.example`에 있다.
 5. 섬 기물 다시 만들기(유료): `uv run python scripts/props/generate.py --only <id>`로 하나씩 확인한 뒤 `--all`, 그다음 `node frontend/scripts/props-normalize.mjs`가 크기·방향·무광 재질을 섬에 맞춰 `frontend/public/gltf/`에 넣는다(패키지의 같은 경로 모델을 대신한다).
 
 ## 캐릭터 스튜디오
 
-`/studio`는 캐릭터 스튜디오 화면(`frontend/src/character/`)을 앱의 경로 아래에 띄운다(`frontend/src/studio/StudioPage.tsx`). 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`frontend/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 그 밖의 읽기는 스튜디오 보기(운영·카탈로그 편집), 기록 변경은 스튜디오 운영, 비용이 드는 작업은 유료 작업 권한이 있어야 한다(아래 권한). `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남는다.
+캐릭터 스튜디오 화면(`frontend/src/character/`)은 둘로 나뉜다. `/character`(`frontend/src/studio/CharacterPage.tsx`)는 회원 누구나 쓰는 옷장이고, `/admin/studio`(`frontend/src/studio/StudioPage.tsx`, 운영 탭 '캐릭터 공장')는 스튜디오 운영 권한이 있어야 열리며 비용이 드는 화면은 유료 작업 권한이 있을 때만 보인다. 옛 `/studio` 주소는 이 둘로 넘긴다. 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`frontend/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 그 밖의 읽기는 스튜디오 보기(운영·카탈로그 편집), 기록 변경은 스튜디오 운영, 비용이 드는 작업은 유료 작업 권한이 있어야 한다(아래 권한). `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남는다.
 
 ## 캐릭터 가져오기
 

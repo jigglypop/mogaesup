@@ -423,9 +423,9 @@ if (browser) {
     'studio',
     'admin studio: the asset library shows the studio jobs',
     async () => {
-      await admin.goto(`${WEB}/studio`);
+      await admin.goto(`${WEB}/admin/studio`);
       await admin.locator('.mg-studio-connection', { hasText: '기록 바꾸기까지' }).waitFor();
-      await admin.getByRole('navigation', { name: '캐릭터 스튜디오' }).getByRole('link', { name: '에셋 라이브러리' }).click();
+      await admin.getByRole('navigation', { name: '캐릭터 공장' }).getByRole('link', { name: '에셋 라이브러리' }).click();
       const gallery = admin.locator('.asset-gallery');
       for (const name of Object.values(names)) await gallery.locator('.asset-gallery-card', { hasText: name }).first().waitFor();
       const hero = gallery.locator('.asset-gallery-card', { hasText: names.hero }).first();
@@ -452,7 +452,7 @@ if (browser) {
         ['파츠', admin.locator('.assembly-preview:not([data-assembly-ready=""])')],
       ];
       for (const [screen, ready] of screens) {
-        await admin.getByRole('navigation', { name: '캐릭터 스튜디오' }).getByRole('link', { name: screen }).click();
+        await admin.getByRole('navigation', { name: '캐릭터 공장' }).getByRole('link', { name: screen }).click();
         await ready.waitFor({ timeout: 60_000 });
         const alerts = await admin.locator('.studio-root [role=alert]').allInnerTexts();
         if (alerts.length) throw new Error(`${screen}: ${alerts.join(' / ')}`);
@@ -550,9 +550,9 @@ if (browser) {
 
   await step(
     'wardrobe',
-    'member opens /studio and gets only the wardrobe',
+    'member opens /character and gets only the wardrobe',
     async () => {
-      await member.goto(`${WEB}/studio`);
+      await member.goto(`${WEB}/character`);
       const scene = member.locator('.wardrobe-scene');
       // The body model is loaded and posed once the clip buttons are enabled.
       await member
@@ -562,14 +562,15 @@ if (browser) {
       const renderer = await scene.getAttribute('data-renderer');
       if (await member.locator('.studio-shell, .asset-gallery, .mg-studio-connection').count())
         throw new Error('a member sees the admin workspace');
-      // Every screen but the wardrobe is marked locked.
-      const nav = member.getByRole('navigation', { name: '캐릭터 스튜디오' });
-      const [links, locked] = [await nav.getByRole('link').count(), await nav.locator('a.is-locked').count()];
-      if (locked !== links - 1) throw new Error(`${locked} of ${links} studio links are locked`);
+      // The member page has no factory screens, and the factory sends a member back to their wardrobe.
+      if (await member.getByRole('navigation', { name: '캐릭터 공장' }).count()) throw new Error('a member sees the factory');
+      if (await member.getByRole('link', { name: '캐릭터 공장' }).count()) throw new Error('a member sees the factory tab');
       await shoot(member, 'member-wardrobe');
-      await member.goto(`${WEB}/studio/library`);
-      await member.getByText('운영자만 쓰는 화면이에요').waitFor();
-      if (await member.locator('.studio-shell').count()) throw new Error('the library opened for a member');
+      for (const path of ['/admin/studio/library', '/admin/studio/make/photo', '/studio/library']) {
+        await member.goto(`${WEB}${path}`);
+        await member.waitForURL(`${WEB}/character`);
+        if (await member.locator('.studio-shell, .asset-gallery').count()) throw new Error(`${path} opened for a member`);
+      }
       const direct = await member.request.get(`${WEB}/api/avatar-factory/jobs`);
       if (direct.status() !== 403) throw new Error(`a member reading the studio jobs got ${direct.status()}`);
       return `renderer ${renderer}`;
@@ -737,7 +738,7 @@ if (browser) {
     'look',
     'the member dresses their character in the wardrobe and saves it as their look',
     async () => {
-      await member.goto(`${WEB}/studio`);
+      await member.goto(`${WEB}/character`);
       await member
         .getByRole('button', { name: 'walk', exact: true })
         .and(member.locator(':enabled'))
