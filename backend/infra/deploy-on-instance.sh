@@ -38,6 +38,18 @@ aws secretsmanager get-secret-value \
   --secret-id "$PROVIDER_SECRET_ARN" \
   --query SecretString --output text --region "$AWS_REGION" > "$secret_tmp"
 python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert value.get("OPENAI_API_KEY") and value.get("MESHY_API_KEY")' "$secret_tmp"
+# The character records database (the mogaesup server stack's CharacterDatabaseSecret on the shared PostgreSQL), once
+# backend/infra/records-to-postgres.py has imported the records and named it in the config.
+if [[ -n "${CHARACTER_DB_SECRET_ARN:-}" && -n "${CHARACTER_DB_HOST:-}" ]]; then
+  aws secretsmanager get-secret-value --secret-id "$CHARACTER_DB_SECRET_ARN"     --query SecretString --output text --region "$AWS_REGION" | python3 -c '
+import json, sys, urllib.parse
+db = json.load(sys.stdin)
+path, host = sys.argv[1], sys.argv[2]
+value = json.load(open(path))
+value["CHARACTER_DATABASE_URL"] = "postgresql://%s:%s@%s:5432/%s?sslmode=require" % (
+    urllib.parse.quote(db["username"], safe=""), urllib.parse.quote(db["password"], safe=""), host, db["dbname"])
+json.dump(value, open(path, "w"))' "$secret_tmp" "$CHARACTER_DB_HOST"
+fi
 mv -f "$secret_tmp" /opt/asset-studio/provider.json
 
 image="gaesup-asset-studio:${release_sha}"

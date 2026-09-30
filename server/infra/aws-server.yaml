@@ -47,11 +47,16 @@ Parameters:
     Type: String
     Default: ''
     Description: The studio instance's security group, allowed into the shared database for the character records.
+  StudioRoleArn:
+    Type: String
+    Default: ''
+    Description: The studio instance's role, allowed to read the character records database secret.
 Conditions:
   HasCloudFrontGroup: !Not [!Equals [!Ref CloudFrontServiceGroup, '']]
   HasStudioInstance: !Not [!Equals [!Ref StudioInstanceId, '']]
   UseSharedDatabase: !Not [!Equals [!Ref SharedDatabaseEndpoint, '']]
   StudioUsesSharedDatabase: !And [!Condition UseSharedDatabase, !Not [!Equals [!Ref StudioSecurityGroup, '']]]
+  StudioReadsCharacterDatabase: !And [!Condition StudioUsesSharedDatabase, !Not [!Equals [!Ref StudioRoleArn, '']]]
 Resources:
   RealtimeTicketSecret:
     Type: AWS::SecretsManager::Secret
@@ -133,6 +138,34 @@ Resources:
       ToPort: 5432
       SourceSecurityGroupId: !Ref StudioSecurityGroup
       Description: mogaesup character studio records
+  # The character studio's records (backend/, CHARACTER_DATABASE_URL) live in the shared instance too, under their own
+  # role and database. CloudFormation generates the password; server/scripts/character-database.py creates the role
+  # with it, and the studio reads it through the resource policy (backend/infra/deploy-on-instance.sh).
+  CharacterDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: StudioReadsCharacterDatabase
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: The character studio's records database role on the shared PostgreSQL
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"character_app","dbname":"mogaesup_character"}'
+        GenerateStringKey: password
+        ExcludePunctuation: true
+        PasswordLength: 40
+      Tags: [{Key: application, Value: mogaesup}]
+  CharacterDatabaseSecretPolicy:
+    Type: AWS::SecretsManager::ResourcePolicy
+    Condition: StudioReadsCharacterDatabase
+    Properties:
+      SecretId: !Ref CharacterDatabaseSecret
+      ResourcePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {AWS: !Ref StudioRoleArn}
+            Action: secretsmanager:GetSecretValue
+            Resource: '*'
   DatabaseSubnets:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -196,6 +229,7 @@ Resources:
                   - !Ref RealtimeTicketSecret
                   - !Ref FactoryGatewaySecret
                   - !If [UseSharedDatabase, !Ref SharedDatabaseSecretArn, !Ref AWS::NoValue]
+                  - !If [StudioReadsCharacterDatabase, !Ref CharacterDatabaseSecret, !Ref AWS::NoValue]
         # Wakes the idle-stopped studio (STUDIO_INSTANCE_ID). DescribeInstances has no resource-level permissions.
         - !If
           - HasStudioInstance
@@ -257,6 +291,9 @@ Outputs:
   DatabaseEndpoint: {Value: !If [UseSharedDatabase, !Ref SharedDatabaseEndpoint, !GetAtt Database.Endpoint.Address]}
   DatabaseSecretArn: {Value: !If [UseSharedDatabase, !Ref SharedDatabaseSecretArn, !GetAtt Database.MasterUserSecret.SecretArn]}
   RealtimeTicketSecretArn: {Value: !Ref RealtimeTicketSecret}
+  CharacterDatabaseSecretArn:
+    Condition: StudioReadsCharacterDatabase
+    Value: !Ref CharacterDatabaseSecret
   FactoryGatewaySecretArn: {Value: !Ref FactoryGatewaySecret}
   VpcOriginId: {Value: !GetAtt VpcOrigin.Id}
   ApiPrivateDns: {Value: !GetAtt ApiInstance.PrivateDnsName}
