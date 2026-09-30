@@ -11,7 +11,6 @@ import {
   GaesupWorldContent,
   GameplayArea,
   hexToLinearRgb,
-  IdleFrameRate,
   InteractionTracker,
   LightingZone,
   Nameplates,
@@ -27,6 +26,7 @@ import { BuildingController } from 'gaesup-world/building';
 
 import { MINIME_SCALE } from './character';
 import { EditCanvas } from './edit/EditCanvas';
+import { IdleFrameRate } from './IdleFrameRate';
 import { Shore } from './Shore';
 import { SPAWN } from './village';
 import { AREAS } from './world';

@@ -47,17 +47,17 @@ export function MinihomePage({ username, editing }: { username: string; editing:
     setProblem(null);
     (async () => {
       const own = viewerName === username;
-      const [view, minimes, furniture, npcs, viewerLook] = await Promise.all([
+      // One round trip: the visit and the visitor's own home do not wait for this home to arrive.
+      const [view, minimes, furniture, npcs, viewerLook, mine, visited] = await Promise.all([
         own ? homeApi.mine() : homeApi.get(username),
         catalogApi.items('minime'),
         catalogApi.items('furniture').catch(() => ({ items: [] })),
         catalogApi.items('npc').catch(() => ({ items: [] })),
         viewerName ? lookApi.mine().then(({ look }) => look, () => null) : null,
+        viewerName && !own ? homeApi.get(viewerName).catch(() => null) : null,
+        homeApi.visit(username, visitorId()).catch(() => null),
       ]);
-      const [mine, visits] = await Promise.all([
-        viewerName && !view.isOwner ? homeApi.get(viewerName).catch(() => null) : null,
-        homeApi.visit(username, visitorId()).catch(() => view.visits),
-      ]);
+      const visits = visited ?? view.visits;
       if (controller.signal.aborted) return;
       const viewerMinime = view.isOwner ? view.profile.minime : (mine?.profile.minime ?? FALLBACK_MINIME);
       prefetchModels([playerModelUrl(viewerLook, viewerMinime, minimes.items)]);

@@ -1,10 +1,10 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { cp, readdir, stat } from 'node:fs/promises';
+import { cp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { NodeIO } from '@gltf-transform/core';
-import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
+import { ALL_EXTENSIONS, EXTMeshoptCompression } from '@gltf-transform/extensions';
 import { textureCompress } from '@gltf-transform/functions';
 import { MeshoptDecoder, MeshoptEncoder } from 'meshoptimizer';
 import sharp from 'sharp';
@@ -43,12 +43,15 @@ function packageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.resolve('gaesup-world'))), '..');
 }
 
-/** Rewrites each figure in `dir` with its maps sized for the minihome, as WebP, keeping Meshopt geometry. */
-async function slimFigures(dir: string, log: (message: string) => void) {
+async function createIO(): Promise<NodeIO> {
   await Promise.all([MeshoptDecoder.ready, MeshoptEncoder.ready]);
-  const io = new NodeIO()
+  return new NodeIO()
     .registerExtensions(ALL_EXTENSIONS)
     .registerDependencies({ 'meshopt.decoder': MeshoptDecoder, 'meshopt.encoder': MeshoptEncoder });
+}
+
+/** Rewrites each figure in `dir` with its maps sized for the minihome, as WebP, keeping Meshopt geometry. */
+async function slimFigures(io: NodeIO, dir: string, log: (message: string) => void) {
   let before = 0;
   let after = 0;
   for (const name of (await readdir(dir)).filter((file) => file.endsWith('.glb'))) {
@@ -67,9 +70,41 @@ async function slimFigures(dir: string, log: (message: string) => void) {
 }
 
 /**
+ * Packs every model under `dir` that is not Meshopt-compressed yet (the package's props and nature carry plain float
+ * buffers, and CloudFront does not compress models) with EXT_meshopt_compression, which the engine's loader decodes.
+ * The codec is lossless: the same vertices and triangles come back, only each triangle's corners may start elsewhere
+ * (same winding). A default island's props and plants shrink by about a third. A model packing does not shrink stays.
+ */
+async function packModels(io: NodeIO, dir: string, log: (message: string) => void) {
+  let before = 0;
+  let after = 0;
+  let packed = 0;
+  const files = (await readdir(dir, { recursive: true })).filter((file) => file.endsWith('.glb'));
+  for (const name of files) {
+    const file = join(dir, name);
+    const original = await readFile(file);
+    const document = await io.readBinary(original);
+    const used = document.getRoot().listExtensionsUsed();
+    if (used.some((extension) => extension.extensionName === EXTMeshoptCompression.EXTENSION_NAME)) continue;
+    document
+      .createExtension(EXTMeshoptCompression)
+      .setRequired(true)
+      .setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.QUANTIZE });
+    const smaller = await io.writeBinary(document);
+    before += original.length;
+    if (smaller.byteLength < original.length) {
+      await writeFile(file, smaller);
+      after += smaller.byteLength;
+      packed += 1;
+    } else after += original.length;
+  }
+  log(`models: ${packed} packed with Meshopt, ${(before / 1e6).toFixed(1)} MB → ${(after / 1e6).toFixed(1)} MB`);
+}
+
+/**
  * Serves and ships the files gaesup-world's npm package carries: `/gltf/*` (characters, avatars, props and nature)
  * and `/wasm/*`. A file of the same path in this app's `public/` wins. Builds size the figures' textures for the
- * minihome camera; the dev server serves the package's files as they are.
+ * minihome camera and pack the other models with Meshopt; the dev server serves the package's files as they are.
  */
 export function gaesupAssets(): Plugin {
   const root = packageRoot();
@@ -105,7 +140,10 @@ export function gaesupAssets(): Plugin {
         const filter = (source: string) => mount.url !== '/gltf/' || !isDroppedFigure(relative(mount.dir, source));
         await cp(mount.dir, join(outDir, mount.url), { recursive: true, force: false, filter });
       }
-      await slimFigures(join(outDir, 'gltf'), (message) => config.logger.info(message));
+      const io = await createIO();
+      const log = (message: string) => config.logger.info(message);
+      await slimFigures(io, join(outDir, 'gltf'), log);
+      await packModels(io, join(outDir, 'gltf'), log);
     },
   };
 }
