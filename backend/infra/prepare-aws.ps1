@@ -38,7 +38,7 @@ $validation = Invoke-Aws @('cloudformation', 'validate-template', '--template-bo
 $archive = Join-Path $artifactRoot 'studio.tar.gz'
 $archiveTemp = Join-Path $artifactRoot 'studio.tar.gz.tmp'
 if (Test-Path -LiteralPath $archiveTemp) { Remove-Item -LiteralPath $archiveTemp -Force }
-& tar -czf $archiveTemp --exclude='node_modules' --exclude='__pycache__' --exclude='*.egg-info' --exclude='build' --exclude='dist' --exclude='test-results' --exclude='playwright-report' --exclude='.env*' -C $root backend/src backend/assets backend/pyproject.toml backend/main.py backend/README.md pyproject.toml uv.lock .dockerignore -C $backend infra
+& tar -czf $archiveTemp --exclude='node_modules' --exclude='__pycache__' --exclude='*.egg-info' --exclude='build' --exclude='dist' --exclude='test-results' --exclude='playwright-report' --exclude='.env*' -C $root backend/src backend/assets backend/migrations backend/pyproject.toml backend/main.py backend/README.md pyproject.toml uv.lock .dockerignore -C $backend infra
 if ($LASTEXITCODE -ne 0) { throw 'Release archive failed.' }
 $entries = @(& tar -tzf $archiveTemp)
 if ($LASTEXITCODE -ne 0) { throw 'Release archive inspection failed.' }
