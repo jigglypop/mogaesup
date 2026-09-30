@@ -2,8 +2,8 @@
 """Moves the live studio's records from S3 JSON into PostgreSQL, on the studio instance over SSM.
 
 Uses the running release's image (`python -m src.records`): applies the schema, dry-runs the import, then — only while
-the studio reports no paid requests or running tasks — stops the container, imports every record of the `assets` and
-`mogaesup-props` prefixes, imports again to confirm nothing is left, and names the records database in
+the studio reports no paid requests or running tasks — stops the container, imports every record of the studio's `assets`
+prefix (the local prop sandbox `mogaesup-props` stays in S3), imports again to confirm nothing is left, and names the records database in
 /etc/asset-studio.env so the next `deploy-aws.ps1` starts the studio on it. The container stays stopped until then.
 Nothing secret reaches this machine: the URL is built on the instance from the server stack's CharacterDatabaseSecret.
 Usage: python backend/infra/records-to-postgres.py   (then deploy a release whose deploy-on-instance.sh reads the config)
@@ -28,12 +28,12 @@ print("postgresql://%s:%s@%s:5432/%s?sslmode=require" % (urllib.parse.quote(db["
 IMAGE=$(docker inspect -f '{{.Config.Image}}' gaesup-asset-studio)
 rec() { docker run --rm --network host -e ASSET_S3_BUCKET="$ASSET_S3_BUCKET" -e ASSET_S3_REGION="$AWS_REGION" -e AWS_REGION="$AWS_REGION" -e CHARACTER_DATABASE_URL="$URL" "$IMAGE" python -m src.records "$@"; }
 rec migrate
-rec import --prefix assets --prefix mogaesup-props --dry-run | tail -8
+rec import --prefix assets --dry-run | tail -8
 busy=$(curl -s --max-time 5 http://127.0.0.1:8080/api/health | python3 -c 'import json,sys; a=json.load(sys.stdin).get("activity") or {}; print(int(a.get("paid_requests",0))+int(a.get("running_tasks",0)))')
 [ "$busy" = 0 ] || { echo "studio is busy ($busy); try again when idle"; trap - ERR; exit 3; }
 docker stop gaesup-asset-studio >/dev/null
-rec import --prefix assets --prefix mogaesup-props | tail -8
-echo "second pass:"; rec import --prefix assets --prefix mogaesup-props | tail -4
+rec import --prefix assets | tail -8
+echo "second pass:"; rec import --prefix assets | tail -4
 rec status | tail -8
 grep -q '^CHARACTER_DB_SECRET_ARN=' /etc/asset-studio.env || printf "CHARACTER_DB_SECRET_ARN='%s'\nCHARACTER_DB_HOST='%s'\n" '{secret}' '{host}' >> /etc/asset-studio.env
 trap - ERR
