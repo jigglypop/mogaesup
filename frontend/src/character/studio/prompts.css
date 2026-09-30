@@ -3,17 +3,17 @@
 .prompt-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .prompt-actions>span,.prompt-scope,.prompt-rule{font-size:13px;color:var(--muted);line-height:1.7}
 .prompt-manager button:disabled{opacity:.45;cursor:default}
-.prompt-manager button.prompt-save{background:rgb(var(--accent-rgb) / .157);border-color:var(--accent)}
-.prompt-groups{display:flex;gap:8px;flex-wrap:wrap;margin:22px 0}
-.prompt-groups button{display:flex;align-items:center;gap:8px}
-.prompt-groups button[aria-pressed=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .125)}
+.prompt-manager button.prompt-save{background:var(--accent-strong);border-color:transparent;color:var(--accent-ink)}
+.prompt-groups{margin:22px 0}
+.prompt-groups button{display:inline-flex;align-items:center;gap:6px}
 .prompt-groups span{font-size:11px;color:var(--muted)}
 .prompt-groups i{font-size:10px;color:var(--accent-text)}
 .prompt-layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:20px;align-items:start}
 .prompt-list,.prompt-editor{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--glass);padding:22px;min-width:0}
 .prompt-list nav{display:flex;flex-direction:column;gap:6px;margin-top:18px}
-.prompt-list nav button{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;padding:12px}
-.prompt-list nav button[aria-current=true]{border-color:var(--accent);background:rgb(var(--accent-rgb) / .094)}
+.prompt-list nav button{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;padding:12px;border:1px solid var(--mg-hair);border-radius:var(--radius-md);background:var(--mg-card);box-shadow:none;font-weight:500}
+
+.prompt-list nav button[aria-current=true]{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 0 4px var(--accent-soft)}
 .prompt-list nav span,.prompt-editor-heading>span,.prompt-editor-footer>span{font-size:11px;color:var(--muted)}
 .prompt-list nav strong{font-size:13px}
 .prompt-editor-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}

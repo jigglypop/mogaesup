@@ -14,6 +14,7 @@ import {
   useAmbientBgm,
   useGameTime,
   useGaesupStoreApi,
+  useWeatherStore,
 } from 'gaesup-world';
 
 import { homeApi, lookApi } from '../api/endpoints';
@@ -40,6 +41,7 @@ import { SettingsMenu } from './Settings';
 import { StatusPanel } from './StatusPanel';
 import { useStored } from './stored';
 import { createVillage } from './village';
+import { WEATHER_NOW } from './weather';
 import { createMinihomeRuntime, MINIHOME_WORLD_ID } from './world';
 import { WorldKeyboard } from './WorldKeyboard';
 import { WorldLoading } from './WorldLoading';
@@ -89,14 +91,17 @@ function KeyHints({ keys, touch = false }: { keys: typeof KEYS | typeof TOUCH_KE
   );
 }
 
+/** The island's clock and the sky over it now. */
 function TimeChip() {
   const time = useGameTime();
+  const kind = useWeatherStore((state) => state.current?.kind ?? 'sunny');
   const day = time.hour >= 6 && time.hour < 18;
   const hour = time.hour % 12 === 0 ? 12 : time.hour % 12;
+  const sky = WEATHER_NOW[kind];
   return (
     <span className="mg-pill mg-glass mg-time">
-      <Icon name={day ? 'sun' : 'moon'} />
-      {time.hour < 12 ? '오전' : '오후'} {hour}:{String(time.minute).padStart(2, '0')}
+      <Icon name={kind === 'sunny' && !day ? 'moon' : sky.icon} />
+      {sky.label} · {time.hour < 12 ? '오전' : '오후'} {hour}:{String(time.minute).padStart(2, '0')}
     </span>
   );
 }

@@ -8,17 +8,17 @@
 .expression-library article > div { display: flex; gap: 12px; margin-top: 6px; font-size: .8rem; }
 .expression-layers { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
 .expression-layers a { display: grid; gap: 8px; width: min(220px, 100%); font-size: 12px; }
-.expression-layers img { width: 100%; height: 128px; object-fit: contain; border-radius: var(--radius-sm); background: repeating-conic-gradient(#fff1 0 25%, transparent 0 50%) 50% / 16px 16px; }
+.expression-layers img { width: 100%; height: 128px; object-fit: contain; border-radius: var(--radius-sm); background: repeating-conic-gradient(var(--mg-tint) 0 25%, transparent 0 50%) 50% / 16px 16px; }
 .expression-generation h3 { margin-top: 0; font-size: 14px; }
 .expression-generation label { display: grid; gap: 8px; margin-bottom: 12px; font-size: 12px; }
-.expression-generation textarea { width: 100%; min-height: 100px; resize: vertical; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--glass); color: inherit; padding: 10px; line-height: 1.6; }
+.expression-generation textarea { width: 100%; min-height: 100px; resize: vertical; padding: 10px 12px; line-height: 1.6; }
 .expression-generation .expression-library article { width: 180px; }
-.expression-generation .expression-library article > img { background: repeating-conic-gradient(#fff1 0 25%, transparent 0 50%) 50% / 16px 16px; }
+.expression-generation .expression-library article > img { background: repeating-conic-gradient(var(--mg-tint) 0 25%, transparent 0 50%) 50% / 16px 16px; }
 .expression-generation .expression-library p { font-size: 12px; }
 .expression-reference { display: grid; gap: 8px; margin-bottom: 14px; }
 .expression-reference-assets { display: flex; flex-wrap: wrap; gap: 10px; }
 .expression-reference-assets figure { display: grid; grid-template-columns: 72px auto; gap: 4px 8px; align-items: center; margin: 0; }
-.expression-reference-assets img { grid-row: 1 / 3; width: 72px; height: 72px; object-fit: contain; border-radius: var(--radius-sm); background: repeating-conic-gradient(#fff1 0 25%, transparent 0 50%) 50% / 16px 16px; }
+.expression-reference-assets img { grid-row: 1 / 3; width: 72px; height: 72px; object-fit: contain; border-radius: var(--radius-sm); background: repeating-conic-gradient(var(--mg-tint) 0 25%, transparent 0 50%) 50% / 16px 16px; }
 .expression-reference-assets figcaption { font-size: 12px; }
 .expression-reference-upload { width: fit-content; margin: 0 !important; }
 .expression-reference-upload input { max-width: min(100%, 260px); }

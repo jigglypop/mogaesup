@@ -8,7 +8,7 @@ import {
 
 import type { EditPart } from './session';
 
-export type Shelf = 'furniture' | 'living' | 'nature' | 'floor' | 'wall' | 'studio' | 'residents';
+export type Shelf = 'furniture' | 'living' | 'nature' | 'floor' | 'wall' | 'weather' | 'studio' | 'residents';
 
 export const SHELVES: { id: Shelf; label: string; part: EditPart }[] = [
   { id: 'furniture', label: '가구', part: 'object' },
@@ -16,6 +16,7 @@ export const SHELVES: { id: Shelf; label: string; part: EditPart }[] = [
   { id: 'nature', label: '자연', part: 'object' },
   { id: 'floor', label: '바닥', part: 'tile' },
   { id: 'wall', label: '벽', part: 'wall' },
+  { id: 'weather', label: '날씨', part: 'object' },
   { id: 'studio', label: '스튜디오에서 만든 것', part: 'object' },
   { id: 'residents', label: '주민', part: 'object' },
 ];

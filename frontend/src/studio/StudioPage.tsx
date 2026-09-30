@@ -78,7 +78,7 @@ function WorkspaceFrame({ screen }: { screen: Screen }) {
   return ready === screen.path ? <Workspace key={screen.path} /> : null;
 }
 
-/** The studio's screens, dark glass, scoped so their stylesheets stay inside. */
+/** The studio's screens on the app's page, scoped so their stylesheets stay inside. */
 export function Stage({ children }: { children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -98,7 +98,7 @@ export function Stage({ children }: { children: ReactNode }) {
     };
   }, []);
   return (
-    <div ref={ref} className="studio-root mg-dark mg-studio-stage mg-glass">
+    <div ref={ref} className="studio-root mg-studio-stage">
       <Suspense fallback={<p className="mg-empty">스튜디오를 여는 중…</p>}>{children}</Suspense>
     </div>
   );

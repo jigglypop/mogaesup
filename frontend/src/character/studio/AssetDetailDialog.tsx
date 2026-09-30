@@ -11,9 +11,10 @@ export function AssetDetailDialog({ title, onClose, children }: { title: string;
     document.body.style.overflow = 'hidden';
     return () => { element.close(); document.body.style.overflow = overflow; previous?.focus(); };
   }, []);
-  return createPortal(<dialog ref={dialog} className="admin-detail-dialog workspace" aria-labelledby="asset-detail-title"
+  // Portaled out of the studio's stage, so it brings the scope its stylesheets are written under.
+  return createPortal(<div className="studio-root"><dialog ref={dialog} className="admin-detail-dialog workspace" aria-labelledby="asset-detail-title"
     onCancel={event => { event.preventDefault(); onClose(); }}>
     <div className="admin-detail-heading"><h2 id="asset-detail-title">{title}</h2><button type="button" autoFocus onClick={onClose}>닫기</button></div>
     <div className="workspace-content admin-detail-content">{children}</div>
-  </dialog>, document.body);
+  </dialog></div>, document.body);
 }

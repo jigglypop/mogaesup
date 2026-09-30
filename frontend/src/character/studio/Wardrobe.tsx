@@ -388,7 +388,7 @@ export default function Wardrobe() {
         </div>}
         <div className="wardrobe-look"><h2>내 캐릭터</h2>
           <div className="wardrobe-look-row">
-            <button type="button" disabled={lookBusy || baking || !settled || !!wearError} onClick={() => void saveLook()}>{baking ? '입히는 중' : '내 캐릭터로 입기'}</button>
+            <button type="button" className="is-primary" disabled={lookBusy || baking || !settled || !!wearError} onClick={() => void saveLook()}>{baking ? '입히는 중' : '내 캐릭터로 입기'}</button>
             {look?.status === 'ready' && (look.worn
               ? <><span role="status">섬에서 입고 있어요</span>{user && <Link to={`/@${user.username}`}>내 섬으로</Link>}</>
               : <button type="button" disabled={lookBusy} onClick={() => void wearLook()}>섬에서 입기</button>)}

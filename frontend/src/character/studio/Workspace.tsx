@@ -6,7 +6,7 @@ import { isCatalogJobDeleted, studioApi } from './api';
 import { AssetGallery } from './AssetGallery';
 import { AssetDetailDialog } from './AssetDetailDialog';
 import { AdminAssetDetail } from './AdminAssetDetail';
-import { partLabels as labels, variantSlots } from '../factory/parts';
+import { variantSlots } from '../factory/parts';
 import { SinglePart } from './SinglePart';
 import { GlbAssetLibrary } from './GlbAssetLibrary';
 import '../factory/character-factory.css';
@@ -21,8 +21,6 @@ const Generations = lazy(() => import('./Generations'));
 const Emoticons = lazy(() => import('./Emoticons'));
 const Prompts = lazy(() => import('./Prompts'));
 const tabs = { admin: '관리자페이지', animals: '동물', character: '캐릭터', props: '기물', textures: '기본 바닥 타일', emoticons: '2D 이모티콘', prompts: '프롬프트 관리' };
-const navigation: (keyof typeof tabs)[] = ['admin', 'character', 'animals', 'props', 'textures', 'emoticons', 'prompts'];
-const characterModes = [['body', '기본몸'], ['parts', '파츠'], ['photo', '사진으로 전체 생성'], ['wardrobe', '옷장']] as const;
 
 export function Workspace() {
   const initial = new URLSearchParams(location.search);
@@ -39,7 +37,7 @@ export function Workspace() {
   const [showInfo, setShowInfo] = useState(false);
   const [deletedAsset, setDeletedAsset] = useState<{ id: string; slot: string; name: string }>();
   const [composeId, setComposeId] = useState('');
-  const [textureMode, setTextureMode] = useState<'basic' | 'prompt'>('basic');
+  const [textureMode] = useState<'basic' | 'prompt'>('basic');
   // The server refreshes its job snapshot every 10 seconds; child screens share these three reads.
   const jobs = usePolling(factoryApi.list, 10000), catalog = usePolling(studioApi.catalog, 15000), bodyProfile = usePolling(factoryApi.bodyProfile, 15000);
   const candidates = (jobs.value?.jobs || []).filter(j => j.production_mode === 'character_parts').sort((a,b) => b.created_at.localeCompare(a.created_at));
@@ -104,20 +102,6 @@ export function Workspace() {
   }
   const name = (j: FactoryJob) => catalog.value?.parts?.[`${j.id}:${j.requested_slots?.[0] || 'body'}`]?.name || catalog.value?.items[j.id]?.name || j.part_name || `${j.character_name} · ${new Date(j.created_at).toLocaleString()}`;
   return <div className="character-factory workspace studio-shell">
-    <aside className="studio-sidebar">
-      <div className="studio-brand"><strong>GAESUP-STORE</strong><span className={`connection-indicator ${jobs.error ? 'offline' : ''}`} aria-label={jobs.error ? '연결 끊김' : '연결됨'} /></div>
-      <nav aria-label="제작 공간">{navigation.map(key => <div key={key} className="studio-nav-group">
-        <button aria-current={tab === key ? 'page' : undefined} onClick={() => setTab(key)}>{tabs[key]}</button>
-        {key === 'character' && tab === 'character' && <div className="studio-subnav" role="group" aria-label="캐릭터 제작 방식">
-          {characterModes.map(([mode, label]) => <button key={mode} aria-pressed={characterMode === mode} onClick={() => setCharacterMode(mode)}>{label}</button>)}
-          {characterMode === 'parts' && <select aria-label="파츠 종류" value={partType} onChange={event => choosePart(event.target.value as typeof partType)}>{variantSlots.map(slot => <option key={slot} value={slot}>{labels[slot]}</option>)}</select>}
-        </div>}
-        {key === 'textures' && tab === 'textures' && <div className="studio-subnav" role="group" aria-label="텍스쳐 제작 방식">
-          <button aria-pressed={textureMode === 'basic'} onClick={() => setTextureMode('basic')}>기본 타일</button>
-          <button aria-pressed={textureMode === 'prompt'} onClick={() => setTextureMode('prompt')}>프롬프트로 재질 생성</button>
-        </div>}
-      </div>)}</nav>
-    </aside>
     <div className="studio-main">
     {(error || jobs.error || catalog.error || bodyProfile.error || native.error || managedNative.error) && <p className="workspace-error" role="alert">{error || jobs.error || catalog.error || bodyProfile.error || native.error || managedNative.error}</p>}
     {tab === 'character' && <>

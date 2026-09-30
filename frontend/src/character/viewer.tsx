@@ -102,7 +102,7 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
 }
 
 function EditingScene({ model, animation, editing, studio, hidden, onEditor, onPaint, onReady }: ViewProps) {
-  const { camera, gl, invalidate } = useThree();
+  const { camera, gl, invalidate, size: viewport } = useThree();
   const storeApi = useGaesupStoreApi();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
@@ -122,8 +122,12 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
     group.current.position.set(-initialCenter.x, -box.min.y, -initialCenter.z);
     group.current.updateMatrixWorld(true);
     box = new THREE.Box3().setFromObject(model.gltf.scene);
-    const center = box.getCenter(new THREE.Vector3()), height = Math.max(box.getSize(new THREE.Vector3()).y, .5);
-    camera.position.copy(center).add(new THREE.Vector3(0, height * .1, height * 2.4)); camera.lookAt(center);
+    const center = box.getCenter(new THREE.Vector3()), dimensions = box.getSize(new THREE.Vector3()), height = Math.max(dimensions.y, .5);
+    // Close framing: the model's height or width, whichever the view meets first, fills most of it.
+    const verticalFov = THREE.MathUtils.degToRad((camera as THREE.PerspectiveCamera).fov || 42);
+    const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(viewport.width / Math.max(viewport.height, 1), .1));
+    const distance = dimensions.z / 2 + Math.max(height / (2 * Math.tan(verticalFov / 2)), dimensions.x / (2 * Math.tan(horizontalFov / 2))) * 1.14;
+    camera.position.copy(center).add(new THREE.Vector3(0, height * .06, distance)); camera.lookAt(center);
     const orbit = new OrbitControls(camera, gl.domElement); orbit.target.copy(center); orbit.enableDamping = true;
     orbit.mouseButtons = { LEFT: studio && !editing ? THREE.MOUSE.ROTATE : -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }; orbit.update(); controls.current = orbit;
     const changed = () => invalidate();
@@ -191,7 +195,7 @@ function CardScene({ model, animation, hidden, cardView, onReady, onError }: Vie
       depth / 2 + dimensions.y / (2 * Math.tan(verticalFov / 2)),
       depth / 2 + width / (2 * Math.tan(horizontalFov / 2)),
       .25,
-    ) * 1.18;
+    ) * 1.1;
     if (profile) perspective.position.set(cardView === 'side' ? distance : -distance, 0, 0);
     else perspective.position.set(0, 0, cardView === 'back' ? -distance : distance);
     perspective.near = Math.max(distance / 100, .001);
@@ -251,6 +255,11 @@ function Garden() {
   </>;
 }
 
+/** The studio floor grid: faint on the page's light or dark well, which shows through the transparent canvas. */
+function studioGrid(): [string, string] {
+  return document.documentElement.dataset['theme'] === 'dark' ? ['#3b3752', '#2d2a42'] : ['#c9c3db', '#dedbe8'];
+}
+
 /** Soft light for matte characters: a warm fill from below and the front keeps faces bright. */
 function SoftLights() {
   return <>
@@ -279,9 +288,8 @@ function CharacterViewport(props: ViewProps) {
   </GaesupWorld>;
   if (props.studio) return <GaesupWorld urls={urls}>
     <PreviewBoundary onError={props.onError}>
-      <color attach="background" args={['#191f17']} />
       <SoftLights />
-      <gridHelper args={[20, 40, '#3d4b32', '#293222']} position={[0, -.02, 0]} />
+      <gridHelper args={[20, 40, ...studioGrid()]} position={[0, -.02, 0]} />
       <EditingScene {...props} />
     </PreviewBoundary>
   </GaesupWorld>;

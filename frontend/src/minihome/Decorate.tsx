@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import {
-  BUILDING_CLIMATE_OPTIONS,
   BUILDING_FARM_CROP_OPTIONS,
   BUILDING_FARM_EDGE_OPTIONS,
   BUILDING_FARM_ROWS_OPTIONS,
@@ -12,7 +11,6 @@ import {
   BUILDING_TILE_SHAPE_OPTIONS,
   BUILDING_WALL_KIND_OPTIONS,
   BUILDING_WALL_PRESETS,
-  BUILDING_WEATHER_EFFECT_OPTIONS,
   readFarmPlot,
   useBuildingStore,
   useBuildingStoreApi,
@@ -30,6 +28,7 @@ import { degreesOf } from './edit/objects';
 import type { EditPart, EditSession, EditTool } from './edit/session';
 import type { ResidentStore } from './residents';
 import { ResidentsShelf } from './ResidentsShelf';
+import { WEATHER_CHOICES, weatherChoiceOf } from './weather';
 
 type BuildingStoreApi = ReturnType<typeof useBuildingStoreApi>;
 
@@ -173,8 +172,8 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
     setShelf(next);
     setQuery('');
     session.setPart(SHELVES.find((item) => item.id === next)!.part);
-    // Residents are placed from the drawer; a click on the island must not drop the last chosen piece.
-    if (next === 'residents') session.setTool('select');
+    // Residents are placed and weather is picked from the drawer; a click on the island must not drop the last chosen piece.
+    if (next === 'residents' || next === 'weather') session.setTool('select');
   };
   /** Picking a floor or wall means using it: the select tool gives way to placing, painting and erasing stay. */
   const toPlace = () => {
@@ -214,6 +213,19 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
     if (shelf === 'studio') {
       if (studio.length === 0) return [<p key="empty" className="mg-empty">스튜디오에서 가져온 가구가 아직 없어요. 운영에서 가져오면 여기에 보여요.</p>];
       return studio.filter((item) => matches(item.label)).map(pieceButton);
+    }
+    if (shelf === 'weather') {
+      const chosen = weatherChoiceOf(weather, climate)?.key;
+      return WEATHER_CHOICES.filter((choice) => matches(choice.label)).map((choice) => (
+        <button key={choice.key} className="mg-piece" aria-pressed={chosen === choice.key} onClick={() => {
+          const state = store.getState();
+          state.setWeatherEffect(choice.weather);
+          state.setClimate(choice.climate);
+        }}>
+          <Icon name={choice.icon} />
+          <span>{choice.label}</span>
+        </button>
+      ));
     }
     if (shelf === 'floor') {
       return [
@@ -321,9 +333,6 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
             <b>선택</b>
             <small>놓인 물건을 눌러 골라요. 고른 물건은 끌어서 옮기고, 돌리고, 복제하고, 지울 수 있어요.</small>
           </header>
-          <Choices label="날씨" options={BUILDING_WEATHER_EFFECT_OPTIONS} value={weather} onChoose={(value) => store.getState().setWeatherEffect(value)} />
-          {/* The season's own weather comes and goes while no weather is fixed. */}
-          <Choices label="계절 날씨" options={BUILDING_CLIMATE_OPTIONS} value={climate} disabled={weather !== 'none'} onChoose={(value) => store.getState().setClimate(value)} />
           <ul className="mg-edit-tips">
             <li>
               빈 곳을 끌거나 <kbd>W</kbd>

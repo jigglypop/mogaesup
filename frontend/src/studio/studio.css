@@ -1,4 +1,4 @@
-/* The character studio inside the app: its screens sit in one dark glass stage, their tokens pointed at 모개숲's. */
+/* The character studio inside the app: its screens stand on the page as the app's glass panels, their tokens and controls pointed at 모개숲's. */
 .mg-studio { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 16px; align-items: start; }
 .mg-studio-nav { position: sticky; top: calc(var(--mg-edge) + 72px); display: grid; gap: 14px; padding: 14px; }
 .mg-studio-nav section { display: grid; gap: 2px; }
@@ -26,69 +26,148 @@
 .mg-studio-connection p { padding: 0; color: var(--mg-ink); }
 .mg-studio-connection small { font-size: 11px; color: var(--mg-muted); }
 
-.mg-studio-stage {
-  min-height: calc(100vh - var(--mg-edge) * 2 - 72px);
-  padding: 8px;
-  overflow: hidden;
-  color: var(--mg-ink);
-}
+/* No box of its own: the studio's panels stand on the page as the app's glass panels do. */
+.mg-studio-stage { min-width: 0; min-height: calc(100vh - var(--mg-edge) * 2 - 72px); color: var(--mg-ink); }
 
-/* The studio's tokens, from the app's (the stage is `.mg-dark`, so these are the dark values). */
-.studio-root.studio-root,
-.studio-root.studio-root .workspace,
-.studio-root.studio-root .admin-detail-dialog {
+/* The studio's tokens, from the app's: light glass, or dark with the app's theme. */
+.studio-root.studio-root {
   --text: var(--mg-ink);
-  --glass: rgba(255, 255, 255, 0.045);
-  --line: var(--mg-line);
+  --glass: var(--mg-glass);
+  --line: var(--mg-hair);
   --muted: var(--mg-muted);
   --accent: var(--mg-primary);
-  --accent-rgb: 183 165 237;
-  --accent-strong: var(--mg-primary-hover);
+  --accent-strong: var(--mg-primary);
   --accent-ink: var(--mg-primary-ink);
   --accent-text: var(--mg-primary);
-  --surface-sunken: var(--mg-sunken);
+  --accent-soft: var(--mg-primary-soft);
+  --surface-sunken: var(--mg-tint);
   --surface-panel: var(--mg-surface);
   --danger: var(--mg-bad);
   --success: var(--mg-good);
   --warning: var(--mg-warn);
-  /* The studio defines these with its admin screens; the wardrobe alone would otherwise draw square corners. */
-  --radius-sm: 8px;
+  --radius-sm: 10px;
   --radius-md: var(--mg-r-control);
   --radius-lg: var(--mg-r-card);
+  --radius: var(--mg-r-card);
+  /* Behind a 3D view or a part picture: the soft well of the app's own model previews. */
+  --studio-well: radial-gradient(120% 90% at 50% 20%, var(--mg-glass-strong), var(--mg-tint));
+  font-family: var(--mg-font);
+  color: var(--mg-ink);
 }
-.studio-root.studio-root { font-family: var(--mg-font); background: rgba(18, 16, 32, 0.84); color-scheme: dark; }
 
-/* The workspace brings its own page frame and navigation; the app's route and menu replace them. */
-.studio-root.studio-root .studio-sidebar { display: none; }
-.studio-root.studio-root .character-factory { min-height: 0; padding-bottom: 8px; background: none; }
-.studio-root.studio-root .studio-shell { display: block; min-height: 0; }
+/* The workspace brings its own page frame; the app's route and menu replace it, and its screens use the page's width. */
+.studio-root.studio-root .character-factory { min-height: 0; padding-bottom: 0; }
 .studio-root.studio-root .studio-main { margin: 0; min-height: 0; padding: 0; }
+.studio-root.studio-root :is(.workspace-content:not(.admin-detail-content), .wardrobe, .studio-main > main, .character-factory > main) {
+  max-width: none;
+  padding: 0;
+}
+.studio-root.studio-root .workspace-error { padding: 0 0 12px; }
 
-/* The wardrobe mounts on its own, without the workspace's page styles (those load with the admin screens), so its
-   heading, fields and buttons take these. `:where` keeps them below the wardrobe's own rules. */
-.studio-root.studio-root .wardrobe { padding: 20px; }
-.studio-root .wardrobe :where(h1) { font-size: 22px; font-weight: 850; letter-spacing: -0.03em; }
-.studio-root .wardrobe :where(label) { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
-.studio-root .wardrobe :where(input:not([type='color'], [type='range'], [type='checkbox'], [type='radio']), select) {
-  min-width: 0;
-  height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: #ffffff06;
-  color: var(--text);
+/* A screen's main surfaces are the app's glass panels. */
+.studio-root.studio-root :is(.asset-gallery, .management-panel, .character-input, .character-result, .base-body-compose,
+  .base-body-results, .generation-compose, .generation-library, .generation-result, .prompt-list, .prompt-editor, .wardrobe-bodies) {
+  border: 1px solid var(--mg-line);
+  border-radius: var(--mg-r-panel);
+  background: var(--mg-glass);
+  box-shadow: var(--mg-shadow);
+  backdrop-filter: var(--mg-blur);
+  -webkit-backdrop-filter: var(--mg-blur);
 }
-.studio-root .wardrobe :where(button) {
+
+/* Controls look like the app's (.mg-btn, .mg-field, .mg-tabs). `:where` keeps them under each screen's own rules. */
+.studio-root :where(button) {
   min-height: 36px;
-  padding: 0 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: rgb(var(--accent-rgb) / 0.08);
-  color: var(--text);
-  font-weight: 650;
+  padding: 6px 14px;
+  border: 1px solid var(--mg-line);
+  border-radius: 999px;
+  background: var(--mg-glass-strong);
+  color: var(--mg-ink);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.25;
+  box-shadow: var(--mg-shadow-soft);
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, color 0.15s;
 }
-.studio-root .wardrobe :where(button[aria-pressed='true']) { border-color: rgb(var(--accent-rgb) / 0.4); color: var(--accent-text); }
-.studio-root .wardrobe :where(button:disabled) { opacity: 0.45; cursor: default; }
+@media (hover: hover) {
+  .studio-root :where(button:hover:not(:disabled)) { background: var(--mg-card); }
+}
+.studio-root :where(button[aria-pressed='true']) {
+  border-color: transparent;
+  background: var(--mg-primary-soft);
+  color: var(--mg-primary);
+  box-shadow: none;
+}
+.studio-root :where(button.is-primary) { border-color: transparent; background: var(--mg-primary); color: var(--mg-primary-ink); }
+@media (hover: hover) {
+  .studio-root :where(button.is-primary:hover:not(:disabled)) { background: var(--mg-primary-hover); }
+}
+.studio-root :where(button:disabled) { opacity: 0.45; cursor: default; }
+
+.studio-root :where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='file']), select, textarea) {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--mg-hair-strong);
+  border-radius: var(--mg-r-control);
+  background: var(--mg-field);
+  color: var(--mg-ink);
+  font-weight: 500;
+  outline: none;
+}
+.studio-root :where(textarea, select[size], select[multiple]) { padding: 10px 12px; line-height: 1.55; }
+.studio-root :where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='file']), select, textarea):focus {
+  border-color: var(--mg-primary);
+  box-shadow: 0 0 0 3px var(--mg-primary-soft);
+}
+.studio-root :where(input[type='checkbox'], input[type='radio'], input[type='range']) { accent-color: var(--mg-primary); }
+.studio-root :where(option) { background: var(--mg-surface); color: var(--mg-ink); }
+
+/* One-of-several choices: a segmented bar on the tint, the chosen one raised on strong glass. */
+.studio-root :where(.wardrobe-slots, .base-body-tabs, .asset-gallery-view-switch, .asset-gallery-filters,
+  .character-workflow-switch, .meshy-clips, .animal-model-switch, .hair-batch-panels, .prompt-groups, .wardrobe-shape-fit) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--mg-tint);
+}
+.studio-root.studio-root .meshy-clips { gap: 4px; }
+.studio-root :where(.wardrobe-slots, .base-body-tabs, .asset-gallery-view-switch, .asset-gallery-filters,
+  .character-workflow-switch, .meshy-clips, .animal-model-switch, .hair-batch-panels, .prompt-groups, .wardrobe-shape-fit) > button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--mg-muted);
+  box-shadow: none;
+  white-space: nowrap;
+}
+.studio-root :where(.wardrobe-slots, .base-body-tabs, .asset-gallery-view-switch, .asset-gallery-filters,
+  .character-workflow-switch, .meshy-clips, .animal-model-switch, .hair-batch-panels, .prompt-groups, .wardrobe-shape-fit)
+  > button:is([aria-pressed='true'], [aria-selected='true']) {
+  background: var(--mg-glass-strong);
+  color: var(--mg-ink);
+  box-shadow: var(--mg-shadow-soft);
+}
+@media (hover: hover) {
+  .studio-root :where(.wardrobe-slots, .base-body-tabs, .asset-gallery-view-switch, .asset-gallery-filters,
+    .character-workflow-switch, .meshy-clips, .animal-model-switch, .hair-batch-panels, .prompt-groups, .wardrobe-shape-fit)
+    > button:hover:not(:disabled, [aria-pressed='true'], [aria-selected='true']) { color: var(--mg-ink); }
+}
+
+.studio-root :where([role='alert']) { color: var(--mg-bad); font-size: 13px; font-weight: 650; }
+.studio-root :where(p[role='status']) { color: var(--mg-muted); font-size: 13px; }
+
+/* The wardrobe mounts on its own, without the workspace's page styles (those load with the admin screens). */
+.studio-root .wardrobe :where(h1) { font-size: 22px; font-weight: 850; letter-spacing: -0.03em; }
+.studio-root .wardrobe :where(h2) { font-size: 14px; font-weight: 800; letter-spacing: -0.02em; }
+.studio-root .wardrobe :where(label) { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 750; color: var(--muted); }
 
 @media (max-width: 960px) {
   .mg-studio { grid-template-columns: minmax(0, 1fr); gap: 12px; }
@@ -112,16 +191,15 @@
 }
 
 @media (max-width: 720px) {
-  .mg-studio-stage { min-height: 0; padding: 4px; }
-  .studio-root.studio-root .wardrobe { padding: 12px; }
+  .mg-studio-stage { min-height: 0; }
 }
 @media (max-width: 720px), (max-height: 500px) {
   /* The 3D view never fills the phone, so there is always page around it to scroll with a thumb. */
-  .studio-root.studio-root .wardrobe-scene.meshy-scene { height: min(420px, 62vh); }
+  .studio-root.studio-root .wardrobe-stage { height: min(460px, 62vh); min-height: 0; }
 }
 
 @media (pointer: coarse) {
-  .studio-root .wardrobe :where(button) { min-height: 40px; }
+  .studio-root :where(button) { min-height: 40px; }
   /* Sideways drags still turn the model; up and down scroll the page instead of being caught by the 3D view. */
   .studio-root .wardrobe-scene canvas { touch-action: pan-y !important; }
 }

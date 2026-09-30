@@ -100,7 +100,7 @@ function PreviewMaterial({ tile, shape, repeat, onError }: Pick<Props, 'tile' | 
 
 function Scene(props: Props & { onTextureError(error: Error): void }) {
   return <>
-    <color attach="background" args={['#14151a']} />
+    <color attach="background" args={['#ebe8f2']} />
     <hemisphereLight args={['#ffffff', '#505767', 2.2]} />
     <directionalLight position={[3, 4, 3]} intensity={3} />
     <directionalLight position={[-3, 1, -2]} intensity={1.1} />
