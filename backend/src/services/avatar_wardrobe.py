@@ -247,7 +247,7 @@ class Wardrobe:
         part_sha = self._record(job_id, version).get('files', {}).get(f'{slot}.glb')
         if not part_sha:
             raise PipelineError('not_found', '파츠 파일을 찾을 수 없습니다.', 404)
-        target = self.library.root/'wardrobe-coverage'/f"{body['body_sha256'][:20]}-{part_sha[:20]}-v9.json"
+        target = self.library.root/'wardrobe-coverage'/f"{body['body_sha256'][:20]}-{part_sha[:20]}-v10.json"
         value = read_json(target)
         if not value:
             native = AvatarNativeParts(self.factory)

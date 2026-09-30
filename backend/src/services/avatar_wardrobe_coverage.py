@@ -240,12 +240,14 @@ def coverage(body, part_content, slot):
         positions, triangles = primitive['positions'], primitive['triangles']
         normals = _normals(positions, triangles)
         covered = _covered(positions, normals, garment) if len(garment) else np.zeros(len(positions), bool)
-        faces = covered[triangles].all(axis=1) & (slot != 'hair')
+        head = _head(primitive)
+        # The scalp stays under a hood or hat: it stands off the head, so skin cannot show through it,
+        # and a hidden scalp shows as a ragged hole through the face opening when no hair is worn.
+        faces = covered[triangles].all(axis=1) & (slot != 'hair') & ~head[triangles].all(axis=1)
         counts[primitive['key']] = int(len(triangles))
         hidden[primitive['key']] = base64.b64encode(np.packbits(faces, bitorder='little').tobytes()).decode()
         legs = np.isin(np.char.lower(primitive['joints'].astype(str)), ('leftupleg', 'rightupleg'))
         thighs.append((positions[legs, 1], covered[legs]))
-        head = _head(primitive)
         # Over the head a hat's crown or a hood's peak stands well off the scalp: a longer reach
         # decides what hair tucks under, never which skin is hidden.
         reached = covered.copy()
