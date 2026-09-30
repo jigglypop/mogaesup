@@ -120,3 +120,5 @@
   .mg-help { border-radius: 0; padding: 18px 16px 24px; }
   .mg-help-group dl > div { grid-template-columns: minmax(84px, auto) 1fr; }
 }
+.mg-tabs.is-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.mg-tabs.is-grid > button { padding: 0 4px; }

@@ -1,13 +1,23 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import {
+  BUILDING_CLIMATE_OPTIONS,
+  BUILDING_FARM_CROP_OPTIONS,
+  BUILDING_FARM_EDGE_OPTIONS,
+  BUILDING_FARM_ROWS_OPTIONS,
+  BUILDING_FARM_SOIL_OPTIONS,
+  BUILDING_FARM_STAGE_OPTIONS,
   BUILDING_TILE_OBJECT_OPTIONS,
   BUILDING_TILE_PRESETS,
   BUILDING_TILE_SHAPE_OPTIONS,
   BUILDING_WALL_KIND_OPTIONS,
   BUILDING_WALL_PRESETS,
+  BUILDING_WEATHER_EFFECT_OPTIONS,
+  readFarmPlot,
   useBuildingStore,
   useBuildingStoreApi,
+  type BuildingOptionMeta,
+  type FarmPlotConfig,
 } from 'gaesup-world/building';
 
 import type { CatalogItem } from '../api/types';
@@ -38,6 +48,35 @@ const QUARTERS = [0, 90, 180, 270];
 const QUARTER = Math.PI / 2;
 /** Stairs and ramps face a way; a box or round tile looks the same turned. */
 const TURNING_SHAPES = new Set(['stairs', 'ramp']);
+/** A farm plot's choices besides its crop, as the inspector offers them while placing or painting farm tiles. */
+const FARM_CHOICES = [
+  { key: 'stage', label: '자람', options: BUILDING_FARM_STAGE_OPTIONS },
+  { key: 'soil', label: '흙', options: BUILDING_FARM_SOIL_OPTIONS },
+  { key: 'edge', label: '테두리', options: BUILDING_FARM_EDGE_OPTIONS },
+  { key: 'rows', label: '이랑', options: BUILDING_FARM_ROWS_OPTIONS },
+] as const;
+
+/** One choice among `options` as a row of radio buttons. */
+function Choices<Value extends string>(props: {
+  label: string;
+  options: readonly BuildingOptionMeta<Value>[];
+  value: Value | undefined;
+  disabled?: boolean;
+  onChoose: (value: Value) => void;
+}) {
+  return (
+    <div className="mg-label">
+      {props.label}
+      <div className="mg-tabs is-grid" role="radiogroup" aria-label={props.label}>
+        {props.options.map((option) => (
+          <button key={option.type} role="radio" aria-checked={props.value === option.type} disabled={props.disabled} onClick={() => props.onChoose(option.type)}>
+            {option.labelKo}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 const studioPiece = (item: CatalogItem): ModelPiece => ({
   kind: 'model',
@@ -104,6 +143,9 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
   const shape = useBuildingStore((state) => state.currentTileShape);
   const height = useBuildingStore((state) => state.currentTileHeight);
   const cover = useBuildingStore((state) => state.selectedTileObjectType);
+  const farm = useBuildingStore((state) => state.currentFarm);
+  const weather = useBuildingStore((state) => state.weatherEffect);
+  const climate = useBuildingStore((state) => state.climate);
   const wallKind = useBuildingStore((state) => state.currentWallKind);
   // Coming back to decorating keeps the part the tools were on, so the drawer opens on its shelf.
   const [shelf, setShelf] = useState<Shelf>(() => ({ object: 'furniture', tile: 'floor', wall: 'wall' } as const)[session.getState().part]);
@@ -181,6 +223,8 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
             className="mg-piece"
             aria-pressed={floor === item.id}
             onClick={() => {
+              // A floor is bare ground until a cover or crop is picked after it.
+              store.getState().setSelectedTileObjectType('none');
               store.getState().setCurrentTileMaterialId(item.id);
               setFloor(item.id);
               toPlace();
@@ -196,6 +240,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
             className="mg-piece"
             aria-pressed={floor === preset.id}
             onClick={() => {
+              store.getState().setSelectedTileObjectType('none');
               store.getState().applyTilePreset(preset.id);
               setFloor(preset.id);
               toPlace();
@@ -205,13 +250,25 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
             <span>{preset.labelKo}</span>
           </button>
         )),
-        ...BUILDING_TILE_OBJECT_OPTIONS.filter((item) => matches(item.labelKo)).map((option) => (
+        ...BUILDING_TILE_OBJECT_OPTIONS.filter((item) => item.type !== 'farm' && matches(item.labelKo)).map((option) => (
           <button key={`cover-${option.type}`} className="mg-piece" aria-pressed={cover === option.type} onClick={() => {
               store.getState().setSelectedTileObjectType(option.type);
               toPlace();
             }}>
             <PieceIcon kind="cover" />
             <span>덮개 · {option.labelKo}</span>
+          </button>
+        )),
+        // Farm tiles by crop; the inspector sets the plot's growth, soil, edge and rows.
+        ...BUILDING_FARM_CROP_OPTIONS.filter((item) => matches(`밭 ${item.labelKo}`)).map((option) => (
+          <button key={`farm-${option.type}`} className="mg-piece" aria-pressed={cover === 'farm' && (farm.crop ?? 'none') === option.type} onClick={() => {
+              const state = store.getState();
+              state.setSelectedTileObjectType('farm');
+              state.setCurrentFarm({ ...state.currentFarm, crop: option.type });
+              toPlace();
+            }}>
+            <PieceIcon kind="cover" />
+            <span>밭 · {option.labelKo}</span>
           </button>
         )),
       ];
@@ -264,6 +321,9 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
             <b>선택</b>
             <small>놓인 물건을 눌러 골라요. 고른 물건은 끌어서 옮기고, 돌리고, 복제하고, 지울 수 있어요.</small>
           </header>
+          <Choices label="날씨" options={BUILDING_WEATHER_EFFECT_OPTIONS} value={weather} onChoose={(value) => store.getState().setWeatherEffect(value)} />
+          {/* The season's own weather comes and goes while no weather is fixed. */}
+          <Choices label="계절 날씨" options={BUILDING_CLIMATE_OPTIONS} value={climate} disabled={weather !== 'none'} onChoose={(value) => store.getState().setClimate(value)} />
           <ul className="mg-edit-tips">
             <li>
               빈 곳을 끌거나 <kbd>W</kbd>
@@ -313,6 +373,16 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
             </div>
           </>
         )}
+        {tool !== 'erase' && part === 'tile' && cover === 'farm' &&
+          FARM_CHOICES.map(({ key, label, options }) => (
+            <Choices<NonNullable<FarmPlotConfig[typeof key]>>
+              key={key}
+              label={label}
+              options={options}
+              value={readFarmPlot(farm, rotation)[key]}
+              onChoose={(value) => store.getState().setCurrentFarm({ ...store.getState().currentFarm, [key]: value })}
+            />
+          ))}
         {tool === 'place' && turns && (
           <div className="mg-label">
             회전

@@ -101,6 +101,8 @@ function tileAt(x: number, z: number): TileConfig {
   if (kind === 's') return { ...base, objectType: 'sand' };
   if (kind === '=') return { ...base, materialId: 'lawn', objectType: 'dirt', objectConfig: ROAD };
   if (kind === '"') return { ...base, materialId: 'lawn', objectType: 'grass', objectConfig: { grassDensity: TALL_GRASS } };
+  // The fenced field: a bed of cabbages north of a bed of carrots.
+  if (kind === '#') return { ...base, materialId: 'field', objectType: 'farm', objectConfig: { farm: { crop: z === 7 ? 'cabbage' : 'carrot' } } };
   return { ...base, materialId: MATERIAL[kind] ?? 'lawn', ...(raised ? { objectConfig: DIRT } : {}) };
 }
 

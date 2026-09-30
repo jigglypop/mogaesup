@@ -16,7 +16,8 @@ const server = await createServer({
   logLevel: 'error',
   clearScreen: false,
   server: { port: Number(process.argv[2]), strictPort: true, host: '127.0.0.1', hmr: false, watch: null },
-  optimizeDeps: { entries: ['index.html', 'src/**/*.{ts,tsx}', '!src/**/__tests__/**'] },
+  // Bundled afresh each run: a cache left from an older gaesup-world served its old exports after an upgrade.
+  optimizeDeps: { entries: ['index.html', 'src/**/*.{ts,tsx}', '!src/**/__tests__/**'], force: true },
 });
 await server.listen();
 process.stdin.once('end', () => void server.close().finally(() => process.exit()));

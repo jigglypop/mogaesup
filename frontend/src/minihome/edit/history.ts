@@ -25,6 +25,7 @@ type IslandParts = {
   showFog: boolean;
   fogColor: string;
   weatherEffect: BuildingSerializedState['weatherEffect'];
+  climate: NonNullable<BuildingSerializedState['climate']>;
   worldSurface: BuildingSerializedState['worldSurface'];
 };
 
@@ -40,6 +41,7 @@ const PART_KEYS = [
   'showFog',
   'fogColor',
   'weatherEffect',
+  'climate',
   'worldSurface',
 ] as const satisfies readonly (keyof IslandParts)[];
 
@@ -88,6 +90,7 @@ function sameIsland(a: IslandParts, b: IslandParts): boolean {
     a.showFog === b.showFog &&
     a.fogColor === b.fogColor &&
     a.weatherEffect === b.weatherEffect &&
+    a.climate === b.climate &&
     a.worldSurface === b.worldSurface &&
     sameList(a.objects, b.objects) &&
     sameList(a.blocks, b.blocks) &&
@@ -130,6 +133,7 @@ function toSerialized(parts: IslandParts): BuildingSerializedState {
     showFog: parts.showFog,
     fogColor: parts.fogColor,
     weatherEffect: parts.weatherEffect,
+    climate: parts.climate,
     worldSurface: parts.worldSurface,
     wallCategories: [...parts.wallCategories.values()],
     tileCategories: [...parts.tileCategories.values()],
