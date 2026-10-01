@@ -47,6 +47,22 @@ describe('saved request', () => {
     expect(stored()).toBeNull();
   });
 
+  it('앱 서버가 한도·권한으로 거절한 유료 요청은 확정 거절이라 지운다', async () => {
+    for (const [status, code] of [[429, 'factory_budget'], [403, 'factory_paid_off'], [403, 'factory_read_only'], [403, 'admin_only']] as const) {
+      const refused = new ApiError(code, '거절', status);
+      await expect(saved().send({ name: 'a' }, async () => Promise.reject(refused))).rejects.toBe(refused);
+      expect(stored()).toBeNull();
+    }
+  });
+
+  it('코드가 없는 429나 스튜디오에 닿지 못한 거절은 남겨 둔다', async () => {
+    for (const refused of [new ApiError('request_failed', '잠시 뒤', 429), new ApiError('request_failed', '연결 실패', 502), new ApiError('studio_waking', '켜는 중', 503)]) {
+      await expect(saved().send({ name: 'a' }, async () => Promise.reject(refused), { key: 'kept' })).rejects.toBe(refused);
+      expect(stored()?.key).toBe('kept');
+      localStorage.clear();
+    }
+  });
+
   it('검사를 통과하지 못한 입력도 서버가 거절하면 지워서 다음 요청을 막지 않는다', async () => {
     const rejected = new ApiError('invalid', '입력 오류', 422);
     const input = { name: 1 } as unknown as Input;

@@ -65,6 +65,20 @@ describe('home save adapter', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)).baseRevision).toBe(9);
   });
 
+  it('저장된 섬의 리비전을 알려 준다: 없으면 0, 읽으면 그 값, 저장하면 새 값', async () => {
+    const adapter = createHomeSaveAdapter({ username: 'mogae', worldId: 'minihome-v6', writable: true });
+    expect(adapter.revision).toBe(0);
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await adapter.read('main');
+    expect(adapter.revision).toBe(0);
+    fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 7, data: blob, updatedAt: '' }));
+    await adapter.read('main');
+    expect(adapter.revision).toBe(7);
+    fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 8, data: blob, updatedAt: '' }));
+    await adapter.write('main', blob);
+    expect(adapter.revision).toBe(8);
+  });
+
   it('방문자의 저장소는 절대 쓰지 않는다', async () => {
     const adapter = createHomeSaveAdapter({ username: 'mogae', worldId: 'minihome-v6', writable: false });
     await adapter.write('main', blob);

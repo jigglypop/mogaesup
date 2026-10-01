@@ -1,19 +1,27 @@
 // Opens the web app in Chromium against the running server: sign up, reach the new island, wait for its first
 // complete frame, decorate it (place a chair, move it with the select tool, undo and redo, checking each saved island),
-// then visit it as a second member, talk, and leave a guestbook entry.
-// Usage: node scripts/browser-smoke.mjs [webUrl] [screenshotDir]
+// then visit it as a second member, talk, and leave a guestbook entry. Both accounts are made with a password generated
+// for this run.
+// Usage: node scripts/browser-smoke.mjs [webUrl] [screenshotDir] [--allow-remote]   (a local server; it creates accounts)
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { chromium } from 'playwright';
 
-const WEB = process.argv[2] ?? 'http://127.0.0.1:5180';
-const SHOTS = process.argv[3] ?? '.data/screenshots';
+const args = process.argv.slice(2);
+const allowRemote = args.includes('--allow-remote');
+const [WEB = 'http://127.0.0.1:5180', SHOTS = '.data/screenshots'] = args.filter((arg) => arg !== '--allow-remote');
+const { hostname } = new URL(WEB);
+if (!allowRemote && !/^(localhost|127(\.\d{1,3}){3}|\[::1\])$/.test(hostname)) {
+  console.error(`${WEB} is not a loopback address, and this script signs up accounts there. Pass --allow-remote to run it anyway.`);
+  process.exit(1);
+}
 const WORLD_READY_MS = 120_000;
 
 mkdirSync(SHOTS, { recursive: true });
 const suffix = randomBytes(3).toString('hex');
+const PASSWORD = randomBytes(16).toString('hex');
 const SCREENSHOT = { timeout: 90_000, animations: 'disabled' };
 const browser = await chromium.launch({
   args: ['--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan'],
@@ -31,7 +39,7 @@ async function member(username, name) {
   await page.getByRole('tab', { name: '가입하기' }).click();
   await page.locator('input[name=username]').fill(username);
   await page.locator('input[name=displayName]').fill(name);
-  await page.locator('input[name=password]').fill('smoke-password-1');
+  await page.locator('input[name=password]').fill(PASSWORD);
   await page.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
   await page.waitForURL(`**/@${username}`);
   return page;
@@ -48,7 +56,13 @@ const step = async (label, run) => {
   }
 };
 
-const worldReady = (page) => page.locator('.mg-world-loading.is-done').waitFor({ state: 'attached', timeout: WORLD_READY_MS });
+// The loading cover stays only ~600 ms after the island is ready, which a busy page can skip past unseen; its being gone
+// (with the island there) is a state that stays.
+const worldReady = (page) =>
+  page.waitForFunction(() => document.querySelector('.mg-world') && !document.querySelector('.mg-world-loading'), undefined, {
+    timeout: WORLD_READY_MS,
+    polling: 250,
+  });
 const saved = (page) =>
   page
     .waitForResponse((response) => response.url().endsWith('/api/homes/me/world') && response.request().method() === 'PUT')

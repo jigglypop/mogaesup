@@ -8,16 +8,16 @@ import * as THREE from 'three';
 extend(THREE as unknown as Parameters<typeof extend>[0]);
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { FaceEditor, type PaintSettings } from './face-editor';
 import { captureRestPose } from './model-pose';
 import { NativeWardrobe, type Tuck, type Wearable } from './native-wardrobe';
 import { TextureExpressions } from './texture-expressions';
 import { matteCharacter } from './matte-materials';
 import { disposeObjectResources } from './assets/gpu-resources';
+import { loadFailure } from './assets/load-failure';
 
 type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
 export type CardView = 'front' | 'side' | 'back' | 'opposite';
-type ViewProps = { model: Model; animation: number; hidden: Set<number>; editing: boolean; studio?: boolean; card?: boolean; cardView: CardView; onEditor(editor: FaceEditor | null): void; onPaint(count: number): void; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
+type ViewProps = { model: Model; animation: number; studio?: boolean; card?: boolean; cardView: CardView; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
 
 const release = (gltf: GLTF) => disposeObjectResources(gltf.scenes);
@@ -31,7 +31,7 @@ class PreviewBoundary extends Component<{ children: ReactNode; onError(error: Er
   override render() { return this.state.failed ? null : this.props.children; }
 }
 
-function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProps) {
+function CharacterScene({ model, animation, onReady, onWorld }: ViewProps) {
   const gl = useThree(state => state.gl);
   const storeApi = useGaesupStoreApi();
   const body = useRef<RapierRigidBody>(null!);
@@ -49,12 +49,6 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
     model.gltf.scene.traverse(node => { if (node instanceof THREE.Mesh) names.push(node.name); });
     return names;
   }, [model]);
-  useEffect(() => {
-    model.gltf.scene.traverse(node => {
-      const index = model.gltf.parser.associations.get(node)?.nodes;
-      if (index !== undefined) node.visible = !hidden.has(index);
-    });
-  }, [model, hidden]);
   useEffect(() => {
     const canvas = gl.domElement;
     canvas.tabIndex = 0; canvas.setAttribute('aria-label', '개숲월드 캐릭터 이동 영역');
@@ -101,18 +95,12 @@ function CharacterScene({ model, animation, hidden, onReady, onWorld }: ViewProp
   </GaesupController>;
 }
 
-function EditingScene({ model, animation, editing, studio, hidden, onEditor, onPaint, onReady }: ViewProps) {
+function EditingScene({ model, animation, studio, onReady }: ViewProps) {
   const { camera, gl, invalidate, size: viewport } = useThree();
   const storeApi = useGaesupStoreApi();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
   const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
-  useEffect(() => {
-    model.gltf.scene.traverse(node => {
-      const index = model.gltf.parser.associations.get(node)?.nodes;
-      if (index !== undefined) node.visible = !hidden.has(index);
-    });
-  }, [model, hidden]);
   useEffect(() => {
     storeApi.getState().setInteractionActive(false);
     model.restorePose();
@@ -129,13 +117,13 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
     const distance = dimensions.z / 2 + Math.max(height / (2 * Math.tan(verticalFov / 2)), dimensions.x / (2 * Math.tan(horizontalFov / 2))) * 1.14;
     camera.position.copy(center).add(new THREE.Vector3(0, height * .06, distance)); camera.lookAt(center);
     const orbit = new OrbitControls(camera, gl.domElement); orbit.target.copy(center); orbit.enableDamping = true;
-    orbit.mouseButtons = { LEFT: studio && !editing ? THREE.MOUSE.ROTATE : -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }; orbit.update(); controls.current = orbit;
+    orbit.mouseButtons = { LEFT: studio ? THREE.MOUSE.ROTATE : -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }; orbit.update(); controls.current = orbit;
     const changed = () => invalidate();
     orbit.addEventListener('change', changed);
-    const editor = editing ? new FaceEditor(model.gltf, gl.domElement, camera, onPaint, `atelier.faces:${model.url}`) : null; onEditor(editor); onReady();
+    onReady();
     invalidate();
-    return () => { editor?.dispose(); orbit.removeEventListener('change', changed); orbit.dispose(); controls.current = null; onEditor(null); };
-  }, [model, editing, studio, camera, gl, onEditor, onPaint, onReady, storeApi]);
+    return () => { orbit.removeEventListener('change', changed); orbit.dispose(); controls.current = null; };
+  }, [model, studio, camera, gl, onReady, storeApi]);
   useEffect(() => {
     mixer.stopAllAction();
     if (studio && animation >= 0 && model.gltf.animations[animation]) mixer.clipAction(model.gltf.animations[animation]).reset().play();
@@ -149,17 +137,11 @@ function EditingScene({ model, animation, editing, studio, hidden, onEditor, onP
   return <group ref={group}><primitive object={model.gltf.scene} dispose={null} /></group>;
 }
 
-function CardScene({ model, animation, hidden, cardView, onReady, onError }: ViewProps) {
+function CardScene({ model, animation, cardView, onReady, onError }: ViewProps) {
   const { camera, gl, invalidate, size: viewport } = useThree();
   const controls = useRef<OrbitControls | null>(null);
   const group = useRef<THREE.Group>(null!);
   const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
-  useEffect(() => {
-    model.gltf.scene.traverse(node => {
-      const index = model.gltf.parser.associations.get(node)?.nodes;
-      if (index !== undefined) node.visible = !hidden.has(index);
-    });
-  }, [model, hidden]);
   useEffect(() => {
     mixer.stopAllAction();
     const clip = animation >= 0 ? model.gltf.animations[animation] : undefined;
@@ -297,7 +279,7 @@ function CharacterViewport(props: ViewProps) {
     <PreviewBoundary onError={props.onError}>
         <Suspense fallback={null}>
           <Physics gravity={[0, -9.81, 0]}>
-            {props.editing || !props.model.rigged ? <><Garden /><EditingScene {...props} /></> : <GaesupWorldContent showGrid={false} showAxes={false}>
+            {!props.model.rigged ? <><Garden /><EditingScene {...props} /></> : <GaesupWorldContent showGrid={false} showAxes={false}>
               <Garden />
               <CharacterScene {...props} />
             </GaesupWorldContent>}
@@ -324,13 +306,6 @@ export class ModelViewer {
   private retired: GLTF[] = [];
   private animation = -1;
   private cardView: CardView = 'front';
-  private editing = false;
-  private editor: FaceEditor | null = null;
-  private paintSettings: PaintSettings = { role: 'hair', radius: .04, erase: false };
-  private paintCount: (count: number) => void = () => {};
-  private onEditor = (editor: FaceEditor | null) => { this.editor = editor; if (editor) editor.settings = this.paintSettings; };
-  private onPaint = (count: number) => this.paintCount(count);
-  private hidden = new Set<number>();
   private generation = 0;
   private disposed = false;
   private request?: AbortController;
@@ -360,6 +335,8 @@ export class ModelViewer {
   private size() { return { width: this.container.clientWidth, height: this.container.clientHeight, top: 0, left: 0 }; }
   private initialize() {
     if (this.initializing) return this.initializing;
+    // A try after a failed one starts from "initializing" again; the badge always says what is true now.
+    delete this.container.dataset.renderer; this.badge.textContent = 'WebGPU 초기화 중';
     const pending = (async () => {
       const renderer = new WebGPURenderer({ canvas: this.canvas, antialias: true, alpha: true });
       try {
@@ -383,6 +360,7 @@ export class ModelViewer {
         this.root = undefined;
         this.renderers.delete(renderer);
         renderer.dispose();
+        if (!this.disposed) { this.container.dataset.renderer = 'error'; this.badge.textContent = '렌더러 초기화 실패'; }
         throw error;
       }
     })();
@@ -410,8 +388,7 @@ export class ModelViewer {
   };
   private render() {
     if (!this.model || this.disposed || !this.root) return;
-    const store = this.root.render(<CharacterViewport model={this.model} animation={this.animation} hidden={this.hidden} editing={this.editing} studio={this.presentation === 'studio'} card={this.presentation === 'card'} cardView={this.cardView}
-      onEditor={this.onEditor} onPaint={this.onPaint}
+    const store = this.root.render(<CharacterViewport model={this.model} animation={this.animation} studio={this.presentation === 'studio'} card={this.presentation === 'card'} cardView={this.cardView}
       onReady={this.onReady} onError={this.onError} onWorld={this.onWorld} />);
     store.getState().invalidate();
   }
@@ -419,9 +396,12 @@ export class ModelViewer {
     const token = ++this.generation;
     this.request?.abort(); this.finish?.();
     this.request = new AbortController();
-    const response = await fetch(url, { signal: AbortSignal.any([this.request.signal, AbortSignal.timeout(20000)]) });
-    if (!response.ok) throw new Error('모델 파일을 불러올 수 없습니다.');
-    const content = await response.arrayBuffer();
+    let content: ArrayBuffer;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.any([this.request.signal, AbortSignal.timeout(20000)]) });
+      if (!response.ok) throw new Error('모델 파일을 불러올 수 없습니다.');
+      content = await response.arrayBuffer();
+    } catch (error) { throw loadFailure(error, '모델 파일'); }
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content))).map(value => value.toString(16).padStart(2, '0')).join('');
     if (options.sha256 && options.sha256 !== digest) throw new Error('모델이 고정한 몸 버전과 다릅니다.');
     const gltf = await new GLTFLoader().parseAsync(content, '');
@@ -447,7 +427,7 @@ export class ModelViewer {
     }
     this.wardrobe?.dispose(); this.wardrobe = wardrobe;
     let rigged = false; gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) rigged = true; });
-    this.model = { gltf, rigged, restorePose: captureRestPose(gltf.scene), url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1; this.hidden = new Set();
+    this.model = { gltf, rigged, restorePose: captureRestPose(gltf.scene), url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1;
     this.container.dataset.modelSha256 = digest;
     await this.initialize();
     if (this.disposed || token !== this.generation) return [];
@@ -484,21 +464,10 @@ export class ModelViewer {
     if (!this.wardrobe) return Promise.reject(new Error('공용 골격 옷장이 준비되지 않았습니다.'));
     return this.wardrobe.equip(parts).then(applied => { if (applied) this.render(); return applied; });
   }
-  wardrobeDiagnostics() { return this.wardrobe?.diagnostics(); }
   setHairColor(color: string | null) { this.wardrobe?.setHairColor(color); this.render(); }
   setHiddenBodyTriangles(hidden: Record<string, Uint8Array> | null) { this.wardrobe?.hideTriangles(hidden); this.render(); }
   setTucked(slot: string, tuck: Tuck | null, outer: Record<string, Uint8Array> | null) { this.wardrobe?.tuckUnder(slot, tuck, outer); this.render(); }
   setPartColors(slot: string, material: number, mask: THREE.Texture, lights: number[], colors: (string | null)[]) { this.wardrobe?.setRegionColors(slot, material, mask, lights, colors); this.render(); }
-  setEditing(enabled: boolean, onCount: (count: number) => void) { this.editing = enabled; this.paintCount = onCount; this.render(); }
-  setPaint(settings: PaintSettings) { this.paintSettings = settings; if (this.editor) this.editor.settings = settings; }
-  selections() { return this.editor?.export() ?? []; }
-  undoPaint() { this.editor?.undo(); }
-  clearPaint() { this.editor?.clear(); }
-  setVisible(index: number, visible: boolean) {
-    this.hidden = new Set(this.hidden);
-    if (visible) this.hidden.delete(index); else this.hidden.add(index);
-    this.render();
-  }
   dispose() {
     this.expressions?.dispose(); this.expressions = undefined;
     this.wardrobe?.dispose(); this.wardrobe = undefined;

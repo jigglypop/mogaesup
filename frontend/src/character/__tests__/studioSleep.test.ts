@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { currentStudioSleep, reportStudio } from '../../api/studioSleep';
-import { ApiError, isDefinitiveRejection, request } from '../api';
+import { ApiError, isDefinitiveRejection, request, savedRequest } from '../api';
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -38,11 +38,41 @@ describe('잠든 스튜디오', () => {
     expect(isDefinitiveRejection(error)).toBe(false);
   });
 
-  it('서버의 다른 거절은 그 메시지를 보이고 판단은 전과 같다', async () => {
+  it('스튜디오에 닿지 못한 거절은 그 메시지를 보이고 판단은 전과 같다', async () => {
     fetchMock.mockResolvedValueOnce(json(502, { code: 'factory_unavailable', message: '캐릭터 서버에 연결하지 못했습니다.' }));
     const error = await request('/api/studio/catalog').catch((problem: unknown) => problem);
     expect(error).toMatchObject({ status: 502, code: 'request_failed', message: '캐릭터 서버에 연결하지 못했습니다.' });
     expect(isDefinitiveRejection(error)).toBe(false);
     expect(currentStudioSleep()).toBeNull();
+  });
+
+  it.each([
+    [429, 'factory_budget', '이번 달 유료 캐릭터 작업 한도를 다 썼습니다.'],
+    [403, 'factory_paid_off', '이 서버에서는 비용이 드는 캐릭터 작업을 시작할 수 없습니다.'],
+    [403, 'factory_read_only', '이 서버에서는 캐릭터 스튜디오를 읽기만 할 수 있습니다.'],
+    [403, 'admin_only', '관리자만 할 수 있어요.'],
+  ])('앱 서버의 %i %s 거절은 자기 코드를 지키고 확정 거절로 센다', async (status, code, message) => {
+    fetchMock.mockResolvedValueOnce(json(status, { code, message }));
+    const error = await request('/api/studio/generations', { method: 'POST' }).catch((problem: unknown) => problem);
+    expect(error).toMatchObject({ status, code, message });
+    expect(isDefinitiveRejection(error)).toBe(true);
+    expect(currentStudioSleep()).toBeNull();
+  });
+
+  it('코드 없는 429는 앱 서버의 거절이 아니므로 전처럼 남긴다', async () => {
+    fetchMock.mockResolvedValueOnce(json(429, {}));
+    const error = await request('/api/studio/generations', { method: 'POST' }).catch((problem: unknown) => problem);
+    expect(error).toMatchObject({ status: 429, code: 'request_failed' });
+    expect(isDefinitiveRejection(error)).toBe(false);
+  });
+
+  it('한도를 넘겨 거절된 유료 요청은 저장해 둔 기록에서 지운다', async () => {
+    const storage = 'test.studio-budget';
+    const saved = savedRequest<{ name: string }>(storage, ({ input }) => typeof input.name === 'string', '읽을 수 없음');
+    fetchMock.mockResolvedValueOnce(json(429, { code: 'factory_budget', message: '이번 달 유료 캐릭터 작업 한도를 다 썼습니다.' }));
+    const post = () => request('/api/studio/generations', { method: 'POST' });
+    await expect(saved.send({ name: 'a' }, post)).rejects.toMatchObject({ code: 'factory_budget' });
+    expect(localStorage.getItem(storage)).toBeNull();
+    expect(saved.read()).toEqual({ pending: null, error: '' });
   });
 });

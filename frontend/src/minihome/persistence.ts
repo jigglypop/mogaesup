@@ -20,6 +20,8 @@ type HomeSaveAdapter = SaveAdapter & {
   refreshRevision: () => Promise<void>;
   /** The size of the last island this adapter wrote or tried to write, in bytes. */
   readonly lastBytes: number | null;
+  /** The stored island's revision as last read or written; 0 while nothing is stored. */
+  readonly revision: number;
 };
 
 const byteLength = (text: string) => new TextEncoder().encode(text).length;
@@ -51,6 +53,9 @@ export function createHomeSaveAdapter(options: { username: string; worldId: stri
     },
     get lastBytes() {
       return lastBytes;
+    },
+    get revision() {
+      return revision;
     },
     async list() {
       return revision > 0 ? [MAIN_SLOT] : [];

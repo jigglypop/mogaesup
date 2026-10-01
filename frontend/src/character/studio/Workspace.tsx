@@ -14,7 +14,6 @@ import './workspace.css';
 
 const PhotoFactory = lazy(() => import('../factory/CharacterFactory').then(m => ({ default: m.CharacterFactory })));
 const BaseBodies = lazy(() => import('./BaseBodies'));
-const Wardrobe = lazy(() => import('./Wardrobe'));
 const Animals = lazy(() => import('./Animals'));
 const Textures = lazy(() => import('./Textures'));
 const Generations = lazy(() => import('./Generations'));
@@ -25,8 +24,8 @@ const tabs = { admin: '관리자페이지', animals: '동물', character: '캐�
 export function Workspace() {
   const initial = new URLSearchParams(location.search);
   const [tab, setTab] = useState<keyof typeof tabs>((initial.get('tab') || '') in tabs ? initial.get('tab') as keyof typeof tabs : 'character');
-  const [characterMode, setCharacterMode] = useState<'body' | 'photo' | 'parts' | 'wardrobe'>(
-    (['body', 'parts', 'wardrobe'] as const).find(mode => mode === initial.get('mode')) || 'photo');
+  const [characterMode, setCharacterMode] = useState<'body' | 'photo' | 'parts'>(
+    (['body', 'parts'] as const).find(mode => mode === initial.get('mode')) || 'photo');
   const [partType, setPartType] = useState<(typeof variantSlots)[number]>(variantSlots.find(slot => slot === initial.get('part')) || 'top');
   const [baseId, setBaseId] = useState(initial.get('base') || '');
   const [jobId, setJobId] = useState(initial.get('partsJob') || '');
@@ -37,7 +36,6 @@ export function Workspace() {
   const [showInfo, setShowInfo] = useState(false);
   const [deletedAsset, setDeletedAsset] = useState<{ id: string; slot: string; name: string }>();
   const [composeId, setComposeId] = useState('');
-  const [textureMode] = useState<'basic' | 'prompt'>('basic');
   // The server refreshes its job snapshot every 10 seconds; child screens share these three reads.
   const jobs = usePolling(factoryApi.list, 10000), catalog = usePolling(studioApi.catalog, 15000), bodyProfile = usePolling(factoryApi.bodyProfile, 15000);
   const candidates = (jobs.value?.jobs || []).filter(j => j.production_mode === 'character_parts').sort((a,b) => b.created_at.localeCompare(a.created_at));
@@ -108,7 +106,7 @@ export function Workspace() {
     {characterMode === 'body' ? <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><BaseBodies selectedJobId={jobId} jobs={candidates.filter(item => !isCatalogJobDeleted(item, catalog.value))} onJob={receiveJob} refreshJobs={jobs.refresh} /></Suspense> : characterMode === 'photo' ? <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><PhotoFactory
       jobs={jobs.value?.jobs || []} jobsLoading={jobs.loading && !jobs.value} jobsError={jobs.error}
       catalog={catalog.value} catalogError={catalog.error} bodyProfile={bodyProfile.value} bodyProfileError={bodyProfile.error}
-      onJob={listJob} refreshJobs={jobs.refresh} /></Suspense> : characterMode === 'wardrobe' ? <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Wardrobe /></Suspense> : <SinglePart slot={partType} onSlotChange={choosePart} bases={bases} base={base} native={nativeState} versions={versions} job={job} name={name} onBaseChange={id => { setBaseId(id); setJobId(''); }} onJobChange={setJobId} onJob={receiveJob} refreshJobs={jobs.refresh} />}</>}
+      onJob={listJob} refreshJobs={jobs.refresh} /></Suspense> : <SinglePart slot={partType} onSlotChange={choosePart} bases={bases} base={base} native={nativeState} versions={versions} job={job} name={name} onBaseChange={id => { setBaseId(id); setJobId(''); }} onJobChange={setJobId} onJob={receiveJob} refreshJobs={jobs.refresh} />}</>}
     {tab === 'admin' && <div className="workspace-content admin-library"><div className="workspace-heading"><h1>에셋 관리</h1><div className="admin-heading-actions"><button onClick={() => { setTab('character'); setCharacterMode('body'); }}>기본몸 추가</button><button onClick={() => { setTab('character'); choosePart('hair'); }}>헤어 생성</button><button aria-expanded={showUploads} onClick={() => setShowUploads(value => !value)}>GLB 등록</button></div></div>
         {deletedAsset && <div className="asset-delete-notice" role="status"><span>{deletedAsset.name} · 휴지통으로 이동했습니다.</span><button disabled={busy || !catalog.value} onClick={() => void perform(async () => { catalog.setValue(await studioApi.savePartMetadata(deletedAsset.id, deletedAsset.slot, { deleted: false }, catalog.value!.revision)); setDeletedAsset(undefined); })}>삭제 취소</button></div>}
         {showUploads && <GlbAssetLibrary bases={bases} defaultBaseId={base?.id} onJob={result => { setBaseId(result.base_job_id || result.id); setAdminAssetId(result.id); setAdminSlot(''); receiveJob(result); void jobs.refresh(); }} />}
@@ -119,7 +117,7 @@ export function Workspace() {
           showInfo={showInfo} onShowInfo={setShowInfo} showMotion={showMotion} onShowMotion={setShowMotion} busy={busy} error={error} perform={perform}
           onClose={() => setAdminAssetId('')} onDeleted={asset => { setDeletedAsset(asset); setAdminAssetId(''); }} onOpenProduction={openProduction} onCompose={setComposeId} />}
     </div>}
-    {tab === 'textures' && <><Suspense fallback={<p className="workspace-content">불러오는 중</p>}>{textureMode === 'basic' ? <Textures /> : <Generations key="texture" kind="texture" />}</Suspense></>}
+    {tab === 'textures' && <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Textures /></Suspense>}
     {tab === 'props' && <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Generations key="prop" kind="prop" /></Suspense>}
     {tab === 'emoticons' && <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Emoticons /></Suspense>}
     {tab === 'animals' && <Suspense fallback={<p>불러오는 중</p>}><Animals /></Suspense>}

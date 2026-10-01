@@ -8,32 +8,68 @@ export class ApiRequestError extends Error {
   }
 }
 
-type RequestOptions = { method?: string; body?: unknown; signal?: AbortSignal };
+/** No answer came in time. What the server did with the request is unknown, so callers treat it like a lost connection. */
+export class ApiTimeoutError extends Error {
+  constructor(readonly ms: number) {
+    super('서버가 대답하지 않아요');
+    this.name = 'ApiTimeoutError';
+  }
+}
+
+type RequestOptions = {
+  method?: string;
+  body?: unknown;
+  signal?: AbortSignal;
+  /** How long the whole exchange may take before it is given up as unanswered; 30 seconds by default. */
+  timeoutMs?: number;
+};
+
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * JSON with the server's session cookie. The server takes writes only as same-origin JSON, so every non-GET request
- * carries a JSON body, `{}` when there is nothing to send.
+ * carries a JSON body, `{}` when there is nothing to send. A request that gets no answer in time fails with
+ * `ApiTimeoutError` rather than holding whoever waits on it for good.
  */
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? 'GET';
   const write = method !== 'GET' && method !== 'HEAD';
-  const response = await fetch(`/api${path}`, {
-    method,
-    credentials: 'same-origin',
-    ...(write ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(options.body ?? {}) } : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
-  if (response.status === 204) return undefined as T;
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const error = body as { code?: string; message?: string } | null;
-    throw new ApiRequestError(
-      response.status,
-      error?.code ?? 'http_error',
-      error?.message ?? `요청이 실패했어요 (${response.status})`,
-    );
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort();
+  if (options.signal?.aborted) cancel();
+  options.signal?.addEventListener('abort', cancel, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    const response = await fetch(`/api${path}`, {
+      method,
+      credentials: 'same-origin',
+      ...(write ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(options.body ?? {}) } : {}),
+      signal: controller.signal,
+    });
+    if (response.status === 204) return undefined as T;
+    // Not JSON (a proxy's error page) reads as no body, but a read the clock cut short is a failure of its own.
+    const body: unknown = await response.json().catch((error: unknown) => (controller.signal.aborted ? Promise.reject(error) : null));
+    if (!response.ok) {
+      const error = body as { code?: string; message?: string } | null;
+      throw new ApiRequestError(
+        response.status,
+        error?.code ?? 'http_error',
+        error?.message ?? `요청이 실패했어요 (${response.status})`,
+      );
+    }
+    return body as T;
+  } catch (error) {
+    if (timedOut && (error as { name?: unknown } | null)?.name === 'AbortError') throw new ApiTimeoutError(timeoutMs);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', cancel);
   }
-  return body as T;
 }
 
 export const problemText = (problem: unknown) =>

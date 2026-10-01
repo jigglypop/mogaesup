@@ -1,6 +1,6 @@
 import type { SaveSystem } from 'gaesup-world';
 
-import { ApiRequestError } from '../../api/client';
+import { ApiRequestError, ApiTimeoutError } from '../../api/client';
 import { IslandTooLargeError, MAX_ISLAND_BYTES } from '../persistence';
 
 type SaveProblemKind = 'tooLarge' | 'invalid' | 'auth' | 'network' | 'server';
@@ -29,12 +29,14 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
   }
   // fetch rejects with a TypeError when the request never reached the server.
   if (error instanceof TypeError) return { kind: 'network', message: '인터넷 연결이 끊겼어요. 연결되면 다시 저장해 볼게요.' };
+  if (error instanceof ApiTimeoutError) return { kind: 'network', message: '서버가 대답하지 않아요. 곧 다시 저장해 볼게요.' };
   return { kind: 'server', message: '섬을 저장하지 못했어요. 조금 뒤에 다시 저장해 볼게요.' };
 }
 
 function describeLoadError(error: unknown): SaveProblem {
   if (error instanceof ApiRequestError && error.status < 500) return { kind: 'auth', message: `섬을 불러오지 못했어요. ${error.message}` };
   if (error instanceof TypeError) return { kind: 'network', message: '섬을 불러오지 못했어요. 인터넷 연결을 확인하고 다시 불러와 주세요.' };
+  if (error instanceof ApiTimeoutError) return { kind: 'network', message: '섬을 불러오지 못했어요. 서버가 대답하지 않아요. 다시 불러와 주세요.' };
   return { kind: 'server', message: '섬을 불러오지 못했어요. 조금 뒤에 다시 불러와 주세요.' };
 }
 
@@ -103,7 +105,8 @@ export type IslandSaver = {
 
 export type IslandSaverOptions = {
   system: Pick<SaveSystem, 'save' | 'load' | 'getBindings'>;
-  adapter: { refreshRevision: () => Promise<void>; readonly lastBytes: number | null };
+  /** `revision`: the stored island's, 0 while nothing is stored. */
+  adapter: { refreshRevision: () => Promise<void>; readonly lastBytes: number | null; readonly revision: number };
   writable: boolean;
   /** Autosave this long after the last change... */
   idleMs?: number;
@@ -143,6 +146,8 @@ export function createIslandSaver({
   let inflight: Promise<boolean> | null = null;
   let again = false;
   let disposed = false;
+  /** Counts loads, so one that a newer load has overtaken leaves the state to it. */
+  let loads = 0;
 
   const set = (patch: Partial<SaverState>) => {
     state = { ...state, ...patch };
@@ -168,7 +173,8 @@ export function createIslandSaver({
   };
 
   const schedule = () => {
-    if (disposed || !writable || state.phase !== 'ready' || state.conflict || !state.dirty || stuck()) return;
+    // A save that failed waits out its own retry delay; editing meanwhile does not shorten it.
+    if (disposed || !writable || state.phase !== 'ready' || state.conflict || !state.dirty || stuck() || retryTimer !== undefined) return;
     const at = now();
     firstDirtyAt ??= at;
     const due = Math.min(at + idleMs, firstDirtyAt + maxWaitMs);
@@ -193,6 +199,8 @@ export function createIslandSaver({
         return true;
       },
       (error: unknown) => {
+        // The wait for the next autosave starts from the next edit, not from the one this attempt was for.
+        firstDirtyAt = null;
         const problem = describeSaveError(error, adapter.lastBytes);
         if (problem === 'conflict') {
           set({ saving: false, conflict: true, dirty: isDirty() });
@@ -244,14 +252,23 @@ export function createIslandSaver({
   };
 
   const load = async (): Promise<boolean> => {
+    const mine = ++loads;
     stopTimer();
     stopRetry();
     saved = null;
     set({ phase: 'loading', problem: null });
+    let applied: boolean;
     try {
-      await system.load();
+      applied = await system.load();
     } catch (error) {
-      set({ phase: 'loadFailed', problem: describeLoadError(error) });
+      if (mine === loads) set({ phase: 'loadFailed', problem: describeLoadError(error) });
+      return false;
+    }
+    if (mine !== loads) return false;
+    // Nothing applied means either nothing is stored yet (the first save creates it), or the restore was cancelled while
+    // an island is stored. This island is then the village the runtime starts with, and saving it would replace theirs.
+    if (!applied && adapter.revision > 0) {
+      set({ phase: 'loadFailed', problem: { kind: 'server', message: '섬을 불러오지 못했어요. 다시 불러와 주세요.' } });
       return false;
     }
     saved = revisions();

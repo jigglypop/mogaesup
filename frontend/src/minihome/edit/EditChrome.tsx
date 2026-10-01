@@ -99,6 +99,18 @@ function SaveStatus({ saver }: { saver: IslandSaver }) {
   );
 }
 
+/** The island's engine did not start, so there is nothing to load or decorate yet. */
+export function StartBanner({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="mg-conflict mg-glass" role="alert">
+      <span>섬을 불러오지 못했어요.</span>
+      <button className="mg-btn is-primary is-small" onClick={onRetry}>
+        다시 불러오기
+      </button>
+    </div>
+  );
+}
+
 /**
  * What needs the owner's say about saving: another copy of the island saved first, the island did not load, or saving
  * keeps failing. Edits stay in the world meanwhile; nothing here reloads the page.

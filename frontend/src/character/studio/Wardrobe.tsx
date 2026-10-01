@@ -6,13 +6,15 @@ import { lookApi } from '../../api/endpoints';
 import type { Look, LookRequest } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
-import { isDefinitiveRejection } from '../api';
+import { isDefinitiveRejection, isRevisionConflict } from '../api';
 import { factoryApi, wardrobeUrls, type WardrobeColors, type WardrobeCoverage, type WardrobeOutfit, type WardrobePart } from '../factory/api';
 import { partLabels as labels } from '../factory/parts';
 import '../factory/meshy-motion.css';
 import { usePolling } from '../use-polling';
 import { ModelViewer } from '../viewer';
 import type { Tuck } from '../native-wardrobe';
+import { createHeldLoads } from './held-loads';
+import { reshapable, wearableParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
 import './wardrobe.css';
 
@@ -23,9 +25,16 @@ const garmentSlots = ['top', 'bottom', 'shoes'];
 // Slots with a coverage record: garments hide skin and layer; a hat and hair layer too.
 const coveredSlots = [...garmentSlots, 'hat', 'hair'];
 const hairSlots = ['hair', 'hairFront', 'hairBack'];
-const shapeSlots = ['top', 'bottom'];
 type Worn = Record<string, WardrobePart>;
 type Palette = { regions: WardrobeColors['regions']; material: number; mask: Texture };
+
+/** A worn garment's colour regions and the mask texture that tells where they are. */
+async function loadPalette(part: WardrobePart, signal: AbortSignal): Promise<Palette> {
+  const value = await factoryApi.wardrobeColors(part, signal);
+  const mask = await new TextureLoader().loadAsync(wardrobeUrls.colorMask(part));
+  mask.flipY = false; mask.colorSpace = NoColorSpace; mask.needsUpdate = true;
+  return { regions: value.regions, material: value.material, mask };
+}
 
 function decodeBits(value: string) {
   const binary = atob(value);
@@ -60,6 +69,8 @@ export default function Wardrobe() {
   const { user } = useAuth();
   // Saved outfits are the studio's own records: only operators change them.
   const admin = can(user, 'operator');
+  // Rebuilding a part's shape is paid studio work on a part everyone shares.
+  const paidOperator = can(user, 'paid_operator');
   const bodies = usePolling(factoryApi.wardrobeBodies, 30000);
   const outfits = usePolling(factoryApi.wardrobeOutfits, 30000);
   const [bodyId, setBodyId] = useState('');
@@ -67,13 +78,14 @@ export default function Wardrobe() {
   const body = registered.find(item => item.job_id === bodyId) || registered.find(item => item.is_default) || registered[0];
   const readParts = useCallback((signal: AbortSignal) => body ? factoryApi.wardrobeParts(body.job_id, signal) : Promise.resolve(null), [body?.job_id]);
   const library = usePolling(readParts, 30000);
-  const reloadParts = useCallback(async () => {
+  const reloadParts = useCallback(async (signal?: AbortSignal) => {
     if (!body) return [];
-    const value = await factoryApi.wardrobeParts(body.job_id);
+    const value = await factoryApi.wardrobeParts(body.job_id, signal);
     library.setValue(value);
     return value.parts;
   }, [body?.job_id, library.setValue]);
-  const parts = body && library.value?.body.job_id === body.job_id ? library.value.parts : [];
+  // Parts whose fit check failed are known-bad fits; only operators see them.
+  const parts = body && library.value?.body.job_id === body.job_id ? wearableParts(library.value.parts, admin) : [];
   const slots = slotOrder.filter(slot => parts.some(part => part.slot === slot));
   const [slot, setSlot] = useState('hair');
   const activeSlot = slots.includes(slot) ? slot : slots[0];
@@ -88,8 +100,18 @@ export default function Wardrobe() {
   // Colour regions and chosen colours, both keyed by part (a new part starts from its own colours).
   const [palettes, setPalettes] = useState<Record<string, Palette>>({});
   const [colors, setColors] = useState<Record<string, Record<string, string>>>({});
-  const masks = useRef<Texture[]>([]);
-  useEffect(() => () => { masks.current.forEach(texture => texture.dispose()); }, []);
+  // One colour mask per worn garment: loaded once, let go when the garment comes off or is replaced.
+  const maskLoads = useRef<ReturnType<typeof createHeldLoads<WardrobePart, Palette>> | null>(null);
+  useEffect(() => {
+    const loads = createHeldLoads<WardrobePart, Palette>({
+      load: loadPalette,
+      release: palette => palette.mask.dispose(),
+      ready: (key, palette) => setPalettes(current => ({ ...current, [key]: palette })),
+      dropped: key => setPalettes(current => Object.fromEntries(Object.entries(current).filter(([item]) => item !== key))),
+    });
+    maskLoads.current = loads;
+    return () => { loads.dispose(); maskLoads.current = null; };
+  }, []);
   const [wearing, setWearing] = useState(false), [wearError, setWearError] = useState(''), [notice, setNotice] = useState('');
   const [hairColor, setHairColor] = useState<string | null>(null);
   const [outfitName, setOutfitName] = useState(''), [loadedId, setLoadedId] = useState('');
@@ -130,7 +152,7 @@ export default function Wardrobe() {
   useEffect(() => { viewer?.setHairColor(hairColor); }, [viewer, hairColor]);
   // A refit gives a job a new version: wear it in place of the one the list no longer has.
   useEffect(() => {
-    const listed = library.value?.body.job_id === body?.job_id ? library.value?.parts : undefined;
+    const listed = library.value?.body.job_id === body?.job_id && library.value ? wearableParts(library.value.parts, admin) : undefined;
     if (!listed) return;
     setWorn(current => {
       const next = { ...current }; let changed = false;
@@ -141,7 +163,7 @@ export default function Wardrobe() {
       }
       return changed ? next : current;
     });
-  }, [library.value, body?.job_id]);
+  }, [library.value, body?.job_id, admin]);
 
   const coverageKey = (part: WardrobePart) => `${body?.job_id}|${keyOf(part, part.slot)}`;
   // Skin under worn garments: fetch each garment's covered body triangles once.
@@ -207,20 +229,12 @@ export default function Wardrobe() {
       return updated;
     });
   }
-  // Colour regions of worn clothing (hair keeps its own colour control).
+  // Colour regions of worn clothing (hair keeps its own colour control). A part without a texture keeps its colours:
+  // its load fails quietly and the swatches stay hidden.
   useEffect(() => {
-    let active = true;
-    for (const part of Object.values(applied.current)) {
-      const key = keyOf(part, part.slot);
-      if (hairSlots.includes(part.slot) || palettes[key]) continue;
-      void factoryApi.wardrobeColors(part).then(async value => {
-        const mask = await new TextureLoader().loadAsync(wardrobeUrls.colorMask(part));
-        mask.flipY = false; mask.colorSpace = NoColorSpace; mask.needsUpdate = true;
-        masks.current.push(mask);
-        if (active) setPalettes(current => ({ ...current, [key]: { regions: value.regions, material: value.material, mask } }));
-      }).catch(() => { /* A part without a texture keeps its colours; the swatches stay hidden. */ });
-    }
-    return () => { active = false; };
+    const garments = new Map<string, WardrobePart>();
+    for (const part of Object.values(applied.current)) if (!hairSlots.includes(part.slot)) garments.set(keyOf(part, part.slot), part);
+    maskLoads.current?.want(garments);
   }, [appliedKey]);
   useEffect(() => {
     if (!viewer) return;
@@ -236,8 +250,8 @@ export default function Wardrobe() {
     const outfit = pendingOutfit.current;
     if (!outfit || !viewer || !body || outfit.body.job_id !== body.job_id || library.value?.body.job_id !== body.job_id) return;
     pendingOutfit.current = null;
-    applyOutfit(outfit, library.value.parts);
-  }, [viewer, library.value, body?.job_id]);
+    applyOutfit(outfit, wearableParts(library.value.parts, admin));
+  }, [viewer, library.value, body?.job_id, admin]);
 
   function toggle(part: WardrobePart) {
     setWearError(''); setNotice('');
@@ -283,6 +297,8 @@ export default function Wardrobe() {
       pendingSave.current = null; setLoadedId(request.id);
     } catch (reason) {
       if (isDefinitiveRejection(reason)) pendingSave.current = null;
+      // Someone saved first: the revision read here is stale, so read the list again before the next try.
+      if (isRevisionConflict(reason)) void outfits.refresh();
       setSaveError((reason as Error).message);
     } finally { setBusy(false); }
   }
@@ -317,12 +333,16 @@ export default function Wardrobe() {
     if (!outfits.value || busy) return;
     setBusy(true); setSaveError('');
     try { outfits.setValue(await factoryApi.deleteWardrobeOutfit(id, outfits.value.revision)); if (loadedId === id) setLoadedId(''); }
-    catch (reason) { setSaveError((reason as Error).message); }
+    catch (reason) {
+      if (isRevisionConflict(reason)) void outfits.refresh();
+      setSaveError((reason as Error).message);
+    }
     finally { setBusy(false); }
   }
 
   const settled = !!viewer && !wearing && Object.keys(worn).length === Object.keys(applied.current).length;
   const savedOutfits = Object.entries(outfits.value?.outfits || {}).sort(([, a], [, b]) => (b.saved_at || '').localeCompare(a.saved_at || ''));
+  const shapes = reshapable(worn, paidOperator);
   if (bodies.value && registered.length === 0) {
     return <div className="wardrobe workspace-content"><div className="workspace-heading"><h1>옷장</h1></div>
       <p className="wardrobe-empty">등록된 옷장 몸이 없습니다. 기본몸 화면에서 등록하세요.</p></div>;
@@ -382,9 +402,9 @@ export default function Wardrobe() {
             </li>;
           })}</ul>
         </div>}
-        {shapeSlots.some(slotName => worn[slotName]?.fit_method === 'body-shell-v1') && <div className="wardrobe-shapes"><h2>모양</h2>
-          <ul>{shapeSlots.filter(slotName => worn[slotName]?.fit_method === 'body-shell-v1').map(slotName =>
-            <WardrobeShape key={slotName} part={worn[slotName]!} label={labels[slotName] || slotName} reload={reloadParts}
+        {shapes.length > 0 && <div className="wardrobe-shapes"><h2>모양</h2>
+          <ul>{shapes.map(([slotName, part]) =>
+            <WardrobeShape key={slotName} part={part} label={labels[slotName] || slotName} reload={reloadParts}
               replace={next => setWorn(current => ({ ...current, [slotName]: next }))} />)}</ul>
         </div>}
         <div className="wardrobe-look"><h2>내 캐릭터</h2>

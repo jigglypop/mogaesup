@@ -24,10 +24,12 @@ import { Icon } from '../ui/icons';
 import { playerModelUrl } from './character';
 import { Decorate } from './Decorate';
 import { EditContext, useEditState, useSaver } from './edit/context';
-import { EditBar, EditHelp, SaveBanners } from './edit/EditChrome';
+import { EditBar, EditHelp, SaveBanners, StartBanner } from './edit/EditChrome';
 import { createEditHistory, readParts, sameParts } from './edit/history';
+import { appDestination, hasUnsaved, leaveIsland } from './edit/leave';
 import { createIslandSaver } from './edit/save';
 import { createEditSession } from './edit/session';
+import { useIslandStart } from './edit/useIslandStart';
 import { Guestbook } from './Guestbook';
 import { NeighborsTab, useNeighbors } from './Ilchons';
 import { InteractButton } from './InteractButton';
@@ -177,17 +179,11 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     return { runtime, saver, history, session, residents, greetings };
   });
   const { runtime, saver, session, residents, greetings } = world;
+  const { failed: startFailed, retry: retryStart } = useIslandStart({ runtime, saver, history: world.history });
+  // Set when the owner chose to leave without edits that could not be saved.
+  const discarding = useRef(false);
   useEffect(() => {
     const { history } = world;
-    let alive = true;
-    // Undo starts from the loaded island, never from the village the runtime begins with.
-    runtime
-      .setup()
-      .then(() => (alive ? saver.load() : false))
-      .then((loaded) => {
-        if (loaded && alive) history.start();
-      })
-      .catch((error: unknown) => console.error(error));
     const unwatch = runtime.buildingStore.subscribe((state, previous) => {
       if (!sameParts(readParts(state), readParts(previous))) saver.changed();
     });
@@ -195,18 +191,21 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     // Rule flags (a chat's choices) change outside the building store; a slow look catches them.
     const poll = window.setInterval(saver.changed, 5000);
     return () => {
-      alive = false;
       unwatch();
       unwatchResidents();
       window.clearInterval(poll);
-      // Leaving the page in the app (another island, 둘러보기) keeps unsaved edits: save them, then let the world go.
-      const pending = saver.flush();
-      saver.dispose();
+      const release = () => void runtime.dispose().catch((error: unknown) => console.error(error));
+      // Leaving the page in the app (another island, 둘러보기, Back) must not drop unsaved edits: they are saved first, and
+      // while they cannot be, the island stays in the background, retrying, until they are.
+      if (isOwner) leaveIsland(saver, release, discarding.current);
       history.stop();
       world.session?.dispose();
-      void pending.finally(() => runtime.dispose().catch((error: unknown) => console.error(error)));
+      if (!isOwner) {
+        saver.dispose();
+        release();
+      }
     };
-  }, [world, runtime, saver]);
+  }, [world, runtime, saver, isOwner]);
   const saverState = useSaver(saver);
   const editActive = useEditState(session, (state) => state.active);
 
@@ -252,12 +251,37 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     [saver],
   );
   const saveNow = useCallback(() => void save(), [save]);
-  // Leaving saves first; with nothing unsaved (or nothing that can be saved yet) it just leaves.
-  const exit = () => {
-    const state = saver.getState();
-    if (state.phase !== 'ready' || (!state.dirty && !state.saving)) navigate(home);
-    else void save().then((ok) => ok && navigate(home));
-  };
+  // Leaving saves first; with nothing unsaved (or nothing that can be saved yet) it just leaves. When the save fails the
+  // owner may stay with the edits or leave without them.
+  const leave = useCallback(
+    (to: string) => {
+      if (!hasUnsaved(saver.getState())) {
+        navigate(to);
+        return;
+      }
+      void save().then((ok) => {
+        if (!ok && !window.confirm('저장하지 못한 변경이 있어요. 나가면 사라져요. 계속할까요?')) return;
+        discarding.current = !ok;
+        navigate(to);
+      });
+    },
+    [saver, save, navigate],
+  );
+  const exit = () => leave(home);
+  // The router here has no way to block a navigation, so a link out of the editor (the rail, the brand) is caught as it
+  // is clicked and goes the same way. Back and Forward are left to the island's leaving, which keeps what is unsaved.
+  useEffect(() => {
+    if (!decorating) return undefined;
+    const intercept = (event: MouseEvent) => {
+      const to = appDestination(event);
+      if (to === null || !hasUnsaved(saver.getState())) return;
+      event.preventDefault();
+      event.stopPropagation();
+      leave(to);
+    };
+    document.addEventListener('click', intercept, true);
+    return () => document.removeEventListener('click', intercept, true);
+  }, [decorating, saver, leave]);
   useEffect(() => {
     if (!saved) return undefined;
     const timer = setTimeout(() => setSaved(false), 2200);
@@ -322,7 +346,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                 <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} />
               ) : (
                 <p className="mg-edit-wait mg-glass" role="status">
-                  {saverState.phase === 'loading' ? '섬을 불러오는 중이에요. 다 불러오면 꾸밀 수 있어요.' : '섬을 불러와야 꾸밀 수 있어요.'}
+                  {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요. 다 불러오면 꾸밀 수 있어요.' : '섬을 불러와야 꾸밀 수 있어요.'}
                 </p>
               )}
               <EditHelp session={session} />
@@ -391,6 +415,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
               <Icon name="check" /> 섬을 저장했어요
             </p>
           )}
+          {startFailed && <StartBanner onRetry={retryStart} />}
           <SaveBanners saver={saver} editing={decorating} onReloaded={reloaded} />
           <ToastHost position="top-center" />
         </div>

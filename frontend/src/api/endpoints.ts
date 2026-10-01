@@ -12,6 +12,7 @@ import type {
   FactoryImport,
   FactoryUsage,
   GuestbookPage,
+  HomeListQuery,
   HomeSummary,
   HomeView,
   HomeWorld,
@@ -32,6 +33,16 @@ import type {
 
 const segment = encodeURIComponent;
 
+/** `/homes` with only the paging and search that are set. */
+export function homesPath({ limit, before, q }: HomeListQuery = {}): string {
+  const query = new URLSearchParams();
+  if (limit) query.set('limit', String(limit));
+  if (before) query.set('before', before);
+  if (q) query.set('q', q);
+  const text = query.toString();
+  return text ? `/homes?${text}` : '/homes';
+}
+
 export const authApi = {
   me: () => api<{ user: User | null }>('/auth/me'),
   register: (body: Registration) => api<{ user: User }>('/auth/register', { method: 'POST', body }),
@@ -41,7 +52,7 @@ export const authApi = {
 };
 
 export const homeApi = {
-  list: () => api<{ homes: HomeSummary[] }>('/homes'),
+  list: (query?: HomeListQuery, signal?: AbortSignal) => api<{ homes: HomeSummary[] }>(homesPath(query), { signal }),
   get: (username: string) => api<HomeView>(`/homes/${segment(username)}`),
   /** The caller's own home, created on the spot if it is missing. */
   mine: () => api<HomeView>('/homes/me'),
@@ -51,7 +62,8 @@ export const homeApi = {
   /** Undefined until the owner first saves. */
   world: (username: string, worldId: string) =>
     api<HomeWorld | undefined>(`/homes/${segment(username)}/world?worldId=${segment(worldId)}`),
-  saveWorld: (body: SaveHomeWorld) => api<HomeWorld>('/homes/me/world', { method: 'PUT', body }),
+  /** An island is up to 2MB, so a save may take longer than other requests before it counts as unanswered. */
+  saveWorld: (body: SaveHomeWorld) => api<HomeWorld>('/homes/me/world', { method: 'PUT', body, timeoutMs: 60_000 }),
 };
 
 export const socialApi = {

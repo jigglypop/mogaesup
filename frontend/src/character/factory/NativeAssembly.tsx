@@ -66,7 +66,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
   const parts = state.parts.filter(p => p.slot !== 'body' && p.available !== false
     && state.artifacts.some(asset => asset.name === `${p.slot}.glb`));
   const inputs = useRef(state); inputs.current = state;
-  const mount = useRef<HTMLDivElement>(null), panel = useRef<HTMLElement>(null), viewer = useRef<ModelViewer | null>(null);
+  const mount = useRef<HTMLDivElement>(null), viewer = useRef<ModelViewer | null>(null);
   const alive = useRef(true), saving = useRef(false), applied = useRef<string[]>([]);
   const [selected, setSelected] = useState<string[]>([]), [saved, setSaved] = useState<string[]>([]);
   const [hairColor, setHairColor] = useState<string | null>(null), [savedHairColor, setSavedHairColor] = useState<string | null>(null);
@@ -108,16 +108,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
       const start = -1;
       instance.play(start); setMotion(start); setReadyViewer(instance);
     }).catch(e => { if (active) setModelError(e.message); });
-    const timer = setInterval(() => {
-      const diagnostic = instance.wardrobeDiagnostics();
-      if (!panel.current || !diagnostic) return;
-      panel.current.dataset.sharedBones = String(diagnostic.shared);
-      panel.current.dataset.boneCount = String(diagnostic.boneCount);
-      panel.current.dataset.partIds = JSON.stringify(diagnostic.partIds);
-      panel.current.dataset.partSamples = JSON.stringify(diagnostic.partSamples);
-      panel.current.dataset.bodySample = JSON.stringify(diagnostic.bodySample);
-    }, 300);
-    return () => { active = false; clearInterval(timer); instance.dispose(); viewer.current = null; };
+    return () => { active = false; instance.dispose(); viewer.current = null; };
   }, [body?.url, body?.sha256, mode, attempt]);
 
   useEffect(() => {
@@ -159,7 +150,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
     }
   }
   const appliedSelection = ready && restored && !wearing && equal(selected, applied.current);
-  return <section ref={panel} className="meshy-motion assembly-preview" data-assembly-ready={appliedSelection && !wearError ? version : ''}>
+  return <section className="meshy-motion assembly-preview" data-assembly-ready={appliedSelection && !wearError ? version : ''}>
     <h2>캐릭터 미리보기</h2>
     {!!state.incomplete_parts?.length && <p role="status">미완성 파츠: {state.incomplete_parts.map(part => labels[part.slot] || part.slot).join(', ')}</p>}
     <div className="meshy-buttons"><button aria-pressed={mode === 'studio'} onClick={() => setMode('studio')}>동작</button><button aria-pressed={mode === 'world'} onClick={() => setMode('world')}>이동</button></div>

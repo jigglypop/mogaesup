@@ -1,4 +1,4 @@
-import { isStudioAsleep, reportStudio } from '../api/studioSleep';
+import { reportStudio } from '../api/studioSleep';
 
 type Part = { node_index: number; role: string; name?: string };
 type Operation = { id: string; action_id: string; status: string; error: { code: string; message: string } | null };
@@ -23,7 +23,8 @@ export class ApiError extends Error {
 }
 
 // A sleeping studio is answered by the app server before or instead of reaching it; a saved request stays pending
-// and is replayed under the same key once the studio is up.
+// and is replayed under the same key once the studio is up. The app server's other refusals (a spent budget, a paid
+// action it does not allow, who may ask) keep their own code: the request never reached the studio, so it is settled.
 const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled', 'studio_waking', 'studio_stopping']);
 
 // A coded server error (including 409 conflicts and 503 configuration errors) means the
@@ -34,6 +35,9 @@ export function isDefinitiveRejection(error: unknown): error is ApiError {
   if ([400, 401, 403, 404, 409, 422].includes(error.status)) return true;
   return error.status >= 400 && !transportCodes.has(error.code);
 }
+
+/** The server refused a change made on a list that has moved on since it was read. */
+export const isRevisionConflict = (error: unknown) => error instanceof ApiError && error.code === 'revision_conflict';
 
 export async function request<T>(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const { timeoutMs = 15000, signal, ...init } = options;
@@ -57,7 +61,8 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
   if (!response.ok) {
     const validation = Array.isArray(body.detail) ? body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join('.') || '입력'}: ${item.msg || '값 확인 필요'}`).join(' / ') : typeof body.detail === 'string' && body.detail !== 'Not Found' ? body.detail : '';
     const fallback = response.status === 401 ? 'API 인증이 필요합니다. 로컬 서버 설정을 확인해 주세요.' : response.status === 404 ? 'API 또는 자료를 찾을 수 없습니다. 프론트와 백엔드 버전·연결 주소를 확인해 주세요.' : response.status >= 500 ? `서버 오류 (${response.status}). 저장된 작업은 다시 불러와 확인할 수 있습니다.` : `요청 오류 (${response.status}). 입력을 확인해 주세요.`;
-    throw new ApiError(body.error?.code || (isStudioAsleep(gateway?.code) ? gateway.code : 'request_failed'), body.error?.message || gateway?.message || validation || fallback, response.status);
+    const gatewayCode = gateway && gateway.code !== 'factory_unavailable' ? gateway.code : undefined;
+    throw new ApiError(body.error?.code || gatewayCode || 'request_failed', body.error?.message || gateway?.message || validation || fallback, response.status);
   }
   return body as T;
   } catch (error) {

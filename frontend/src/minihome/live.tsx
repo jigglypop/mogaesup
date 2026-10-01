@@ -19,6 +19,7 @@ import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
 import { Icon } from '../ui/icons';
 import { MINIME_SCALE } from './character';
+import { peerColor } from './peers';
 
 type Multiplayer = ReturnType<typeof useMultiplayer>;
 
@@ -131,7 +132,7 @@ export function LiveAvatars({ playerRef }: { playerRef: RefObject<RapierRigidBod
 export function usePresence() {
   const live = useLive();
   if (!live?.isConnected) return { connected: false, count: 0, others: [] as { id: string; name: string; color: string }[] };
-  const others = [...live.players.entries()].map(([id, player]) => ({ id, name: player.name, color: player.color }));
+  const others = [...live.players.entries()].map(([id, player]) => ({ id, name: player.name, color: peerColor(player.color) }));
   return { connected: true, count: others.length + 1, others };
 }
 
@@ -168,7 +169,7 @@ export function ChatBar({ signedIn }: { signedIn: boolean }) {
     <form className="mg-chatbar mg-glass" onSubmit={send}>
       <span className="mg-chatbar-people" aria-hidden="true">
         {others.slice(0, 3).map((player, index) => (
-          <i key={index} style={{ background: player.color }}>
+          <i key={index} style={{ background: peerColor(player.color) }}>
             {[...player.name][0] ?? '?'}
           </i>
         ))}

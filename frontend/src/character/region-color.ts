@@ -2,6 +2,8 @@ import { Color, MeshStandardMaterial, type Texture } from 'three';
 import { float, max, mix, texture, uniform, vec3, vec4 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 
+import { ownProgramKey } from './program-key';
+
 /** Recolour up to four texture regions (one mask channel each; the fourth is stored inverted in alpha)
  * while keeping each texel's shading.
  * lights: mean linear luminance of each region, so a texel keeps its brightness relative to its region. */
@@ -22,6 +24,7 @@ export function regionColorControl(material: MeshStandardMaterial, mask: Texture
     return mix(current, shaded, weight.mul(amount));
   }, base as unknown as ReturnType<typeof mix>);
   Object.assign(material, { colorNode: sampled ? vec4(color, sampled.a) : color });
+  ownProgramKey(material, 'region-color');
   material.needsUpdate = true;
   return (colors: (string | null)[]) => {
     amounts.forEach((amount, index) => {

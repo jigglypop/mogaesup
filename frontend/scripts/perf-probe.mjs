@@ -1,13 +1,21 @@
 // Measures a minihome in Chrome on this machine's GPU (WebGPU, vsync off): load time, bytes, frame times standing and
-// walking, long tasks, and the main thread's hottest functions. Signs up a throwaway account on the target server.
-// Usage: node scripts/perf-probe.mjs [webUrl] [outFile]   (a local server; it creates an account)
+// walking, long tasks, and the main thread's hottest functions. Signs up a throwaway account on the target server, with a
+// password made for this run.
+// Usage: node scripts/perf-probe.mjs [webUrl] [outFile] [--allow-remote]   (a local server; it creates an account)
 import { randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 
 import { chromium } from 'playwright';
 
-const WEB = process.argv[2] ?? 'http://127.0.0.1:5180';
-const OUT = process.argv[3];
+const args = process.argv.slice(2);
+const allowRemote = args.includes('--allow-remote');
+const [WEB = 'http://127.0.0.1:5180', OUT] = args.filter((arg) => arg !== '--allow-remote');
+const { hostname } = new URL(WEB);
+if (!allowRemote && !/^(localhost|127(\.\d{1,3}){3}|\[::1\])$/.test(hostname)) {
+  console.error(`${WEB} is not a loopback address, and this script signs up an account there. Pass --allow-remote to run it anyway.`);
+  process.exit(1);
+}
+const PASSWORD = randomBytes(16).toString('hex');
 const PHASE_MS = 8_000;
 /** Extra wait after the island is ready, to tell start-up hitches from steady ones. */
 const SETTLE_MS = Number(process.env['PERF_SETTLE_MS'] ?? 0);
@@ -28,25 +36,42 @@ if (process.env['PERF_IDLE'] === 'off') {
     } catch {}
   });
 }
+// WorldLoading.tsx keeps the loading cover's is-done class for only ~600 ms after the island is ready, then removes the
+// cover. Polling can miss that window on a busy main thread, so an observer notes when the class first appeared (the time
+// reported), and the wait is for the cover to be gone, a state that stays.
+await page.addInitScript(() => {
+  const watch = new MutationObserver(() => {
+    if (!document.querySelector('.mg-world-loading.is-done')) return;
+    window.__worldReadyAt = performance.now();
+    watch.disconnect();
+  });
+  watch.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+});
 const errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
 
 const username = `perf_${randomBytes(3).toString('hex')}`;
 await page.goto(WEB);
-const registered = await page.evaluate(async (name) => {
-  const response = await fetch('/api/auth/register', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: name, displayName: '측정', password: 'perf-probe-password' }),
-  });
-  return response.status;
-}, username);
+const registered = await page.evaluate(
+  async ({ name, password }) => {
+    const response = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: name, displayName: '측정', password }),
+    });
+    return response.status;
+  },
+  { name: username, password: PASSWORD },
+);
 if (registered !== 201) throw new Error(`register answered ${registered}`);
 
-const started = Date.now();
 await page.goto(`${WEB}/@${username}`);
-await page.locator('.mg-world-loading.is-done').waitFor({ state: 'attached', timeout: 180_000 });
-const worldReadyMs = Date.now() - started;
+await page.waitForFunction(() => window.__worldReadyAt !== undefined && !document.querySelector('.mg-world-loading'), undefined, {
+  timeout: 180_000,
+  polling: 250,
+});
+// Since this page's navigation began, which is about where the old measure started.
+const worldReadyMs = Math.round(await page.evaluate(() => window.__worldReadyAt));
 
 const resources = await page.evaluate(() => {
   const byType = {};

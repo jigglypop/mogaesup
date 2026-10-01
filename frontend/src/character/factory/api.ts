@@ -1,4 +1,4 @@
-import { isDefinitiveRejection, request } from '../api';
+import { isDefinitiveRejection, request, savedRequest } from '../api';
 import type { MeshyOptions } from '../studio/meshy-options';
 
 export type ImageRetry = { slot: string; view: string; failure_id: string };
@@ -112,6 +112,15 @@ type RigTransferState = {
 };
 export type RigTransferSource = { job_id: string; version: string; name: string };
 const imagePendingKey = (id: string) => `gaesup.image-production:${id}`;
+const imageRequests = (id: string) => savedRequest<ImageProductionInput>(imagePendingKey(id), ({ input }) =>
+  input.character_id === id && typeof input.source_sha256 === 'string' && typeof input.blueprint_revision === 'string'
+    && ['generate', 'prepared'].includes(input.image_mode)
+    && Array.isArray(input.slots) && input.slots.length > 0 && input.slots.every(slot => typeof slot === 'string')
+    && (input.base_job_id == null || typeof input.base_job_id === 'string') && (input.base_version == null || typeof input.base_version === 'string')
+    && (input.hair_length == null || ['source', 'short', 'long'].includes(input.hair_length))
+    && (input.view_mode == null || ['single', 'front_side', 'front_side_back'].includes(input.view_mode))
+    && (input.meshy_options == null || typeof input.meshy_options === 'object'),
+  '저장된 이미지 생성 요청을 읽을 수 없습니다. 기존 요청 기록을 확인해야 새 생성을 접수할 수 있습니다.');
 const nativePartsSelectionKey = (id: string) => `gaesup.native-parts-selection:${id}`;
 type PendingNativePartsSelection = { key: string; input: { version: string; expected_version: string } };
 export const factoryApi = {
@@ -214,23 +223,24 @@ export const factoryApi = {
   retryImages: (id: string, images: ImageRetry[]) => request<FactoryJob>(`/api/avatar-factory/jobs/${id}/retry-images`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ images }),
   }),
-  pendingImage: (id: string): {key:string;input:ImageProductionInput}|null => {
-    const key = imagePendingKey(id);
-    const saved = localStorage.getItem(key) || sessionStorage.getItem(key);
-    if (saved && !localStorage.getItem(key)) localStorage.setItem(key, saved);
-    return JSON.parse(saved || 'null');
-  },
-  async produceImage(input: ImageProductionInput): Promise<FactoryJob> {
-    const storage = imagePendingKey(input.character_id);
-    const pending = factoryApi.pendingImage(input.character_id)||{key:crypto.randomUUID(),input};
-    localStorage.setItem(storage,JSON.stringify(pending));
+  /** The character's saved image request, if the browser still has one; `error` when what it holds cannot be read. */
+  imageRecovery: (id: string) => {
+    // An older version kept it for the tab's session only.
     try {
-      const job = await request<FactoryJob>('/api/avatar-factory/image-jobs',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':pending.key},body:JSON.stringify(pending.input)});
-      localStorage.removeItem(storage); sessionStorage.removeItem(storage); return job;
-    } catch(error) {
-      if (isDefinitiveRejection(error)) { localStorage.removeItem(storage); sessionStorage.removeItem(storage); }
-      throw error;
-    }
+      const key = imagePendingKey(id), legacy = sessionStorage.getItem(key);
+      if (legacy !== null) { if (!localStorage.getItem(key)) localStorage.setItem(key, legacy); sessionStorage.removeItem(key); }
+    } catch { /* Storage is closed; the saved request cannot be read either. */ }
+    return imageRequests(id).read();
+  },
+  /** Starts an image production. A saved request is replayed only as itself: pass its key as `replay` with its own input;
+   * with another one saved this refuses rather than send the saved one in place of `input`. */
+  async produceImage(input: ImageProductionInput, replay?: string): Promise<FactoryJob> {
+    const { pending, error } = factoryApi.imageRecovery(input.character_id);
+    if (error) throw new Error(error);
+    if (pending && pending.key !== replay) throw new Error('저장된 이미지 생성 요청이 있습니다. 같은 요청을 복구한 뒤 다시 시도해 주세요.');
+    return imageRequests(input.character_id).send(input, saved => request<FactoryJob>('/api/avatar-factory/image-jobs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': saved.key }, body: JSON.stringify(saved.input),
+    }));
   },
   detail: (id: string, signal?: AbortSignal) => request<FactoryJob>(`/api/avatar-factory/jobs/${id}`, { signal }),
   list: (signal?: AbortSignal) => request<{ jobs: FactoryJob[] }>('/api/avatar-factory/jobs', { signal, timeoutMs: 60000 }),

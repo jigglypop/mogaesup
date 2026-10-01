@@ -78,7 +78,8 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
   const reference = source?.artifacts.find(a => a.id === 'reference');
   const running = job?.character_flow?.busy ?? (!!job && ['pipeline_queued', 'pipeline_running', 'accepted', 'running'].includes(job.status));
   const connectionError = jobsError || configuration.error || live.failure;
-  const pending = source ? factoryApi.pendingImage(source.id) : null;
+  const recovery = source ? factoryApi.imageRecovery(source.id) : { pending: null, error: '' };
+  const pending = recovery.pending;
   const commonBodyId = bodyProfile?.body?.job_id || '';
   const selectedBaseId = pending ? pending.input.base_job_id || '' : baseId || (useCommonBody ? commonBodyId : '');
   const bases = partJobs.filter(item => usableBase(item, catalog));
@@ -221,11 +222,11 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
     void upload(file);
   }
   async function produce() {
-    if (!source || locked.current || (!pending && !baseReady)) return;
+    if (!source || locked.current || recovery.error || (!pending && !baseReady)) return;
     locked.current = true; setBusy(true); setError('');
     try {
       let result: FactoryJob;
-      if (pending) result = await factoryApi.produceImage(pending.input);
+      if (pending) result = await factoryApi.produceImage(pending.input, pending.key);
       else {
         if (meshyOptionsError(meshy.options)) throw new Error(meshyOptionsError(meshy.options));
         const blueprint = await request<Blueprint>(`/api/avatar-blueprints/${source.id}`);
@@ -267,10 +268,10 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
         <a className="prompt-management-link" href="/?tab=prompts&promptGroup=parts" target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
         <MeshyOptionsEditor scope={sharedMeshyScope} value={pending?.input.meshy_options || meshy.options} disabled={busy || running || !!pending} onChange={meshy.setOptions} onUploading={setMeshyUploading} />
         {meshy.storageError && <p role="alert">{meshy.storageError}</p>}
-        <button className="character-create" disabled={busy || meshyUploading || (!pending && (running || !reference || !compatible || !canGenerate || !baseReady || creditsShort))} onClick={() => void produce()}>{busy ? '접수 중' : pending ? '요청 복구' : running ? '생성 중' : selectedBaseId ? '선택한 몸에 사진 파츠 생성' : '사진으로 전체 생성'}</button>
+        <button className="character-create" disabled={busy || meshyUploading || !!recovery.error || (!pending && (running || !reference || !compatible || !canGenerate || !baseReady || creditsShort))} onClick={() => void produce()}>{busy ? '접수 중' : pending ? '요청 복구' : running ? '생성 중' : selectedBaseId ? '선택한 몸에 사진 파츠 생성' : '사진으로 전체 생성'}</button>
         <small className="character-generation">유료 이미지 {totalImageCount}장 · 3D {providerModelCount}개 · {selectedBaseId ? '기존 몸·리깅·동작 재사용' : '리깅 1회 · 기본 동작'}{capabilities?.meshy_balance != null && ` · Meshy 잔여 크레딧 ${capabilities.meshy_balance.toLocaleString()}`}</small>
         {blockedReason && <p className="character-status" role="status">{blockedReason}</p>}
-        {(error || connectionError || catalogError || bodyProfileError) && <p role="alert">{error || connectionError || catalogError || bodyProfileError}</p>}
+        {(error || recovery.error || connectionError || catalogError || bodyProfileError) && <p role="alert">{error || recovery.error || connectionError || catalogError || bodyProfileError}</p>}
         {jobId && !job && !jobsLoading && !connectionError && <p role="alert">선택한 작업을 찾을 수 없습니다. 제작 버전을 다시 선택해 주세요.</p>}
         {versions.length > 1 && <label className="character-history">제작 버전<select aria-label="제작 버전" value={job?.id || ''} onChange={e => remember(source!.id, e.target.value)}><option value="" disabled>버전 선택</option>{versions.map(v => <option key={v.id} value={v.id}>{new Date(v.created_at).toLocaleString()}</option>)}</select></label>}
         {retryBatch && <button disabled={busy || running} onClick={() => void retryImages(retryBatch)}>실패한 이미지 재요청 · 유료 {retryBatch.length}장</button>}

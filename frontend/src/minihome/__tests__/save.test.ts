@@ -1,43 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiRequestError } from '../../api/client';
-import { createIslandSaver, describeSaveError, describeStatus, type IslandSaverOptions } from '../edit/save';
+import { ApiRequestError, ApiTimeoutError } from '../../api/client';
+import { createIslandSaver, describeSaveError, describeStatus } from '../edit/save';
 import { IslandTooLargeError } from '../persistence';
-
-/** A save system whose domains move when `edit()` is called and whose writes answer as told. */
-function fakeWorld() {
-  const revisions = { building: 1, 'gameplay-events': 1 };
-  const answers: (Error | null)[] = [];
-  const system = {
-    save: vi.fn(async () => {
-      const answer = answers.shift();
-      if (answer) throw answer;
-    }),
-    load: vi.fn(async () => true),
-    getBindings: () =>
-      (Object.keys(revisions) as (keyof typeof revisions)[]).map((key) => ({
-        key,
-        serialize: () => null,
-        hydrate: () => {},
-        revision: () => revisions[key],
-      }))[Symbol.iterator](),
-  } as unknown as IslandSaverOptions['system'] & { save: ReturnType<typeof vi.fn>; load: ReturnType<typeof vi.fn> };
-  const adapter = { refreshRevision: vi.fn(async () => {}), lastBytes: 1234 };
-  return {
-    system,
-    adapter,
-    answers,
-    edit(key: keyof typeof revisions = 'building') {
-      revisions[key]++;
-    },
-  };
-}
-
-const ready = async (world: ReturnType<typeof fakeWorld>, options: Partial<IslandSaverOptions> = {}) => {
-  const saver = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true, ...options });
-  await saver.load();
-  return saver;
-};
+import { fakeWorld, ready } from './fakeWorld';
 
 describe('island saver', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -145,6 +111,211 @@ describe('island saver', () => {
     await vi.advanceTimersByTimeAsync(3_000);
     expect(world.system.save).toHaveBeenCalledTimes(2);
     expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
+  });
+
+  describe('저장이 계속 실패할 때', () => {
+    const offline = () => new TypeError('Failed to fetch');
+    /** Edits at the start, and every 5 s after it while `keepEditing`; the seconds at which the saver tried to write. */
+    const offlineFor = async (
+      world: ReturnType<typeof fakeWorld>,
+      saver: Awaited<ReturnType<typeof ready>>,
+      seconds: number,
+      keepEditing: boolean,
+    ) => {
+      const tries: number[] = [];
+      const start = Date.now();
+      world.system.save.mockImplementation(async () => {
+        tries.push(Math.round((Date.now() - start) / 1000));
+        throw offline();
+      });
+      for (let second = 0; second < seconds; second += 5) {
+        if (keepEditing || second === 0) {
+          world.edit();
+          saver.changed();
+        }
+        await vi.advanceTimersByTimeAsync(5_000);
+      }
+      return tries;
+    };
+
+    it('10·30·60·120초 뒤에 다시 시도하고, 그 뒤로는 120초마다 한다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world);
+      expect(await offlineFor(world, saver, 600, false)).toEqual([10, 20, 50, 110, 230, 350, 470, 590]);
+    });
+
+    it('계속 꾸미는 중이라 해도 같은 간격이고, 첫 시도만 최대 대기 시간(60초)에 맞춰진다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world);
+      expect(await offlineFor(world, saver, 600, true)).toEqual([60, 70, 100, 160, 280, 400, 520]);
+    });
+
+    it('연결이 300초 끊겨 있어도 시도는 몇 번 안 된다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world);
+      const tries = await offlineFor(world, saver, 300, true);
+      expect(tries.length).toBeLessThanOrEqual(5);
+      expect(saver.getState()).toMatchObject({ dirty: true, saving: false });
+      expect(saver.getState().problem?.kind).toBe('network');
+    });
+
+    it('기다리는 동안 편집해도 기다림이 줄지 않는다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world);
+      world.failing.with = offline();
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      // The next try is 30 s after the second: 편집은 다음 시도를 앞당기지 못한다.
+      await vi.advanceTimersByTimeAsync(1_000);
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(28_999);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(world.system.save).toHaveBeenCalledTimes(3);
+    });
+
+    it('저장에 성공하면 기다리는 시간이 처음으로 돌아간다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world);
+      world.answers.push(offline(), offline());
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(world.system.save).toHaveBeenCalledTimes(3);
+      expect(saver.getState()).toMatchObject({ dirty: false, problem: null });
+
+      world.failing.with = offline();
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(world.system.save).toHaveBeenCalledTimes(4);
+      // 처음의 10초다. 30초가 아니다.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(world.system.save).toHaveBeenCalledTimes(5);
+    });
+
+    it('나가거나 저장 버튼을 누르면 기다리지 않고 바로 저장하고, 또 실패하면 다음 간격으로 간다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world);
+      world.failing.with = offline();
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(world.system.save).toHaveBeenCalledTimes(1);
+
+      expect(await saver.flush()).toBe(false);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      // 두 번 실패했으니 다음은 30초 뒤다. 처음 10초 타이머는 남지 않는다.
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(world.system.save).toHaveBeenCalledTimes(3);
+
+      world.failing.with = null;
+      expect(await saver.flush()).toBe(true);
+      expect(world.system.save).toHaveBeenCalledTimes(4);
+      expect(saver.getState()).toMatchObject({ dirty: false, problem: null });
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(world.system.save).toHaveBeenCalledTimes(4);
+    });
+
+    it('시간 초과도 연결이 끊긴 것처럼 다시 시도한다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world, { retryMs: [3_000] });
+      world.answers.push(new ApiTimeoutError(60_000));
+      world.edit();
+      await saver.save();
+      expect(saver.getState().problem).toMatchObject({ kind: 'network' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
+    });
+
+    it('고쳐야 하는 실패 뒤의 첫 편집은 이미 오래 기다린 것으로 치지 않는다', async () => {
+      const world = fakeWorld();
+      const saver = await ready(world, { idleMs: 10_000, maxWaitMs: 30_000 });
+      world.answers.push(new IslandTooLargeError(3 * 1024 * 1024));
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(world.system.save).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(world.system.save).toHaveBeenCalledTimes(1);
+
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(world.system.save).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('불러오기', () => {
+    it('저장된 섬이 있는데 불러오기가 적용되지 않았다면 불러오지 못한 것으로 보고 그 위에 저장하지 않는다', async () => {
+      const world = fakeWorld();
+      world.adapter.revision = 4;
+      world.system.load.mockResolvedValueOnce(false);
+      const saver = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true });
+      expect(await saver.load()).toBe(false);
+      expect(saver.getState()).toMatchObject({ phase: 'loadFailed' });
+      expect(saver.getState().problem?.message).toContain('불러오지 못했어요');
+
+      world.edit();
+      saver.changed();
+      expect(await saver.save()).toBe(false);
+      expect(await saver.flush()).toBe(false);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(world.system.save).not.toHaveBeenCalled();
+
+      expect(await saver.load()).toBe(true);
+      expect(saver.getState()).toMatchObject({ phase: 'ready', problem: null, dirty: false });
+    });
+
+    it('저장된 것이 없는 섬은 불러오기가 false여도 새 섬으로 시작한다', async () => {
+      const world = fakeWorld();
+      world.adapter.revision = 0;
+      world.system.load.mockResolvedValueOnce(false);
+      const saver = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true, idleMs: 1_000 });
+      expect(await saver.load()).toBe(true);
+      expect(saver.getState().phase).toBe('ready');
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(world.system.save).toHaveBeenCalledTimes(1);
+    });
+
+    it('뒤에 시작한 불러오기가 이미 끝났다면 밀려난 불러오기가 늦게 끝나도 상태를 바꾸지 않는다', async () => {
+      const world = fakeWorld();
+      world.adapter.revision = 2;
+      let overtaken!: (applied: boolean) => void;
+      world.system.load.mockImplementationOnce(() => new Promise<boolean>((done) => (overtaken = done)));
+      const saver = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true });
+      const first = saver.load();
+      expect(await saver.load()).toBe(true);
+      expect(saver.getState().phase).toBe('ready');
+      overtaken(false);
+      expect(await first).toBe(false);
+      expect(saver.getState()).toMatchObject({ phase: 'ready', problem: null });
+    });
+
+    it('밀려난 불러오기가 던져도 새 불러오기의 상태를 건드리지 않는다', async () => {
+      const world = fakeWorld();
+      let overtaken!: (error: unknown) => void;
+      world.system.load.mockImplementationOnce(() => new Promise<boolean>((_done, fail) => (overtaken = fail)));
+      const saver = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true });
+      const first = saver.load();
+      await saver.load();
+      overtaken(new TypeError('Failed to fetch'));
+      expect(await first).toBe(false);
+      expect(saver.getState().phase).toBe('ready');
+    });
   });
 
   it('방문자의 저장기는 아무것도 쓰지 않는다', async () => {

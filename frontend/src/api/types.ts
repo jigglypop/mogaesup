@@ -55,6 +55,9 @@ export type HomeSummary = Pick<HomeProfile, 'username' | 'ownerName' | 'title' |
   total: number;
 };
 
+/** The island list is newest first: `before` is the last island's `updatedAt`, `q` a search in names and titles. */
+export type HomeListQuery = { limit?: number; before?: string; q?: string };
+
 export type ProfileChanges = Partial<
   Pick<HomeProfile, 'title' | 'statusMessage' | 'mood' | 'minime' | 'emoji' | 'visibility'>
 >;

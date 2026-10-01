@@ -17,20 +17,35 @@ const VISIBILITY: { value: HomeVisibility; label: string }[] = [
 ];
 const SAVE_DELAY_MS = 800;
 
+/** Whether typing left something to save: more than spaces at the edges, and an empty field only where empty is allowed. */
+export function wantsSave(draft: string, saved: string, allowEmpty: boolean): boolean {
+  const next = draft.trim();
+  return next !== saved && (allowEmpty || next !== '');
+}
+
 /** A text field that saves a moment after typing stops. */
 function Autosaved({
   value,
   onSave,
   multiline = false,
+  allowEmpty = false,
   ...props
-}: { value: string; onSave: (value: string) => void; multiline?: boolean; maxLength: number; placeholder: string; 'aria-label': string }) {
+}: {
+  value: string;
+  onSave: (value: string) => void;
+  multiline?: boolean;
+  allowEmpty?: boolean;
+  maxLength: number;
+  placeholder: string;
+  'aria-label': string;
+}) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   useEffect(() => {
-    if (draft === value || !draft.trim()) return undefined;
+    if (!wantsSave(draft, value, allowEmpty)) return undefined;
     const timer = setTimeout(() => onSave(draft), SAVE_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [draft, value, onSave]);
+  }, [draft, value, allowEmpty, onSave]);
   const common = {
     ...props,
     className: 'mg-field',
@@ -123,7 +138,7 @@ export function About({
           </label>
           <label className="mg-label">
             상태 메시지
-            <Autosaved value={profile.statusMessage} onSave={saveStatus} maxLength={60} placeholder="오늘은 어떤 날인가요" aria-label="상태 메시지" multiline />
+            <Autosaved value={profile.statusMessage} onSave={saveStatus} maxLength={60} placeholder="오늘은 어떤 날인가요" aria-label="상태 메시지" multiline allowEmpty />
           </label>
           <div className="mg-label">
             오늘 기분

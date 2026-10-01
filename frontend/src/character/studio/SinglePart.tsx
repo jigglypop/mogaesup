@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { factoryApi, type FactoryCapabilities, type FactoryJob, type FitProfile, type NativePartsState, type PartMethod } from '../factory/api';
+import { factoryApi, type FactoryCapabilities, type FactoryJob, type NativePartsState, type PartMethod } from '../factory/api';
 import { NativeAssembly } from '../factory/NativeAssembly';
 import { PartProgress } from '../factory/PartProgress';
 import { ProductionProgress } from '../factory/ProductionProgress';
 import { StageRunner } from '../factory/StageRunner';
 import { partLabels, variantSlots } from '../factory/parts';
 import { studioApi } from './api';
+import { fitProfileFor, fitsByPrompt } from './garment-fit';
 import { MeshyOptionsEditor } from './MeshyOptionsEditor';
 import { useMeshyOptions, meshyOptionsError } from './meshy-options';
 import { HairBatch } from './HairBatch';
@@ -53,6 +54,8 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const pending = recovery.pending;
   const differentPending = !!pending && pending.input.slot !== slot;
   const inputLocked = busy || meshyUploading || !!pending || !!recovery.error;
+  // Sleeve and ease only change the single-view method's prompt (see garment-fit); other methods ignore them.
+  const askFit = fitsByPrompt(pending?.input.part_method || partMethod);
   // Designed garments for this slot: picking one fills its name, brief and lower-garment kind.
   const styles = garmentStyles.garments.filter(item => item.slot === slot);
   const chooseStyle = (styleName: string) => {
@@ -89,8 +92,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
 
   async function submit() {
     if (locked.current) return;
-    const fitProfile: FitProfile | undefined = slot === 'top' ? { revision: 'garment-fit-v1', sleeve, ease }
-      : slot === 'bottom' ? { revision: 'garment-fit-v1', kind: bottomKind, ease } : undefined;
+    const fitProfile = fitProfileFor(slot, partMethod, { sleeve, kind: bottomKind, ease });
     const input = pending?.input || (base && native?.version ? {
       base_job_id: base.id,
       base_version: native.version,
@@ -144,10 +146,10 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
       {!batchMode && baseSelector}
       {!batchMode && native?.artifacts.find(artifact => artifact.name === 'body-front.png') && <img className="base-portrait" src={native.artifacts.find(artifact => artifact.name === 'body-front.png')!.url} alt="선택한 캐릭터" />}
       {slot === 'hair' && !batchMode && <label>헤어 길이<select value={hairLength} disabled={inputLocked} onChange={event => setHairLength(event.target.value as typeof hairLength)}><option value="source">저장된 기준</option><option value="short">숏컷</option><option value="long">롱컷</option></select></label>}
-      {slot === 'top' && <label>소매<select value={sleeve} disabled={inputLocked} onChange={event => setSleeve(event.target.value as typeof sleeve)}><option value="source">원본대로</option><option value="none">민소매</option><option value="short">반팔</option><option value="long">긴팔</option></select></label>}
+      {slot === 'top' && askFit && <label>소매<select value={sleeve} disabled={inputLocked} onChange={event => setSleeve(event.target.value as typeof sleeve)}><option value="source">원본대로</option><option value="none">민소매</option><option value="short">반팔</option><option value="long">긴팔</option></select></label>}
       {slot === 'bottom' && <label>하의 종류<select value={bottomKind} disabled={inputLocked} onChange={event => setBottomKind(event.target.value as typeof bottomKind)}><option value="source">저장된 기준</option><option value="pants">바지</option><option value="skirt">치마</option></select></label>}
-      {(slot === 'top' || slot === 'bottom') && <label>여유<select value={ease} disabled={inputLocked} onChange={event => setEase(event.target.value as typeof ease)}><option value="source">원본대로</option><option value="regular">보통</option><option value="loose">여유 있음</option></select></label>}
-      {!batchMode && methodOptions[slot] && <label>만드는 방식<select value={pending?.input.part_method || partMethod} disabled={inputLocked} onChange={event => setPartMethod(event.target.value as PartMethod)}>{methodOptions[slot]!.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}
+      {(slot === 'top' || slot === 'bottom') && askFit && <label>여유<select value={ease} disabled={inputLocked} onChange={event => setEase(event.target.value as typeof ease)}><option value="source">원본대로</option><option value="regular">보통</option><option value="loose">여유 있음</option></select></label>}
+      {!batchMode && methodOptions[slot] && <label>만드는 방식<select value={pending?.input.part_method || partMethod} disabled={inputLocked} onChange={event => { const method = event.target.value as PartMethod; setPartMethod(method); if (!fitsByPrompt(method)) { setSleeve('source'); setEase('source'); } }}>{methodOptions[slot]!.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}
       {!batchMode && partMethod !== 'body_shell' && (capabilities?.model_providers?.length || 0) > 1 && <label>3D 제공자<select value={pending?.input.model_provider || provider} disabled={inputLocked} onChange={event => setProvider(event.target.value as 'meshy' | 'tripo')}>{capabilities!.model_providers!.map(value => <option key={value} value={value}>{value === 'tripo' ? 'Tripo' : 'Meshy'}</option>)}</select></label>}
       {!batchMode && styles.length > 0 && <label>스타일<select value={styles.find(item => item.name === partName)?.name || ''} disabled={inputLocked} onChange={event => chooseStyle(event.target.value)}>
         <option value="">직접 입력</option>{styles.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label>}

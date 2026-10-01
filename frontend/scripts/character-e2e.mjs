@@ -299,7 +299,13 @@ async function person(name) {
   );
   return { page, sent };
 }
-const worldReady = (page) => page.locator('.mg-world-loading.is-done').waitFor({ state: 'attached', timeout: WORLD_READY_MS });
+// The loading cover stays only ~600 ms after the island is ready, which a busy page can skip past unseen; its being gone
+// (with the island there) is a state that stays.
+const worldReady = (page) =>
+  page.waitForFunction(() => document.querySelector('.mg-world') && !document.querySelector('.mg-world-loading'), undefined, {
+    timeout: WORLD_READY_MS,
+    polling: 250,
+  });
 const shoot = (page, name) => page.screenshot({ ...SCREENSHOT, path: join(SHOTS, `${name}.jpg`) });
 async function json(page, path) {
   const response = await page.request.get(`${WEB}${path}`);

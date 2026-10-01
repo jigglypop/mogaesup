@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { Link, useSearchParams } from 'react-router-dom';
 
@@ -6,7 +6,10 @@ import { homeApi } from '../api/endpoints';
 import type { HomeSummary } from '../api/types';
 import { PageShell } from '../shell/Shell';
 import { Icon } from '../ui/icons';
+import { appendHomes, EXPLORE_PAGE, nextBefore, searchOf } from './explore';
 
+/** How long the typing rests before the list asks the server. */
+const SEARCH_REST_MS = 300;
 const SKIES = [
   ['#cfe8f7', '#bfe3b4'],
   ['#fde3d3', '#d6ecbf'],
@@ -53,27 +56,69 @@ function ExploreSearch({ query, onQuery }: { query: string; onQuery: (query: str
   );
 }
 
-/** `/explore`: public islands, most recently changed first, filtered by `?q`. */
+/** `value` once it has stayed the same for `ms`. */
+function useRested<T>(value: T, ms: number): T {
+  const [rested, setRested] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setRested(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return rested;
+}
+
+/** `/explore`: public islands, most recently changed first, found by `?q` on the server and a page at a time. */
 export function ExplorePage() {
   const [params, setParams] = useSearchParams();
   const query = params.get('q') ?? '';
+  const search = useRested(searchOf(query), SEARCH_REST_MS);
   const [homes, setHomes] = useState<HomeSummary[] | null>(null);
+  const [before, setBefore] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
+  // Another search drops whatever is still on its way for the one before it.
+  const asking = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    homeApi.list().then(
-      (result) => setHomes(result.homes),
-      () => setError('목록을 불러오지 못했어요'),
+    const controller = new AbortController();
+    asking.current = controller;
+    setLoadingMore(false);
+    homeApi.list({ limit: EXPLORE_PAGE, q: search }, controller.signal).then(
+      (result) => {
+        if (controller.signal.aborted) return;
+        setHomes(result.homes);
+        setBefore(nextBefore(result.homes));
+        setError('');
+      },
+      () => {
+        if (controller.signal.aborted) return;
+        // What stays on screen would be the answer to an earlier search.
+        setHomes(null);
+        setBefore(null);
+        setError('목록을 불러오지 못했어요');
+      },
     );
-  }, []);
+    return () => controller.abort();
+  }, [search]);
 
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle || !homes) return homes;
-    return homes.filter((home) =>
-      [home.username, home.ownerName, home.title, home.statusMessage].some((text) => text.toLowerCase().includes(needle)),
+  const loadMore = () => {
+    const controller = asking.current;
+    if (!before || !controller || loadingMore) return;
+    setLoadingMore(true);
+    setError('');
+    homeApi.list({ limit: EXPLORE_PAGE, q: search, before }, controller.signal).then(
+      (result) => {
+        if (controller.signal.aborted) return;
+        setHomes((current) => appendHomes(current ?? [], result.homes));
+        setBefore(nextBefore(result.homes));
+        setLoadingMore(false);
+      },
+      () => {
+        if (controller.signal.aborted) return;
+        setError('목록을 불러오지 못했어요');
+        setLoadingMore(false);
+      },
     );
-  }, [homes, query]);
+  };
 
   return (
     <PageShell title="둘러보기">
@@ -91,9 +136,9 @@ export function ExplorePage() {
           <ExploreSearch query={query} onQuery={(text) => setParams(text ? { q: text } : {}, { replace: true })} />
         </div>
         {error && <p className="mg-error">{error}</p>}
-        {shown?.length === 0 && <p className="mg-empty">{query ? '찾는 섬이 없어요' : '아직 공개된 섬이 없어요'}</p>}
+        {homes?.length === 0 && <p className="mg-empty">{search ? '찾는 섬이 없어요' : '아직 공개된 섬이 없어요'}</p>}
         <ul className="mg-islands">
-          {shown?.map((home) => {
+          {homes?.map((home) => {
             const [top, bottom] = skyOf(home.username);
             return (
               <li key={home.username}>
@@ -117,6 +162,11 @@ export function ExplorePage() {
             );
           })}
         </ul>
+        {before && (
+          <button className="mg-btn is-quiet is-wide" disabled={loadingMore} onClick={loadMore}>
+            더 보기
+          </button>
+        )}
       </section>
     </PageShell>
   );

@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 import { authApi } from '../api/endpoints';
 import type { Credentials, Registration, User } from '../api/types';
+import { followSession } from './session';
 
 type AuthValue = {
   status: 'loading' | 'anonymous' | 'signedIn';
@@ -13,17 +14,22 @@ type AuthValue = {
 
 const AuthContext = createContext<AuthValue | null>(null);
 
-/** Asks the server who the session cookie belongs to once, then follows sign-in and sign-out. */
+/**
+ * Asks the server who the session cookie belongs to, then follows sign-in and sign-out. While the server does not
+ * answer, nobody is taken for signed out: the screens wait, and it asks again.
+ */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
 
-  useEffect(() => {
-    authApi
-      .me()
-      .then((result) => setUser(result.user), () => setUser(null))
-      .finally(() => setReady(true));
-  }, []);
+  useEffect(
+    () =>
+      followSession(authApi.me, (who) => {
+        setUser(who);
+        setReady(true);
+      }),
+    [],
+  );
 
   const value = useMemo<AuthValue>(
     () => ({

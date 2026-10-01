@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { factoryApi, type GarmentShape, type WardrobePart } from '../factory/api';
+import { pollUntil } from './poll-until';
 
 const FITS: { value: NonNullable<GarmentShape['fit']>; label: string }[] = [
   { value: 'tight', label: '붙음' }, { value: 'normal', label: '보통' }, { value: 'loose', label: '넓음' }];
@@ -7,42 +8,50 @@ const HEM_RANGE: Record<string, string> = { top: '허리~가랑이', bottom: '�
 const sleeveText = (value: number) => value <= 0 ? '없음' : value >= 1 ? '손목' : `${Math.round(value*100)}%`;
 const initialShape = (part: WardrobePart): GarmentShape => ({
   ...(part.slot === 'top' ? { sleeve: part.shape?.sleeve ?? .5 } : {}), hem: part.shape?.hem ?? .5, fit: part.shape?.fit ?? 'normal' });
+const POLL_MS = 2000;
 
 /** Sleeve, hem and fit of a worn body-shell top or bottom. Rebuilding refits the part in its own job;
- * `replace` receives the new version once the wardrobe lists it. */
+ * `replace` receives the new version once the wardrobe lists it. Closing the panel stops the waiting. */
 export function WardrobeShape({ part, label, reload, replace }: {
   part: WardrobePart; label: string;
-  reload: () => Promise<WardrobePart[]>; replace: (next: WardrobePart) => void;
+  reload: (signal?: AbortSignal) => Promise<WardrobePart[]>; replace: (next: WardrobePart) => void;
 }) {
   const [draft, setDraft] = useState<GarmentShape>(() => initialShape(part));
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [elapsed, setElapsed] = useState(0);
-  const alive = useRef(true);
-  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const closed = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    closed.current = controller;
+    return () => controller.abort();
+  }, []);
   useEffect(() => { setDraft(initialShape(part)); }, [part.job_id, part.version]);
 
   async function rebuild(shape: GarmentShape) {
+    const signal = closed.current?.signal;
+    if (!signal || signal.aborted) return;
     setBusy(true); setError(''); setElapsed(0);
     const started = performance.now();
     const tick = setInterval(() => setElapsed(Math.round((performance.now() - started)/1000)), 1000);
-    const wait = () => new Promise(resolve => setTimeout(resolve, 2000));
     try {
       await factoryApi.refitPart(part.job_id, part.version, part.slot, undefined, 'body_shell', shape);
-      for (let attempt = 0; ; attempt++) {
-        if (attempt > 150) throw new Error('다시 만들기가 끝나지 않았습니다.');
-        await wait();
-        const state = await factoryApi.nativeParts(part.job_id);
-        if (['failed', 'recovery_required', 'qc_failed'].includes(state.status)) throw new Error(state.error || '다시 만들지 못했습니다.');
-        if (state.status === 'review_required' && state.version && state.version !== part.version) break;
-      }
+      const rebuilt = await pollUntil(
+        stop => factoryApi.nativeParts(part.job_id, stop),
+        state => {
+          if (['failed', 'recovery_required', 'qc_failed'].includes(state.status)) throw new Error(state.error || '다시 만들지 못했습니다.');
+          return state.status === 'review_required' && state.version && state.version !== part.version ? state.version : undefined;
+        }, { attempts: 151, delayMs: POLL_MS, signal });
+      if (signal.aborted) return;
+      if (!rebuilt) throw new Error('다시 만들기가 끝나지 않았습니다.');
       // The job listing behind the wardrobe refreshes every few seconds.
-      for (let attempt = 0; attempt < 15; attempt++) {
-        const next = (await reload()).find(item => item.job_id === part.job_id && item.slot === part.slot && item.version !== part.version);
-        if (next) { if (alive.current) replace(next); return; }
-        await wait();
-      }
-      throw new Error('새 버전이 옷장에 아직 보이지 않습니다.');
-    } catch (reason) { if (alive.current) setError((reason as Error).message); }
-    finally { clearInterval(tick); if (alive.current) setBusy(false); }
+      const next = await pollUntil(
+        stop => reload(stop),
+        parts => parts.find(item => item.job_id === part.job_id && item.slot === part.slot && item.version !== part.version),
+        { attempts: 15, delayMs: POLL_MS, immediate: true, signal });
+      if (signal.aborted) return;
+      if (!next) throw new Error('새 버전이 옷장에 아직 보이지 않습니다.');
+      replace(next);
+    } catch (reason) { if (!signal.aborted) setError((reason as Error).message); }
+    finally { clearInterval(tick); if (!signal.aborted) setBusy(false); }
   }
 
   return <li className="wardrobe-shape">

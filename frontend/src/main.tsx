@@ -12,6 +12,7 @@ import { AuthPage } from './pages/AuthPage';
 import { ExplorePage } from './pages/ExplorePage';
 import { Loading } from './pages/Loading';
 import { MinihomePage } from './pages/MinihomePage';
+import { AppErrorBoundary } from './ui/ErrorBoundary';
 import { initTheme } from './ui/theme';
 
 initTheme();
@@ -39,48 +40,50 @@ function UsernameRoute() {
 const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<AuthPage />} />
-          <Route path="/explore" element={<ExplorePage />} />
-          <Route
-            path="/character"
-            element={
-              <Suspense fallback={<Loading />}>
-                <CharacterPage />
-              </Suspense>
-            }
-          />
-          <Route path="/studio/*" element={<StudioRedirect />} />
-          <Route
-            path="/admin/studio/*"
-            element={
-              <Suspense fallback={<Loading />}>
-                <StudioPage />
-              </Suspense>
-            }
-          />
-          <Route
-            path="/admin/permissions"
-            element={
-              <Suspense fallback={<Loading />}>
-                <PermissionsPage />
-              </Suspense>
-            }
-          />
-          <Route
-            path="/admin/*"
-            element={
-              <Suspense fallback={<Loading />}>
-                <AdminPage />
-              </Suspense>
-            }
-          />
-          <Route path="/:slug/*" element={<UsernameRoute />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
-    </AuthProvider>,
+    <AppErrorBoundary>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<AuthPage />} />
+            <Route path="/explore" element={<ExplorePage />} />
+            <Route
+              path="/character"
+              element={
+                <Suspense fallback={<Loading />}>
+                  <CharacterPage />
+                </Suspense>
+              }
+            />
+            <Route path="/studio/*" element={<StudioRedirect />} />
+            <Route
+              path="/admin/studio/*"
+              element={
+                <Suspense fallback={<Loading />}>
+                  <StudioPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/admin/permissions"
+              element={
+                <Suspense fallback={<Loading />}>
+                  <PermissionsPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/admin/*"
+              element={
+                <Suspense fallback={<Loading />}>
+                  <AdminPage />
+                </Suspense>
+              }
+            />
+            <Route path="/:slug/*" element={<UsernameRoute />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+    </AppErrorBoundary>,
   );
 }
