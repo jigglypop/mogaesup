@@ -8,18 +8,24 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sqlx::{PgExecutor, Row, postgres::PgRow};
+use sqlx::{PgExecutor, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
     AppState,
     auth::{User, current_user, optional_user, username},
     error::{ApiError, ApiResult, bad, conflict, forbidden, not_found},
+    permissions::like_escape,
     rebac::{Checker, Object, Subject},
-    security::client_address,
+    security::{client_address, rate_limit},
 };
 
 const MAX_WORLD_BYTES: usize = 2 * 1024 * 1024;
+/// Island saves one member may make in the rate window (ten minutes): the autosave writes about every ten seconds.
+const WORLD_SAVES_PER_WINDOW: u32 = 120;
+/// Islands (worlds) one member keeps. The app uses one at a time and moves to a new id when its layout changes, so
+/// a first save past this pushes out the least recently updated ones instead of locking the member out.
+const MAX_WORLDS: i64 = 8;
 const MAX_DOMAINS: usize = 64;
 const VISIBILITIES: [&str; 3] = ["public", "ilchon", "private"];
 const MOODS: i16 = 4;
@@ -123,11 +129,13 @@ async fn my_home(state: &AppState, user: &User) -> ApiResult<HomeProfile> {
     Ok(profile(&row))
 }
 
-/// `?limit=&before=` on a newest-first listing: at most 50 rows (20 unless asked), older than `before`.
+/// `?limit=&before=` on a newest-first listing: at most 50 rows (20 unless asked), older than `before`. `q` is what a
+/// searchable listing looks for.
 #[derive(Deserialize)]
 pub struct Page {
     limit: Option<i64>,
     before: Option<DateTime<Utc>>,
+    q: Option<String>,
 }
 
 impl Page {
@@ -138,16 +146,31 @@ impl Page {
     pub fn before(&self) -> DateTime<Utc> {
         self.before.unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(1))
     }
+
+    /// The search text as an ILIKE pattern for it anywhere in a column, its own `%`, `_` and `\` taken literally; None
+    /// without one.
+    fn pattern(&self) -> ApiResult<Option<String>> {
+        let Some(text) = self.q.as_deref().map(str::trim).filter(|text| !text.is_empty()) else { return Ok(None) };
+        if text.chars().count() > 40 || text.chars().any(char::is_control) {
+            return Err(bad("invalid_query", "검색어는 40자 이하로 입력해 주세요."));
+        }
+        Ok(Some(format!("%{}%", like_escape(text))))
+    }
 }
 
+/// `GET /api/homes?q=`: public islands, newest first; `q` keeps the ones whose owner's username or name, or title,
+/// holds it (capitals do not matter).
 async fn list(State(state): State<AppState>, Query(page): Query<Page>) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(
         "SELECT u.username, u.display_name AS owner_name, h.title, h.status_message, h.emoji, h.updated_at, h.visits_total
          FROM homes h JOIN users u ON u.id = h.owner_id
-         WHERE h.visibility = 'public' AND h.updated_at < $1 ORDER BY h.updated_at DESC LIMIT $2",
+         WHERE h.visibility = 'public' AND h.updated_at < $1
+           AND ($3::text IS NULL OR u.username ILIKE $3 OR u.display_name ILIKE $3 OR h.title ILIKE $3)
+         ORDER BY h.updated_at DESC LIMIT $2",
     )
     .bind(page.before())
     .bind(page.limit())
+    .bind(page.pattern()?)
     .fetch_all(&state.db)
     .await?;
     let homes: Vec<Value> = rows
@@ -234,6 +257,7 @@ async fn update(
     }
     // Picking a 미니미 means walking as it: a look the owner wore comes off.
     let picked = minime.is_some();
+    let visibility_set = changes.visibility.is_some();
     sqlx::query(
         "UPDATE homes SET title = COALESCE($2, title), status_message = COALESCE($3, status_message),
          mood = COALESCE($4, mood), minime = COALESCE($5, minime), emoji = COALESCE($6, emoji),
@@ -250,6 +274,10 @@ async fn update(
     .await?;
     if picked {
         crate::looks::take_off(&state.db, user.id).await?;
+    }
+    // Whoever stands on the island and no longer may is let out.
+    if visibility_set {
+        crate::rooms::revalidate(&state, &user.username).await;
     }
     let home = my_home(&state, &user).await?;
     home_view(&state, home, true).await
@@ -403,12 +431,51 @@ fn world_problem(data: &Map<String, Value>) -> Option<&'static str> {
     domains.values().any(unsafe_url).then_some("url")
 }
 
+/// A world's first save, which makes its row; None when the world exists already. The owner then keeps at most
+/// [`MAX_WORLDS`]: the least recently updated of the others make room, never the one saved here. Everything runs under
+/// a lock on their home, so saves made at once cannot pass the cap.
+async fn first_save(
+    db: &PgPool,
+    owner: Uuid,
+    world_id: &str,
+    data: &Value,
+    byte_size: usize,
+) -> ApiResult<Option<PgRow>> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(owner).execute(&mut *tx).await?;
+    let row = sqlx::query(
+        "INSERT INTO home_worlds (owner_id, world_id, revision, data, byte_size) VALUES ($1, $2, 1, $3, $4)
+         ON CONFLICT DO NOTHING RETURNING world_id, revision, data, updated_at",
+    )
+    .bind(owner)
+    .bind(world_id)
+    .bind(data)
+    .bind(byte_size as i32)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if row.is_some() {
+        sqlx::query(
+            "DELETE FROM home_worlds WHERE owner_id = $1 AND world_id IN (
+               SELECT world_id FROM home_worlds WHERE owner_id = $1 AND world_id <> $2
+               ORDER BY updated_at DESC, world_id OFFSET $3)",
+        )
+        .bind(owner)
+        .bind(world_id)
+        .bind(MAX_WORLDS - 1)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(row)
+}
+
 async fn save_world(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<SaveWorld>,
 ) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    rate_limit(&state, format!("world:{}", user.id), WORLD_SAVES_PER_WINDOW)?;
     my_home(&state, &user).await?;
     let world_id = world_id(&body.world_id)?.to_owned();
     let data = Value::Object(body.data);
@@ -429,23 +496,20 @@ async fn save_world(
         return Err(bad("invalid_residents", "섬에 둘 수 없는 주민이 있습니다."));
     }
     let row = if body.base_revision == 0 {
-        sqlx::query(
-            "INSERT INTO home_worlds (owner_id, world_id, revision, data, byte_size) VALUES ($1, $2, 1, $3, $4)
-             ON CONFLICT DO NOTHING RETURNING world_id, revision, data, updated_at",
-        )
+        first_save(&state.db, user.id, &world_id, &data, byte_size).await?
     } else {
         sqlx::query(
             "UPDATE home_worlds SET revision = revision + 1, data = $3, byte_size = $4, updated_at = now()
              WHERE owner_id = $1 AND world_id = $2 AND revision = $5 RETURNING world_id, revision, data, updated_at",
         )
+        .bind(user.id)
+        .bind(&world_id)
+        .bind(&data)
+        .bind(byte_size as i32)
+        .bind(body.base_revision)
+        .fetch_optional(&state.db)
+        .await?
     }
-    .bind(user.id)
-    .bind(&world_id)
-    .bind(&data)
-    .bind(byte_size as i32)
-    .bind(body.base_revision)
-    .fetch_optional(&state.db)
-    .await?
     .ok_or(conflict("revision_conflict", "다른 곳에서 먼저 저장했어요. 새로 불러온 뒤 다시 저장해 주세요."))?;
     sqlx::query("UPDATE homes SET updated_at = now() WHERE owner_id = $1").bind(user.id).execute(&state.db).await?;
     Ok(Json(world_json(&row)))

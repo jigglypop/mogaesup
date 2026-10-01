@@ -15,7 +15,7 @@ use futures_util::FutureExt;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, postgres::PgRow};
+use sqlx::{PgPool, Row, postgres::PgRow};
 use std::{collections::BTreeMap, panic::AssertUnwindSafe};
 use uuid::Uuid;
 
@@ -37,8 +37,19 @@ const MAX_PARTS: usize = 12;
 const SAVES_PER_WINDOW: u32 = 30;
 /// A bake still marked running after this long was cut short by a restart.
 const STALE: chrono::Duration = chrono::Duration::minutes(10);
+/// Looks being assembled at once, over every member, before a save is turned away. Each holds its part files in memory
+/// until it has a slot for the heavy work.
+const MAX_BAKING: i64 = 16;
 const MAX_MASK_BYTES: usize = 16 * 1024 * 1024;
+/// What an assembled look may weigh, as stored: it loads on every visitor's island.
+const MAX_LOOK_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOOK_TRIANGLES: u64 = 150_000;
 
+const BUSY: ApiError = ApiError::new(
+    StatusCode::TOO_MANY_REQUESTS,
+    "looks_busy",
+    "지금 모습을 입히는 사람이 많아요. 잠시 뒤에 다시 저장해 주세요.",
+);
 const BAKING: ApiError = conflict("look_baking", "지금 입히는 중이에요. 끝난 뒤 다시 저장해 주세요.");
 const BODY_CHANGED: ApiError = conflict("look_body_changed", "옷장 몸이 바뀌었어요. 옷장을 다시 불러와 주세요.");
 const PART_CHANGED: ApiError = conflict("look_part_changed", "옷장에 없는 파츠가 있어요. 옷장을 다시 불러와 주세요.");
@@ -46,6 +57,7 @@ const INVALID: ApiError = bad("invalid_look", "입힐 수 없는 조합이에요
 const NOT_READY: ApiError = conflict("look_not_ready", "아직 입을 수 있는 모습이 없어요.");
 const NO_LOOK: ApiError = not_found("look_not_found", "저장한 모습이 없어요.");
 const NOT_PLAYABLE: &str = "옷장 몸에 idle·walk 애니메이션이 없어 섬에서 걸을 수 없어요.";
+const TOO_LARGE: &str = "입힌 모습이 너무 커요(16 MB, 삼각형 15만 개까지). 파츠를 줄여 주세요.";
 const INTERRUPTED: &str = "서버가 다시 시작되어 입히기가 멈췄어요. 다시 저장해 주세요.";
 
 pub fn router() -> Router<AppState> {
@@ -199,12 +211,25 @@ async fn mine(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Js
     Ok(Json(json!({"look": look_of(&state, user.id).await?})))
 }
 
+/// Looks being assembled now: `baking`, and not yet as old as [`STALE`].
+async fn baking_now(db: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM user_looks WHERE status = 'baking' AND updated_at > now() - make_interval(mins => $1)",
+    )
+    .bind(STALE.num_minutes() as i32)
+    .fetch_one(db)
+    .await
+}
+
 /// `PUT /api/looks/me`: saves the look and starts assembling it; 202 with the look, `baking` until it is worn.
 async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LookBody>) -> ApiResult<Response> {
     let user = current_user(&state, &headers).await?;
     rate_limit(&state, format!("look:{}", user.id), SAVES_PER_WINDOW)?;
     let look = request(body)?;
     factory::configured(&state)?;
+    if baking_now(&state.db).await? > MAX_BAKING {
+        return Err(BUSY);
+    }
     let body_job = text(&look["body"], "jobId").to_owned();
     let bodies =
         factory::fetch_json(&state, &user.username, "avatar-factory/wardrobe/bodies").await?.unwrap_or_default();
@@ -215,7 +240,7 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     let revision: Option<i64> = sqlx::query_scalar(
         "INSERT INTO user_looks (user_id, request) VALUES ($1, $2)
          ON CONFLICT (user_id) DO UPDATE SET request = $2, revision = user_looks.revision + 1, status = 'baking',
-           error_code = NULL, error_message = NULL, updated_at = now()
+           error_code = NULL, error_message = NULL, wear_on_ready = true, updated_at = now()
          WHERE user_looks.status <> 'baking' OR user_looks.updated_at < now() - make_interval(mins => $3)
          RETURNING revision",
     )
@@ -236,11 +261,13 @@ struct Wear {
     worn: bool,
 }
 
-/// `PATCH /api/looks/me`: `{worn}`: the island wears the look, or the 미니미 again.
+/// `PATCH /api/looks/me`: `{worn}`: the island wears the look, or the 미니미 again. What is chosen here also holds for a
+/// look still baking, which is worn when it finishes only if the member wanted it worn.
 async fn wear(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<Wear>) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
     let changed = sqlx::query(
-        "UPDATE user_looks SET worn = $2 WHERE user_id = $1 AND (NOT $2 OR model_url IS NOT NULL) RETURNING user_id",
+        "UPDATE user_looks SET worn = $2, wear_on_ready = $2 WHERE user_id = $1 AND (NOT $2 OR model_url IS NOT NULL)
+         RETURNING user_id",
     )
     .bind(user.id)
     .bind(body.worn)
@@ -253,10 +280,28 @@ async fn wear(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     Ok(Json(json!({"look": look})))
 }
 
-/// Picking a 미니미 on the island takes the look off.
-pub async fn take_off(db: &sqlx::PgPool, user: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE user_looks SET worn = false WHERE user_id = $1 AND worn").bind(user).execute(db).await?;
+/// Picking a 미니미 on the island takes the look off, and a look still baking is not put on when it finishes.
+pub async fn take_off(db: &PgPool, user: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE user_looks SET worn = false, wear_on_ready = false WHERE user_id = $1 AND (worn OR wear_on_ready)",
+    )
+    .bind(user)
+    .execute(db)
+    .await?;
     Ok(())
+}
+
+/// Marks the looks a stopped server left baking as failed: their tasks ended with it. Run at startup, before this
+/// server bakes any of its own.
+pub async fn interrupt_unfinished(db: &PgPool) -> Result<u64, sqlx::Error> {
+    let stopped = sqlx::query(
+        "UPDATE user_looks SET status = 'failed', error_code = 'interrupted', error_message = $1, updated_at = now()
+         WHERE status = 'baking'",
+    )
+    .bind(INTERRUPTED)
+    .execute(db)
+    .await?;
+    Ok(stopped.rows_affected())
 }
 
 /// Why a bake failed: a code and a message for the wardrobe.
@@ -266,6 +311,20 @@ impl From<ApiError> for Failure {
     fn from(error: ApiError) -> Self {
         Self(error.code, error.message.to_owned())
     }
+}
+
+/// A garment of a covered slot whose coverage record is missing or unreadable: without it the body would show through.
+fn no_coverage(slot: &str) -> Failure {
+    Failure("look_coverage", format!("{slot} 파츠가 몸을 가리는 모양을 읽지 못했어요. 옷장을 다시 불러와 주세요."))
+}
+
+/// Colours chosen for a part that cannot take them (no regions or texture, a mask that cannot be read): the model would
+/// come out without them.
+fn no_colors(slot: &str) -> Failure {
+    Failure(
+        "look_colors",
+        format!("{slot} 파츠에 고른 색을 입힐 수 없어요. 색을 되돌리거나 옷장을 다시 불러와 주세요."),
+    )
 }
 
 /// One saved look being assembled.
@@ -279,27 +338,31 @@ struct Bake {
 
 impl Bake {
     async fn run(self) {
-        // Heavy model work shares the import slots; waiting here keeps the look `baking`.
-        let Ok(_slot) = self.state.imports.clone().acquire_owned().await else { return };
+        // A newer save, or the cleanup after a restart, ends this bake before it does any work.
+        if !self.current().await {
+            return;
+        }
         let outcome = match AssertUnwindSafe(self.make()).catch_unwind().await {
             Ok(outcome) => outcome,
             Err(_) => Err(Failure("internal", "잠시 후 다시 시도해 주세요.".into())),
         };
-        let saved =
-            match outcome {
-                Ok((model_url, report)) => sqlx::query(
-                    "UPDATE user_looks SET status = 'ready', model_url = $3, baked = request, report = $4, worn = true,
-                     updated_at = now() WHERE user_id = $1 AND revision = $2",
+        let saved = match outcome {
+            Ok(None) => return,
+            Ok(Some((model_url, report))) => {
+                sqlx::query(
+                    "UPDATE user_looks SET status = 'ready', model_url = $3, baked = request, report = $4,
+                     worn = wear_on_ready, updated_at = now() WHERE user_id = $1 AND revision = $2",
                 )
                 .bind(self.user.id)
                 .bind(self.revision)
                 .bind(model_url)
                 .bind(report)
                 .execute(&self.state.db)
-                .await,
-                Err(Failure(code, message)) => {
-                    tracing::warn!(user = %self.user.id, code, "Look bake failed");
-                    sqlx::query(
+                .await
+            }
+            Err(Failure(code, message)) => {
+                tracing::warn!(user = %self.user.id, code, "Look bake failed");
+                sqlx::query(
                     "UPDATE user_looks SET status = 'failed', error_code = $3, error_message = $4, updated_at = now()
                      WHERE user_id = $1 AND revision = $2",
                 )
@@ -309,11 +372,24 @@ impl Bake {
                 .bind(message)
                 .execute(&self.state.db)
                 .await
-                }
-            };
+            }
+        };
         if let Err(error) = saved {
             tracing::error!(%error, user = %self.user.id, "Could not record a look bake");
         }
+    }
+
+    /// Whether this is still the look's latest bake and still `baking`.
+    async fn current(&self) -> bool {
+        let found = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM user_looks WHERE user_id = $1 AND revision = $2 AND status = 'baking')",
+        )
+        .bind(self.user.id)
+        .bind(self.revision)
+        .fetch_one(&self.state.db)
+        .await;
+        // A database that cannot answer cannot take the result either, which the end of the bake reports.
+        found.unwrap_or(true)
     }
 
     /// A file under the character server's `/api/`, checked against the SHA-256 the wardrobe listed for it.
@@ -329,19 +405,23 @@ impl Bake {
         Ok(factory::fetch_json(&self.state, &self.user.username, path).await?)
     }
 
-    /// A garment's colour regions and their mask, with the colours the look chose; None when it chose none or the
-    /// part has no regions.
+    /// A garment's colour regions and their mask, with the colours the look chose; None when it chose none. Colours the
+    /// part cannot take fail the look instead of being left off the model unseen.
     async fn palette(&self, slot: &str, part: &Value) -> Result<Option<Palette>, Failure> {
         let Some(chosen) = self.look["colors"][slot].as_object() else { return Ok(None) };
         let (job, version) = (text(part, "jobId"), text(part, "version"));
-        let Some(regions) =
-            self.json(&format!("avatar-factory/wardrobe/colors/{job}/{slot}?version={version}")).await?
+        let regions_path = format!("avatar-factory/wardrobe/colors/{job}/{slot}?version={version}");
+        let Some(regions) = factory::fetch_json_if_applicable(&self.state, &self.user.username, &regions_path).await?
         else {
-            return Ok(None);
+            return Err(no_colors(slot));
         };
         let mask_path = format!("avatar-factory/wardrobe/colors/{job}/{slot}/mask?version={version}");
-        let mask = factory::fetch_file(&self.state, &self.user.username, &mask_path, MAX_MASK_BYTES, None).await?;
-        let Some(mask) = slim::decode(&mask, image::ImageFormat::Png, 4096, 256 * 1024 * 1024) else { return Ok(None) };
+        let mask = factory::fetch_file(&self.state, &self.user.username, &mask_path, MAX_MASK_BYTES, None)
+            .await
+            .map_err(|error| if error.status == StatusCode::NOT_FOUND { no_colors(slot) } else { error.into() })?;
+        let Some(mask) = slim::decode(&mask, image::ImageFormat::Png, 4096, 256 * 1024 * 1024) else {
+            return Err(no_colors(slot));
+        };
         let lights = regions["regions"]
             .as_array()
             .into_iter()
@@ -359,7 +439,8 @@ impl Bake {
         }))
     }
 
-    async fn make(&self) -> Result<(String, Value), Failure> {
+    /// The model's site path and the bake's report; None when a newer save took over while this one waited for a slot.
+    async fn make(&self) -> Result<Option<(String, Value)>, Failure> {
         let body_ref = &self.look["body"];
         let (body_job, body_version) = (text(body_ref, "jobId"), text(body_ref, "version"));
         let body_path = format!("avatar-factory/jobs/{body_job}/native-parts/{body_version}/body.glb");
@@ -376,7 +457,8 @@ impl Bake {
                 .await?;
             let coverage = if COVERED_SLOTS.contains(&slot.as_str()) {
                 let path = format!("avatar-factory/wardrobe/bodies/{body_job}/coverage/{job}/{slot}?version={version}");
-                self.json(&path).await?.as_ref().and_then(Coverage::parse)
+                let record = self.json(&path).await?;
+                Some(record.as_ref().and_then(Coverage::parse).ok_or_else(|| no_coverage(slot))?)
             } else {
                 None
             };
@@ -384,7 +466,13 @@ impl Bake {
             files.push((slot.clone(), bytes, coverage, palette));
         }
         let hair = self.look["hairColor"].as_str().and_then(look_bake::linear_color);
+        // Only the heavy work takes a slot (shared with the imports); the downloads above wait for nobody.
+        let slot = self.state.imports.clone().acquire_owned().await.map_err(|error| Failure::from(internal(error)))?;
+        if !self.current().await {
+            return Ok(None);
+        }
         let (web, details, report) = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
             let parts: Vec<Part> = files
                 .iter()
                 .map(|(slot, bytes, coverage, palette)| Part {
@@ -405,12 +493,15 @@ impl Bake {
         if !details.summary().playable() {
             return Err(Failure("look_not_playable", NOT_PLAYABLE.into()));
         }
+        if web.len() > MAX_LOOK_BYTES || details.triangles > MAX_LOOK_TRIANGLES {
+            return Err(Failure("look_too_large", TOO_LARGE.into()));
+        }
         let mut report = report;
         report["bytes"] = web.len().into();
         report["triangles"] = details.triangles.into();
         report["clips"] = json!(details.clips);
         let model_url = self.state.config.models.put("glb", web).await?;
-        Ok((model_url, report))
+        Ok(Some((model_url, report)))
     }
 }
 

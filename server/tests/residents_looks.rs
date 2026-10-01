@@ -8,7 +8,7 @@ use common::{TestApp, TestDb};
 use mogaesup_server::{
     MIGRATOR,
     config::{Factory, FactoryAccess, FactoryToken},
-    glb,
+    glb, looks,
 };
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -125,6 +125,34 @@ fn part_glb(slot: &str, head: f64) -> Vec<u8> {
     )
 }
 
+/// A hat of a hundred and fifty thousand triangles (all of them degenerate, which the bake does not mind): worn, the
+/// look is too heavy to store.
+fn heavy_glb() -> Vec<u8> {
+    build(
+        json!({
+            "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}], "nodes": bones(0.5, "Piece", Some("hat")),
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2}, "indices": 4, "material": 0}]}],
+            "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+            "textures": [{"source": 0}], "images": [{"bufferView": 5, "mimeType": "image/png"}],
+            "skins": [{"joints": [1, 2], "inverseBindMatrices": 3}],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 1.5, 0], "max": [1, 2, 0]},
+                {"bufferView": 1, "componentType": 5121, "count": 3, "type": "VEC4"},
+                {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4"},
+                {"bufferView": 3, "componentType": 5126, "count": 2, "type": "MAT4"},
+                {"bufferView": 4, "componentType": 5123, "count": 450_003, "type": "SCALAR"}],
+        }),
+        &[
+            f32s(&[0.0, 1.5, 0.0, 1.0, 1.5, 0.0, 0.5, 2.0, 0.0]),
+            [1u8, 0, 0, 0].repeat(3),
+            f32s(&[1.0, 0.0, 0.0, 0.0].repeat(3)),
+            f32s(&INVERSE_BINDS),
+            vec![0; 450_003 * 2],
+            png([128, 128, 128, 255]),
+        ],
+    )
+}
+
 /// A studio character that stands but never walks.
 fn standing_glb() -> Vec<u8> {
     glb::join(
@@ -133,11 +161,14 @@ fn standing_glb() -> Vec<u8> {
     )
 }
 
-/// What the fake character server knows: two finished characters, and a wardrobe with one body and three parts.
+/// What the fake character server knows: two finished characters, and a wardrobe with one body and parts that each go
+/// wrong in their own way: `bare` has no coverage record, `twisted` one that is not base64, `plain` no colour regions,
+/// `flat` a 422 for them (no texture), `blurred` a mask that is not a picture, `heavy` too many triangles.
 struct Studio {
     body: Vec<u8>,
     hat: Vec<u8>,
     tall_hat: Vec<u8>,
+    heavy_hat: Vec<u8>,
     standing: Vec<u8>,
     /// Wardrobe requests seen, by path.
     seen: Mutex<Vec<String>>,
@@ -155,6 +186,7 @@ impl Studio {
             body: body_glb(),
             hat: part_glb("hat", 0.5),
             tall_hat: part_glb("hat", 0.8),
+            heavy_hat: heavy_glb(),
             standing: standing_glb(),
             seen: Mutex::default(),
         })
@@ -162,7 +194,11 @@ impl Studio {
 
     fn parts(&self) -> Value {
         let part = |job: &str, bytes: &[u8]| json!({"job_id": job, "version": "v2", "slot": "hat", "name": format!("{job} 모자"), "sha256": sha256(bytes)});
-        json!({"body": {"job_id": "body", "version": "v1"}, "parts": [part("hats", &self.hat), part("tall", &self.tall_hat)]})
+        let plain: Vec<Value> =
+            ["hats", "bare", "twisted", "plain", "flat", "blurred"].iter().map(|job| part(job, &self.hat)).collect();
+        let others = [part("tall", &self.tall_hat), part("heavy", &self.heavy_hat)];
+        let parts = [plain, others.to_vec()].concat();
+        json!({"body": {"job_id": "body", "version": "v1"}, "parts": parts})
     }
 
     fn answer(&self, path: &str) -> axum::response::Response {
@@ -179,16 +215,32 @@ impl Studio {
             .into_response(),
             ["avatar-factory", "wardrobe", "bodies", "body", "parts"] => Json(self.parts()).into_response(),
             ["avatar-factory", "jobs", "body", "native-parts", "v1", "body.glb"] => file(&self.body),
-            ["avatar-factory", "jobs", "hats", "native-parts", "v2", "hat.glb"] => file(&self.hat),
             ["avatar-factory", "jobs", "tall", "native-parts", "v2", "hat.glb"] => file(&self.tall_hat),
+            ["avatar-factory", "jobs", "heavy", "native-parts", "v2", "hat.glb"] => file(&self.heavy_hat),
+            ["avatar-factory", "jobs", _, "native-parts", "v2", "hat.glb"] => file(&self.hat),
+            ["avatar-factory", "wardrobe", "bodies", "body", "coverage", "bare", "hat"] => {
+                StatusCode::NOT_FOUND.into_response()
+            }
+            ["avatar-factory", "wardrobe", "bodies", "body", "coverage", "twisted", "hat"] => {
+                Json(json!({"slot": "hat", "hidden": {"0:0": "not base64!"}, "triangles": {}, "covers_bottom": false}))
+                    .into_response()
+            }
             ["avatar-factory", "wardrobe", "bodies", "body", "coverage", _, "hat"] => {
                 Json(json!({"slot": "hat", "hidden": {}, "triangles": {}, "covers_bottom": false})).into_response()
             }
-            ["avatar-factory", "wardrobe", "colors", "hats", "hat"] => {
+            // `plain` has no colour regions at all; `flat` has no texture to colour.
+            ["avatar-factory", "wardrobe", "colors", "plain", "hat"] => StatusCode::NOT_FOUND.into_response(),
+            ["avatar-factory", "wardrobe", "colors", "flat", "hat"] => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"code": "no_texture", "message": "색을 바꿀 텍스처가 없는 파츠입니다."})),
+            )
+                .into_response(),
+            ["avatar-factory", "wardrobe", "colors", "blurred", "hat", "mask"] => file(b"not a picture"),
+            ["avatar-factory", "wardrobe", "colors", _, "hat"] => {
                 Json(json!({"slot": "hat", "material": 0, "regions": [{"index": 0, "color": "#808080", "share": 1.0, "light": 0.2}]}))
                     .into_response()
             }
-            ["avatar-factory", "wardrobe", "colors", "hats", "hat", "mask"] => file(&png([255, 0, 0, 255])),
+            ["avatar-factory", "wardrobe", "colors", _, "hat", "mask"] => file(&png([255, 0, 0, 255])),
             _ => StatusCode::NOT_FOUND.into_response(),
         }
     }
@@ -407,9 +459,30 @@ async fn 관리자가_가져온_주민을_섬_주인이_인사말과_함께_두�
 
 fn look(part_job: &str) -> Value {
     let studio = Studio::new();
-    let sha = if part_job == "tall" { sha256(&studio.tall_hat) } else { sha256(&studio.hat) };
+    let sha = match part_job {
+        "tall" => sha256(&studio.tall_hat),
+        "heavy" => sha256(&studio.heavy_hat),
+        _ => sha256(&studio.hat),
+    };
     json!({"body": {"jobId": "body", "version": "v1"}, "parts": {"hat": {"jobId": part_job, "version": "v2", "sha256": sha}},
         "hairColor": null, "colors": {"hat": {"0": "#00ff00"}}})
+}
+
+/// The same look in another colour: another model.
+fn recolored(part_job: &str, color: &str) -> Value {
+    let mut look = look(part_job);
+    look["colors"]["hat"]["0"] = json!(color);
+    look
+}
+
+/// Every import slot: while held, a bake that has everything it needs waits for its turn at the heavy work.
+async fn busy_slots(app: &TestApp) -> tokio::sync::OwnedSemaphorePermit {
+    app.state.imports.clone().acquire_many_owned(mogaesup_server::imports::SLOTS as u32).await.unwrap()
+}
+
+fn stored_models(app: &TestApp) -> usize {
+    let files = std::fs::read_dir(&app.model_dir).unwrap();
+    files.filter(|file| file.as_ref().unwrap().file_name().to_string_lossy().ends_with(".glb")).count()
 }
 
 async fn settled(app: &TestApp, member: &str) -> Value {
@@ -485,5 +558,183 @@ async fn 옷장에서_꾸민_모습을_저장하면_한_모델로_조립되어_�
     );
     assert_eq!(app.call("GET", "/api/looks/me", None, Some(&other)).await.body, json!({"look": null}));
     assert_eq!(app.call("GET", "/api/looks/member_x", None, Some(&other)).await.status, StatusCode::NOT_FOUND);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 읽을_수_없는_가림_정보와_입힐_수_없는_색은_조용히_넘기지_않고_실패로_알린다() {
+    let (app, _studio, _admin, member) = resident_app().await;
+    for (job, code) in [
+        ("bare", "look_coverage"),
+        ("twisted", "look_coverage"),
+        ("plain", "look_colors"),
+        ("flat", "look_colors"),
+        ("blurred", "look_colors"),
+    ] {
+        let queued = app.call("PUT", "/api/looks/me", Some(look(job)), Some(&member)).await;
+        assert_eq!(queued.status, StatusCode::ACCEPTED, "{job}: {:?}", queued.body);
+        let failed = settled(&app, &member).await;
+        assert_eq!(
+            (failed["status"].as_str(), failed["error"]["code"].as_str()),
+            (Some("failed"), Some(code)),
+            "{job}"
+        );
+        assert!(failed["error"]["message"].as_str().unwrap().starts_with("hat "), "{job}: {failed}");
+    }
+    assert_eq!(stored_models(&app), 0);
+
+    // Colours are only needed where one was chosen: the same part without any bakes fine.
+    let mut uncolored = look("plain");
+    uncolored["colors"] = json!({});
+    assert_eq!(app.call("PUT", "/api/looks/me", Some(uncolored), Some(&member)).await.status, StatusCode::ACCEPTED);
+    let ready = settled(&app, &member).await;
+    assert_eq!(ready["status"], "ready", "{ready}");
+    assert_eq!(ready["report"]["recoloredMaterials"], 0);
+    assert_eq!(
+        (ready["report"]["skippedHides"].as_u64(), ready["report"]["skippedTucks"].as_u64()),
+        (Some(0), Some(0))
+    );
+    assert_eq!(stored_models(&app), 1);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 너무_큰_모습은_저장하지_않고_look_too_large로_알린다() {
+    let (app, _studio, _admin, member) = resident_app().await;
+    let queued = app.call("PUT", "/api/looks/me", Some(look("heavy")), Some(&member)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    let failed = settled(&app, &member).await;
+    assert_eq!((failed["status"].as_str(), failed["error"]["code"].as_str()), (Some("failed"), Some("look_too_large")));
+    assert_eq!((failed["modelUrl"].clone(), failed["worn"].clone()), (Value::Null, json!(false)));
+    assert_eq!(stored_models(&app), 0);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 서버가_다시_뜨면_멈춘_모습_입히기를_실패로_적고_바로_다시_저장할_수_있다() {
+    let (app, _studio, _admin, member) = resident_app().await;
+    let user = app.user_id("owner_r").await;
+    // What the last process left behind: still baking, and too recent for the staleness rule to free it.
+    sqlx::query("INSERT INTO user_looks (user_id, request, status) VALUES ($1, $2, 'baking')")
+        .bind(user)
+        .bind(look("hats"))
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    let stuck = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
+    assert_eq!((stuck.status, stuck.body["code"].as_str()), (StatusCode::CONFLICT, Some("look_baking")));
+
+    assert_eq!(looks::interrupt_unfinished(&app.state.db).await.unwrap(), 1);
+    let after = app.call("GET", "/api/looks/me", None, Some(&member)).await.body["look"].clone();
+    assert_eq!((after["status"].as_str(), after["error"]["code"].as_str()), (Some("failed"), Some("interrupted")));
+    assert!(after["error"]["message"].as_str().is_some_and(|message| !message.is_empty()));
+    assert_eq!(looks::interrupt_unfinished(&app.state.db).await.unwrap(), 0, "a failed look is not touched again");
+
+    assert_eq!(app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await.status, StatusCode::ACCEPTED);
+    assert_eq!(settled(&app, &member).await["status"], "ready");
+    assert_eq!(looks::interrupt_unfinished(&app.state.db).await.unwrap(), 0, "a finished look is not touched either");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 새로_저장하면_앞선_입히기는_일을_하지_않고_물러난다() {
+    let (app, studio, _admin, member) = resident_app().await;
+    let slots = busy_slots(&app).await;
+    let first = app.call("PUT", "/api/looks/me", Some(recolored("hats", "#00ff00")), Some(&member)).await;
+    assert_eq!(first.status, StatusCode::ACCEPTED, "{:?}", first.body);
+    // It has run for longer than a bake may, so a second save is let in while the first still waits for a slot.
+    sqlx::query("UPDATE user_looks SET updated_at = now() - interval '11 minutes'")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    let second = app.call("PUT", "/api/looks/me", Some(recolored("hats", "#0000ff")), Some(&member)).await;
+    assert_eq!(second.status, StatusCode::ACCEPTED, "{:?}", second.body);
+    until("both bakes to fetch their files", || async {
+        let masks = studio.seen.lock().unwrap().iter().filter(|path| path.ends_with("/hat/mask")).count();
+        (masks == 2).then_some(json!(masks))
+    })
+    .await;
+    drop(slots);
+
+    let ready = settled(&app, &member).await;
+    assert_eq!(ready["status"], "ready", "{ready}");
+    assert_eq!(ready["request"]["colors"], json!({"hat": {"0": "#0000ff"}}));
+    // The older bake stepped aside: nothing of it was assembled or stored.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(stored_models(&app), 1);
+    assert_eq!(app.call("GET", "/api/looks/me", None, Some(&member)).await.body["look"]["status"], "ready");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 모습을_입히는_사람이_너무_많으면_저장을_거절하고_열여섯까지는_받는다() {
+    let (app, _studio, _admin, member) = resident_app().await;
+    for at in 0..17 {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, password_hash) VALUES ($1, $2, $2, 'x')")
+            .bind(id)
+            .bind(format!("baker{at}"))
+            .execute(&app.state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO user_looks (user_id, request, status) VALUES ($1, '{}', 'baking')")
+            .bind(id)
+            .execute(&app.state.db)
+            .await
+            .unwrap();
+    }
+    let turned_away = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
+    assert_eq!(
+        (turned_away.status, turned_away.body["code"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("looks_busy"))
+    );
+    assert_eq!(app.call("GET", "/api/looks/me", None, Some(&member)).await.body, json!({"look": null}));
+
+    // One of them was cut short long ago and no longer counts: sixteen are not more than sixteen.
+    sqlx::query(
+        "UPDATE user_looks SET updated_at = now() - interval '11 minutes'
+         WHERE user_id = (SELECT id FROM users WHERE username = 'baker0')",
+    )
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let accepted = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 입히는_동안_미니미를_고르면_끝난_모습을_입히지_않는다() {
+    let (app, _studio, _admin, member) = resident_app().await;
+    let worn = |reply: &Value| reply["worn"].as_bool().unwrap();
+    // A 미니미 picked while the look bakes: the finished look stays off.
+    let slots = busy_slots(&app).await;
+    assert_eq!(app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await.status, StatusCode::ACCEPTED);
+    app.call("PATCH", "/api/homes/me", Some(json!({"minime": "man"})), Some(&member)).await;
+    drop(slots);
+    let first = settled(&app, &member).await;
+    assert_eq!(first["status"], "ready", "{first}");
+    assert!(!worn(&first));
+    assert!(first["modelUrl"].is_string());
+
+    // Wearing it by hand puts it on; taking it off while a new one bakes keeps the new one off too.
+    assert!(worn(&app.call("PATCH", "/api/looks/me", Some(json!({"worn": true})), Some(&member)).await.body["look"]));
+    let slots = busy_slots(&app).await;
+    assert_eq!(
+        app.call("PUT", "/api/looks/me", Some(recolored("hats", "#0000ff")), Some(&member)).await.status,
+        StatusCode::ACCEPTED
+    );
+    assert!(!worn(&app.call("PATCH", "/api/looks/me", Some(json!({"worn": false})), Some(&member)).await.body["look"]));
+    drop(slots);
+    let second = settled(&app, &member).await;
+    assert_eq!((second["status"].as_str(), worn(&second)), (Some("ready"), false), "{second}");
+
+    // Saving again means to wear it, whatever was chosen before.
+    assert_eq!(
+        app.call("PUT", "/api/looks/me", Some(recolored("hats", "#ff0000")), Some(&member)).await.status,
+        StatusCode::ACCEPTED
+    );
+    let third = settled(&app, &member).await;
+    assert_eq!((third["status"].as_str(), worn(&third)), (Some("ready"), true), "{third}");
     app.cleanup().await;
 }

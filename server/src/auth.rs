@@ -292,7 +292,8 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
 
 pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
-    // Each tab renews about every 40 seconds and again on every reconnect, so two tabs or a reconnect loop still fit.
+    // A page asks for one when its room connects and again each time the connection drops (checked every second, with
+    // waits that double up to 30 seconds), so several tabs or a reconnect loop still fit.
     rate_limit(&state, format!("realtime-ticket:{}", user.id), 90)?;
     let (ticket, expires_at) = crate::rooms::issue_ticket(&state.config.ticket_secret, &user);
     Ok(Json(json!({"ticket": ticket, "expiresAt": expires_at, "user": user})))

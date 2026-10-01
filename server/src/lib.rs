@@ -59,7 +59,7 @@ impl AppState {
             attempts: Default::default(),
             hashing: Arc::new(Semaphore::new(HASHING_SLOTS)),
             rooms: rooms::Rooms::default(),
-            http: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("HTTP client"),
+            http: factory::client(),
             imports: Arc::new(Semaphore::new(imports::SLOTS)),
             power,
         }

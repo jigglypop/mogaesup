@@ -1002,3 +1002,173 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     assert_eq!(app.send(upload("https://evil.example")).await.status, StatusCode::FORBIDDEN);
     app.cleanup().await;
 }
+
+/// `text` written into a URL query.
+fn encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| if byte.is_ascii_alphanumeric() { char::from(byte).to_string() } else { format!("%{byte:02X}") })
+        .collect()
+}
+
+#[tokio::test]
+async fn 한_회원의_섬은_여덟_개만_남고_새로_저장하면_가장_오래_손대지_않은_섬이_밀려난다() {
+    let app = TestApp::new(None).await;
+    let owner = app.register("owner_l", "주인").await;
+    let save = |world: String, base: i64| {
+        let (app, owner) = (&app, owner.clone());
+        async move {
+            let data = json!({"version": 1, "savedAt": 1, "domains": {"building": {}}});
+            let body = json!({"worldId": world, "baseRevision": base, "data": data});
+            app.call("PUT", "/api/homes/me/world", Some(body), Some(&owner)).await
+        }
+    };
+    let ids = |versions: &[u32]| {
+        let mut ids: Vec<String> = versions.iter().map(|at| format!("minihome-v{at}")).collect();
+        ids.sort();
+        ids
+    };
+    let kept = || async {
+        sqlx::query_scalar::<_, String>("SELECT world_id FROM home_worlds ORDER BY world_id")
+            .fetch_all(&app.state.db)
+            .await
+            .unwrap()
+    };
+    for at in 1..=8 {
+        assert_eq!(save(format!("minihome-v{at}"), 0).await.status, StatusCode::OK, "{at}");
+    }
+    assert_eq!(kept().await, ids(&[1, 2, 3, 4, 5, 6, 7, 8]));
+
+    // Saving v1 again makes v2 the one least recently updated: a ninth world takes its place, whatever its id.
+    assert_eq!(save("minihome-v1".into(), 1).await.body["revision"], 2);
+    let ninth = save("minihome-v9".into(), 0).await;
+    assert_eq!((ninth.status, ninth.body["revision"].as_i64()), (StatusCode::OK, Some(1)), "{:?}", ninth.body);
+    assert_eq!(kept().await, ids(&[1, 3, 4, 5, 6, 7, 8, 9]));
+    assert_eq!(
+        app.call("GET", "/api/homes/owner_l/world?worldId=minihome-v2", None, None).await.status,
+        StatusCode::NO_CONTENT
+    );
+
+    // A first save of a world that exists is the usual conflict and pushes nothing out; the worlds kept save as ever.
+    assert_eq!(save("minihome-v3".into(), 0).await.status, StatusCode::CONFLICT);
+    assert_eq!(kept().await, ids(&[1, 3, 4, 5, 6, 7, 8, 9]));
+    assert_eq!(save("minihome-v3".into(), 1).await.body["revision"], 2);
+
+    // Five more at once: all are kept, and what is pushed out is the oldest of the rest, so the cap holds.
+    let replies = futures_util::future::join_all((10..=14).map(|at| save(format!("minihome-v{at}"), 0))).await;
+    let statuses: Vec<StatusCode> = replies.iter().map(|reply| reply.status).collect();
+    assert_eq!(statuses, [StatusCode::OK; 5], "{:?}", replies.iter().map(|reply| &reply.body).collect::<Vec<_>>());
+    assert_eq!(kept().await, ids(&[1, 3, 9, 10, 11, 12, 13, 14]));
+
+    // The count is per member, and any id is fine.
+    let other = app.register("other_l", "다른 주인").await;
+    let body = json!({"worldId": "x", "baseRevision": 0, "data": {"version": 1, "savedAt": 1, "domains": {}}});
+    assert_eq!(app.call("PUT", "/api/homes/me/world", Some(body), Some(&other)).await.status, StatusCode::OK);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM home_worlds").fetch_one(&app.state.db).await.unwrap();
+    assert_eq!(rows, 9);
+    app.cleanup().await;
+}
+
+async fn first_save(app: &TestApp, cookie: &str, world: &str) -> common::Reply {
+    let body = json!({"worldId": world, "baseRevision": 0, "data": {"version": 1, "savedAt": 1, "domains": {}}});
+    app.call("PUT", "/api/homes/me/world", Some(body), Some(cookie)).await
+}
+
+#[tokio::test]
+async fn 섬_저장은_열_분에_백스무_번까지만_받는다() {
+    let app = TestApp::new(None).await;
+    let owner = app.register("owner_t", "주인").await;
+    let other = app.register("other_t", "다른 주인").await;
+    // Refused attempts count like any other: a client stuck on a bad request cannot go on forever.
+    for _ in 0..120 {
+        assert_eq!(first_save(&app, &owner, "bad id!").await.body["code"], "invalid_world_id");
+    }
+    let limited = first_save(&app, &owner, "minihome-v1").await;
+    assert_eq!((limited.status, limited.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    assert_eq!(first_save(&app, &other, "minihome-v1").await.status, StatusCode::OK);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 탐색_목록은_아이디와_이름과_제목으로_찾고_와일드카드는_글자로_읽는다() {
+    let app = TestApp::new(None).await;
+    let mut cookies = HashMap::new();
+    for (username, name, title) in [
+        ("alice_q", "앨리스", "꽃밭 마을"),
+        ("bob_q", "Bobby", "바다 마을"),
+        ("cat_q", "a_b", "산"),
+        ("dog_q", "axb", "산"),
+        ("emu_q", "50%", "산"),
+        ("fox_q", "5000", "산"),
+        ("gnu_q", "a\\b", "산"),
+        ("hen_q", "ab", "산"),
+    ] {
+        let cookie = app.register(username, name).await;
+        app.call("PATCH", "/api/homes/me", Some(json!({"title": title})), Some(&cookie)).await;
+        cookies.insert(username, cookie);
+    }
+    let find = |query: &str| {
+        let app = &app;
+        let path = format!("/api/homes?q={}", encoded(query));
+        async move {
+            let reply = app.call("GET", &path, None, None).await;
+            assert_eq!(reply.status, StatusCode::OK, "{path}: {:?}", reply.body);
+            let mut names: Vec<String> = reply.body["homes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|home| home["username"].as_str().unwrap().to_owned())
+                .collect();
+            names.sort();
+            names
+        }
+    };
+    assert_eq!(find("alice").await, ["alice_q"]);
+    assert_eq!(find("ALICE").await, ["alice_q"]);
+    assert_eq!(find("  alice  ").await, ["alice_q"]);
+    assert_eq!(find("앨리").await, ["alice_q"]);
+    assert_eq!(find("obb").await, ["bob_q"]);
+    assert_eq!(find("바다").await, ["bob_q"]);
+    assert_eq!(find("마을").await, ["alice_q", "bob_q"]);
+    assert_eq!(find("nobody").await, Vec::<String>::new());
+    // Blank is no filter; `%`, `_` and `\` are only themselves.
+    assert_eq!(find("").await.len(), 8);
+    assert_eq!(find("   ").await.len(), 8);
+    assert_eq!(find("a_b").await, ["cat_q"]);
+    assert_eq!(find("50%").await, ["emu_q"]);
+    assert_eq!(find("%").await, ["emu_q"]);
+    assert_eq!(find("a\\b").await, ["gnu_q"]);
+
+    // Only public islands are found, and the listing's paging goes on working.
+    let hidden = app
+        .call(
+            "PATCH",
+            "/api/homes/me",
+            Some(json!({"visibility": "private"})),
+            cookies.get("bob_q").map(String::as_str),
+        )
+        .await;
+    assert_eq!(hidden.status, StatusCode::OK);
+    assert_eq!(find("bob").await, Vec::<String>::new());
+    let first = app.call("GET", "/api/homes?q=_q&limit=3", None, None).await;
+    let page: Vec<&str> =
+        first.body["homes"].as_array().unwrap().iter().map(|home| home["username"].as_str().unwrap()).collect();
+    assert_eq!(page.len(), 3);
+    let before = first.body["homes"][2]["updatedAt"].as_str().unwrap();
+    let rest = app.call("GET", &format!("/api/homes?q=_q&limit=50&before={}", encoded(before)), None, None).await;
+    let rest: Vec<&str> =
+        rest.body["homes"].as_array().unwrap().iter().map(|home| home["username"].as_str().unwrap()).collect();
+    assert_eq!(page.len() + rest.len(), 7, "{page:?} {rest:?}");
+    assert!(page.iter().all(|name| !rest.contains(name)));
+
+    // Forty characters are the most; control characters are no search.
+    assert_eq!(app.call("GET", &format!("/api/homes?q={}", "a".repeat(40)), None, None).await.status, StatusCode::OK);
+    for query in ["a".repeat(41), "%00".to_owned(), "a%0Ab".to_owned()] {
+        let reply = app.call("GET", &format!("/api/homes?q={query}"), None, None).await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid_query")),
+            "{query}"
+        );
+    }
+    app.cleanup().await;
+}

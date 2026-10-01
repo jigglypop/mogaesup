@@ -214,7 +214,8 @@ struct UserSearch {
     limit: Option<i64>,
 }
 
-fn like_escape(text: &str) -> String {
+/// `text` for a LIKE or ILIKE pattern, its `%`, `_` and `\` taken literally.
+pub(crate) fn like_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 

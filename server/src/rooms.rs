@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::User,
+    config::Config,
     error::{ApiError, ApiResult, conflict},
     homes::visible_home,
     security::{FOREIGN_ORIGIN, constant_time_eq, epoch_seconds, hmac_sha256, same_origin},
@@ -38,9 +39,13 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const OUTBOUND_CAPACITY: usize = 256;
 const ROOM_CAPACITY: usize = 30;
 const SERVER_CAPACITY: usize = 512;
+/// Sockets one account may have open at once: a tab keeps one, and a ticket opens exactly one.
+const ACCOUNT_CAPACITY: usize = 4;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a socket we closed is kept for the peer's answer.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
 const WINDOW: Duration = Duration::from_secs(1);
 const MESSAGES_PER_SECOND: usize = 60;
 const UPDATES_PER_SECOND: usize = 30;
@@ -167,26 +172,39 @@ fn label(value: &str) -> bool {
     value.chars().count() <= MAX_LABEL
 }
 
-/// Models the platform serves; a peer's avatar never makes the others fetch a stranger's host.
-fn model_url(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("https://").or_else(|| value.strip_prefix("http://")) else { return false };
-    let path = rest.find('/').map(|at| &rest[at..]).unwrap_or("");
-    value.len() <= MAX_MODEL_URL && !path.contains('?') && crate::homes::safe_asset_url(path) && path.ends_with(".glb")
+/// A model the site serves, on one of its own origins (`APP_ORIGIN`): a peer's avatar never makes the others fetch a
+/// stranger's host. The URL must be written exactly as its origin and path (no credentials, query or fragment).
+fn model_url(value: &str, origins: &[String]) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else { return false };
+    let origin = url.origin();
+    value.len() <= MAX_MODEL_URL
+        && value.strip_prefix(&origin.ascii_serialization()) == Some(url.path())
+        && origins.iter().any(|own| reqwest::Url::parse(own).is_ok_and(|own| own.origin() == origin))
+        && url.path().ends_with(".glb")
+        && crate::homes::safe_asset_url(url.path())
+}
+
+/// The colour the engine sends (`#rrggbb`): other visitors' pages write it into CSS, so nothing but hex digits passes.
+fn hex_color(value: &str) -> bool {
+    value.strip_prefix('#').is_some_and(|digits| {
+        matches!(digits.len(), 3 | 4 | 6 | 8) && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 impl PartialState {
-    fn valid(&self) -> bool {
+    fn valid(&self, origins: &[String]) -> bool {
         self.position.is_none_or(|p| p.iter().all(|v| coordinate(*v)))
             && self.velocity.is_none_or(|v| v.iter().all(|x| coordinate(*x)))
             && self.rotation.is_none_or(|r| r.iter().all(|v| coordinate(*v)) && r.iter().any(|v| *v != 0.0))
-            && self.color.as_deref().is_none_or(label)
+            && self.color.as_deref().is_none_or(hex_color)
             && self.animation.as_deref().is_none_or(label)
-            && self.model_url.as_deref().is_none_or(model_url)
+            && self.model_url.as_deref().is_none_or(|url| model_url(url, origins))
     }
 }
 
 struct Peer {
     tx: mpsc::Sender<Message>,
+    user: User,
     name: String,
     state: Option<PlayerState>,
     acked: VecDeque<String>,
@@ -200,6 +218,8 @@ struct Peer {
 struct Hub {
     rooms: HashMap<String, HashMap<String, Peer>>,
     connections: usize,
+    /// Open sockets per account.
+    accounts: HashMap<Uuid, usize>,
 }
 
 #[derive(Default)]
@@ -265,20 +285,29 @@ impl Rooms {
         used.insert(receipt, claims.exp).is_none().then_some(claims)
     }
 
-    fn register(&self, room: &str, name: String, tx: mpsc::Sender<Message>) -> ApiResult<Registration> {
+    fn register(&self, room: &str, user: User, name: String, tx: mpsc::Sender<Message>) -> ApiResult<Registration> {
         let mut hub = self.hub();
         if hub.connections >= SERVER_CAPACITY {
             return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "room", "실시간 서버가 가득 찼습니다."));
+        }
+        if hub.accounts.get(&user.id).is_some_and(|open| *open >= ACCOUNT_CAPACITY) {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "room",
+                "이 계정으로 열어 둔 실시간 연결이 너무 많습니다. 다른 탭을 닫고 다시 시도해 주세요.",
+            ));
         }
         let peers = hub.rooms.entry(room.to_owned()).or_default();
         if peers.len() >= ROOM_CAPACITY {
             return Err(conflict("room", "이 섬에 사람이 가득 찼습니다."));
         }
         let id = Uuid::new_v4().to_string();
+        let account = user.id;
         peers.insert(
             id.clone(),
             Peer {
                 tx,
+                user,
                 name,
                 state: None,
                 acked: VecDeque::new(),
@@ -289,6 +318,7 @@ impl Rooms {
             },
         );
         hub.connections += 1;
+        *hub.accounts.entry(account).or_default() += 1;
         Ok(Registration { rooms: self.clone(), room: room.to_owned(), id })
     }
 
@@ -303,9 +333,29 @@ impl Rooms {
             hub.rooms.remove(room_key);
         }
         hub.connections -= 1;
+        if let Some(open) = hub.accounts.get_mut(&peer.user.id) {
+            *open -= 1;
+            if *open == 0 {
+                hub.accounts.remove(&peer.user.id);
+            }
+        }
     }
 
-    fn receive(&self, room_key: &str, id: &str, raw: &str) -> Flow {
+    /// Everyone with a socket in `room`: each peer's id and who it is.
+    fn occupants(&self, room: &str) -> Vec<(String, User)> {
+        let hub = self.hub();
+        hub.rooms.get(room).into_iter().flatten().map(|(id, peer)| (id.clone(), peer.user.clone())).collect()
+    }
+
+    /// Closes one peer's socket, which takes it out of its room.
+    fn evict(&self, room: &str, id: &str) {
+        if let Some(peer) = self.hub().rooms.get(room).and_then(|room| room.get(id)) {
+            let _ = peer.tx.try_send(Message::Close(Some(CloseFrame { code: 4403, reason: "no access".into() })));
+        }
+        self.remove(room, id);
+    }
+
+    fn receive(&self, room_key: &str, id: &str, raw: &str, origins: &[String]) -> Flow {
         let now = Instant::now();
         let mut hub = self.hub();
         let Some(room) = hub.rooms.get_mut(room_key) else { return Flow::Close(1011, "room closed") };
@@ -320,7 +370,7 @@ impl Rooms {
             }
             ClientMessage::Leave => return Flow::Close(1000, "left"),
             ClientMessage::Join { color, model_url: model, .. } => {
-                if !label(&color) || model.as_deref().is_some_and(|url| !model_url(url)) {
+                if !hex_color(&color) || model.as_deref().is_some_and(|url| !model_url(url, origins)) {
                     return malformed(&mut peer.invalid, now);
                 }
                 let rejoin = peer.state.is_some();
@@ -349,7 +399,7 @@ impl Rooms {
             }
             ClientMessage::Update { state: changes } => {
                 let Some(state) = peer.state.as_mut() else { return Flow::Continue };
-                if !changes.valid() {
+                if !changes.valid(origins) {
                     return malformed(&mut peer.invalid, now);
                 }
                 if !peer.updates.allow(now, UPDATES_PER_SECOND) {
@@ -458,28 +508,58 @@ async fn upgrade(
     let visitor = User { id: claims.sub, username: claims.username, display_name: claims.name, role: "user".into() };
     let (home, _) = visible_home(&state, &name, Some(&visitor)).await?;
     let (tx, rx) = mpsc::channel(OUTBOUND_CAPACITY);
-    let display = if visitor.display_name.is_empty() { visitor.username } else { visitor.display_name };
-    let registration = state.rooms.register(&home.username, display, tx)?;
+    let display = if visitor.display_name.is_empty() { visitor.username.clone() } else { visitor.display_name.clone() };
+    let registration = state.rooms.register(&home.username, visitor, display, tx)?;
+    let config = state.config.clone();
     Ok(ws
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| connection(socket, registration, rx)))
+        .on_upgrade(move |socket| connection(socket, registration, rx, config)))
+}
+
+/// Closes the sockets of whoever may no longer view `owner`'s island, after something narrowed who may: its visibility,
+/// or a 일촌 taken away. Only a refusal drops a peer; a failed check leaves everyone in.
+pub async fn revalidate(state: &AppState, owner: &str) {
+    let mut checked: HashMap<Uuid, bool> = HashMap::new();
+    for (id, user) in state.rooms.occupants(owner) {
+        let stays = match checked.get(&user.id) {
+            Some(stays) => *stays,
+            None => {
+                let seen = visible_home(state, owner, Some(&user)).await;
+                let stays = !matches!(&seen, Err(error) if error.status == StatusCode::FORBIDDEN);
+                checked.insert(user.id, stays);
+                stays
+            }
+        };
+        if !stays {
+            state.rooms.evict(owner, &id);
+        }
+    }
 }
 
 async fn send(socket: &mut WebSocket, message: Message) -> bool {
     matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await, Ok(Ok(())))
 }
 
-async fn connection(mut socket: WebSocket, registration: Registration, mut outbound: mpsc::Receiver<Message>) {
+async fn connection(
+    mut socket: WebSocket,
+    registration: Registration,
+    mut outbound: mpsc::Receiver<Message>,
+    config: Arc<Config>,
+) {
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_seen = Instant::now();
+    // Whether a close frame has gone to the peer.
+    let mut closed = false;
     let closing = loop {
         tokio::select! {
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(raw))) => {
                     last_seen = Instant::now();
-                    if let Flow::Close(code, reason) = registration.rooms.receive(&registration.room, &registration.id, raw.as_str()) {
+                    if let Flow::Close(code, reason) =
+                        registration.rooms.receive(&registration.room, &registration.id, raw.as_str(), &config.origins)
+                    {
                         break Some((code, reason));
                     }
                 }
@@ -488,7 +568,14 @@ async fn connection(mut socket: WebSocket, registration: Registration, mut outbo
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break None,
             },
             outgoing = outbound.recv() => match outgoing {
-                Some(message) => if !send(&mut socket, message).await { break None; },
+                Some(message) => {
+                    let close = matches!(message, Message::Close(_));
+                    if !send(&mut socket, message).await { break None; }
+                    if close {
+                        closed = true;
+                        break None;
+                    }
+                }
                 None => break None,
             },
             _ = heartbeat.tick() => {
@@ -498,9 +585,14 @@ async fn connection(mut socket: WebSocket, registration: Registration, mut outbo
         }
     };
     if let Some((code, reason)) = closing {
-        let _ = send(&mut socket, Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+        closed = send(&mut socket, Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
     }
     drop(registration);
+    if closed {
+        // Dropped at once, the socket would reset the connection when the peer answers (a pong, its own close), and the
+        // peer could lose the close frame unread; so its answer is read first.
+        let _ = tokio::time::timeout(CLOSE_GRACE, async { while let Some(Ok(_)) = socket.recv().await {} }).await;
+    }
 }
 
 #[cfg(test)]
@@ -521,12 +613,95 @@ mod tests {
         assert!(rooms.verify(secret, &ticket).is_none());
     }
 
+    fn origins() -> Vec<String> {
+        vec!["https://mogaesup.com".into(), "http://127.0.0.1:5180".into()]
+    }
+
     #[test]
-    fn peer_model_urls_stay_on_platform_paths() {
-        assert!(model_url("https://mogaesup.com/gltf/man.glb"));
-        assert!(model_url(&format!("http://127.0.0.1:5180/models/{}.glb", "b".repeat(64))));
-        assert!(!model_url("https://evil.example/x.glb?gltf/"));
-        assert!(!model_url("/gltf/man.glb"));
-        assert!(!model_url("https://mogaesup.com/api/homes/x.glb"));
+    fn peer_model_urls_stay_on_the_sites_own_origins_and_platform_paths() {
+        let own = origins();
+        assert!(model_url("https://mogaesup.com/gltf/man.glb", &own));
+        assert!(model_url(&format!("http://127.0.0.1:5180/models/{}.glb", "b".repeat(64)), &own));
+        assert!(!model_url("https://evil.example/x.glb?gltf/", &own));
+        assert!(!model_url("/gltf/man.glb", &own));
+        assert!(!model_url("https://mogaesup.com/api/homes/x.glb", &own));
+        // Another host, whatever the path: the case a path check alone let through.
+        assert!(!model_url("https://evil.example/gltf/x.glb", &own));
+        assert!(!model_url("https://mogaesup.com.evil.example/gltf/x.glb", &own));
+        assert!(!model_url("https://evil-mogaesup.com/gltf/x.glb", &own));
+        assert!(!model_url("https://cdn.mogaesup.com/gltf/x.glb", &own));
+        // The host is what comes after the credentials, whatever it starts with.
+        assert!(!model_url("https://mogaesup.com@evil.example/gltf/x.glb", &own));
+        assert!(!model_url("https://evil.example@mogaesup.com/gltf/x.glb", &own));
+        assert!(!model_url("https://mogaesup.com:pass@mogaesup.com/gltf/x.glb", &own));
+        // Scheme and port are part of the origin.
+        assert!(!model_url("http://mogaesup.com/gltf/man.glb", &own));
+        assert!(!model_url("https://mogaesup.com:8443/gltf/man.glb", &own));
+        assert!(!model_url("https://127.0.0.1:5180/gltf/man.glb", &own));
+        assert!(!model_url("http://127.0.0.1:5181/gltf/man.glb", &own));
+        assert!(!model_url("ftp://mogaesup.com/gltf/man.glb", &own));
+        // Only the written form of an origin and a path: no query, fragment, dot segments or other spellings.
+        assert!(!model_url("https://mogaesup.com/gltf/man.glb#x", &own));
+        assert!(!model_url("https://mogaesup.com/gltf/../api/x.glb", &own));
+        assert!(!model_url("https://mogaesup.com/gltf/%2e%2e/api/x.glb", &own));
+        assert!(!model_url("https://MOGAESUP.com/gltf/man.glb", &own));
+        assert!(!model_url("https://mogaesup.com:443/gltf/man.glb", &own));
+        assert!(!model_url(&format!("https://mogaesup.com/gltf/{}.glb", "a".repeat(MAX_MODEL_URL)), &own));
+        assert!(!model_url("https://mogaesup.com/gltf/man.glb", &[]));
+    }
+
+    #[test]
+    fn peer_colours_are_hex_and_nothing_a_stylesheet_could_fetch() {
+        for color in ["#ff7a59", "#FF7A59", "#fff", "#0f08", "#8b6cf0cc", "#000000"] {
+            assert!(hex_color(color), "{color}");
+        }
+        for color in [
+            "",
+            "#",
+            "red",
+            "ff7a59",
+            "#ff7a5",
+            "#ff7a59f",
+            "#ff7a59fff",
+            "#ggg",
+            "#ff7a59 ",
+            "#fff;x",
+            "url(//evil.io/p)",
+            "#fff,url(//evil.io/p)",
+            "rgb(1,2,3)",
+            "var(--x)",
+            "expression(alert(1))",
+            "\\#fff",
+        ] {
+            assert!(!hex_color(color), "{color:?}");
+        }
+        let changes = |color: &str| PartialState { color: Some(color.into()), ..Default::default() };
+        assert!(changes("#2bb3a3").valid(&origins()));
+        assert!(!changes("url(//evil.io/p)").valid(&origins()));
+        let model = |url: &str| PartialState { model_url: Some(url.into()), ..Default::default() };
+        assert!(model("https://mogaesup.com/gltf/man.glb").valid(&origins()));
+        assert!(!model("https://evil.example/gltf/man.glb").valid(&origins()));
+    }
+
+    fn peer(user: &User, room: &str, rooms: &Rooms) -> ApiResult<Registration> {
+        rooms.register(room, user.clone(), user.display_name.clone(), mpsc::channel(4).0)
+    }
+
+    #[test]
+    fn an_account_holds_a_few_sockets_and_frees_them_as_they_close() {
+        let rooms = Rooms::default();
+        let (me, other) = (user(), user());
+        let mut held: Vec<Registration> =
+            (0..ACCOUNT_CAPACITY).map(|at| peer(&me, &format!("room{at}"), &rooms).unwrap()).collect();
+        let refused = peer(&me, "room0", &rooms).err().unwrap();
+        assert_eq!((refused.status, refused.code), (StatusCode::TOO_MANY_REQUESTS, "room"));
+        // Another account is not held back, and a closed socket gives its place up.
+        let _others = peer(&other, "room0", &rooms).unwrap();
+        assert_eq!(rooms.count(), ACCOUNT_CAPACITY + 1);
+        held.pop();
+        assert!(peer(&me, "room0", &rooms).is_ok());
+        drop(held);
+        assert_eq!(rooms.count(), 1);
+        assert_eq!(rooms.hub().accounts.len(), 1);
     }
 }

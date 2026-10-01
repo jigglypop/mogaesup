@@ -496,6 +496,8 @@ async fn 라우트마다_필요한_권한만_통과한다() {
     .await
     .unwrap();
     assert!(recorded.contains(&("crew_x".to_owned(), false)) && recorded.contains(&("paid_x".to_owned(), true)));
+    // The admins' proxy is recorded too: its POST started paid work (it is not one of the free ones).
+    assert!(recorded.contains(&("boss_x".to_owned(), true)));
     app.cleanup().await;
 
     // FACTORY_ACCESS stays the upper bound, whoever asks.
@@ -506,6 +508,12 @@ async fn 라우트마다_필요한_권한만_통과한다() {
     assert_eq!(outfit.body["code"], "factory_read_only");
     let paid = app.call("POST", "/api/studio/generations", Some(json!({})), Some(&boss)).await;
     assert_eq!(paid.body["code"], "factory_paid_off");
+    // The admins' proxy answers to the same ceiling.
+    let proxied =
+        app.call("PUT", "/api/factory/avatar-factory/wardrobe/outfits/mine", Some(json!({})), Some(&boss)).await;
+    assert_eq!(proxied.body["code"], "factory_read_only");
+    let proxied_paid = app.call("POST", "/api/factory/studio/generations", Some(json!({})), Some(&boss)).await;
+    assert_eq!(proxied_paid.body["code"], "factory_paid_off");
     app.cleanup().await;
 }
 

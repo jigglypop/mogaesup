@@ -308,6 +308,9 @@ async fn unlink(State(state): State<AppState>, headers: HeaderMap, Path(name): P
         .bind(other)
         .execute(&state.db)
         .await?;
+    // Each of them may have stood on the other's island as a 일촌; whoever may not now is let out.
+    crate::rooms::revalidate(&state, &viewer.username).await;
+    crate::rooms::revalidate(&state, &crate::auth::username(&name)?).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

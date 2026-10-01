@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{OriginalUri, Path, RawQuery, State},
+    extract::{OriginalUri, RawQuery, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::Response,
     routing::any,
@@ -9,6 +9,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
+use sqlx::PgExecutor;
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
@@ -16,7 +17,7 @@ use std::{
 
 use crate::{
     AppState,
-    auth::{current_user, require},
+    auth::{User, current_user, require},
     config::{Factory, FactoryAccess, FactoryToken},
     error::{ApiError, ApiResult, forbidden, internal, not_found},
     rebac::{ADMIN, OPERATOR, PAID_OPERATOR, STUDIO_VIEWER},
@@ -24,13 +25,21 @@ use crate::{
 };
 
 const OPERATOR_TOKEN_SECONDS: u64 = 300;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the character server may stay silent: before it answers, or between two pieces of what it sends. Uploads
+/// and downloads of 256 MB take minutes, so this catches a stalled connection and does not limit a transfer.
+const READ_TIMEOUT: Duration = Duration::from_secs(600);
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 /// A cold job listing can take the character server twelve seconds.
 const JSON_TIMEOUT: Duration = Duration::from_secs(30);
+/// The largest JSON answer read: the job listing is the biggest and stays far below this.
+const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const LISTING_ATTEMPTS: u32 = 3;
 const LISTING_RETRY: Duration = Duration::from_secs(2);
 pub const MAX_MODEL_BYTES: usize = 64 * 1024 * 1024;
 const MIN_SECRET_BYTES: usize = 32;
+/// The advisory lock that serializes counting and recording paid requests; the only one this server takes.
+const PAID_LOCK: i64 = 7_309_001;
 /// Headers a studio request needs; cookies and the browser's own credentials never reach the character server.
 const FORWARDED_REQUEST_HEADERS: [HeaderName; 5] = [
     header::CONTENT_TYPE,
@@ -136,6 +145,17 @@ pub fn configured(state: &AppState) -> ApiResult<()> {
     factory(state).map(|_| ())
 }
 
+/// The HTTP client for the character server and the files it points to. It follows no redirect by itself: `fetch_file`
+/// decides where a file may be fetched from.
+pub fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .build()
+        .expect("HTTP client")
+}
+
 /// Sends one request to the character server. When its instance may have powered itself off this asks EC2 first,
 /// and a request that cannot reach it wakes it (`studio_power`): the caller then gets `studio_waking` or
 /// `studio_stopping` to retry. Its CloudFront answers 502 or 504 while the instance is down or booting.
@@ -215,12 +235,14 @@ enum Need {
     Paid,
 }
 
-/// Uploads and selections that never start paid work. Every other POST is treated as paid: the character server starts
-/// generation, rigging, retries and resumes with POSTs, and a new one must not slip through as free.
-const FREE_POSTS: [&[&str]; 9] = [
+/// Uploads, selections and local image crops that never start paid work. Every other POST is treated as paid: the
+/// character server starts generation, rigging, retries and resumes with POSTs, and a new one must not slip through as
+/// free.
+const FREE_POSTS: [&[&str]; 10] = [
     &["avatar-factory", "jobs", "*", "native-parts", "select"],
     &["avatar-factory", "base-bodies", "glb-assets"],
     &["avatar-factory", "meshy-options", "texture-assets"],
+    &["avatar-factory", "part-batches", "split-sheet"],
     &["avatar-blueprints", "assets"],
     &["studio", "glb-assets"],
     &["studio", "glb-assets", "upload"],
@@ -229,9 +251,10 @@ const FREE_POSTS: [&[&str]; 9] = [
     &["characters", "*", "sources"],
 ];
 
-/// The policy for one studio request; `path` is below `/api/`, e.g. `avatar-factory/wardrobe/bodies`.
-fn need(method: &Method, path: &str) -> Need {
-    let segments: Vec<&str> = path.split('/').collect();
+/// The policy for one studio request; `segments` are its path below `/api/`, read by [`path_segments`], e.g.
+/// `avatar-factory`, `wardrobe`, `bodies`.
+fn need(method: &Method, segments: &[String]) -> Need {
+    let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
     if matches!(*method, Method::GET | Method::HEAD) {
         let member = match segments.as_slice() {
             ["avatar-factory", "wardrobe", ..] => true,
@@ -252,13 +275,67 @@ const BUDGET_SPENT: ApiError =
     ApiError::new(StatusCode::TOO_MANY_REQUESTS, "factory_budget", "이번 달 유료 캐릭터 작업 한도를 다 썼습니다.");
 
 /// Paid studio requests started since the start of this month (UTC).
-async fn paid_this_month(state: &AppState) -> ApiResult<i64> {
-    Ok(sqlx::query_scalar(
+async fn paid_this_month(db: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
         "SELECT count(*) FROM factory_requests
          WHERE paid AND created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'",
     )
-    .fetch_one(&state.db)
-    .await?)
+    .fetch_one(db)
+    .await
+}
+
+const NO_SUCH_PATH: ApiError = not_found("not_found", "찾을 수 없습니다.");
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    char::from(byte).to_digit(16).map(|digit| digit as u8)
+}
+
+/// One request path segment as the character server will read it: percent-decoded once. None when it could mean
+/// something else on the way: empty, `.` or `..`, encoded twice (a `%` is left after decoding), a separator, a control
+/// character, or bytes that are not UTF-8.
+fn path_segment(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let digits = bytes.get(at + 1..at + 3)?;
+            decoded.push(hex_digit(digits[0])? << 4 | hex_digit(digits[1])?);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    let text = String::from_utf8(decoded).ok()?;
+    let plain = !text.is_empty()
+        && text != "."
+        && text != ".."
+        && !text.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | '%'));
+    plain.then_some(text)
+}
+
+/// A request path below `/api/` as the client wrote it, read once into the segments both the policy and the character
+/// server get, so they cannot disagree about what was asked for; `NO_SUCH_PATH` unless every segment passes
+/// [`path_segment`].
+fn path_segments(raw: &str) -> ApiResult<Vec<String>> {
+    raw.split('/').map(path_segment).collect::<Option<_>>().ok_or(NO_SUCH_PATH)
+}
+
+/// A studio request, its path already read: the policy classifies, and the character server is sent, these segments.
+struct Call {
+    method: Method,
+    headers: HeaderMap,
+    segments: Vec<String>,
+    query: Option<String>,
+    body: Body,
+}
+
+impl Call {
+    /// `path` is the request path below `/api/` (or `/api/factory/`), still as the client wrote it.
+    fn read(method: Method, headers: HeaderMap, path: &str, query: Option<String>, body: Body) -> ApiResult<Self> {
+        Ok(Self { method, headers, segments: path_segments(path)?, query, body })
+    }
 }
 
 /// `/api/{avatar-factory,studio,avatar-blueprints,characters}/*`: the studio's own API, checked against [`need`] and the
@@ -271,46 +348,57 @@ async fn studio(
     RawQuery(query): RawQuery,
     body: Body,
 ) -> ApiResult<Response> {
-    let path = uri.path().trim_start_matches("/api/").to_owned();
-    let need = need(&method, &path);
+    let call = Call::read(method, headers, uri.path().strip_prefix("/api/").unwrap_or_default(), query, body)?;
+    let need = need(&call.method, &call.segments);
     let user = match need {
-        Need::Member => current_user(&state, &headers).await?,
-        Need::Read => require(&state, &headers, STUDIO_VIEWER).await?,
-        Need::Write => require(&state, &headers, OPERATOR).await?,
-        Need::Paid => require(&state, &headers, PAID_OPERATOR).await?,
+        Need::Member => current_user(&state, &call.headers).await?,
+        Need::Read => require(&state, &call.headers, STUDIO_VIEWER).await?,
+        Need::Write => require(&state, &call.headers, OPERATOR).await?,
+        Need::Paid => require(&state, &call.headers, PAID_OPERATOR).await?,
     };
-    let factory = factory(&state)?;
+    relay(&state, &user, need, call).await
+}
+
+/// `/api/factory/*`: the character server's own `/api/*`, signed in as its operator. Reads (model previews on /admin)
+/// are for `studio_viewer`, anything else for admins; a change then takes the road the studio's own routes take, under
+/// the same server-wide ceiling and record. Bodies stream both ways.
+async fn proxy(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    RawQuery(query): RawQuery,
+    body: Body,
+) -> ApiResult<Response> {
+    let call = Call::read(method, headers, uri.path().strip_prefix("/api/factory/").unwrap_or_default(), query, body)?;
+    let read = matches!(call.method, Method::GET | Method::HEAD);
+    let user = require(&state, &call.headers, if read { STUDIO_VIEWER } else { ADMIN }).await?;
+    let need = need(&call.method, &call.segments);
+    relay(&state, &user, need, call).await
+}
+
+/// What every studio request goes through once its sender is known: the server-wide ceiling (`FACTORY_ACCESS` and the
+/// month's paid budget), the record of a change in `factory_requests`, then the request itself.
+async fn relay(state: &AppState, user: &User, need: Need, call: Call) -> ApiResult<Response> {
+    let factory = factory(state)?;
     let paid = need == Need::Paid;
     match need {
         Need::Write if factory.access < FactoryAccess::Write => return Err(READ_ONLY),
         Need::Paid if factory.access < FactoryAccess::Paid => return Err(PAID_OFF),
-        Need::Paid if paid_this_month(&state).await? >= factory.paid_monthly => return Err(BUDGET_SPENT),
+        // Refused before the sleeping studio is woken for it, and counted again under the lock when it is recorded.
+        Need::Paid if paid_this_month(&state.db).await? >= factory.paid_monthly => return Err(BUDGET_SPENT),
         _ => {}
     }
-    // A change the sleeping studio cannot take is not recorded (nor counted against the paid budget).
-    if matches!(need, Need::Write | Need::Paid)
-        && let Some(asleep) = state.power.before().await
-    {
-        return Err(asleep);
-    }
     let record = if matches!(need, Need::Write | Need::Paid) {
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO factory_requests (user_id, method, path, paid) VALUES ($1, $2, $3, $4) RETURNING id",
-        )
-        .bind(user.id)
-        .bind(method.as_str())
-        .bind(&path)
-        .bind(paid)
-        .fetch_one(&state.db)
-        .await?;
-        if paid {
-            tracing::warn!(user = %user.username, %method, %path, "paid studio request");
+        // A change the sleeping studio cannot take is not recorded (nor counted against the paid budget).
+        if let Some(asleep) = state.power.before().await {
+            return Err(asleep);
         }
-        Some(id)
+        Some(record_change(state, factory, user, &call.method, &call.segments, paid).await?)
     } else {
         None
     };
-    let response = forward(&state, &user.username, method, &headers, &path, query, body).await;
+    let response = forward(state, &user.username, call).await;
     if let Some(id) = record {
         let status =
             response.as_ref().map_or_else(|error| error.status.as_u16(), |response| response.status().as_u16());
@@ -335,44 +423,79 @@ pub async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     Ok(Json(json!({
         "connected": true,
         "access": factory.access,
-        "paidThisMonth": paid_this_month(&state).await?,
+        "paidThisMonth": paid_this_month(&state.db).await?,
         "paidMonthly": factory.paid_monthly,
     })))
 }
 
-/// The character server's `/api/*`, signed in as its operator: reads (model previews on /admin) for `studio_viewer`,
-/// anything else for admins. Bodies stream both ways.
-async fn proxy(
-    State(state): State<AppState>,
-    method: Method,
-    headers: HeaderMap,
-    Path(path): Path<String>,
-    RawQuery(query): RawQuery,
-    body: Body,
-) -> ApiResult<Response> {
-    let read = matches!(method, Method::GET | Method::HEAD);
-    let user = require(&state, &headers, if read { STUDIO_VIEWER } else { ADMIN }).await?;
-    forward(&state, &user.username, method, &headers, &path, query, body).await
+/// Writes a change down before it is sent, and returns its record's id. The month's paid requests are counted under a
+/// lock held until the record is saved, so concurrent requests cannot spend more between them than the budget has left.
+async fn record_change(
+    state: &AppState,
+    factory: &Factory,
+    user: &User,
+    method: &Method,
+    segments: &[String],
+    paid: bool,
+) -> ApiResult<i64> {
+    let path = segments.join("/");
+    let mut tx = state.db.begin().await?;
+    if paid {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(PAID_LOCK).execute(&mut *tx).await?;
+        if paid_this_month(&mut *tx).await? >= factory.paid_monthly {
+            tx.rollback().await?;
+            return Err(BUDGET_SPENT);
+        }
+    }
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO factory_requests (user_id, method, path, paid) VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(user.id)
+    .bind(method.as_str())
+    .bind(&path)
+    .bind(paid)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if paid {
+        tracing::warn!(user = %user.username, %method, %path, "paid studio request");
+    }
+    Ok(id)
 }
 
-/// Sends one request to the character server's `/api/{path}` as the operator and streams its answer back.
-async fn forward(
-    state: &AppState,
-    username: &str,
-    method: Method,
-    headers: &HeaderMap,
-    path: &str,
-    query: Option<String>,
-    body: Body,
-) -> ApiResult<Response> {
+/// `FACTORY_URL/api/<segments>?<query>`, every segment encoded again: the character server reads exactly the segments
+/// the policy saw, however the client wrote them.
+fn target(factory: &Factory, segments: &[String], query: Option<&str>) -> ApiResult<reqwest::Url> {
+    let mut url = reqwest::Url::parse(&factory.url).map_err(|error| {
+        tracing::error!(%error, "FACTORY_URL is not a URL");
+        UNAVAILABLE
+    })?;
+    url.path_segments_mut()
+        .map_err(|()| UNAVAILABLE)?
+        .extend(std::iter::once("api").chain(segments.iter().map(String::as_str)));
+    url.set_query(query);
+    Ok(url)
+}
+
+/// The character server's URL for one of this server's own paths under `/api/` (`a/b/c`, with `?d=e` when it has a
+/// query), whose segments are ids already checked; they are read like a request's all the same.
+fn api_url(factory: &Factory, api_path: &str) -> ApiResult<reqwest::Url> {
+    let (path, query) = api_path.split_once('?').map_or((api_path, None), |(path, query)| (path, Some(query)));
+    let segments = path_segments(path).map_err(|_| internal(format!("{api_path} is not a character server path")))?;
+    target(factory, &segments, query)
+}
+
+/// Sends one request to the character server's `/api/` as the operator and streams its answer back.
+async fn forward(state: &AppState, username: &str, call: Call) -> ApiResult<Response> {
     let factory = factory(state)?;
-    if path.split('/').any(|segment| segment == ".." || segment.is_empty()) {
-        return Err(not_found("not_found", "찾을 수 없습니다."));
+    let url = target(factory, &call.segments, call.query.as_deref())?;
+    let read = matches!(call.method, Method::GET | Method::HEAD);
+    let mut request = state.http.request(call.method, url);
+    if !read {
+        request = request.body(reqwest::Body::wrap_stream(call.body.into_data_stream()));
     }
-    let url = format!("{}/api/{path}{}", factory.url, query.map(|q| format!("?{q}")).unwrap_or_default());
-    let mut request = state.http.request(method, url).body(reqwest::Body::wrap_stream(body.into_data_stream()));
     for name in FORWARDED_REQUEST_HEADERS {
-        if let Some(value) = headers.get(&name) {
+        if let Some(value) = call.headers.get(&name) {
             request = request.header(name, value.clone());
         }
     }
@@ -398,8 +521,17 @@ pub struct Received {
     pub total: AtomicUsize,
 }
 
+/// Whether a redirect from the character server may be followed: to https, or to the character server itself (local
+/// runs serve their files from it), and never to an address with credentials in it. Anything else would let the answer
+/// of whatever sits behind `FACTORY_URL` aim this server's requests at its own network.
+fn follows(location: &reqwest::Url, factory: &str) -> bool {
+    let own = reqwest::Url::parse(factory).is_ok_and(|own| own.origin() == location.origin());
+    (location.scheme() == "https" || own) && location.username().is_empty() && location.password().is_none()
+}
+
 /// A file under the character server's `/api/`, at most `limit` bytes, counting what has arrived into `received` as it
-/// streams in. Its files answer with a presigned S3 redirect, followed here without the operator token or key.
+/// streams in. Its files answer with a presigned S3 redirect, followed here (see [`follows`]) without the operator
+/// token or key.
 pub async fn fetch_file(
     state: &AppState,
     username: &str,
@@ -408,8 +540,8 @@ pub async fn fetch_file(
     received: Option<&Received>,
 ) -> ApiResult<Vec<u8>> {
     let factory = factory(state)?;
-    let url = format!("{}/api/{api_path}", factory.url);
-    let mut response = send(state, signed(state.http.get(&url), factory, username).timeout(FILE_TIMEOUT)).await?;
+    let url = api_url(factory, api_path)?;
+    let mut response = send(state, signed(state.http.get(url), factory, username).timeout(FILE_TIMEOUT)).await?;
     if response.status().is_redirection() {
         let location = response
             .headers()
@@ -417,6 +549,12 @@ pub async fn fetch_file(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| response.url().join(v).ok())
             .ok_or(UNAVAILABLE)?;
+        if !follows(&location, &factory.url) {
+            // Only where it points: a presigned address carries its signature in the query.
+            let to = location.origin().ascii_serialization();
+            tracing::warn!(%to, api_path, "Character server redirected a file elsewhere");
+            return Err(UNAVAILABLE);
+        }
         response = state.http.get(location).timeout(FILE_TIMEOUT).send().await.map_err(unavailable)?;
     }
     if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -445,19 +583,39 @@ pub async fn fetch_file(
     Ok(bytes)
 }
 
-/// JSON from the character server's `/api/`; None for a 404. Its job listing answers 503 `listing_pending` while a cold
-/// snapshot is still being read, so that is retried a few times.
-pub async fn fetch_json(state: &AppState, username: &str, api_path: &str) -> ApiResult<Option<Value>> {
+/// The body of a JSON answer, read up to [`MAX_JSON_BYTES`]: a larger one is not read on.
+async fn read_json(response: reqwest::Response) -> ApiResult<Value> {
+    if response.content_length().is_some_and(|length| length > MAX_JSON_BYTES as u64) {
+        return Err(UNAVAILABLE);
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        bytes.extend_from_slice(&chunk.map_err(unavailable)?);
+        if bytes.len() > MAX_JSON_BYTES {
+            tracing::warn!("Character server sent more JSON than is read");
+            return Err(UNAVAILABLE);
+        }
+    }
+    serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE)
+}
+
+/// JSON from the character server's `/api/`; None for each status in `absent`. Its job listing answers 503
+/// `listing_pending` while a cold snapshot is still being read, so that is retried a few times.
+async fn fetch_json_but(
+    state: &AppState,
+    username: &str,
+    api_path: &str,
+    absent: &[reqwest::StatusCode],
+) -> ApiResult<Option<Value>> {
     let factory = factory(state)?;
-    let url = format!("{}/api/{api_path}", factory.url);
+    let url = api_url(factory, api_path)?;
     for attempt in 1..=LISTING_ATTEMPTS {
-        let response = send(state, signed(state.http.get(&url), factory, username).timeout(JSON_TIMEOUT)).await?;
+        let response =
+            send(state, signed(state.http.get(url.clone()), factory, username).timeout(JSON_TIMEOUT)).await?;
         match response.status() {
-            reqwest::StatusCode::NOT_FOUND => return Ok(None),
-            status if status.is_success() => {
-                let bytes = response.bytes().await.map_err(unavailable)?;
-                return serde_json::from_slice(&bytes).map(Some).map_err(|_| UNAVAILABLE);
-            }
+            status if absent.contains(&status) => return Ok(None),
+            status if status.is_success() => return read_json(response).await.map(Some),
             reqwest::StatusCode::SERVICE_UNAVAILABLE if attempt < LISTING_ATTEMPTS => {
                 tokio::time::sleep(LISTING_RETRY).await;
             }
@@ -468,6 +626,18 @@ pub async fn fetch_json(state: &AppState, username: &str, api_path: &str) -> Api
         }
     }
     Err(UNAVAILABLE)
+}
+
+/// JSON from the character server's `/api/`, at most [`MAX_JSON_BYTES`]; None for a 404.
+pub async fn fetch_json(state: &AppState, username: &str, api_path: &str) -> ApiResult<Option<Value>> {
+    fetch_json_but(state, username, api_path, &[reqwest::StatusCode::NOT_FOUND]).await
+}
+
+/// Like [`fetch_json`], and None for a 422 as well: the request was understood but does not apply (a colour palette
+/// for a part without a texture).
+pub async fn fetch_json_if_applicable(state: &AppState, username: &str, api_path: &str) -> ApiResult<Option<Value>> {
+    let absent = [reqwest::StatusCode::NOT_FOUND, reqwest::StatusCode::UNPROCESSABLE_ENTITY];
+    fetch_json_but(state, username, api_path, &absent).await
 }
 
 #[cfg(test)]
@@ -505,5 +675,121 @@ mod tests {
         assert_eq!(claims["roles"][0], "ADMIN");
         let expected = URL_SAFE_NO_PAD.encode(hmac_sha256(&token.key, format!("{}.{}", parts[0], parts[1]).as_bytes()));
         assert_eq!(parts[2], expected);
+    }
+
+    fn read(path: &str) -> Option<Vec<String>> {
+        path_segments(path).ok()
+    }
+
+    fn strings(segments: &[&str]) -> Vec<String> {
+        segments.iter().map(|segment| (*segment).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_path_is_read_once_and_nothing_that_could_mean_another_survives() {
+        assert_eq!(read("avatar-factory/wardrobe/bodies"), Some(strings(&["avatar-factory", "wardrobe", "bodies"])));
+        // Decoded once: letters, spaces and UTF-8 pass, and come out as the characters they stand for.
+        assert_eq!(read("studio/%ED%95%9C%EA%B8%80/a%20b/%77x"), Some(strings(&["studio", "한글", "a b", "wx"])));
+        for refused in [
+            "",
+            "a/",
+            "/a",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "a/..",
+            "a/%2e/b",
+            "a/%2e%2e/b",
+            "a/.%2e/b",
+            "a/%2e./b",
+            "a/%2E%2E/b",
+            "a/%252e%252e/b",
+            "a/%252f",
+            "a/..%2fb",
+            "a/b%2Fc",
+            "a/b%5cc",
+            "a/b\\c",
+            "a/%00",
+            "a/%0a",
+            "a/%7f",
+            "a/%c2%85",
+            "a/%ff",
+            "a/%c3",
+            "a/%",
+            "a/%2",
+            "a/%zz",
+            "a/%+f",
+            "a/100%",
+        ] {
+            assert_eq!(read(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn what_a_request_needs_follows_the_segments_it_is_read_into() {
+        let need_of = |method: &Method, path: &str| need(method, &read(path).unwrap());
+        for path in ["avatar-factory/wardrobe/bodies", "avatar-factory/%77ardrobe/colors/j/hat"] {
+            assert_eq!(need_of(&Method::GET, path), Need::Member, "{path}");
+        }
+        assert_eq!(need_of(&Method::GET, "avatar-factory/jobs/j1/native-parts/v2/body.glb"), Need::Member);
+        for path in ["avatar-factory/jobs", "avatar-factory/jobs/j1/native-parts/v2/model.json", "studio/catalog"] {
+            assert_eq!(need_of(&Method::GET, path), Need::Read, "{path}");
+        }
+        assert_eq!(need_of(&Method::HEAD, "avatar-factory/wardrobe/bodies"), Need::Member);
+        // Uploads, selections and the local sheet crop are free; every other POST starts paid work.
+        for path in [
+            "avatar-factory/part-batches/split-sheet",
+            "avatar-factory/jobs/j1/native-parts/select",
+            "studio/glb-assets/upload",
+            "characters",
+        ] {
+            assert_eq!(need_of(&Method::POST, path), Need::Write, "{path}");
+        }
+        for path in ["avatar-factory/part-batches", "avatar-factory/part-batches/b1/resume", "studio/%67enerations"] {
+            assert_eq!(need_of(&Method::POST, path), Need::Paid, "{path}");
+        }
+        for method in [Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_eq!(need_of(&method, "studio/generations"), Need::Write, "{method}");
+        }
+    }
+
+    fn settings(url: &str) -> Factory {
+        Factory {
+            url: url.into(),
+            api_key: None,
+            token: None,
+            access: FactoryAccess::Read,
+            paid_monthly: 0,
+            gateway_key: None,
+            instance: None,
+        }
+    }
+
+    #[test]
+    fn the_character_server_is_sent_each_segment_encoded_again_and_the_query_as_it_came() {
+        let factory = settings("http://127.0.0.1:8000");
+        let url =
+            target(&factory, &strings(&["avatar-factory", "a b", "한", "x?y#z"]), Some("version=v1&q=%20")).unwrap();
+        assert_eq!(url.as_str(), "http://127.0.0.1:8000/api/avatar-factory/a%20b/%ED%95%9C/x%3Fy%23z?version=v1&q=%20");
+        assert_eq!(target(&factory, &strings(&["health"]), None).unwrap().as_str(), "http://127.0.0.1:8000/api/health");
+        // The callers' own paths carry their query in the string.
+        let own = api_url(&factory, "avatar-factory/wardrobe/colors/j1/hat/mask?version=v2").unwrap();
+        assert_eq!(own.as_str(), "http://127.0.0.1:8000/api/avatar-factory/wardrobe/colors/j1/hat/mask?version=v2");
+        assert!(api_url(&factory, "avatar-factory/../jobs").is_err());
+    }
+
+    #[test]
+    fn a_redirect_is_followed_to_https_or_home_and_never_with_credentials() {
+        let follow = |location: &str| follows(&reqwest::Url::parse(location).unwrap(), "http://127.0.0.1:8000");
+        assert!(follow("https://bucket.s3.ap-northeast-2.amazonaws.com/key?X-Amz-Signature=1"));
+        assert!(follow("http://127.0.0.1:8000/signed/a.glb"));
+        assert!(!follow("http://169.254.169.254/latest/meta-data/"));
+        assert!(!follow("http://127.0.0.1:9000/signed/a.glb"));
+        assert!(!follow("http://bucket.s3.amazonaws.com/key"));
+        assert!(!follow("https://user:secret@bucket.s3.amazonaws.com/key"));
+        assert!(!follow("https://user@bucket.s3.amazonaws.com/key"));
+        assert!(!follow("http://user@127.0.0.1:8000/signed/a.glb"));
+        assert!(!follow("file:///etc/passwd"));
+        assert!(!follows(&reqwest::Url::parse("http://127.0.0.1:8000/x").unwrap(), "not a url"));
     }
 }

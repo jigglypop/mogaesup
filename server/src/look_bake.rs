@@ -83,7 +83,8 @@ fn words<T>(value: &Value, from: fn([u8; 4]) -> T) -> Option<BTreeMap<String, Ve
 }
 
 impl Coverage {
-    /// The coverage JSON; None when its bitsets are not base64.
+    /// The coverage JSON; None when its `hidden` is missing or any of its bitsets is not base64: a record that cannot
+    /// be read says nothing about what the garment covers.
     pub fn parse(value: &Value) -> Option<Self> {
         let strings = |key: &str| -> Vec<String> {
             value[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()
@@ -95,9 +96,13 @@ impl Coverage {
             }
             _ => Default::default(),
         };
+        let over = match value.get("over").filter(|over| !over.is_null()) {
+            Some(over) => Some(bits(over)?),
+            None => None,
+        };
         Some(Self {
-            hidden: bits(&value["hidden"]).unwrap_or_default(),
-            over: value.get("over").filter(|over| !over.is_null()).and_then(bits),
+            hidden: bits(&value["hidden"])?,
+            over,
             covers_bottom: value["covers_bottom"].as_bool().unwrap_or(false),
             covers_head: value["covers_head"].as_bool().unwrap_or(false),
             anchors,
@@ -215,7 +220,13 @@ fn number(value: &Value) -> usize {
     value.as_u64().and_then(|v| usize::try_from(v).ok()).unwrap_or(0)
 }
 
-/// An accessor's elements, flattened, as f64; None when it cannot be read here (sparse, or outside the buffer).
+/// Elements (vertices, indices) one accessor may hold here, and the values they flatten to. A file's counts are its own
+/// word, so they are checked before anything is allocated; a character has tens of thousands of vertices.
+const MAX_ELEMENTS: usize = 4_000_000;
+const MAX_VALUES: usize = 3 * MAX_ELEMENTS;
+
+/// An accessor's elements, flattened, as f64; None when it cannot be read here (sparse, too large, or outside the
+/// buffer).
 fn read(json: &Value, bin: &[u8], accessor: usize) -> Option<Vec<f64>> {
     let accessor = json["accessors"].get(accessor)?;
     if accessor.get("sparse").is_some() {
@@ -225,16 +236,31 @@ fn read(json: &Value, bin: &[u8], accessor: usize) -> Option<Vec<f64>> {
     let component = accessor["componentType"].as_u64()?;
     let size = component_size(component)?;
     let width = components(accessor["type"].as_str()?)?;
+    if count > MAX_ELEMENTS || count * width > MAX_VALUES {
+        return None;
+    }
     let Some(view) = index(&accessor["bufferView"]).and_then(|view| json["bufferViews"].get(view)) else {
         return Some(vec![0.0; count * width]);
     };
-    let start = number(&view["byteOffset"]) + number(&accessor["byteOffset"]);
-    let stride = view["byteStride"].as_u64().map_or(size * width, |stride| stride as usize);
+    let start = number(&view["byteOffset"]).checked_add(number(&accessor["byteOffset"]))?;
+    // A stride of 0 is no stride: the elements follow each other.
+    let stride = match number(&view["byteStride"]) {
+        0 => size * width,
+        stride => stride,
+    };
+    // The last element ends inside the chunk, so every element before it does.
+    let end = match count.checked_sub(1) {
+        Some(last) => last.checked_mul(stride)?.checked_add(start)?.checked_add(size * width)?,
+        None => 0,
+    };
+    if end > bin.len() {
+        return None;
+    }
     let normalized = accessor["normalized"].as_bool().unwrap_or(false);
     let mut out = Vec::with_capacity(count * width);
     for element in 0..count {
         for part in 0..width {
-            let at = start.checked_add(element.checked_mul(stride)?)?.checked_add(part * size)?;
+            let at = start + element * stride + part * size;
             let bytes = bin.get(at..at + size)?;
             let value = match component {
                 5126 => f64::from(f32::from_le_bytes(bytes.try_into().ok()?)),
@@ -257,6 +283,9 @@ fn triangles(json: &Value, bin: &[u8], primitive: &Value) -> Option<(Vec<u32>, u
         return None;
     }
     let vertices = number(&json["accessors"].get(index(&primitive["attributes"]["POSITION"])?)?["count"]);
+    if vertices > MAX_ELEMENTS {
+        return None;
+    }
     let indices = match index(&primitive["indices"]) {
         Some(accessor) => read(json, bin, accessor)?.into_iter().map(|value| value as u32).collect(),
         None => (0..vertices as u32).collect(),
@@ -464,12 +493,15 @@ fn same_rest(a: &Matrix, b: &Matrix) -> bool {
 }
 
 /// Body vertices under the outer garments' covered triangles, grown by one ring so the press reaches just past a hem,
-/// per body `mesh:primitive` (1 = covered). Read from the body as it was loaded, before any triangle was left out.
-fn covered_vertices(json: &Value, bin: &[u8], outer: &Bits) -> HashMap<String, Vec<u8>> {
+/// per body `mesh:primitive` (1 = covered). Read from the body as it was loaded, before any triangle was left out. The
+/// count is of the body primitives that could not be read, which leaves what tucks under them untucked.
+fn covered_vertices(json: &Value, bin: &[u8], outer: &Bits) -> (HashMap<String, Vec<u8>>, usize) {
     let mut out = HashMap::new();
+    let mut unread = 0;
     for (key, bits) in outer {
         let Some((indices, vertices)) = primitive_at(json, key).and_then(|primitive| triangles(json, bin, primitive))
         else {
+            unread += 1;
             continue;
         };
         let mut marked = vec![0u8; vertices];
@@ -494,15 +526,23 @@ fn covered_vertices(json: &Value, bin: &[u8], outer: &Bits) -> HashMap<String, V
         }
         out.insert(key.clone(), grown);
     }
-    out
+    (out, unread)
 }
 
-/// Leaves the hidden triangles out of the body's primitives; the count left out.
-fn hide_triangles(out: &mut Out, hidden: &Bits) -> usize {
+/// Leaves the hidden triangles out of the body's primitives; the count left out, and the number of body primitives that
+/// could not be read, whose triangles stay under the garment.
+fn hide_triangles(out: &mut Out, hidden: &Bits) -> (usize, usize) {
     let mut left_out = 0;
+    let mut unread = 0;
     for (key, bits) in hidden {
-        let Some(primitive) = primitive_at(&out.json, key).cloned() else { continue };
-        let Some((indices, vertices)) = triangles(&out.json, &out.bin, &primitive) else { continue };
+        let Some(primitive) = primitive_at(&out.json, key).cloned() else {
+            unread += 1;
+            continue;
+        };
+        let Some((indices, vertices)) = triangles(&out.json, &out.bin, &primitive) else {
+            unread += 1;
+            continue;
+        };
         let kept: Vec<u32> = indices
             .chunks_exact(3)
             .enumerate()
@@ -520,7 +560,7 @@ fn hide_triangles(out: &mut Out, hidden: &Bits) -> usize {
         out.json["meshes"][mesh.parse::<usize>().unwrap_or(0)]["primitives"][at.parse::<usize>().unwrap_or(0)]["indices"] =
             accessor.into();
     }
-    left_out
+    (left_out, unread)
 }
 
 /// Drops the body's primitives whose material a worn slot covers (`hidden_by_slots`); the number dropped.
@@ -625,7 +665,7 @@ fn texture_sources(texture: &mut Value) -> Vec<&mut Value> {
 
 fn shift(value: &mut Value, by: usize) {
     if let Some(at) = index(value) {
-        *value = (at + by).into();
+        *value = at.saturating_add(by).into();
     }
 }
 
@@ -641,9 +681,17 @@ fn items_mut<'a>(value: &'a mut Value, key: &str) -> std::slice::IterMut<'a, Val
     value.get_mut(key).and_then(Value::as_array_mut).map(|items| items.iter_mut()).unwrap_or_default()
 }
 
+/// `materials[material]`'s `pbrMetallicRoughness`, added when the material has none; None when the material is not
+/// there or either is not an object (indexing such a value mutably would panic).
+fn pbr_of(out: &mut Out, material: usize) -> Option<&mut Value> {
+    let material = out.json.get_mut("materials")?.get_mut(material)?.as_object_mut()?;
+    let pbr = material.entry("pbrMetallicRoughness").or_insert_with(|| json!({}));
+    pbr.is_object().then_some(pbr)
+}
+
 /// A new colour map for `material`: each texel of its current map (or its factor, without one) through `shade`, which
 /// takes the texel's linear colour times the factor and its UV. The factor turns white, since the map now holds it.
-/// None when the map cannot be decoded here.
+/// None when the material is not there or the map cannot be decoded here.
 fn repaint(out: &mut Out, material: usize, shade: &dyn Fn([f64; 3], f64, f64) -> [f64; 3]) -> Option<()> {
     let factor = {
         let values = &out.json["materials"][material]["pbrMetallicRoughness"]["baseColorFactor"];
@@ -657,8 +705,7 @@ fn repaint(out: &mut Out, material: usize, shade: &dyn Fn([f64; 3], f64, f64) ->
     let reference = out.json["materials"][material]["pbrMetallicRoughness"]["baseColorTexture"].clone();
     let Some(texture) = index(&reference["index"]) else {
         let color = shade(tint, 0.5, 0.5);
-        out.json["materials"][material]["pbrMetallicRoughness"]["baseColorFactor"] =
-            json!([color[0], color[1], color[2], factor[3]]);
+        pbr_of(out, material)?["baseColorFactor"] = json!([color[0], color[1], color[2], factor[3]]);
         return Some(());
     };
     let texture_value = out.json["textures"].get(texture)?.clone();
@@ -692,7 +739,7 @@ fn repaint(out: &mut Out, material: usize, shade: &dyn Fn([f64; 3], f64, f64) ->
     }
     texture_value["source"] = image.into();
     let texture = out.push("textures", texture_value);
-    let pbr = &mut out.json["materials"][material]["pbrMetallicRoughness"];
+    let pbr = pbr_of(out, material)?;
     pbr["baseColorTexture"]["index"] = texture.into();
     pbr["baseColorFactor"] = json!([1.0, 1.0, 1.0, factor[3]]);
     Some(())
@@ -705,6 +752,8 @@ struct Added {
     tucked: usize,
     recolored: usize,
     unreadable_maps: usize,
+    /// Primitives whose tuck was left out because their positions could not be read or did not match the record.
+    skipped_tucks: usize,
 }
 
 /// Copies one part's skinned meshes into `out`, bound to the body's bones, with its tuck and colours baked in.
@@ -719,6 +768,15 @@ fn add_part(
     let broken = || fail("look_part", format!("{slot} 파츠 파일을 읽지 못했습니다."));
     let (json, bin) = split(part.glb).ok_or_else(broken)?;
     single_buffer(&json, broken)?;
+    // A primitive names one of the part's own materials: an index past them would land on another file's after the
+    // merge.
+    let own_materials = json["materials"].as_array().map_or(0, Vec::len);
+    let mut named = json["meshes"].as_array().into_iter().flatten().flat_map(|mesh| {
+        mesh["primitives"].as_array().into_iter().flatten().filter_map(|primitive| index(&primitive["material"]))
+    });
+    if named.any(|material| material >= own_materials) {
+        return Err(broken());
+    }
     let mut added = Added::default();
 
     // Which of its nodes are skinned meshes, where they stand, and whether its bones are the body's.
@@ -775,7 +833,7 @@ fn add_part(
         base("meshes"),
     );
     for mut view in json["bufferViews"].as_array().cloned().unwrap_or_default() {
-        view["byteOffset"] = (number(&view["byteOffset"]) + bin_base).into();
+        view["byteOffset"] = number(&view["byteOffset"]).saturating_add(bin_base).into();
         out.push("bufferViews", view);
     }
     for mut accessor in json["accessors"].as_array().cloned().unwrap_or_default() {
@@ -804,7 +862,7 @@ fn add_part(
         out.push("textures", texture);
     }
     for mut material in json["materials"].as_array().cloned().unwrap_or_default() {
-        remap_texture_refs(&mut material, &|at| Some(at + textures));
+        remap_texture_refs(&mut material, &|at| Some(at.saturating_add(textures)));
         out.push("materials", material);
     }
     let tuck = part.coverage.as_ref().filter(|coverage| coverage.tucks());
@@ -827,11 +885,14 @@ fn add_part(
                 continue;
             };
             let float = out.json["accessors"][position]["componentType"].as_u64() == Some(5126);
-            let Some(values) = read(&out.json, &out.bin, position).filter(|_| float) else { continue };
-            let count = values.len() / 3;
-            if anchors.len() != count || moves.len() != count * 3 {
+            let positions = read(&out.json, &out.bin, position).filter(|_| float);
+            // A tuck that does not fit its primitive (unreadable positions, another vertex count) is left out, and
+            // counted in the report.
+            let count = positions.as_ref().map_or(0, |values| values.len() / 3);
+            let Some(values) = positions.filter(|_| anchors.len() == count && moves.len() == count * 3) else {
+                added.skipped_tucks += 1;
                 continue;
-            }
+            };
             let mut points: Vec<f32> = values.iter().map(|&value| value as f32).collect();
             let mut moved = 0;
             for (vertex, &anchor) in anchors.iter().enumerate() {
@@ -886,11 +947,13 @@ fn add_part(
             ]
         };
         // A material without a colour map is shaded from its flat colour, as the wardrobe's shader does.
-        if palette.material < json["materials"].as_array().map_or(0, Vec::len) && mask_width > 0 && mask_height > 0 {
+        if palette.material < own_materials && mask_width > 0 && mask_height > 0 {
             match repaint(out, palette.material + materials, &|base, u, v| region_shade(base, weights(u, v), palette)) {
                 Some(()) => added.recolored += 1,
                 None => added.unreadable_maps += 1,
             }
+        } else {
+            added.unreadable_maps += 1;
         }
     }
 
@@ -904,7 +967,7 @@ fn add_part(
             None => {
                 let mut value = json!({"joints": skins[&skin]});
                 if let Some(matrices) = index(&json["skins"][skin]["inverseBindMatrices"]) {
-                    value["inverseBindMatrices"] = (matrices + accessors).into();
+                    value["inverseBindMatrices"] = matrices.saturating_add(accessors).into();
                 }
                 if let Some(skeleton) = rig.skeleton {
                     value["skeleton"] = skeleton.into();
@@ -916,7 +979,7 @@ fn add_part(
         };
         let mut placed = Map::new();
         placed.insert("name".into(), format!("{slot}-{}", source["name"].as_str().unwrap_or("mesh")).into());
-        placed.insert("mesh".into(), (index(&source["mesh"]).unwrap_or(0) + meshes).into());
+        placed.insert("mesh".into(), index(&source["mesh"]).unwrap_or(0).saturating_add(meshes).into());
         placed.insert("skin".into(), skin_at.into());
         let matrix = world[node].unwrap_or(IDENTITY);
         if matrix != IDENTITY {
@@ -940,9 +1003,20 @@ fn add_part(
     Ok(added)
 }
 
+fn dangling() -> BakeError {
+    fail("look_part", "합친 모델이 없는 데이터를 가리켜 만들지 못했습니다.")
+}
+
+/// The entries of `all` at `used`, in order; an index past its end is a reference to nothing.
+fn picked(all: &Value, used: &BTreeSet<usize>) -> Result<Vec<Value>, BakeError> {
+    let all = all.as_array().map_or(&[][..], Vec::as_slice);
+    used.iter().map(|at| all.get(*at).cloned().ok_or_else(dangling)).collect()
+}
+
 /// Keeps only what the file still uses: accessors, textures, images and buffer views nothing points at go, and the
-/// binary chunk is packed again.
-fn compact(out: &mut Out) {
+/// binary chunk is packed again. A reference to something that is not there, or to bytes past the chunk, is an error:
+/// the model would play with parts of it missing.
+fn compact(out: &mut Out) -> Result<(), BakeError> {
     let json = &mut out.json;
     // Accessors meshes, skins and animations read.
     let mut used = BTreeSet::new();
@@ -1000,11 +1074,7 @@ fn compact(out: &mut Out) {
             }
         }
     }
-    let accessors: Vec<Value> = json["accessors"]
-        .as_array()
-        .map(|all| used.iter().filter_map(|at| all.get(*at).cloned()).collect())
-        .unwrap_or_default();
-    json["accessors"] = accessors.into();
+    json["accessors"] = picked(&json["accessors"], &used)?.into();
 
     // Textures materials name, and the images those textures show.
     let mut textures = BTreeSet::new();
@@ -1013,10 +1083,7 @@ fn compact(out: &mut Out) {
     for material in items_mut(json, "materials") {
         remap_texture_refs(material, &|old| texture_map.get(&old).copied());
     }
-    let mut kept_textures: Vec<Value> = json["textures"]
-        .as_array()
-        .map(|all| textures.iter().filter_map(|at| all.get(*at).cloned()).collect())
-        .unwrap_or_default();
+    let mut kept_textures = picked(&json["textures"], &textures)?;
     let mut images = BTreeSet::new();
     for texture in &mut kept_textures {
         images.extend(texture_sources(texture).into_iter().filter_map(|source| index(source)));
@@ -1030,11 +1097,7 @@ fn compact(out: &mut Out) {
         }
     }
     json["textures"] = kept_textures.into();
-    let kept_images: Vec<Value> = json["images"]
-        .as_array()
-        .map(|all| images.iter().filter_map(|at| all.get(*at).cloned()).collect())
-        .unwrap_or_default();
-    json["images"] = kept_images.into();
+    json["images"] = picked(&json["images"], &images)?.into();
 
     // Buffer views accessors and images still read, packed into a new binary chunk.
     let mut views = BTreeSet::new();
@@ -1050,9 +1113,12 @@ fn compact(out: &mut Out) {
     let mut bin = Vec::with_capacity(out.bin.len());
     let mut kept_views = Vec::new();
     for old in &views {
-        let Some(mut view) = json["bufferViews"].get(*old).cloned() else { continue };
+        let mut view = json["bufferViews"].get(*old).cloned().ok_or_else(dangling)?;
         let start = number(&view["byteOffset"]);
-        let data = out.bin.get(start..start + number(&view["byteLength"])).unwrap_or_default();
+        let data = start
+            .checked_add(number(&view["byteLength"]))
+            .and_then(|end| out.bin.get(start..end))
+            .ok_or_else(|| fail("look_part", "합친 모델의 데이터가 파일 범위를 벗어나 만들지 못했습니다."))?;
         while !bin.len().is_multiple_of(4) {
             bin.push(0);
         }
@@ -1095,6 +1161,7 @@ fn compact(out: &mut Out) {
         }
     }
     out.bin = bin;
+    Ok(())
 }
 
 /// The look: `body` (the wardrobe body's GLB) wearing `parts`, with `hair` (linear) on hair parts.
@@ -1124,6 +1191,7 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
     // Where each inner garment tucks: the body the outer garments worn with it cover. Hair tucks only under a top or hat
     // that covers the head.
     let mut tucked_under: HashMap<String, HashMap<String, Vec<u8>>> = HashMap::new();
+    let mut skipped_tucks = 0;
     for part in &parts {
         let Some(coverage) = part.coverage.as_ref().filter(|coverage| coverage.tucks()) else { continue };
         let mut outer = Bits::new();
@@ -1134,7 +1202,9 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
             }
         }
         if !outer.is_empty() {
-            tucked_under.insert(part.slot.clone(), covered_vertices(&original, bin, &outer));
+            let (covered, unread) = covered_vertices(&original, bin, &outer);
+            skipped_tucks += unread;
+            tucked_under.insert(part.slot.clone(), covered);
         }
     }
 
@@ -1142,7 +1212,7 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
     for coverage in by_slot.values() {
         union(&mut hidden, &coverage.hidden);
     }
-    let hidden_triangles = hide_triangles(&mut out, &hidden);
+    let (hidden_triangles, skipped_hides) = hide_triangles(&mut out, &hidden);
     let hidden_primitives = hide_covered_materials(&mut out, &worn);
 
     let mut slots = Vec::new();
@@ -1152,9 +1222,10 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
         tucked += added.tucked;
         recolored += added.recolored;
         unreadable += added.unreadable_maps;
+        skipped_tucks += added.skipped_tucks;
         slots.push(json!({"slot": part.slot, "meshes": added.meshes}));
     }
-    compact(&mut out);
+    compact(&mut out)?;
     out.json["asset"]["generator"] = "mogaesup look".into();
     let report = json!({
         "parts": slots,
@@ -1164,6 +1235,9 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
         "tuckedVertices": tucked,
         "recoloredMaterials": recolored,
         "unreadableMaps": unreadable,
+        // What was left out because a file could not be read: body triangles that stay under a garment, tucks not made.
+        "skippedHides": skipped_hides,
+        "skippedTucks": skipped_tucks,
     });
     Ok(Baked { glb: join(&out.json, &out.bin), report })
 }
@@ -1435,5 +1509,163 @@ pub(crate) mod tests {
         assert!((linear_color("#808080").unwrap()[0] - 0.2158605).abs() < 1e-6);
         assert!(linear_color("#12345").is_none() && linear_color("red").is_none());
         assert!((to_srgb(to_linear(0.3)) - 0.3).abs() < 1e-9);
+    }
+
+    /// `glb_bytes` with its JSON changed by `change`.
+    fn edited(glb_bytes: &[u8], change: impl FnOnce(&mut Value)) -> Vec<u8> {
+        let (mut json, bin) = split(glb_bytes).unwrap();
+        change(&mut json);
+        glb::join(&json, bin)
+    }
+
+    fn wear(slot: &str, glb_bytes: &[u8], hair: Option<[f64; 3]>) -> Result<Baked, BakeError> {
+        let part = Part { slot: slot.into(), glb: glb_bytes, coverage: None, palette: None };
+        bake(&body(), vec![part], hair)
+    }
+
+    #[test]
+    fn an_accessor_is_read_only_as_far_as_the_file_really_goes() {
+        let bytes = f32s(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let read_with = |count: u64, view: Value| {
+            let accessor = json!({"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": count});
+            read(&json!({"accessors": [accessor], "bufferViews": [view]}), &bytes, 0)
+        };
+        let all = Some(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(read_with(2, json!({"byteLength": 24})), all);
+        // A stride of zero is no stride at all: the elements follow each other.
+        assert_eq!(read_with(2, json!({"byteLength": 24, "byteStride": 0})), all);
+        assert_eq!(read_with(1, json!({"byteLength": 24, "byteOffset": 12})), Some(vec![4.0, 5.0, 6.0]));
+        // What the file only claims: more elements than bytes, a stride that runs past the end, offsets that wrap.
+        assert_eq!(read_with(3, json!({"byteLength": 24})), None);
+        assert_eq!(read_with(2, json!({"byteLength": 24, "byteStride": 16})), None);
+        assert_eq!(read_with(1, json!({"byteLength": 24, "byteOffset": u64::MAX})), None);
+        // Counts no character has, with a stride of zero that would never leave the first element: refused before any
+        // element is read or anything allocated.
+        for count in [MAX_ELEMENTS as u64 + 1, 4_000_000_000, u64::MAX] {
+            assert_eq!(read_with(count, json!({"byteLength": 24, "byteStride": 0})), None, "{count}");
+        }
+        let without_view =
+            |count: u64| read(&json!({"accessors": [{"componentType": 5126, "type": "VEC3", "count": count}]}), &[], 0);
+        assert_eq!(without_view(2), Some(vec![0.0; 6]));
+        assert_eq!(without_view(MAX_ELEMENTS as u64 + 1), None);
+        assert_eq!(without_view(u64::MAX), None);
+        let sparse =
+            json!({"accessors": [{"componentType": 5126, "type": "VEC3", "count": 1, "sparse": {"count": 1}}]});
+        assert_eq!(read(&sparse, &bytes, 0), None);
+    }
+
+    #[test]
+    fn a_primitive_has_no_more_vertices_than_a_character_can() {
+        let primitive = json!({"attributes": {"POSITION": 0}});
+        let huge = json!({"accessors": [{"componentType": 5126, "type": "VEC3", "count": 4_000_000_000u64}]});
+        assert!(triangles(&huge, &[], &primitive).is_none());
+        let outer = Bits::from([("0:0".to_owned(), vec![1u8])]);
+        let huge_body = json!({"accessors": [{"count": 4_000_000_000u64}],
+            "meshes": [{"primitives": [primitive.clone()]}]});
+        let (covered, unread) = covered_vertices(&huge_body, &[], &outer);
+        assert_eq!((covered.len(), unread), (0, 1));
+        let three = json!({"accessors": [{"componentType": 5126, "type": "VEC3", "count": 3}]});
+        assert_eq!(triangles(&three, &[], &primitive), Some((vec![0, 1, 2], 3)));
+    }
+
+    #[test]
+    fn a_part_pointing_outside_itself_is_refused_without_a_panic() {
+        let hat = part("hat", 0.5);
+        let refused = |glb_bytes: Vec<u8>, hair: Option<[f64; 3]>| {
+            let error = wear("hat", &glb_bytes, hair).err().unwrap();
+            assert_eq!(error.code, "look_part", "{}", error.message);
+        };
+        // A material past the part's own, with and without hair to recolour it.
+        let stray =
+            |material: u64| edited(&hat, |json| json["meshes"][0]["primitives"][0]["material"] = material.into());
+        refused(stray(7), None);
+        refused(stray(u64::MAX), linear_color("#2040ff"));
+        // Bytes past the binary chunk, offsets that wrap, buffer views and accessors that are not there.
+        refused(edited(&hat, |json| json["bufferViews"][0]["byteLength"] = 1_000_000.into()), None);
+        refused(edited(&hat, |json| json["bufferViews"][0]["byteOffset"] = u64::MAX.into()), None);
+        refused(edited(&hat, |json| json["accessors"][1]["bufferView"] = 99.into()), None);
+        refused(edited(&hat, |json| json["meshes"][0]["primitives"][0]["attributes"]["POSITION"] = 50.into()), None);
+        refused(
+            edited(&hat, |json| json["meshes"][0]["primitives"][0]["attributes"]["POSITION"] = u64::MAX.into()),
+            None,
+        );
+        assert!(wear("hat", &hat, None).is_ok());
+    }
+
+    #[test]
+    fn a_material_that_cannot_be_painted_is_counted_not_trusted() {
+        let hair = part("hair", 0.5);
+        let blue = linear_color("#2040ff");
+        // Not an object: nothing to recolour, and no panic reaching for its colour.
+        let odd = edited(&hair, |json| json["materials"] = json!([5]));
+        assert_eq!(wear("hair", &odd, blue).unwrap().report["unreadableMaps"], 1);
+        let flat = edited(&hair, |json| json["materials"] = json!([{"pbrMetallicRoughness": 5}]));
+        assert_eq!(wear("hair", &flat, blue).unwrap().report["unreadableMaps"], 1);
+        // A colour set for a material the part does not have is counted too.
+        let top = part("top", 0.5);
+        let palette = |material: usize| Palette {
+            material,
+            lights: vec![0.5],
+            mask: RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255])),
+            colors: [linear_color("#00ff00"), None, None, None],
+        };
+        let worn = |material: usize| {
+            let part = Part { slot: "top".into(), glb: &top, coverage: None, palette: Some(palette(material)) };
+            bake(&body(), vec![part], None).unwrap().report
+        };
+        assert_eq!((worn(0)["recoloredMaterials"].clone(), worn(0)["unreadableMaps"].clone()), (json!(1), json!(0)));
+        assert_eq!((worn(5)["recoloredMaterials"].clone(), worn(5)["unreadableMaps"].clone()), (json!(0), json!(1)));
+    }
+
+    #[test]
+    fn what_is_left_out_because_a_file_cannot_be_read_is_counted_in_the_report() {
+        let top_glb = part("top", 0.5);
+        let bottom_glb = part("bottom", 0.5);
+        let top = Coverage::parse(&json!({"hidden": {"0:0": b64(&[0b01])}})).unwrap();
+        let bottom_with = |anchors: &[i32], moves: &[f32]| {
+            let anchors: Vec<u8> = anchors.iter().flat_map(|a| a.to_le_bytes()).collect();
+            Coverage::parse(
+                &json!({"hidden": {}, "anchors": {"0:0": b64(&anchors)}, "tucks": {"0:0": b64(&f32s(moves))},
+                "anchor_keys": ["0:0"], "under": ["top"]}),
+            )
+            .unwrap()
+        };
+        let worn = |top: Coverage, bottom: Coverage, bottom_glb: &[u8]| {
+            let parts = vec![
+                Part { slot: "top".into(), glb: &top_glb, coverage: Some(top), palette: None },
+                Part { slot: "bottom".into(), glb: bottom_glb, coverage: Some(bottom), palette: None },
+            ];
+            bake(&body(), parts, None).unwrap().report
+        };
+        // A tuck for three vertices fits the part's three; one for two does not and is left out.
+        let fits = worn(top.clone(), bottom_with(&[1, 3, -1], &[0.0; 9]), &bottom_glb);
+        assert_eq!((fits["skippedTucks"].clone(), fits["tuckedVertices"].clone()), (json!(0), json!(2)));
+        let short = worn(top.clone(), bottom_with(&[1, 3], &[0.0; 6]), &bottom_glb);
+        assert_eq!((short["skippedTucks"].clone(), short["tuckedVertices"].clone()), (json!(1), json!(0)));
+        // Positions that cannot be read (a sparse accessor) leave the tuck out as well.
+        let sparse = edited(&bottom_glb, |json| json["accessors"][0]["sparse"] = json!({"count": 1}));
+        let unread = worn(top.clone(), bottom_with(&[1, 3, -1], &[0.0; 9]), &sparse);
+        assert_eq!((unread["skippedTucks"].clone(), unread["tuckedVertices"].clone()), (json!(1), json!(0)));
+        // Coverage of a body primitive the body does not have hides nothing, and says so.
+        let elsewhere = Coverage::parse(&json!({"hidden": {"3:0": b64(&[1])}})).unwrap();
+        let part = Part { slot: "top".into(), glb: &top_glb, coverage: Some(elsewhere), palette: None };
+        let report = bake(&body(), vec![part], None).unwrap().report;
+        assert_eq!((report["skippedHides"].clone(), report["hiddenTriangles"].clone()), (json!(1), json!(0)));
+    }
+
+    #[test]
+    fn a_coverage_record_that_cannot_be_read_is_not_taken_for_an_empty_one() {
+        assert!(Coverage::parse(&json!({"hidden": {"0:0": b64(&[1])}, "covers_bottom": false})).is_some());
+        assert!(Coverage::parse(&json!({"hidden": {}, "over": null})).is_some());
+        for broken in [
+            json!({"hidden": {"0:0": "not base64!"}}),
+            json!({"hidden": {"0:0": 7}}),
+            json!({"hidden": "x"}),
+            json!({"covers_bottom": false}),
+            json!({"hidden": {}, "over": {"0:0": "not base64!"}}),
+            json!({"hidden": {}, "anchors": {"0:0": "!"}, "tucks": {}, "anchor_keys": []}),
+        ] {
+            assert!(Coverage::parse(&broken).is_none(), "{broken}");
+        }
     }
 }

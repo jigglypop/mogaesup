@@ -1,5 +1,6 @@
 mod common;
 
+use axum::http::StatusCode;
 use common::{ORIGIN, TestApp};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -139,5 +140,169 @@ async fn 티켓은_한_번만_쓰고_출처와_공개_범위를_지킨다() {
     .await
     .unwrap();
     assert_eq!(closed, Some(4400));
+    app.cleanup().await;
+}
+
+/// The code of the close frame the server sends next; None when the stream ends without one or nothing comes in time.
+async fn closed(stream: &mut Stream) -> Option<u16> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(message) = stream.next().await {
+            if let Ok(Message::Close(frame)) = message {
+                return frame.map(|frame| u16::from(frame.code));
+            }
+        }
+        None
+    })
+    .await
+    .unwrap_or(None)
+}
+
+#[tokio::test]
+async fn 다른_곳의_모델_주소와_스타일로_번질_색은_받지_않는다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_x", "호스트").await;
+    let guest = app.register("guest_x", "손님").await;
+    let base = serve(&app).await;
+    let mut host_socket = connect(&base, "host_x", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    send(&mut host_socket, json!({"type": "Join", "room_id": "host_x", "color": "#ff7a59"})).await;
+    next(&mut host_socket, "Welcome").await.unwrap();
+
+    // Joins the room must never hear of: another host, credentials that only look like the site's, a lookalike host,
+    // another scheme or port, and colours a stylesheet would read as something else.
+    let mut guest_socket = connect(&base, "host_x", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    for (color, model) in [
+        ("#8b6cf0", Some("https://evil.example/gltf/x.glb")),
+        ("#8b6cf0", Some("http://test.local@evil.example/gltf/x.glb")),
+        ("#8b6cf0", Some("http://test.local.evil.example/gltf/x.glb")),
+        ("#8b6cf0", Some("https://test.local/gltf/x.glb")),
+        ("#8b6cf0", Some("http://test.local:8080/gltf/x.glb")),
+        ("#8b6cf0", Some("http://test.local/gltf/x.glb?//evil.example")),
+        ("url(//evil.io/p)", None),
+        ("red", None),
+        ("#8b6cf0; background: url(//evil.io/p)", None),
+    ] {
+        let mut join = json!({"type": "Join", "room_id": "host_x", "color": color});
+        if let Some(model) = model {
+            join["modelUrl"] = json!(model);
+        }
+        send(&mut guest_socket, join).await;
+    }
+    assert!(next(&mut host_socket, "PlayerJoined").await.is_none());
+
+    let model = "http://test.local/gltf/man.glb";
+    send(&mut guest_socket, json!({"type": "Join", "room_id": "host_x", "color": "#8b6cf0", "modelUrl": model})).await;
+    next(&mut guest_socket, "Welcome").await.unwrap();
+    assert_eq!(next(&mut host_socket, "PlayerJoined").await.unwrap()["state"]["modelUrl"], model);
+
+    // Updates change what the others see only with a hex colour and a model of the site's own.
+    for state in [
+        json!({"color": "url(//evil.io/p)"}),
+        json!({"color": "#fff,url(//evil.io/p)"}),
+        json!({"modelUrl": "https://evil.example/gltf/x.glb"}),
+        json!({"modelUrl": "http://test.local@evil.example/gltf/x.glb"}),
+    ] {
+        send(&mut guest_socket, json!({"type": "Update", "state": state})).await;
+    }
+    send(
+        &mut guest_socket,
+        json!({"type": "Update", "state": {"color": "#2bb3a3", "modelUrl": model, "animation": "walk"}}),
+    )
+    .await;
+    let update = next(&mut host_socket, "PlayerUpdate").await.unwrap();
+    assert_eq!(update["state"]["color"], "#2bb3a3");
+    assert_eq!(update["state"]["modelUrl"], model);
+
+    // Whoever comes later is told the state the room really holds.
+    let late = app.register("late_x", "늦은 손님").await;
+    let mut late_socket = connect(&base, "host_x", &ticket(&app, &late).await, ORIGIN).await.unwrap();
+    send(&mut late_socket, json!({"type": "Join", "room_id": "host_x", "color": "#000000"})).await;
+    let welcome = next(&mut late_socket, "Welcome").await.unwrap();
+    let states: Vec<Value> = welcome["room_state"].as_object().unwrap().values().cloned().collect();
+    let guest_state = states.iter().find(|state| state["name"] == "손님").unwrap();
+    assert_eq!((guest_state["color"].as_str(), guest_state["modelUrl"].as_str()), (Some("#2bb3a3"), Some(model)));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 한_계정은_실시간_연결을_네_개까지만_열고_닫으면_다시_연다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_k", "호스트").await;
+    let guest = app.register("guest_k", "손님").await;
+    let base = serve(&app).await;
+    let mut sockets = Vec::new();
+    for _ in 0..4 {
+        sockets.push(connect(&base, "host_k", &ticket(&app, &guest).await, ORIGIN).await.unwrap());
+    }
+    // The fifth is turned away whichever island it asks for; another account is not held back.
+    assert!(connect(&base, "host_k", &ticket(&app, &guest).await, ORIGIN).await.is_err());
+    assert!(connect(&base, "guest_k", &ticket(&app, &guest).await, ORIGIN).await.is_err());
+    assert!(connect(&base, "host_k", &ticket(&app, &host).await, ORIGIN).await.is_ok());
+
+    sockets.pop().unwrap().close(None).await.unwrap();
+    let mut reopened = false;
+    for _ in 0..40 {
+        if connect(&base, "host_k", &ticket(&app, &guest).await, ORIGIN).await.is_ok() {
+            reopened = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(reopened, "a closed socket gives its place back");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 섬이_더_좁게_공개되거나_일촌이_끊기면_들어와_있던_사람도_내보낸다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_e", "호스트").await;
+    let guest = app.register("guest_e", "손님").await;
+    let friend = app.register("friend_e", "일촌").await;
+    let base = serve(&app).await;
+    let join = |name: &'static str| json!({"type": "Join", "room_id": "host_e", "color": "#123456", "name": name});
+
+    let mut host_socket = connect(&base, "host_e", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    send(&mut host_socket, join("host")).await;
+    next(&mut host_socket, "Welcome").await.unwrap();
+    let mut guest_socket = connect(&base, "host_e", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    send(&mut guest_socket, join("guest")).await;
+    next(&mut guest_socket, "Welcome").await.unwrap();
+    let guest_id = next(&mut host_socket, "PlayerJoined").await.unwrap()["client_id"].as_str().unwrap().to_owned();
+
+    // Staying open to everyone lets nobody out; closing the island to its 일촌 lets the guest out and only the guest.
+    let widened = app.call("PATCH", "/api/homes/me", Some(json!({"visibility": "public"})), Some(&host)).await;
+    assert_eq!(widened.status, StatusCode::OK);
+    send(&mut guest_socket, json!({"type": "Ping", "ts": 1})).await;
+    assert_eq!(next(&mut guest_socket, "Pong").await.unwrap()["ts"], 1);
+    let narrowed = app.call("PATCH", "/api/homes/me", Some(json!({"visibility": "ilchon"})), Some(&host)).await;
+    assert_eq!(narrowed.status, StatusCode::OK);
+    assert_eq!(closed(&mut guest_socket).await, Some(4403));
+    assert_eq!(next(&mut host_socket, "PlayerLeft").await.unwrap()["client_id"], guest_id.as_str());
+    send(&mut host_socket, json!({"type": "Ping", "ts": 2})).await;
+    assert_eq!(next(&mut host_socket, "Pong").await.unwrap()["ts"], 2, "the owner stays");
+    assert_eq!(app.state.rooms.count(), 1);
+
+    // A 일촌 is let in, and let out again when the tie is cut.
+    let asked = app
+        .call(
+            "POST",
+            "/api/ilchon/host_e/request",
+            Some(json!({"name": "섬주인", "theirName": "꽃밭지기"})),
+            Some(&friend),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::CREATED);
+    let received = app.call("GET", "/api/ilchon-requests", None, Some(&host)).await;
+    let id = received.body["received"][0]["id"].as_str().unwrap().to_owned();
+    let accepted = app
+        .call("POST", &format!("/api/ilchon-requests/{id}/accept"), Some(json!({"name": "베프"})), Some(&host))
+        .await;
+    assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+    let mut friend_socket = connect(&base, "host_e", &ticket(&app, &friend).await, ORIGIN).await.unwrap();
+    send(&mut friend_socket, join("friend")).await;
+    next(&mut friend_socket, "Welcome").await.unwrap();
+    let unlinked = app.call("DELETE", "/api/ilchon/friend_e", None, Some(&host)).await;
+    assert_eq!(unlinked.status, StatusCode::NO_CONTENT);
+    assert_eq!(closed(&mut friend_socket).await, Some(4403));
+    assert!(connect(&base, "host_e", &ticket(&app, &friend).await, ORIGIN).await.is_err());
     app.cleanup().await;
 }
