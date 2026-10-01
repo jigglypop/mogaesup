@@ -7,7 +7,7 @@ character server behind the server's studio gateway.
 Each service starts hidden with its log in .data/dev/<name>.log; one already listening on its port is kept as it is.
 With -Character the character server (backend/, from the root uv environment) runs on 127.0.0.1:8016 with auto-resume
 off, and the Rust server gets FACTORY_URL plus the API key and JWT settings from backend/.env (read here, never
-printed), so /admin imports and /studio work end to end. The character server alone gets CHARACTER_DATABASE_URL: its
+printed), so /admin imports and the studio screens (/character, /admin/studio) work end to end. The character server alone gets CHARACTER_DATABASE_URL: its
 records live in mogaesup_character on the compose PostgreSQL, created and migrated here; copy the records of its
 storage prefix in once with `uv run python -m src.records import --prefix <prefix>` while it is stopped. Admins may
 change studio records (FACTORY_ACCESS=write); paid studio work stays blocked unless -Paid, capped at -PaidMonthly requests. backend/.env holds production keys: only use

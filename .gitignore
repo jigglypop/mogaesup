@@ -11,6 +11,8 @@ coverage/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 .data/
 .vscode/*
 !.vscode/extensions.json

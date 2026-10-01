@@ -25,7 +25,7 @@
 
 ## 캐릭터 스튜디오
 
-캐릭터 스튜디오 화면(`frontend/src/character/`)은 둘로 나뉜다. `/character`(`frontend/src/studio/CharacterPage.tsx`)는 회원 누구나 쓰는 옷장이고, `/admin/studio`(`frontend/src/studio/StudioPage.tsx`, 운영 탭 '캐릭터 공장')는 스튜디오 운영 권한이 있어야 열리며 비용이 드는 화면은 유료 작업 권한이 있을 때만 보인다. 옛 `/studio` 주소는 이 둘로 넘긴다. 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`frontend/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 그 밖의 읽기는 스튜디오 보기(운영·카탈로그 편집), 기록 변경은 스튜디오 운영, 비용이 드는 작업은 유료 작업 권한이 있어야 한다(아래 권한). `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남는다.
+캐릭터 스튜디오 화면(`frontend/src/character/`)은 둘로 나뉜다. `/character`(`frontend/src/studio/CharacterPage.tsx`)는 회원 누구나 쓰는 옷장이고, `/admin/studio`(`frontend/src/studio/StudioPage.tsx`, 운영 탭 '캐릭터 공장')는 스튜디오 운영 권한이 있어야 열리며, 만들기 화면(기본몸·파츠·바닥 타일 등 생성을 시작하는 화면)은 모두 유료 작업 권한이 있을 때만 보여서 그 권한이 없는 운영자는 에셋 라이브러리와 프롬프트만 본다. 옛 `/studio` 주소는 이 둘로 넘긴다. 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`frontend/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 그 밖의 읽기는 스튜디오 보기(운영·카탈로그 편집), 기록 변경은 스튜디오 운영, 비용이 드는 작업은 유료 작업 권한이 있어야 한다(아래 권한). `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택과 이미지만 자르는 `part-batches/split-sheet` 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남고, 월 한도는 동시에 들어온 요청도 넘지 않게 센다. 관리자용 `/api/factory/*`도 같은 `FACTORY_ACCESS`·월 한도·기록을 따른다(읽기는 스튜디오 보기, 바꾸기는 관리자). 요청 경로는 한 번 디코드한 조각마다 검사해서 `.`·`..`·빈 조각·디코드 뒤에도 남은 `%`·`/`·`\`가 있으면 404로 거절하고, 권한 판단과 캐릭터 서버로 보내는 주소에 같은 조각을 쓴다(`%2e%2e`로 옷장 허용 경로를 벗어날 수 없다). 캐릭터 서버와는 연결 10초·응답 대기 600초로 통신하고, JSON 응답은 8 MiB까지 읽으며, 파일 받기는 https이거나 `FACTORY_URL`과 같은 출처인 리다이렉트만 따른다.
 
 ## 캐릭터 가져오기
 
@@ -40,8 +40,16 @@
 ## 주민과 내 캐릭터
 
 - 주민: 섬 주인이 꾸미기의 `주민` 탭에서 공개된 주민을 골라 이름과 인사말을 주고 보는 곳 가운데에 둔다(섬마다 12명). 섬 저장 봉투의 `residents` 영역으로 함께 저장되고, 서버가 모양과 카탈로그의 주민인지 확인한다(`server/src/residents.rs`). 섬은 gaesup-world의 NPC 시스템으로 그리며(idle, 이름표, 화면 밖·먼 주민 생략), 가까이 온 사람을 바라보고, 상호작용(E 키·버튼)하면 인사말을 보여 준다. 방문자도 같은 저장을 읽으니 같은 주민을 본다.
-- 내 캐릭터: 옷장에서 `내 캐릭터로 입기`를 누르면 `PUT /api/looks/me`가 몸·파츠·색을 캐릭터 서버의 옷장 목록과 SHA-256까지 대조한 뒤 뒤에서 하나의 GLB로 조립한다(`server/src/look_bake.rs`: 파츠를 몸의 뼈에 이름으로 묶고, 가려지는 몸 삼각형과 재질을 빼고, 안쪽 옷을 밀착시키고, 머리·옷 색을 새 텍스처로 굽는다). 검사·텍스처 줄이기를 거쳐 가져온 모델처럼 `MODEL_STORE`에 저장되고, 섬의 내 캐릭터와 실시간 방의 `Join.modelUrl`이 그 모델이 된다. 회원은 자기 것(`/api/looks/me`)만 읽고 쓴다. 섬의 미니미를 고르면 내 모습을 벗고, 소개 탭의 `내 모습`으로 다시 입는다.
+- 내 캐릭터: 옷장에서 `내 캐릭터로 입기`를 누르면 `PUT /api/looks/me`가 몸·파츠·색을 캐릭터 서버의 옷장 목록과 SHA-256까지 대조한 뒤 뒤에서 하나의 GLB로 조립한다(`server/src/look_bake.rs`: 파츠를 몸의 뼈에 이름으로 묶고, 가려지는 몸 삼각형과 재질을 빼고, 안쪽 옷을 밀착시키고, 머리·옷 색을 새 텍스처로 굽는다). 검사·텍스처 줄이기를 거쳐 가져온 모델처럼 `MODEL_STORE`에 저장되고, 섬의 내 캐릭터와 실시간 방의 `Join.modelUrl`이 그 모델이 된다. 회원은 자기 것(`/api/looks/me`)만 읽고 쓴다. 섬의 미니미를 고르면 내 모습을 벗고, 소개 탭의 `내 모습`으로 다시 입는다. 굽는 동안 미니미를 골랐으면 다 구워져도 입지 않는다(`wear_on_ready`).
+  - 가림 영역을 읽지 못한 옷(`look_coverage`)이나 색 정보를 읽지 못한 색 선택(`look_colors`)은 조용히 넘기지 않고 실패한다(몸이 옷을 뚫은 모델을 `ready`로 저장하지 않는다). 그 밖에 건너뛴 항목은 결과 보고서의 `skippedHides`·`skippedTucks`·`unreadableMaps`로 센다. 결과가 16 MiB나 삼각형 15만을 넘으면 `look_too_large`이다.
+  - 굽는 중인 모습이 16개를 넘으면 새 저장은 429 `looks_busy`이고, 이미 밀린 굽기는 시작 전에 자기 차례가 아닌지(수정 번호) 다시 확인한다. 서버가 다시 시작되면 굽던 모습은 `interrupted`로 바로 실패 처리한다. 만든 모델은 해시 이름으로 `MODEL_STORE`에 남고 지우지 않는다. 오래된 모델을 줄이려면 버킷의 `models/` 수명주기 규칙으로 정한다.
 
+
+## 실시간 방과 섬 저장
+
+- 방: 일회용 티켓으로 들어오고(60초), 방문자가 보내는 `modelUrl`은 `APP_ORIGIN`과 같은 출처의 `/gltf/*.glb`나 `/models/<sha>.glb`만, 색은 `#` 16진 값만 받는다. 한 계정은 소켓을 4개까지 열 수 있고(넘으면 핸드셰이크 429), 섬의 공개 범위를 좁히거나 일촌을 끊으면 접근을 잃은 사람을 close 코드 4403으로 내보낸다.
+- 섬 저장: `PUT /api/homes/me/world`는 10분에 120번까지이고 리비전이 맞을 때만 받는다. 한 계정은 섬 월드 행을 8개까지 두며, 새 월드를 처음 저장해 8개를 넘으면 가장 오래 손대지 않은 월드부터 지운다(예: `minihome-v<N>`의 옛 버전).
+- 둘러보기: `GET /api/homes?limit=&before=&q=`는 공개 섬을 새 순서로 돌려주고, `q`(40자까지)는 아이디·이름·제목에 들어 있는 글자를 대소문자 구분 없이 찾는다.
 
 ## 권한
 
@@ -70,7 +78,7 @@
 CloudFront(mogaesup.com, www는 apex로 이동)가 정적 파일은 비공개 S3에서, `/api/*`(WebSocket 포함)는 VPC origin으로 EC2의 Rust 서버에서 받는다. 서버는 비공개 RDS PostgreSQL 17을 쓰고 인터넷에 직접 열려 있지 않다.
 
 1. 리눅스 바이너리: `server`에서 `docker run --rm -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/src/target -v ${PWD}:/src -w /src rust:1-alpine sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"`
-2. 서버: `python server/scripts/deploy-rust-server.py --factory-url <캐릭터 서버 주소> --factory-access write`. 스택(`mogaesup-server`)을 맞추고, S3와 SSM으로 바이너리를 올려 체크섬을 확인한 뒤 systemd로 띄운다. 비밀값은 개발 PC로 가져오지 않는다. 스택의 `FactoryGatewaySecret`이 `FACTORY_GATEWAY_KEY`로 들어가 캐릭터 서버 요청마다 `x-gateway-key`로 실린다. 캐릭터 서버 인스턴스는 쉬면 스스로 꺼지므로, 처음 한 번 `--studio-instance-id <인스턴스 ID>`를 주면 스택(`StudioInstanceId`)이 기억하고 서버 역할에 그 인스턴스만 켤 권한(`ec2:StartInstances`)을 준다. 서버는 닿지 않는 스튜디오 요청에 인스턴스를 켜고 켜질 때까지 503 `studio_waking`으로 답하며, 관리자는 `/api/catalog/admin/studio-power`로 상태를 보고 켠다.
+2. 서버: `python server/scripts/deploy-rust-server.py --factory-url <캐릭터 서버 주소> --factory-access write`. 스택(`mogaesup-server`)을 맞추고, S3와 SSM으로 바이너리를 올려 체크섬을 확인한 뒤 systemd로 띄운다. 주지 않은 `--factory-*`·`--studio-instance-id`는 서버에 있는 값을 그대로 유지하고(끝에 `Studio gateway:` 한 줄로 적용된 값을 보여 준다), 스택 변경이 있으면 변경 세트만 보여 주고 멈추므로 확인한 뒤 `--yes`로 다시 실행한다. 새 바이너리가 시작하지 않거나 건강 검사에 실패하면 이전 바이너리(`mogaesup-server.prev`)로 돌아가 non-zero로 끝난다. 비밀값은 개발 PC로 가져오지 않는다. 스택의 `FactoryGatewaySecret`이 `FACTORY_GATEWAY_KEY`로 들어가 캐릭터 서버 요청마다 `x-gateway-key`로 실린다. 캐릭터 서버 인스턴스는 쉬면 스스로 꺼지므로, 처음 한 번 `--studio-instance-id <인스턴스 ID>`를 주면 스택(`StudioInstanceId`)이 기억하고 서버 역할에 그 인스턴스만 켤 권한(`ec2:StartInstances`)을 준다. 서버는 닿지 않는 스튜디오 요청에 인스턴스를 켜고 켜질 때까지 503 `studio_waking`으로 답하며, 관리자는 `/api/catalog/admin/studio-power`로 상태를 보고 켠다.
 3. 웹: `frontend/scripts/deploy-aws.ps1`. 스택(`mogaesup-web`)을 맞추고 빌드·업로드·무효화한 뒤 운영 주소의 `index.html`과 `/api/health`를 확인한다.
 4. 캐릭터 서버: `backend/infra/prepare-aws.ps1 -Upload` 뒤 `backend/infra/deploy-aws.ps1`(자세한 것은 `backend/README.md`). 컨테이너는 API만 낸다.
 5. 스튜디오 잠금: `python server/scripts/lock-studio.py --allow-ip <주인 IP>`. 캐릭터 스튜디오의 CloudFront에 함수를 붙여 게이트웨이 키를 가진 이 서버와 적은 IP만 통과시킨다(`--unlock`으로 뗀다). 스튜디오 스택(`gaesup-asset-studio`)을 다시 배포하면 떨어지니 그 뒤에 다시 돌린다.

@@ -7,13 +7,15 @@ provider's balance before and after is printed at the end. Run it yourself from 
     uv run python scripts/props/generate.py --only chair-basic   # one item first
     uv run python scripts/props/generate.py --all [--provider tripo]
 
-It starts a local character API on 127.0.0.1:8016 with auto-resume off, a sandbox storage prefix (`mogaesup-props/`
-in the asset bucket, away from the studio's own data) and the signight database unreachable, then submits one studio
-"prop" generation per manifest item. Each item has a fixed Idempotency-Key, so running the script again only waits for
-and downloads what already exists: it never pays twice for the same item. An item keeps the provider it was accepted
-with, except one blocked before any 3D task was accepted (e.g. refused for credits after its image was made): it keeps
-its image and has only its 3D step sent again, to `--provider`. The server refuses that once a 3D task was accepted or
-its acceptance is uncertain. Results land in scripts/props/out/<id>/ (model.glb, image.png, record.json);
+It starts a local character API on a free 127.0.0.1 port with auto-resume off, a sandbox storage prefix (`mogaesup-props/`
+in the asset bucket, away from the studio's own data) and CHARACTER_DATABASE_URL cleared, so its records stay in S3 under
+that prefix, then submits one studio "prop" generation per manifest item. Only a server that reports the pid of the process
+started here is used: one already listening on 8016 (`npm run dev:character`, with the real prefix and records database) is
+never asked. Each item has a fixed Idempotency-Key, so running the script again only waits for and downloads what
+already exists: it never pays twice for the same item. An item keeps the provider it was accepted with, except one
+blocked before any 3D task was accepted (e.g. refused for credits after its image was made): it keeps its image and has
+only its 3D step sent again, to `--provider`. The server refuses that once a 3D task was accepted or its acceptance is
+uncertain. Results land in scripts/props/out/<id>/ (model.glb, image.png, record.json);
 `node frontend/scripts/props-normalize.mjs` then fits them to the island.
 """
 
@@ -22,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -29,14 +32,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
+import psutil
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / 'backend'
 HERE = Path(__file__).resolve().parent
 OUT = HERE / 'out'
-PORT = 8016
-BASE = f'http://127.0.0.1:{PORT}'
 # A studio owner id of our own: its generations live under mogaesup-props/avatar-factory/7700/.
 OWNER = '7700'
 KEY_VERSION = 'v1'
@@ -45,7 +47,33 @@ PARALLEL = 4
 WAIT_MINUTES = 30
 
 
-def start_api() -> subprocess.Popen:
+def free_port() -> int:
+    """A loopback port nothing listens on right now: ask the system for one by binding port 0."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
+def process_family(pid: int) -> set[int]:
+    """The process and what it started: a Windows venv's python.exe is a launcher that runs the interpreter as a child."""
+    try:
+        return {pid, *(child.pid for child in psutil.Process(pid).children(recursive=True))}
+    except psutil.Error:
+        return {pid}
+
+
+def is_own_health(answer: object, pids: set[int]) -> bool:
+    """Whether a /health answer comes from the server started here: the pid it reports (src/runtime_identity.py) is ours."""
+    runtime = answer.get('runtime') if isinstance(answer, dict) else None
+    pid = runtime.get('pid') if isinstance(runtime, dict) else None
+    return isinstance(pid, int) and not isinstance(pid, bool) and pid in pids
+
+
+def start_api(timeout: float = 60) -> tuple[subprocess.Popen, str]:
+    """Starts the sandboxed API on a free port and returns it with its base URL once its own /health answers. A server
+    that happens to listen there is never taken for it, and neither is a /health that is not from the child."""
+    port = free_port()
+    base = f'http://127.0.0.1:{port}'
     env = {
         **os.environ,
         'ASSET_AUTO_RESUME': '0',
@@ -55,21 +83,22 @@ def start_api() -> subprocess.Popen:
     }
     log = open(HERE / 'api.log', 'wb')
     process = subprocess.Popen(
-        [sys.executable, '-m', 'uvicorn', 'src.api.server:app', '--host', '127.0.0.1', '--port', str(PORT)],
+        [sys.executable, '-m', 'uvicorn', 'src.api.server:app', '--host', '127.0.0.1', '--port', str(port)],
         cwd=BACKEND, env=env, stdout=log, stderr=subprocess.STDOUT,
     )
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            if httpx.get(f'{BASE}/health', timeout=3).status_code == 200:
-                return process
-        except httpx.HTTPError:
-            pass
         if process.poll() is not None:
             raise SystemExit(f'character API exited; see {HERE / "api.log"}')
+        try:
+            answer = httpx.get(f'{base}/health', timeout=3)
+            if answer.status_code == 200 and is_own_health(answer.json(), process_family(process.pid)):
+                return process, base
+        except (httpx.HTTPError, ValueError):
+            pass
         time.sleep(0.5)
     process.terminate()
-    raise SystemExit('character API did not answer /health within 60 s')
+    raise SystemExit(f'character API did not answer its own /health within {timeout:g} s')
 
 
 def generate(client: httpx.Client, style: dict, item: dict, provider: str) -> str:
@@ -167,10 +196,10 @@ def main() -> None:
     api_key = (settings.get('API_KEY') or '').strip()
     OUT.mkdir(exist_ok=True)
     before = credits(provider, settings)
-    process = start_api()
+    process, base = start_api()
     try:
         headers = {'x-user-id': OWNER, **({'x-api-key': api_key} if api_key else {})}
-        with httpx.Client(base_url=BASE, headers=headers, timeout=60) as client:
+        with httpx.Client(base_url=base, headers=headers, timeout=60) as client:
             ready = client.get('/api/studio/generations', params={'kind': 'prop'})
             ready.raise_for_status()
             if provider not in ready.json()['capabilities'].get('providers', []):
