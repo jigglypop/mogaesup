@@ -5,6 +5,8 @@ Uses the running release's image (`python -m src.records`): applies the schema, 
 the studio reports no paid requests or running tasks — stops the container, imports every record of the studio's `assets`
 prefix (the local prop sandbox `mogaesup-props` stays in S3), imports again to confirm nothing is left, and names the records database in
 /etc/asset-studio.env so the next `deploy-aws.ps1` starts the studio on it. The container stays stopped until then.
+The import also leaves a marker object (`<prefix>/.records-in-database`) in S3: from then on a server of that prefix that
+starts without CHARACTER_DATABASE_URL refuses to start instead of reading the stale S3 records.
 Nothing secret reaches this machine: the URL is built on the instance from the server stack's CharacterDatabaseSecret.
 Usage: python backend/infra/records-to-postgres.py   (then deploy a release whose deploy-on-instance.sh reads the config)
 """
@@ -65,6 +67,10 @@ def main():
     print(result['StandardOutputContent'], result['StandardErrorContent'])
     if result['Status'] != 'Success':
         raise SystemExit(f"failed: {result['Status']}")
+    # The script appended the config lines on this instance; the stack's UserData writes them itself when its parameters
+    # name the database, so an instance the stack replaces starts on the records database as well.
+    print(f"Give the studio stack (backend/infra/ec2.yaml) CharacterDbSecretArn={outputs['CharacterDatabaseSecretArn']} "
+          f"CharacterDbHost={outputs['DatabaseEndpoint']}")
 
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@ from src.services import character_jobs
 from src.services.animation_glb import merge_character_clips
 from src.services.asset_editor import _write_json
 from src.services.asset_delivery import inspect_glb
-from src.services.wardrobe import _digest, download_glb
+from src.services.wardrobe import _digest, download_glb, get_with_retry
 from src.services.meshy_status import BLOCKED
 from src.services.runtime_activity import paid_request
 
@@ -74,16 +74,12 @@ def _task(run, pack, slot, endpoint, payload, client):
     if value["status"] in BLOCKED:
         raise ValueError("Existing provider attempt requires recovery; no automatic resubmission")
     if value["status"] != "SUCCEEDED":
-        response = client.get(f"{endpoint}/{value['task_id']}")
-        response.raise_for_status()
-        task = response.json()
+        task = get_with_retry(client, f"{endpoint}/{value['task_id']}").json()
         value.update(status=task["status"], progress=task.get("progress"), result=task.get("result"), consumed_credits=task.get("consumed_credits"))
         _save(run, pack)
     elif slot == "rig" or slot not in pack.get("clips", {}):
         # Output URLs expire. Recover fresh URLs with a GET, never another POST.
-        response = client.get(f"{endpoint}/{value['task_id']}")
-        response.raise_for_status()
-        task = response.json()
+        task = get_with_retry(client, f"{endpoint}/{value['task_id']}").json()
         value.update(status=task["status"], result=task.get("result"), consumed_credits=task.get("consumed_credits"))
         _save(run, pack)
     if value["status"] in {"FAILED", "CANCELED"}:
@@ -180,9 +176,7 @@ def recover(run: Path, slot: str, task_id: str, client: httpx.Client):
     task = pack.get("tasks", {}).get(slot)
     if not task or task["status"] != "submission_uncertain":
         raise ValueError("No uncertain submission for this stage")
-    response = client.get(f"{task['endpoint']}/{task_id}")
-    response.raise_for_status()
-    result = response.json()
+    result = get_with_retry(client, f"{task['endpoint']}/{task_id}").json()
     if slot != "rig":
         if (result.get("rig_task_id") is not None and result["rig_task_id"] != pack["tasks"]["rig"]["task_id"]
                 or result.get("action_id") is not None and result["action_id"] != pack["actions"][slot]):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import logging
@@ -14,9 +15,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
+from src import configure_logging
 from src.paths import load_environment
 
 load_environment()
+# `uvicorn src.api.server:app` never runs src.cli, so without this the INFO logs (requests, auto resume) are dropped.
+configure_logging()
 
 from src.api.observability import (
     attach_request_id,
@@ -36,6 +40,7 @@ from src.services.runtime_activity import ActivityMiddleware, snapshot as activi
 from src.auth import is_public_path
 from src.runtime_identity import runtime_identity
 from src.services import record_store
+from src.services.object_storage import assert_records_mode
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,8 @@ _RUNTIME = runtime_identity()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # A server that lost CHARACTER_DATABASE_URL must not go on with the S3 records the record database replaced.
+    await asyncio.to_thread(assert_records_mode)
     # Continue factory stages stopped with the previous server process.
     from src.api.avatar_factory import get_factory
     from src.services.avatar_auto_resume import start as start_auto_resume

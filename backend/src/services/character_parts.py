@@ -10,6 +10,7 @@ from src.services.asset_delivery import DeliveryPolicy, inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.wardrobe import _digest
 from src.services.process_identity import identity
+from src.services.worker_env import worker_environment
 
 
 def blender_executable() -> str | None:
@@ -64,9 +65,14 @@ def separate_materials(model: Path, output: Path, selections: list[dict] | None 
     # run/Blender file locks, never this semaphore, so waiting here cannot deadlock.
     # The worker's own timeout starts once a slot is granted.
     with _QUEUE, (output / "blender.log").open("wb") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        _write_json(output / "runner.json", {"process": identity(process.pid), "source_sha256": _digest(model)})
+        try:
+            _write_json(output / "runner.json", {"process": identity(process.pid), "source_sha256": _digest(model)})
+        except BaseException:
+            # No receipt, no supervision: a Blender nobody can find must not keep running.
+            stop_process(process)
+            raise
         try:
             code = process.wait(timeout=240)
         except subprocess.TimeoutExpired:

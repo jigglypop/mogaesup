@@ -14,6 +14,7 @@ from src.services.object_storage import StoredPath as Path, copy_file, local_wor
 from src.services.process_identity import identity, state as process_state
 from src.services.wardrobe import run_lock
 from src.services.studio_library import StudioLibrary
+from src.services.worker_env import worker_environment
 
 
 class AvatarRigTransfer:
@@ -186,11 +187,15 @@ class AvatarRigTransfer:
                                '--python-exit-code', '1', '--python', str(Path(__file__).with_name('avatar_rig_transfer_blender.py')),
                                '--', str(directory/'input.json')]
                     with _QUEUE, (directory/'blender.log').open('wb') as log:
-                        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                            env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
+                        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                        _write_json(directory/'runner.json', {'process': identity(process.pid)})
-                        publish_checkpoint(directory/'runner.json')
+                        try:
+                            _write_json(directory/'runner.json', {'process': identity(process.pid)})
+                            publish_checkpoint(directory/'runner.json')
+                        except BaseException:
+                            # No receipt, no supervision: a Blender nobody can find must not keep running.
+                            stop_process(process)
+                            raise
                         try:
                             code = process.wait(timeout=1200)
                         except subprocess.TimeoutExpired:

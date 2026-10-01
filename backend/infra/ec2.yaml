@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Gaesup asset studio with S3 durability, SSM administration, optional static public site, and optional HTTPS studio
+Description: Gaesup character studio API on one instance with S3 durability and SSM administration, optionally reachable over HTTPS through CloudFront
 Parameters:
   VpcId: {Type: 'AWS::EC2::VPC::Id'}
   SubnetId: {Type: 'AWS::EC2::Subnet::Id'}
@@ -12,16 +12,26 @@ Parameters:
   ProviderSecretArn:
     Type: String
     AllowedPattern: '^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+  CharacterDbSecretArn:
+    Type: String
+    Default: ''
+    Description: The mogaesup server stack's CharacterDatabaseSecretArn output. With CharacterDbHost the studio keeps its job records in PostgreSQL (CHARACTER_DATABASE_URL); both empty keeps them in S3.
+    AllowedPattern: '^$|^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+  CharacterDbHost:
+    Type: String
+    Default: ''
+    Description: The records database host, the server stack's DatabaseEndpoint output.
+    AllowedPattern: '^$|^[A-Za-z0-9.-]+$'
   PublicSiteOrigin:
     Type: String
     Default: ''
-    Description: Optional HTTPS origin. When set, port 80 serves static UI and runtime SEO files while /api remains private.
+    Description: Optional HTTPS origin of the public site. When set and PublicStudio is false, port 80 is open to the internet and answers 404, since the studio serves its API only.
     AllowedPattern: '^$|^https://[A-Za-z0-9.-]+(?::[0-9]+)?$'
   PublicStudio:
     Type: String
     Default: 'false'
     AllowedValues: ['false', 'true']
-    Description: When true, a CloudFront HTTPS address serves the whole studio, and port 80 accepts CloudFront only.
+    Description: When true, a CloudFront HTTPS address serves the studio API, and port 80 accepts CloudFront only. With STUDIO_GATEWAY_KEY in the provider secret, nginx also answers 403 to requests that do not send it as x-gateway-key.
   CloudFrontPrefixListId:
     Type: String
     Default: ''
@@ -29,6 +39,9 @@ Parameters:
     AllowedPattern: '^$|^pl-[0-9a-f]+$'
   InstanceType: {Type: String, Default: t3.large, AllowedValues: [t3.large, t3.xlarge, c7i.large, c7i.xlarge]}
   ImageId:
+    # Resolved again on every stack update, so a newer AL2023 image replaces the instance. The image the instance runs now
+    # is not recorded here; to pin it, take its id from `aws ec2 describe-instances` and make this a plain
+    # AWS::EC2::Image::Id parameter with that default, as server/infra/aws-server.yaml does.
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 Rules:
@@ -37,7 +50,18 @@ Rules:
     Assertions:
       - Assert: !Not [!Equals [!Ref CloudFrontPrefixListId, '']]
         AssertDescription: CloudFrontPrefixListId is required when PublicStudio is true
+  CharacterDbPair:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref CharacterDbSecretArn, '']
+            - !Equals [!Ref CharacterDbHost, '']
+          - !And
+            - !Not [!Equals [!Ref CharacterDbSecretArn, '']]
+            - !Not [!Equals [!Ref CharacterDbHost, '']]
+        AssertDescription: CharacterDbSecretArn and CharacterDbHost must be supplied together
 Conditions:
+  HasCharacterDb: !And [!Not [!Equals [!Ref CharacterDbSecretArn, '']], !Not [!Equals [!Ref CharacterDbHost, '']]]
   HasPublicSite: !Not [!Equals [!Ref PublicSiteOrigin, '']]
   HasPublicStudio: !Equals [!Ref PublicStudio, 'true']
   HasOpenHttp: !And [!Condition HasPublicSite, !Not [!Condition HasPublicStudio]]
@@ -59,15 +83,19 @@ Resources:
                 Action: ['s3:ListBucket']
                 Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}'
                 Condition: {StringLike: {'s3:prefix': ['assets/*', 'releases/*']}}
+              # The studio deletes objects it replaces or archives (StoredPath.unlink); the bucket is versioned.
               - Effect: Allow
-                Action: ['s3:GetObject', 's3:PutObject']
+                Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject']
                 Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/assets/*'
               - Effect: Allow
                 Action: ['s3:GetObject']
                 Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/releases/studio/*'
+              # deploy-on-instance.sh reads the provider secret and, when given, the records database secret.
               - Effect: Allow
                 Action: ['secretsmanager:GetSecretValue']
-                Resource: !Ref ProviderSecretArn
+                Resource:
+                  - !Ref ProviderSecretArn
+                  - !If [HasCharacterDb, !Ref CharacterDbSecretArn, !Ref AWS::NoValue]
   Profile:
     Type: AWS::IAM::InstanceProfile
     Properties: {Roles: [!Ref InstanceRole]}
@@ -114,31 +142,44 @@ Resources:
           Ebs: {VolumeSize: 60, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
       Tags: [{Key: Name, Value: gaesup-asset-studio}]
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
-          # curl-minimal already provides curl; installing the full package conflicts with it.
-          dnf install -y docker
-          systemctl enable --now docker
-          install -d -m 700 /opt/asset-studio
-          cat > /etc/asset-studio.env <<'CONFIG'
-          ASSET_S3_BUCKET='${AssetBucket}'
-          AWS_REGION='${AWS::Region}'
-          PROVIDER_SECRET_ARN='${ProviderSecretArn}'
-          PUBLIC_SITE_ORIGIN='${PublicSiteOrigin}'
-          PUBLIC_STUDIO='${PublicStudio}'
-          CONFIG
-          chmod 600 /etc/asset-studio.env
-          release_sha="$(basename '${ReleaseKey}' .tar.gz)"
-          exec 8>/var/lock/asset-studio-prepare.lock
-          flock -n 8 || { echo 'another release preparation is active' >&2; exit 3; }
-          incoming="/opt/asset-studio/incoming/$release_sha"
-          install -d -m 700 "$incoming/source"
-          aws s3 cp 's3://${AssetBucket}/${ReleaseKey}' "$incoming/release.tar.gz" --region '${AWS::Region}' --checksum-mode ENABLED --only-show-errors
-          printf '%s  %s\n' "$release_sha" "$incoming/release.tar.gz" | sha256sum -c -
-          tar -xzf "$incoming/release.tar.gz" -C "$incoming/source"
-          printf '%s\n' "$release_sha" > "$incoming/source/.release-sha256"
-          /bin/bash "$incoming/source/infra/deploy-on-instance.sh" '${ReleaseKey}' "$release_sha" "$incoming/source"
+        # Without a records database this renders exactly as before CharacterDbConfig existed, so the user data does not
+        # change. With one, the two lines are what records-to-postgres.py appends by hand.
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euo pipefail
+            # curl-minimal already provides curl; installing the full package conflicts with it.
+            dnf install -y docker
+            systemctl enable --now docker
+            install -d -m 700 /opt/asset-studio
+            cat > /etc/asset-studio.env <<'CONFIG'
+            ASSET_S3_BUCKET='${AssetBucket}'
+            AWS_REGION='${AWS::Region}'
+            PROVIDER_SECRET_ARN='${ProviderSecretArn}'
+            PUBLIC_SITE_ORIGIN='${PublicSiteOrigin}'
+            PUBLIC_STUDIO='${PublicStudio}'${CharacterDbConfig}
+            CONFIG
+            chmod 600 /etc/asset-studio.env
+            release_sha="$(basename '${ReleaseKey}' .tar.gz)"
+            exec 8>/var/lock/asset-studio-prepare.lock
+            flock -n 8 || { echo 'another release preparation is active' >&2; exit 3; }
+            incoming="/opt/asset-studio/incoming/$release_sha"
+            install -d -m 700 "$incoming/source"
+            aws s3 cp 's3://${AssetBucket}/${ReleaseKey}' "$incoming/release.tar.gz" --region '${AWS::Region}' --checksum-mode ENABLED --only-show-errors
+            printf '%s  %s\n' "$release_sha" "$incoming/release.tar.gz" | sha256sum -c -
+            tar -xzf "$incoming/release.tar.gz" -C "$incoming/source"
+            printf '%s\n' "$release_sha" > "$incoming/source/.release-sha256"
+            /bin/bash "$incoming/source/infra/deploy-on-instance.sh" '${ReleaseKey}' "$release_sha" "$incoming/source"
+          - CharacterDbConfig: !If
+              - HasCharacterDb
+              - !Join
+                - ''
+                - - "\nCHARACTER_DB_SECRET_ARN='"
+                  - !Ref CharacterDbSecretArn
+                  - "'\nCHARACTER_DB_HOST='"
+                  - !Ref CharacterDbHost
+                  - "'"
+              - ''
   StudioAddress:
     # Fixed address so the CloudFront origin name survives instance stop and start.
     Type: AWS::EC2::EIP
@@ -148,8 +189,9 @@ Resources:
       InstanceId: !Ref Instance
       Tags: [{Key: Name, Value: gaesup-asset-studio}]
   StudioCachePolicy:
-    # Authorization must be part of the cache key for CloudFront to forward it on GET;
-    # DefaultTTL 0 keeps API responses uncached unless the origin asks otherwise.
+    # Authorization must be part of the cache key for CloudFront to forward it on GET. So is x-gateway-key: CloudFront
+    # caches an origin 403 for a few seconds, and the one nginx gives a request without the key (STUDIO_GATEWAY_KEY) must not
+    # be served to a request that has it. DefaultTTL 0 keeps API responses uncached unless the origin asks otherwise.
     Type: AWS::CloudFront::CachePolicy
     Condition: HasPublicStudio
     Properties:
@@ -161,7 +203,7 @@ Resources:
         ParametersInCacheKeyAndForwardedToOrigin:
           EnableAcceptEncodingGzip: true
           EnableAcceptEncodingBrotli: true
-          HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization]}
+          HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization, x-gateway-key]}
           CookiesConfig: {CookieBehavior: none}
           QueryStringsConfig: {QueryStringBehavior: all}
   StudioDistribution:

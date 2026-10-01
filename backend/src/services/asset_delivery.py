@@ -21,6 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.services.glb import parse_glb
 
+# Pixels preflight decodes for the distinct images of one file (PIL itself only bounds each image).
+MAX_DECODED_PIXELS = 128 * 1024 * 1024
+
 
 class DeliveryPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -247,15 +250,35 @@ def _check_scene(tables: dict, doc: dict) -> dict:
 
 
 def _check_images(tables: dict, binary: bytes, policy: DeliveryPolicy, budget_warnings: list | None = None) -> int:
-    pixels = 0
+    pixels = decoded_pixels = 0
+    sizes: dict[tuple, tuple[int, int]] = {}
+
+    def count(width: int, height: int) -> None:
+        nonlocal pixels
+        pixels += width * height
+        if max(width, height) > policy.max_texture_dimension or pixels > policy.max_texture_pixels:
+            if budget_warnings is None:
+                raise ValueError("texture budget exceeded")
+            if "texture budget exceeded" not in budget_warnings:
+                budget_warnings.append("texture budget exceeded")
+
     for image in tables["images"]:
         if "uri" in image:
             uri = image["uri"]
             if "bufferView" in image or not uri.startswith(("data:image/png;base64,", "data:image/jpeg;base64,")):
                 raise ValueError("only embedded PNG/JPEG images are supported by preflight")
-            content = base64.b64decode(uri.split(",", 1)[1], validate=True)
+            source = ("uri", uri)
         else:
             view = _ref(tables["bufferViews"], image["bufferView"])
+            source = ("view", image["bufferView"])
+        # Entries that share a buffer view or URI are the same bytes: each counts toward the texture budget, but the
+        # bytes are decoded once.
+        if source in sizes:
+            count(*sizes[source])
+            continue
+        if source[0] == "uri":
+            content = base64.b64decode(uri.split(",", 1)[1], validate=True)
+        else:
             offset = view.get("byteOffset", 0)
             content = binary[offset:offset + view["byteLength"]]
         with warnings.catch_warnings():
@@ -263,13 +286,12 @@ def _check_images(tables: dict, binary: bytes, policy: DeliveryPolicy, budget_wa
             with Image.open(io.BytesIO(content)) as decoded:
                 if decoded.format not in ("PNG", "JPEG"):
                     raise ValueError("unsupported embedded image format")
-                width, height = decoded.size
-                pixels += width * height
-                if max(width, height) > policy.max_texture_dimension or pixels > policy.max_texture_pixels:
-                    if budget_warnings is None:
-                        raise ValueError("texture budget exceeded")
-                    if "texture budget exceeded" not in budget_warnings:
-                        budget_warnings.append("texture budget exceeded")
+                sizes[source] = decoded.size
+                # A cap on the work one file can cause, whatever the delivery policy tolerates.
+                decoded_pixels += decoded.width * decoded.height
+                if decoded_pixels > MAX_DECODED_PIXELS:
+                    raise ValueError("image decode budget exceeded")
+                count(decoded.width, decoded.height)
                 decoded.load()
     for texture in tables["textures"]:
         _ref(tables["images"], texture["source"])

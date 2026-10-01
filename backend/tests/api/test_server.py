@@ -114,3 +114,15 @@ def test_health_degrades_without_exposing_database_errors(monkeypatch):
 
     assert health["status"] == "degraded"
     assert health["connections"] == {"database": {"configured": True, "ok": False}}
+
+
+def test_startup_is_refused_when_the_records_live_in_the_database_and_the_url_is_gone(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    def refuse():
+        raise RuntimeError('records live in PostgreSQL, but CHARACTER_DATABASE_URL is not set')
+
+    monkeypatch.setattr(server, 'assert_records_mode', refuse)
+    with pytest.raises(RuntimeError, match='CHARACTER_DATABASE_URL'):
+        with TestClient(server.app):
+            pass

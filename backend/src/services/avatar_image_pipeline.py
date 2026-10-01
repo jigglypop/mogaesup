@@ -3,6 +3,7 @@
 One persisted attempt per paid stage. Resume only polls known task IDs or starts
 stages never attempted within the original request's fixed limits.
 """
+from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import io
@@ -20,7 +21,7 @@ import httpx
 from PIL import Image
 
 from src.services import character_jobs
-from src.services.asset_editor import _write_json
+from src.services.asset_editor import _write_json, update_json
 from src.services.avatar_blueprints import AvatarBlueprints, SLOTS
 from src.services.avatar_equipment import EQUIPMENT
 from src.services.avatar_openai_images import (DEFAULT_MODEL, DEFAULT_BASE, OpenAIImageHTTPError,
@@ -30,6 +31,7 @@ from src.services.character_parts import blender_executable
 from src.services.model_providers import failure_text, uncertain_text
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity, state as process_state
+from src.services.wardrobe import transient
 from src.services.avatar_production_spec import (
     IMAGE_INTAKE_POLICY, production_spec, public_spec,
 )
@@ -98,6 +100,48 @@ def _provider_http_message(status, provider='meshy', body=''):
 
 def resubmittable(task, explicit):
     return bool(task) and (_auto_resubmit(task) or (bool(explicit) and task.get('status') in character_jobs.RETRYABLE))
+
+
+# Stops that a later resume continues from without any new paid request: the task is saved, only its status or file is missing.
+CONTINUABLE_STOPS = ('provider_poll_failed', 'download_failed')
+
+
+def _body_text(response):
+    """The body of a provider's answer, or '' when it was streamed and never read."""
+    try:
+        return response.text
+    except httpx.StreamError:
+        return ''
+
+
+def _pause_message(exc, failure_id, provider):
+    """Public reason a run stopped, from classified fields only. The pause is written with it, so it must never raise."""
+    try:
+        if isinstance(exc, PipelineError):
+            return exc.message
+        if isinstance(exc, httpx.HTTPStatusError):
+            return _provider_http_message(exc.response.status_code, provider, _body_text(exc.response))
+        if isinstance(exc, httpx.RequestError):
+            return f'제공자 응답 연결이 끊겼습니다 ({type(exc).__name__}, 진단 {failure_id}). 성공 여부를 확인할 수 없어 자동 재제출하지 않습니다.'
+    except Exception:
+        pass
+    return f'생산 중단: {type(exc).__name__} · 진단 {failure_id}. 받은 이미지와 기존 작업은 보존했습니다. 새 유료 요청은 자동으로 보내지 않습니다.'
+
+
+@contextmanager
+def _polling(state):
+    """Around status reads only. A read that kept failing after its retries pauses the job as unreachable: nothing
+    was sent, so unlike a lost POST answer the saved task is known to be untouched."""
+    try:
+        yield
+    except httpx.HTTPError as exc:
+        if not transient(exc):
+            raise
+        name = 'Tripo' if state.get('model_provider') == 'tripo' else 'Meshy'
+        raise PipelineError('provider_poll_failed', f'{name} 연결이 일시적으로 되지 않아 상태를 확인하지 못했습니다 · 접수한 3D 작업은 그대로이며 '
+                            '3D 파츠부터 실행으로 조회를 이어갈 수 있습니다 · 받은 이미지와 파일은 보존했습니다.', 502) from None
+
+
 DESCRIPTIONS = {
     'hair': 'one complete voluminous hairstyle including bangs, both sides, full crown, rear hair and nape; reconstruct hair hidden under the hat; hair only, no hat, headwear, face, scalp skin or body',
     'body': 'one complete clothed character, including head and all limbs',
@@ -258,11 +302,16 @@ class AvatarImagePipeline:
         job_id = hashlib.sha256(f'{owner}:image:{key}'.encode()).hexdigest()[:24]
         directory = self.factory.directory(owner, job_id)
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        meshy_actions = []
         if not read_json(directory/'job.json'):
             # A replay returns its job; a new request must be affordable before any image is paid for.
             from src.services.meshy_status import require_credits
             slots = payload.get('slots') or []
             require_credits(len(slots), rig=bool(payload.get('rig_with_meshy')) and 'body' in slots)
+            if payload.get('rig_with_meshy'):
+                # Asked here, not under the lock: a slow Meshy must not stall every other job action.
+                from src.services.avatar_meshy import AvatarMeshy
+                meshy_actions = AvatarMeshy(self.factory).library(owner)
         with _LOCK:
             existing = read_json(directory/'job.json')
             if existing:
@@ -305,8 +354,8 @@ class AvatarImagePipeline:
             if (mesh_rig and slots != ['body'] and production_mode != 'character_parts') or (motions and not mesh_rig):
                 raise PipelineError('invalid_rig', 'Meshy 리깅과 동작은 통짜 전신에서 선택하세요.', 422)
             if mesh_rig:
-                from src.services.avatar_meshy import AvatarMeshy, SLOTS as MOTION_SLOTS
-                available = {i['action_id'] for i in AvatarMeshy(self.factory).library(owner)} if motions else set()
+                from src.services.avatar_meshy import SLOTS as MOTION_SLOTS
+                available = {i['action_id'] for i in meshy_actions} if motions else set()
                 if not set(motions) <= set(MOTION_SLOTS) or any(type(v) is not int or v not in available for v in motions.values()):
                     raise PipelineError('invalid_action', '기본 동작을 현재 Meshy 목록에서 다시 선택하세요.', 422)
             if default_expressions and (production_mode != 'character_parts' or 'body' not in slots or not mesh_rig):
@@ -420,7 +469,12 @@ class AvatarImagePipeline:
     def publish(self, owner, job_id, state):
         directory = self.factory.directory(owner, job_id)
         _write_json(directory/'pipeline.json', state)
-        job = read_json(directory/'job.json')
+        # The job record also changes under other writers (resume, a stop found by a GET): only its public view of the state is replaced.
+        update_json(directory/'job.json', lambda job: self._published(job, state))
+
+    @staticmethod
+    def _published(job, state):
+        """`job` with the public view of `state`. update_json may run this again on a newer record, so it only reads `state`."""
         job['parts'] = [{'slot': p['slot'], 'part_method': p.get('part_method', 'isolated'),
                          'image_status': p['image']['status'], 'image_asset': p['image'].get('asset'),
                          'model_status': p['model']['status'], 'task_id': p['model'].get('task_id'),
@@ -469,7 +523,8 @@ class AvatarImagePipeline:
                     job.setdefault('files', {})[view['raw_file']] = view['raw_sha256']
             if p['image'].get('file'):
                 job.setdefault('files', {})[p['image']['file']] = p['image']['sha256']
-        job['updated_at'] = now(); _write_json(directory/'job.json', job)
+        job['updated_at'] = now()
+        return job
 
     def _part_prompt(self, state, part):
         design_prompt = part.get('design_prompt', part.get('description', ''))
@@ -563,24 +618,39 @@ class AvatarImagePipeline:
             _write_json(directory/'job.json', job)
         return self.factory.get(owner, job_id)
 
+    def _recoverable(self, directory, slot, task_id):
+        """(state, run, receipt) of a part whose submission has no task ID yet; raises when it cannot be recovered now."""
+        job = read_json(directory/'job.json'); state = read_json(directory/'pipeline.json')
+        if job.get('input_kind') != 'image' or job['status'] != 'pipeline_paused' or slot not in [p['slot'] for p in state['parts']]:
+            raise PipelineError('invalid_state', '복구할 파츠 작업을 찾을 수 없습니다.')
+        run = directory/'parts'/slot; task = read_json(run/'character.json')
+        if not task or task.get('task_id') or task.get('status') != 'submission_uncertain':
+            raise PipelineError('invalid_state', '응답이 불확실한 기존 제출만 작업 ID로 복구할 수 있습니다.')
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', task_id):
+            raise PipelineError('invalid_task', '올바른 Meshy 작업 ID를 입력하세요.', 422)
+        return state, run, task
+
     def recover_task(self, owner, job_id, slot, task_id):
         self.factory.get(owner, job_id)
         directory = self.factory.directory(owner, job_id)
+        def lookup_failed():
+            return PipelineError('task_lookup_failed', '3D 제공자에서 해당 작업을 확인하지 못했습니다. 작업 ID와 연결 설정을 확인하세요.', 422)
         with _LOCK:
-            job = read_json(directory/'job.json'); state = read_json(directory/'pipeline.json')
-            if job.get('input_kind') != 'image' or job['status'] != 'pipeline_paused' or slot not in [p['slot'] for p in state['parts']]:
-                raise PipelineError('invalid_state', '복구할 파츠 작업을 찾을 수 없습니다.')
-            run = directory/'parts'/slot; task = read_json(run/'character.json')
-            if not task or task.get('task_id') or task.get('status') != 'submission_uncertain':
-                raise PipelineError('invalid_state', '응답이 불확실한 기존 제출만 작업 ID로 복구할 수 있습니다.')
-            if not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', task_id):
-                raise PipelineError('invalid_task', '올바른 Meshy 작업 ID를 입력하세요.', 422)
+            state, run, task = self._recoverable(directory, slot, task_id)
+        # The provider is asked without the lock, so a slow answer stalls no other job action; what it said is
+        # applied below only if the job is still waiting for exactly this recovery.
+        try:
+            from src.services.model_providers import client as provider_client
+            with provider_client(task.get('provider', 'meshy'), state, timeout=30) as client:
+                fetched = character_jobs.fetch_task(client, task, task_id)
+        except (httpx.HTTPError, KeyError, ValueError, PipelineError):
+            raise lookup_failed() from None
+        with _LOCK:
+            state, run, task = self._recoverable(directory, slot, task_id)
             try:
-                from src.services.model_providers import client as provider_client
-                with provider_client(task.get('provider', 'meshy'), state, timeout=30) as client:
-                    task = character_jobs.refresh(run, client, task_id)
-            except (httpx.HTTPError, KeyError, ValueError, PipelineError):
-                raise PipelineError('task_lookup_failed', '3D 제공자에서 해당 작업을 확인하지 못했습니다. 작업 ID와 연결 설정을 확인하세요.', 422) from None
+                task = character_jobs.record_task(run, task, task_id, fetched)
+            except (KeyError, ValueError):
+                raise lookup_failed() from None
             task['recovered_at'] = now(); task['recovered_by'] = owner; _write_json(run/'character.json', task)
             for p in state['parts']:
                 if p['slot'] == slot:
@@ -821,7 +891,8 @@ class AvatarImagePipeline:
                                 if digest(run/'generated.glb') != artifacts['generated']['sha256']:
                                     raise PipelineError('model_changed', '생성된 파츠 파일이 변경되었습니다.')
                                 part['model']['status'] = 'ready'; continue
-                            task = character_jobs.refresh(run, client)
+                            with _polling(state):
+                                task = character_jobs.refresh(run, client)
                             part['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
                             self.publish(owner, job_id, state)
                             if task['status'] in ('FAILED', 'CANCELED'):
@@ -839,7 +910,8 @@ class AvatarImagePipeline:
             models = []
             for part in modelled:
                 from src.services.meshy_outputs import publish_extras
-                publish_extras(directory/'parts'/part['slot'], directory, part['slot'])
+                with _polling(state):
+                    publish_extras(directory/'parts'/part['slot'], directory, part['slot'])
                 path = directory/'parts'/part['slot']/'generated.glb'
                 models.append({'slot': part['slot'], 'path': str(path), 'sha256': digest(path), 'task_id': part['model']['task_id']})
                 if state.get('production_mode') == 'character_parts' or part['slot'] == 'body':
@@ -867,27 +939,31 @@ class AvatarImagePipeline:
             failure_id = uuid.uuid4().hex[:12]
             # No credentials, raw response or internal exception text in public errors.
             code = exc.code if isinstance(exc, PipelineError) else None
-            import traceback
-            frames = [{'file': Path(f.filename).name, 'line': f.lineno, 'function': f.name}
-                      for f in traceback.extract_tb(exc.__traceback__)]
-            last = frames[-1] if frames else {}
-            LOGGER.error('Avatar production %s failed: job=%s type=%s code=%s at=%s:%s', failure_id, job_id,
-                         type(exc).__name__, code, last.get('file'), last.get('line'))
-            _write_json(directory/'failure.json', {'id': failure_id, 'type': type(exc).__name__, 'code': code,
-                                                   'frames': frames, 'at': now()})
-            # A POST may have persisted its intent before the caller received its result.
-            state = read_json(directory/'pipeline.json')
-            for p in state.get('parts', []):
-                task = read_json(directory/'parts'/p['slot']/'character.json')
-                if task:
-                    p['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
-            self.publish(owner, job_id, state)
+            state = {}
+            try:
+                import traceback
+                frames = [{'file': Path(f.filename).name, 'line': f.lineno, 'function': f.name}
+                          for f in traceback.extract_tb(exc.__traceback__)]
+                last = frames[-1] if frames else {}
+                LOGGER.error('Avatar production %s failed: job=%s type=%s code=%s at=%s:%s', failure_id, job_id,
+                             type(exc).__name__, code, last.get('file'), last.get('line'))
+                _write_json(directory/'failure.json', {'id': failure_id, 'type': type(exc).__name__, 'code': code,
+                                                       'frames': frames, 'at': now()})
+                # A POST may have persisted its intent before the caller received its result.
+                state = read_json(directory/'pipeline.json')
+                for p in state.get('parts', []):
+                    task = read_json(directory/'parts'/p['slot']/'character.json')
+                    if task:
+                        p['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
+                self.publish(owner, job_id, state)
+            except Exception as detail:
+                # The details are best effort. A job left running here would answer every resume with invalid_state until a restart.
+                LOGGER.error('Avatar production %s: failure details not saved: job=%s type=%s', failure_id, job_id, type(detail).__name__)
             job = read_json(directory/'job.json')
-            message = exc.message if isinstance(exc, PipelineError) else (
-                _provider_http_message(exc.response.status_code, state.get('model_provider', 'meshy'), exc.response.text)
-                if isinstance(exc, httpx.HTTPStatusError) else
-                f'제공자 응답 연결이 끊겼습니다 ({type(exc).__name__}, 진단 {failure_id}). 성공 여부를 확인할 수 없어 자동 재제출하지 않습니다.' if isinstance(exc, httpx.RequestError) else
-                f'생산 중단: {type(exc).__name__} · 진단 {failure_id}. 받은 이미지와 기존 작업은 보존했습니다. 새 유료 요청은 자동으로 보내지 않습니다.')
-            job.update(status='pipeline_paused', error=message, updated_at=now()); _write_json(directory/'job.json', job)
+            job.update(status='pipeline_paused', error=_pause_message(exc, failure_id, state.get('model_provider', 'meshy')),
+                       updated_at=now())
+            if code in CONTINUABLE_STOPS:
+                job['interrupted'] = {'stage': 'models', 'at': now()}
+            _write_json(directory/'job.json', job)
         finally:
             lock.release()

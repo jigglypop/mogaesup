@@ -54,6 +54,8 @@ def reply(value):
 def studio(tmp_path, monkeypatch, storage_configured):
     for name in ('OPENAI_API_KEY', 'MESHY_API_KEY', 'TRIPO_API_KEY'):
         monkeypatch.setenv(name, 'fixture-key')
+    # Status polls retry a lost answer after 1, 2 and 4 seconds; the tests do not wait for them.
+    monkeypatch.setattr('src.services.wardrobe._sleep', lambda seconds: None)
     calls = {'images': 0, 'meshy': [], 'tripo': [], 'polls': 0, 'downloads': 0}
     # Each list is consumed in order; its last reply repeats.
     replies = {'tripo_submit': [ACCEPTED], 'tripo_task': [SUCCESS], 'meshy_submit': [httpx.Response(402, json={})],
@@ -252,7 +254,8 @@ def test_meshy_credit_refusal_resumes_with_meshy_after_a_top_up(studio):
 
 def test_provider_switch_is_refused_once_a_task_was_accepted(studio):
     service, calls, replies, _ = studio
-    replies['tripo_task'] = [httpx.ReadTimeout('poll lost'), SUCCESS]
+    # A status poll is retried 4 times before the job pauses; the fifth answer arrives after the resume.
+    replies['tripo_task'] = [httpx.ReadTimeout('poll lost')] * 4 + [SUCCESS]
     public = run(service, 'tripo')
     job = public['id']
     assert public['status'] == 'paused' and public['can_resume'] is True and public['can_change_provider'] is False
@@ -264,7 +267,7 @@ def test_provider_switch_is_refused_once_a_task_was_accepted(studio):
     assert dispatch and not resumed['model_attempts']
     service.execute(job)
     assert service.get(job)['status'] == 'complete'
-    assert len(calls['tripo']) == 1 and not calls['meshy'] and calls['polls'] == 2
+    assert len(calls['tripo']) == 1 and not calls['meshy'] and calls['polls'] == 5
 
 
 def test_resume_route_takes_an_optional_provider(studio):

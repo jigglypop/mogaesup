@@ -6,7 +6,7 @@ import httpx
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, read_json
 from src.services.object_storage import copy_file
-from src.services.wardrobe import download_glb
+from src.services.wardrobe import download_glb, download_stream
 
 
 def publish_extras(directory, job_directory, slot):
@@ -49,8 +49,7 @@ def publish_extras(directory, job_directory, slot):
                     download_glb(downloader, url, target, preserve_detail=True)
                 else:
                     data = bytearray()
-                    with downloader.stream('GET', url) as response:
-                        response.raise_for_status()
+                    with download_stream(downloader, url) as response:
                         for chunk in response.iter_bytes():
                             data.extend(chunk)
                             if len(data) > 256*1024*1024:

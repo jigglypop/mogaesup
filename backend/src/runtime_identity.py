@@ -11,7 +11,8 @@ def runtime_identity():
     backend = Path(__file__).resolve().parents[1]
     root = backend.parent
     digest = hashlib.sha256()
-    for key in ('ASSET_S3_BUCKET', 'ASSET_S3_REGION', 'ASSET_S3_PREFIX', 'ASSET_AWS_PROFILE', 'AVATAR_IMAGE_TLS_MAX_VERSION'):
+    for key in ('ASSET_S3_BUCKET', 'ASSET_S3_REGION', 'ASSET_S3_PREFIX', 'ASSET_AWS_PROFILE', 'AVATAR_IMAGE_TLS_MAX_VERSION',
+                'CHARACTER_DATABASE_URL'):
         digest.update((key+'='+os.getenv(key, '')+'\0').encode())
     files = [*backend.joinpath('src').rglob('*.py'), *backend.joinpath('assets').rglob('*.json'),
              root/'pyproject.toml', root/'uv.lock']

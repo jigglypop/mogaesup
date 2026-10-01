@@ -1,14 +1,43 @@
 """Saved common body and garment fitting controls on existing factory artifacts."""
+from collections import OrderedDict
 from copy import deepcopy
 import hashlib
 import json
 import re
+from threading import Lock
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.glb import parse_glb
+from src.services.keyed_lock import keyed_lock
 from src.services.studio_library import StudioLibrary
+
+_facts = OrderedDict()
+_facts_lock = Lock()
+
+
+def body_facts(path, sha256):
+    """{'identity': geometry_identity, 'clips': animation names} of a body GLB whose content hashes to `sha256`.
+    Parsing takes seconds and the file is immutable, so it is parsed once per hash: callers can do it before taking
+    the process lock, and the checks under the lock then read it from memory."""
+    with _facts_lock:
+        if sha256 in _facts:
+            _facts.move_to_end(sha256)
+            return _facts[sha256]
+    with keyed_lock(('body-facts', sha256)):
+        with _facts_lock:
+            if sha256 in _facts:
+                return _facts[sha256]
+        content = path.read_bytes()
+        doc, _ = parse_glb(content, strict=True)
+        facts = {'identity': geometry_identity(content),
+                 'clips': [clip.get('name', f'clip_{index}') for index, clip in enumerate(doc.get('animations', []))]}
+        with _facts_lock:
+            _facts[sha256] = facts
+            while len(_facts) > 32:
+                _facts.popitem(last=False)
+        return facts
 
 
 def geometry_identity(content):
@@ -63,22 +92,33 @@ class FittingManagement:
             # Part generation rejects an unprepared GLB body, so it cannot be a shared body either.
             raise PipelineError('body_preparation_required', '바로 등록한 GLB는 피팅·조립부터 실행한 뒤 지정하세요.', 422)
         path = native.artifact(self.owner, job, version, 'body.glb')
-        identity = geometry_identity(path.read_bytes())
+        identity = body_facts(path, record['files']['body.glb'])['identity']
         body = {'job_id': job, 'version': version, 'profile_id': f'body-{identity[:24]}',
                 'geometry_sha256': identity, 'body_sha256': record['files']['body.glb'],
                 'measurements': record.get('result', {}).get('body_profile')}
         return body, source_job
 
     def save_body_default(self, job, version, expected_revision):
-        self.library.require_storage()
-        with _LOCK:
+        def pending():
+            """The stored default while it still has to change; the same default is answered as it is."""
             previous = self.body_default()
             if previous.get('body', {}) and all(previous['body'].get(k) == v
                                                for k, v in (('job_id', job), ('version', version))):
-                return previous
+                return previous, False
             if previous['revision'] != expected_revision:
                 raise PipelineError('revision_conflict', '공통 몸이 변경되었습니다. 다시 불러오세요.', 409)
-            body, _ = self.body_entry(job, version)
+            return previous, True
+        self.library.require_storage()
+        with _LOCK:
+            previous, changes = pending()
+        if not changes:
+            return previous
+        # Reading and parsing the body GLB takes seconds: the lock is only for comparing and writing the default.
+        body, _ = self.body_entry(job, version)
+        with _LOCK:
+            previous, changes = pending()
+            if not changes:
+                return previous
             value = {'body': body, 'updated_at': now()}
             value['revision'] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
             _write_json(self.library.root/'body-profile.json', value)

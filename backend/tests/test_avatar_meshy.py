@@ -1,10 +1,12 @@
 import json
+import threading
 
 import httpx
 import pytest
 
 from services.test_character_preparation import animated_fixture
 from src.services import avatar_meshy as module
+from src.services import wardrobe
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import AvatarFactory, digest
 from src.services.character_pipeline import PipelineError, read_json
@@ -287,3 +289,134 @@ def test_api_saves_defaults_restores_state_and_scopes_artifacts(setup):
         assert api.get(endpoint).status_code == 404
         assert api.get(artifact).status_code == 404
         assert api.get('/api/avatar-factory/motion-defaults').json()['selections'] == {}
+
+
+def lock_is_held_by_caller():
+    """True when the running thread holds the factory's lock: another thread cannot take it."""
+    taken = []
+
+    def try_to_take():
+        taken.append(module._LOCK.acquire(timeout=0.5))
+        if taken[0]:
+            module._LOCK.release()
+    probe = threading.Thread(target=try_to_take)
+    probe.start(), probe.join()
+    return not taken[0]
+
+
+def stopped_rig(service, jid, directory, **receipt):
+    """A rig submission whose answer was lost, with its worker idle."""
+    service.start(1, jid)
+    run = directory/'meshy'
+    _write_json(run/'worker.json', {'status': 'paused', 'error': None})
+    _write_json(run/'character.json', {'stage': 'rigging', 'status': 'submission_uncertain',
+                                      'generation_task_id': 'generation-fixture', 'height_meters': 1.81, **receipt})
+    return run
+
+
+def use_handler(monkeypatch, handler):
+    monkeypatch.setattr(module, 'client', lambda base: httpx.Client(base_url=base, transport=httpx.MockTransport(handler)))
+
+
+def test_recovering_a_lost_rig_asks_meshy_outside_the_lock(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    run = stopped_rig(service, jid, directory)
+    held = []
+
+    def handler(request):
+        held.append((request.method, lock_is_held_by_caller()))
+        return transport(request)
+    use_handler(monkeypatch, handler)
+    service.recover(1, jid, 'recovered-rig')
+    assert held == [('GET', False)] and not calls
+    saved = read_json(run/'character.json')
+    assert saved['task_id'] == 'recovered-rig' and saved['stage'] == 'rigging' and saved['status'] == 'SUCCEEDED'
+    assert (run/'rigging-result.json').is_file()
+
+
+def test_a_rig_recovery_is_dropped_when_the_submission_changed_meanwhile(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    run = stopped_rig(service, jid, directory)
+
+    def handler(request):
+        # The operator retries the rig while Meshy is being asked.
+        _write_json(run/'character.json', {**read_json(run/'character.json'), 'status': 'FAILED'})
+        return transport(request)
+    use_handler(monkeypatch, handler)
+    with pytest.raises(PipelineError) as error:
+        service.recover(1, jid, 'recovered-rig')
+    assert error.value.code == 'invalid_state'
+    assert 'task_id' not in read_json(run/'character.json') and not (run/'rigging-result.json').exists()
+
+
+def stopped_animation(service, jid, directory):
+    service.start(1, jid)
+    run = directory/'meshy'
+    _write_json(run/'worker.json', {'status': 'paused', 'error': None})
+    action = run/'actions/77'
+    action.mkdir(parents=True)
+    _write_json(action/'motion-pack.json', {'action_id': 77, 'rig_task_id': 'fixture-rig', 'max_new_tasks': 1, 'submitted_tasks': 1,
+                                           'tasks': {'clip': {'status': 'submission_uncertain', 'endpoint': '/openapi/v1/animations'}}})
+    return action
+
+
+def test_recovering_a_lost_animation_asks_meshy_outside_the_lock(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    action = stopped_animation(service, jid, directory)
+    held = []
+
+    def handler(request):
+        held.append((request.method, lock_is_held_by_caller()))
+        return transport(request)
+    use_handler(monkeypatch, handler)
+    service.recover(1, jid, 'recovered-clip', 77)
+    assert held == [('GET', False)] and not calls
+    clip = read_json(action/'motion-pack.json')['tasks']['clip']
+    assert clip['task_id'] == 'recovered-clip' and clip['status'] == 'PENDING' and clip['recovery_method'] == 'operator_task_id'
+
+
+def test_an_animation_of_another_rig_is_still_refused_after_the_lock_is_retaken(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    action = stopped_animation(service, jid, directory)
+    use_handler(monkeypatch, lambda request: httpx.Response(200, json={'status': 'SUCCEEDED', 'rig_task_id': 'another-rig'}))
+    with pytest.raises(PipelineError) as error:
+        service.recover(1, jid, 'recovered-clip', 77)
+    assert error.value.code == 'task_mismatch'
+    assert read_json(action/'motion-pack.json')['tasks']['clip']['status'] == 'submission_uncertain'
+
+
+def test_a_busy_provider_while_waiting_for_the_rig_is_asked_again_without_a_new_request(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    waited = []
+    monkeypatch.setattr(wardrobe, '_sleep', waited.append)
+    answers = iter([503, 502])
+
+    def handler(request):
+        if request.method == 'GET' and '/rigging/' in request.url.path and (status := next(answers, 200)) != 200:
+            return httpx.Response(status)
+        return transport(request)
+    use_handler(monkeypatch, handler)
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert service.get(1, jid)['status'] == 'ready' and waited == [1, 2] and len(calls) == 1
+
+
+def test_a_provider_that_stays_down_pauses_the_rig_worker_and_sends_nothing_more(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    monkeypatch.setattr(wardrobe, '_sleep', lambda seconds: None)
+    use_handler(monkeypatch, lambda request: httpx.Response(503) if request.method == 'GET' and '/rigging/' in request.url.path
+                else transport(request))
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    worker = read_json(directory/'meshy/worker.json')
+    assert worker['status'] == 'paused' and worker['error'] == 'Meshy 응답을 가져오지 못했습니다. 저장된 작업에서 조회를 이어갈 수 있습니다.'
+    assert len(calls) == 1
+
+
+def test_a_refused_clip_download_pauses_the_rig_worker_with_the_reason(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+
+    def refused(run, stage):
+        raise PipelineError('download_failed', '3D 파일을 내려받지 못했습니다 (HTTP 403). 다시 시도할 수 있습니다.', 502)
+    monkeypatch.setattr(module.character_jobs, 'download', refused)
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    worker = read_json(directory/'meshy/worker.json')
+    assert worker['status'] == 'paused' and 'HTTP 403' in worker['error']

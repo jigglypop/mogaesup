@@ -5,8 +5,11 @@ import time
 
 import httpx
 
+from src.services.character_jobs import RETRYABLE
 from src.services.character_pipeline import PipelineError, read_json
 
+# An attempt that is over or was never accepted: what blocks polling and resubmission is what an explicit run may retry.
+BLOCKED = RETRYABLE
 _BALANCE = {'value': None, 'at': 0.0}
 _BALANCE_LOCK = Lock()
 # consumed_credits observed for one textured multi-image part and for one rig task.
@@ -43,9 +46,6 @@ def meshy_balance(*, refresh=False):
                 value = None
         _BALANCE.update(value=value if isinstance(value, (int, float)) else None, at=time.monotonic())
         return _BALANCE['value']
-
-
-BLOCKED =('submission_uncertain', 'submission_rejected', 'submission_not_sent', 'FAILED', 'CANCELED')
 
 
 def task_problem(task, stage):

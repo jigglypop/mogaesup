@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -24,6 +26,44 @@ router = APIRouter(prefix='/avatar-factory', tags=['avatar-factory'])
 @lru_cache
 def get_factory():
     return AvatarFactory(data_root())
+
+
+class UploadSlots:
+    """How many large uploads are read and checked at once: each is held whole in memory, up to 256 MiB. The others
+    wait up to `wait` seconds for a free slot and are then refused."""
+
+    def __init__(self, count, wait):
+        self.count, self.wait = count, wait
+        self._loop = self._semaphore = None
+
+    @asynccontextmanager
+    async def slot(self):
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            # A semaphore belongs to one event loop; the server has one, a test client may start several.
+            self._loop, self._semaphore = loop, asyncio.Semaphore(self.count)
+        semaphore = self._semaphore
+        try:
+            await asyncio.wait_for(semaphore.acquire(), self.wait)
+        except asyncio.TimeoutError:
+            raise PipelineError('upload_busy', '다른 GLB 업로드를 처리 중입니다. 잠시 후 다시 올려 주세요.', 503) from None
+        try:
+            yield
+        finally:
+            semaphore.release()
+
+
+GLB_UPLOADS = UploadSlots(2, 30)
+
+
+async def read_glb(request, limit, too_large):
+    """The request body, read into one bytearray that is handed on as it is; `too_large` is raised past `limit`."""
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > limit:
+            raise too_large
+    return content
 
 
 class FitAnchorInput(BaseModel):
@@ -118,12 +158,9 @@ class GlbBodyInput(BaseModel):
 async def upload_body_glb(request: Request, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from starlette.concurrency import run_in_threadpool
     from src.services.avatar_glb_bodies import AvatarGlbBodies, MAX_GLB_BYTES
-    content = bytearray()
-    async for chunk in request.stream():
-        content.extend(chunk)
-        if len(content) > MAX_GLB_BYTES:
-            raise PipelineError('glb_too_large', 'GLB는 256MB 이하로 올려 주세요.', 422)
-    return await run_in_threadpool(AvatarGlbBodies(factory).upload, user.user_id, bytes(content))
+    async with GLB_UPLOADS.slot():
+        content = await read_glb(request, MAX_GLB_BYTES, PipelineError('glb_too_large', 'GLB는 256MB 이하로 올려 주세요.', 422))
+        return await run_in_threadpool(AvatarGlbBodies(factory).upload, user.user_id, content)
 
 
 @router.get('/base-bodies/glb-assets/{asset_id}')

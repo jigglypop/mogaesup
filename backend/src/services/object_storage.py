@@ -3,34 +3,59 @@
 With CHARACTER_DATABASE_URL set, the `.json` records of the same namespaces live in PostgreSQL
 (src.services.record_store) and only binary artifacts stay in S3. The database alone then decides
 whether a record exists: JSON objects that the import left in S3 are never read or listed again.
+`src.records import` leaves a marker object beside them, so that a server which lost the variable
+refuses to start (assert_records_mode) instead of reading the stale JSON.
 """
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 import base64
 import hashlib
 import io
+import itertools
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path as LocalPath, PurePosixPath
 import stat
-from threading import RLock
+from threading import RLock, Thread
 import time
 
 from src.services import record_store
+
+LOGGER = logging.getLogger(__name__)
+
+# What the tables below remember only has to outlive a read or listing that began before the write: a few
+# seconds of S3 timeouts. The tables are kept oldest first; once one holds more than _TABLE_LIMIT entries, those
+# untouched for _MEMORY seconds are dropped.
+_MEMORY = 120
+_TABLE_LIMIT = 4096
 
 _working = ContextVar('asset_workspaces', default=())
 _cache = {}
 _content_cache = {}
 _key_index = {}
-_written_keys = {}
-_generations = {}
-_changes = {}
+_written_keys = {}          # bucket -> {key: monotonic time of the write}
+_generations = OrderedDict()  # (bucket, key) -> (change number, monotonic time); a read stores only if it did not change
+_change_numbers = itertools.count(1)
+_changes = OrderedDict()    # job scope -> monotonic time of this process's last write below it
 _cache_lock = RLock()
 _workspace_lock = RLock()   # guards the bookkeeping below, never held while a worker runs
-_directory_locks = {}       # one active workspace per local directory
+_directory_locks = {}       # one active workspace per local directory: [lock, workspaces holding or waiting for it]
 _materialized = {}          # shared input path -> [workspaces using it, created by a workspace]
+
+
+def _forget_old(table, horizon, limit=0, at=lambda value: value):
+    """Bound a table that is kept oldest first: while it holds more than `limit` entries, drop those untouched for
+    `horizon` seconds (`at` reads an entry's time)."""
+    now = time.monotonic()
+    while len(table) > limit:
+        oldest = next(iter(table))
+        if now - at(table[oldest]) < horizon:
+            return
+        del table[oldest]
 
 
 def _change_scope(path):
@@ -46,7 +71,10 @@ def mark_changed(path):
     scope = _change_scope(path)
     if scope:
         with _cache_lock:
+            _changes.pop(scope, None)
             _changes[scope] = time.monotonic()
+            # changed_since is asked about moments within the last minute.
+            _forget_old(_changes, 600, _TABLE_LIMIT)
 
 
 def changed_since(path, since):
@@ -123,6 +151,54 @@ def record_blob_key(prefix, digest):
     return '/'.join(filter(None, (prefix, 'record-blobs', f'{digest}.json')))
 
 
+def records_marker_key(prefix):
+    """The object `src.records import` leaves to say that the records of a storage prefix live in the record database."""
+    return '/'.join(filter(None, (prefix, '.records-in-database')))
+
+
+def records_marker_present(s3, bucket, prefix):
+    """Whether the marker exists; any failure to find out is raised."""
+    key = records_marker_key(prefix)
+    # A listing says "not there" with a 200. A HEAD of a missing key is a 403 for a role that may only list some
+    # prefixes, which cannot be told from a real denial.
+    found = s3.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+    return any(item['Key'] == key for item in found.get('Contents', []))
+
+
+def assert_records_mode(timeout=5):
+    """Refuse to run on S3 JSON that the record database has replaced.
+
+    The records live in PostgreSQL only while CHARACTER_DATABASE_URL is set, and a replaced instance can lose that
+    variable. The server would then read and write the old S3 JSON, stale since the import, and still look healthy.
+    Raises RuntimeError when the marker of this storage prefix exists but the variable is not set. Whatever keeps the
+    check from answering (no network, no permission, slower than `timeout` seconds) is logged and the start goes on.
+    """
+    bucket = os.getenv('ASSET_S3_BUCKET', '').strip()
+    if not bucket or record_store.configured() or os.getenv('ASSET_STORAGE_WORKER_LOCAL') == '1':
+        return
+    prefix = _prefix()
+    outcome = []
+
+    def probe():
+        try:
+            outcome.append(records_marker_present(_s3(), bucket, prefix))
+        except Exception as exc:
+            outcome.append(exc)
+
+    worker = Thread(target=probe, name='records-marker', daemon=True)
+    worker.start()
+    worker.join(timeout)
+    found = outcome[0] if outcome else TimeoutError(f'no answer within {timeout} s')
+    if found is True:
+        argument = prefix or "''"
+        raise RuntimeError(
+            f'The records of storage prefix {prefix!r} live in PostgreSQL, but CHARACTER_DATABASE_URL is not set. Set it, or '
+            f'copy the records back to S3 with `uv run python -m src.records export --prefix {argument}` and run again.')
+    if isinstance(found, Exception):
+        LOGGER.warning('Could not check whether the records of storage prefix %r live in PostgreSQL: %s: %s',
+                       prefix, type(found).__name__, found)
+
+
 def _s3():
     return _client(os.getenv('ASSET_S3_REGION', os.getenv('AWS_REGION', 'ap-northeast-2')),
                    os.getenv('ASSET_AWS_PROFILE', os.getenv('AWS_PROFILE', '')))
@@ -138,7 +214,11 @@ def _index(bucket, prefix):
     for page in _s3().get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
         result.update(item['Key'] for item in page.get('Contents', []))
     with _cache_lock:
-        result.update(key for key in _written_keys.get(bucket, ()) if key.startswith(prefix))
+        # Writes that landed while the listing ran may be missing from it.
+        written = _written_keys.get(bucket)
+        if written:
+            _forget_old(written, _MEMORY)
+            result.update(key for key in written if key.startswith(prefix))
         if len(_key_index) > 4096:
             _key_index.clear()
         _key_index[bucket, prefix] = time.monotonic(), result
@@ -223,17 +303,19 @@ def _upload(bucket, key, content, mime, *, exclusive=False):
                      ServerSideEncryption='AES256', **({'IfNoneMatch': '*'} if exclusive else {}))
 
 
-def _put_record(record, content, *, exclusive=False):
+def _put_record(record, content, *, exclusive=False, expected_version=None):
     prefix, path = record
     digest = hashlib.sha256(content).hexdigest()
     if len(content) <= record_store.INLINE_LIMIT:
-        record_store.put(prefix, path, content=content, size=len(content), sha256=digest, exclusive=exclusive)
+        record_store.put(prefix, path, content=content, size=len(content), sha256=digest, exclusive=exclusive,
+                         expected_version=expected_version)
         return
     record_store.require(prefix)
     blob = record_blob_key(prefix, digest)
     # Bytes first, row second: a row never points at a blob that is not there yet.
     _upload(os.getenv('ASSET_S3_BUCKET', '').strip(), blob, content, 'application/json')
-    record_store.put(prefix, path, blob_key=blob, size=len(content), sha256=digest, exclusive=exclusive)
+    record_store.put(prefix, path, blob_key=blob, size=len(content), sha256=digest, exclusive=exclusive,
+                     expected_version=expected_version)
 
 
 def _read_record(record):
@@ -259,14 +341,39 @@ def _put_object(path, content, *, exclusive=False):
         return
     bucket, key = _location(path)
     _upload(bucket, key, content, _content_type(path), exclusive=exclusive)
+    _stored(bucket, key)
+
+
+def _changed(bucket, key):
+    """The object changed in S3: what a read or listing that began earlier saw must not be kept (hold _cache_lock)."""
+    _cache.pop((bucket, key), None)
+    _content_cache.pop((bucket, key), None)
+    _generations.pop((bucket, key), None)
+    _generations[bucket, key] = next(_change_numbers), time.monotonic()
+    _forget_old(_generations, _MEMORY, _TABLE_LIMIT, at=lambda value: value[1])
+
+
+def _stored(bucket, key):
+    """The object now exists in S3: caches and the key indexes learn it at once."""
     with _cache_lock:
-        _cache.pop((bucket, key), None)
-        _content_cache.pop((bucket, key), None)
-        _generations[bucket, key] = _generations.get((bucket, key), 0) + 1
-        _written_keys.setdefault(bucket, set()).add(key)
+        _changed(bucket, key)
+        written = _written_keys.setdefault(bucket, OrderedDict())
+        written.pop(key, None)
+        written[key] = time.monotonic()
+        _forget_old(written, _MEMORY)
         for (indexed_bucket, prefix), (_, keys) in _key_index.items():
             if bucket == indexed_bucket and key.startswith(prefix):
                 keys.add(key)
+
+
+def _deleted(bucket, key):
+    """The object is gone from S3."""
+    with _cache_lock:
+        _changed(bucket, key)
+        _written_keys.get(bucket, {}).pop(key, None)
+        for (indexed_bucket, _), (_, keys) in _key_index.items():
+            if indexed_bucket == bucket:
+                keys.discard(key)
 
 
 def write_json(path, value):
@@ -280,6 +387,56 @@ def write_json(path, value):
         mark_changed(path)
     else:
         _put(path, content)
+    return True
+
+
+def is_remote(path):
+    """True when a write to `path` goes to S3 or the record database, where one PUT is atomic and a temporary file that is
+    renamed afterwards only costs a copy and a delete; False for a local file, where temporary file and rename are atomic."""
+    path = StoredPath(path)
+    return bool(_location(path)) and not _is_working(path)
+
+
+def read_json_versioned(path):
+    """(document, version) of a JSON file. In the record database the version is the row's (0 while there is no row), the
+    token write_json_if_version compares; elsewhere (S3 objects, local files) it is None, as there is nothing to compare."""
+    from src.services.asset_editor import _retry_file_io
+    path = StoredPath(path)
+    record = None if _is_working(path) else _record(path)
+    if record is None:
+        try:
+            # Windows can briefly deny a read while another thread replaces the file.
+            return json.loads(_retry_file_io(lambda: path.read_text(encoding='utf-8'))), None
+        except FileNotFoundError:
+            return {}, None
+    found = record_store.fetch(*record)
+    if found is None:
+        # A legacy local file stands in until the record exists.
+        try:
+            return json.loads(_retry_file_io(lambda: path.read_text(encoding='utf-8'))), 0
+        except FileNotFoundError:
+            return {}, 0
+    meta, content = found
+    if content is None:
+        content = _read_record(record)
+    return json.loads(content), meta.version
+
+
+def write_json_if_version(path, value, version):
+    """Replaces a JSON record only while it is still at `version` (0: it must not exist yet), the compare-and-set that the
+    record database offers. False when another writer got there first. Only for a `version` read_json_versioned gave."""
+    path = StoredPath(path)
+    record = _record(path)
+    if record is None or version is None:
+        raise ValueError('Only records in the record database have versions')
+    content = json.dumps(value, ensure_ascii=False, indent=2).encode('utf-8')
+    mark_changed(path)
+    try:
+        _put_record(record, content, exclusive=version == 0, expected_version=None if version == 0 else version)
+    except FileExistsError:
+        return False
+    finally:
+        mark_changed(path)
     return True
 
 
@@ -315,7 +472,7 @@ class StoredPath(type(LocalPath())):
             return LocalPath(self).read_bytes()
         bucket, key = _location(self)
         with _cache_lock:
-            generation = _generations.get((bucket, key), 0)
+            generation = _generations.get((bucket, key))
             cached = _content_cache.get((bucket, key))
             if cached and time.monotonic() - cached[0] < 2:
                 return cached[1]
@@ -332,7 +489,7 @@ class StoredPath(type(LocalPath())):
             with _cache_lock:
                 if len(_content_cache) > 512:
                     _content_cache.clear()
-                if _generations.get((bucket, key), 0) == generation:
+                if _generations.get((bucket, key)) == generation:
                     _content_cache[bucket, key] = time.monotonic(), content
         return content
 
@@ -452,6 +609,10 @@ class StoredPath(type(LocalPath())):
                 pass  # Not in the database: a legacy local file, copied below like any other.
             finally:
                 mark_changed(self); mark_changed(target)
+        # Two plain S3 objects: the copy happens inside S3, so a model of hundreds of MiB never passes through this host.
+        if _server_copy(self, target):
+            self.unlink()
+            return target
         target.write_bytes(self.read_bytes())
         self.unlink()
         return target
@@ -476,14 +637,7 @@ class StoredPath(type(LocalPath())):
         if not missing_ok and not _head(self):
             raise FileNotFoundError(str(self))
         _s3().delete_object(Bucket=location[0], Key=location[1])
-        with _cache_lock:
-            _cache.pop(location, None)
-            _content_cache.pop(location, None)
-            _generations[location] = _generations.get(location, 0) + 1
-            _written_keys.get(location[0], set()).discard(location[1])
-            for (bucket, _), (_, keys) in _key_index.items():
-                if bucket == location[0]:
-                    keys.discard(location[1])
+        _deleted(*location)
 
 
 def _glob_match(relative, pattern):
@@ -553,15 +707,7 @@ def _server_copy(source, target):
         return False
     finally:
         mark_changed(target)
-    bucket, key = destination
-    with _cache_lock:
-        _cache.pop((bucket, key), None)
-        _content_cache.pop((bucket, key), None)
-        _generations[bucket, key] = _generations.get((bucket, key), 0) + 1
-        _written_keys.setdefault(bucket, set()).add(key)
-        for (indexed_bucket, prefix), (_, keys) in _key_index.items():
-            if bucket == indexed_bucket and key.startswith(prefix):
-                keys.add(key)
+    _stored(*destination)
     return True
 
 
@@ -672,75 +818,177 @@ def provider_image(path, content, mime):
             'identity': {'bucket': bucket, 'key': key, 'sha256': digest}}
 
 
+class WorkspaceUploadError(OSError):
+    """Files of a local workspace that did not reach the store. They stay in its scratch directory."""
+
+
+_FINAL_RECORDS = {'job.json', 'record.json', 'current.json', 'delivery.json', 'worker.json'}
+
+
+def _upload_rank(path):
+    return 2 if path.name in _FINAL_RECORDS else 1 if path.suffix == '.json' else 0
+
+
+@contextmanager
+def _directory_lock(local):
+    """One active workspace per local directory; different jobs run their Blender workers in parallel. The lock is
+    forgotten once no workspace holds or awaits it."""
+    with _workspace_lock:
+        entry = _directory_locks.setdefault(local, [RLock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _workspace_lock:
+            entry[1] -= 1
+            if not entry[1]:
+                del _directory_locks[local]
+
+
+def _in_store(path):
+    """True when the record database or S3 holds the file itself, whatever a copy on the local disk says."""
+    record = _record(path)
+    if record:
+        return record_store.head(*record) is not None
+    return _head(path) is not None
+
+
+def _flush_workspace(local, downloaded):
+    """Store what the worker wrote or changed, then clear the scratch. Returns {file: why it is not stored}.
+
+    Artifacts go first, then JSON, then the records that declare the work complete, and those only when everything
+    before them is stored: completion is never published ahead of its evidence. Every upload is attempted. A file the
+    store did not take stays on disk, as it may be the only copy; the rest of the scratch, now in the store, goes."""
+    files = [p for p in local.rglob('*') if p.is_file() and _location(p)]
+    changed, failed = [], {}
+    for path in files:
+        try:
+            with path.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').digest()
+        except OSError as exc:
+            failed[path] = exc
+            continue
+        # Skip bytes that came from the store unchanged.
+        if downloaded.get(path.resolve()) != digest:
+            changed.append(path)
+    for path in sorted(changed, key=_upload_rank):
+        if _upload_rank(path) == 2 and any(_upload_rank(other) < 2 for other in failed):
+            failed[path] = 'withheld until the files before it are stored'
+            continue
+        try:
+            _put(path, path.read_bytes())
+        except Exception as exc:
+            failed[path] = exc
+    for path, reason in failed.items():
+        name = path.relative_to(local).as_posix()
+        if isinstance(reason, Exception):
+            LOGGER.error('Workspace file %s was not stored', name, exc_info=reason)
+        else:
+            LOGGER.warning('Workspace file %s was %s', name, reason)
+    for path in files:
+        if path in failed:
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            LOGGER.warning('Workspace scratch file %s could not be removed: %s', path.name, exc)
+    return failed
+
+
+def _upload_error(local, failed):
+    names = ', '.join(f'{path.relative_to(local).as_posix()} ({reason if isinstance(reason, str) else type(reason).__name__})'
+                      for path, reason in sorted(failed.items()))
+    error = WorkspaceUploadError(f'Workspace files were not stored and stay on disk: {names}')
+    error.__cause__ = next((reason for reason in failed.values() if isinstance(reason, Exception)), None)
+    return error
+
+
+def _release_inputs(held, original):
+    """Explicit Blender inputs may live outside the output directory. Remove a shared input only when the last
+    workspace that materialized it is done."""
+    with _workspace_lock:
+        for path in held:
+            entry = _materialized.get(path)
+            if entry is None:
+                continue
+            entry[0] -= 1
+            if entry[0] <= 0:
+                _materialized.pop(path, None)
+                if entry[1] and path not in original and path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError as exc:
+                        LOGGER.warning('Workspace input %s could not be removed: %s', path.name, exc)
+
+
 @contextmanager
 def local_workspace(directory, *, inputs=()):
-    """Blender scratch only. Upload outputs, then remove newly materialized files."""
+    """Blender scratch only. Upload outputs, then remove newly materialized files.
+
+    Every file the worker wrote is attempted (see _flush_workspace). What the store did not take stays in the scratch
+    directory and the exit raises WorkspaceUploadError naming it, unless the body is already failing: that error
+    stands and the upload failures are only logged. A scratch file the store lacks was left by such a failure, and goes
+    up when the next workspace on the directory ends; a file the store has is replaced by the stored bytes.
+    """
     directory = StoredPath(directory)
     if not _location(directory) or _is_working(directory):
         yield directory
         return
     local = LocalPath(directory).resolve()
-    with _workspace_lock:
-        directory_lock = _directory_locks.setdefault(local, RLock())
-    # One workspace per directory; different jobs run their Blender workers in parallel.
-    with directory_lock:
+    with _directory_lock(local):
         input_paths = [StoredPath(path) for path in inputs]
         input_locals = [LocalPath(path).resolve() for path in input_paths]
+        shared = [p for p in input_locals if not p.is_relative_to(local)]
         local.mkdir(parents=True, exist_ok=True)
         original = {p.resolve() for p in local.rglob('*') if p.is_file()}
-        downloaded = {}
-        for path in directory.rglob('*'):
-            if 'provider-inputs' in path.parts or '-provider.' in path.name or path.name.startswith('guide-'):
-                continue
-            if path.is_file():
-                content = path.read_bytes()
-                target = LocalPath(path)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(content)
-                downloaded[target.resolve()] = hashlib.sha256(content).digest()
-        shared = [p for p in input_locals if not p.is_relative_to(local)]
-        for path, target in zip(input_paths, input_locals):
-            content = path.read_bytes()
-            with _workspace_lock:
-                # Another workspace may be using the same shared input right now.
-                entry = _materialized.get(target) if target in shared else None
-                if target.is_file() and target.read_bytes() != content:
-                    raise ValueError('Existing local input differs from the saved assembly input')
-                if target in shared:
-                    if entry is None:
-                        entry = _materialized[target] = [0, not target.is_file()]
-                    entry[0] += 1
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.is_file():
-                    target.write_bytes(content)
-            if target.is_relative_to(local):
-                downloaded.setdefault(target, hashlib.sha256(content).digest())
-        token = _working.set((*_working.get(), local, *input_locals))
+        downloaded, unstored, held = {}, set(), []
         try:
-            yield directory
-        finally:
-            _working.reset(token)
-            # Keep scratch files if any upload fails; never discard the only copy.
-            files = [p for p in local.rglob('*') if p.is_file() and _location(p)]
-            # Upload what the worker wrote or changed; skip bytes that came from S3 unchanged.
-            changed = [p for p in files if downloaded.get(p.resolve()) != hashlib.sha256(p.read_bytes()).digest()]
-            # Publish completion only after its artifacts and evidence are durable.
-            final_records = {'job.json', 'record.json', 'current.json', 'delivery.json', 'worker.json'}
-            for path in sorted(changed, key=lambda p: 2 if p.name in final_records else 1 if p.suffix == '.json' else 0):
-                _put(path, path.read_bytes())
-            for path in files:
-                resolved = path.resolve()
-                if resolved not in original and resolved.is_relative_to(local):
-                    path.unlink()
-            # Explicit Blender inputs may live outside the output directory. Remove a
-            # shared input only when the last workspace that materialized it is done.
-            with _workspace_lock:
-                for path in shared:
-                    entry = _materialized.get(path)
-                    if entry is None:
+            for path in directory.rglob('*'):
+                if 'provider-inputs' in path.parts or '-provider.' in path.name or path.name.startswith('guide-'):
+                    continue
+                if path.is_file():
+                    target = LocalPath(path)
+                    if target.resolve() in original and not _in_store(path):
+                        # Left by a workspace whose upload failed: its bytes are not "downloaded", so they go up at the end.
+                        unstored.add(target.resolve())
                         continue
-                    entry[0] -= 1
-                    if entry[0] <= 0:
-                        _materialized.pop(path, None)
-                        if entry[1] and path not in original and path.is_file():
-                            path.unlink()
+                    content = path.read_bytes()
+                    if target.resolve() in original and target.read_bytes() != content:
+                        # The control plane rewrites records outside workspaces: the store is the newer one.
+                        LOGGER.warning('Workspace scratch file %s differs from the stored one; the stored bytes are used',
+                                       path.relative_to(directory).as_posix())
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+                    downloaded[target.resolve()] = hashlib.sha256(content).digest()
+            for path, target in zip(input_paths, input_locals):
+                content = path.read_bytes()
+                with _workspace_lock:
+                    # Another workspace may be using the same shared input right now.
+                    entry = _materialized.get(target) if target in shared else None
+                    if target.is_file() and target.read_bytes() != content:
+                        raise ValueError('Existing local input differs from the saved assembly input')
+                    if target in shared:
+                        if entry is None:
+                            entry = _materialized[target] = [0, not target.is_file()]
+                        entry[0] += 1
+                        held.append(target)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.is_file():
+                        target.write_bytes(content)
+                if target.is_relative_to(local) and target not in unstored:
+                    downloaded.setdefault(target, hashlib.sha256(content).digest())
+            token = _working.set((*_working.get(), local, *input_locals))
+            failure = None
+            try:
+                yield directory
+            except BaseException as exc:
+                failure = exc
+                raise
+            finally:
+                _working.reset(token)
+                failed = _flush_workspace(local, downloaded)
+                if failed and failure is None:
+                    raise _upload_error(local, failed)
+        finally:
+            _release_inputs(held, original)

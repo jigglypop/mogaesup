@@ -52,6 +52,32 @@ def _write_json(path: Path, value: dict) -> None:
     mark_changed(path)
 
 
+class WriteConflict(RuntimeError):
+    """A JSON record kept changing under update_json."""
+
+
+def update_json(path: Path, mutate: Callable[[dict], dict | None], *, attempts: int = 8) -> dict:
+    """Read, change and write one JSON record without overwriting another writer's change.
+
+    In the record database the write compares the row's version; a lost race reads the record again and applies `mutate`
+    to it again, so `mutate` must be safe to call more than once. It gets the current document ({} when there is none)
+    and returns the new one, or None to leave the record as it is. Where records are S3 objects or local files (one
+    process) this is a plain read and write. Returns the document that stands afterwards.
+    """
+    from src.services.object_storage import read_json_versioned, write_json_if_version
+    for _ in range(attempts):
+        current, version = read_json_versioned(path)
+        updated = mutate(current)
+        if updated is None:
+            return current
+        if version is None:
+            _write_json(path, updated)
+            return updated
+        if write_json_if_version(path, updated, version):
+            return updated
+    raise WriteConflict(f"{Path(path).name} kept changing; try again")
+
+
 class AssetEditor:
     def __init__(self, root: Path, client: BlenderMCP, policy: DeliveryPolicy | None = None):
         self.root = root.resolve()

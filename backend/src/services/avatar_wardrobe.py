@@ -11,11 +11,12 @@ import hashlib
 import io
 import json
 import re
-from threading import RLock
+from threading import RLock, Semaphore
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
 from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.keyed_lock import keyed_lock
 from src.services.studio_library import StudioLibrary
 
 MAX_BODIES = 8
@@ -30,6 +31,8 @@ _DRESS = re.compile(r'원피스|드레스|\bdress\b')
 _records = OrderedDict()
 _records_lock = RLock()
 _READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='wardrobe-records')
+# Colour and coverage work holds hundreds of MB of arrays: only a few run at once, however many members open the wardrobe.
+_COMPUTING = Semaphore(2)
 
 
 def lineage_body(jobs_by_id, job_id, registered):
@@ -45,6 +48,18 @@ def lineage_body(jobs_by_id, job_id, registered):
             return base
         current = jobs_by_id.get(base[0])
     return None
+
+
+class _JobRecords:
+    """job.json records read when asked, which is all lineage_body needs: a member's request must not list every job."""
+
+    def __init__(self, factory, owner):
+        self.factory, self.owner = factory, owner
+
+    def get(self, job_id):
+        if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
+            return None
+        return read_json(self.factory.directory(self.owner, job_id)/'job.json') or None
 
 
 class Wardrobe:
@@ -77,9 +92,11 @@ class Wardrobe:
         counts = {}
         if jobs is not None:
             jobs_by_id = {job['id']: job for job in jobs}
+            metadata = self.library.metadata()
             for job in jobs:
                 body = lineage_body(jobs_by_id, job['id'], registered)
-                if body:
+                # The count is of jobs parts() lists parts of, not of every job that was ever built on the body.
+                if body and self._offered(job, metadata):
                     counts[body] = counts.get(body, 0) + 1
         return {'revision': value['revision'],
                 'bodies': [{**body, 'is_default': bool(default) and (default['job_id'], default['version']) == (body['job_id'], body['version']),
@@ -89,23 +106,34 @@ class Wardrobe:
 
     def register(self, job, version, expected_revision):
         from src.services.avatar_fitting_management import FittingManagement
+
+        def pending():
+            """The stored list while this body still has to be added to it; None when it is there already."""
+            previous = self._stored()
+            if any(b['job_id'] == job and b['version'] == version for b in previous['bodies']):
+                return None
+            if previous['revision'] != expected_revision:
+                raise PipelineError('revision_conflict', '옷장 몸 목록이 변경되었습니다. 다시 불러오세요.', 409)
+            return previous
         self.library.require_storage()
         with _LOCK:
-            previous = self._stored()
-            if not any(b['job_id'] == job and b['version'] == version for b in previous['bodies']):
-                if previous['revision'] != expected_revision:
-                    raise PipelineError('revision_conflict', '옷장 몸 목록이 변경되었습니다. 다시 불러오세요.', 409)
-                body, source_job = FittingManagement(self.factory, self.owner).body_entry(job, version)
-                if source_job.get('base_job_id'):
-                    raise PipelineError('variant_body', '변형 작업의 몸은 옷장 몸으로 등록할 수 없습니다. 기준 몸을 등록하세요.', 422)
-                others = [b for b in previous['bodies'] if b['job_id'] != job]
-                if len(others) >= MAX_BODIES:
-                    raise PipelineError('too_many_bodies', f'옷장 몸은 {MAX_BODIES}개까지 등록할 수 있습니다.', 422)
-                name = self.library.metadata()['items'].get(job, {}).get('name')
-                entry = {**{key: body[key] for key in _FIELDS},
-                         'name': name or source_job.get('character_name') or job,
-                         'body_type': (source_job.get('base_body') or {}).get('body_type'), 'registered_at': now()}
-                self._write(others + [entry])
+            previous = pending()
+        if previous is not None:
+            # Reading and parsing the body GLB takes seconds: the lock is only for comparing and writing the list.
+            body, source_job = FittingManagement(self.factory, self.owner).body_entry(job, version)
+            if source_job.get('base_job_id'):
+                raise PipelineError('variant_body', '변형 작업의 몸은 옷장 몸으로 등록할 수 없습니다. 기준 몸을 등록하세요.', 422)
+            with _LOCK:
+                previous = pending()
+                if previous is not None:
+                    others = [b for b in previous['bodies'] if b['job_id'] != job]
+                    if len(others) >= MAX_BODIES:
+                        raise PipelineError('too_many_bodies', f'옷장 몸은 {MAX_BODIES}개까지 등록할 수 있습니다.', 422)
+                    name = self.library.metadata()['items'].get(job, {}).get('name')
+                    entry = {**{key: body[key] for key in _FIELDS},
+                             'name': name or source_job.get('character_name') or job,
+                             'body_type': (source_job.get('base_body') or {}).get('body_type'), 'registered_at': now()}
+                    self._write(others + [entry])
         return self.bodies()
 
     def unregister(self, job, expected_revision):
@@ -143,12 +171,42 @@ class Wardrobe:
                     _records.popitem(last=False)
         return record
 
+    def _offered(self, job, metadata, pinned=None):
+        """The version parts() reads a job's parts from, or None when it offers none: a deleted or archived job, one
+        whose slots are all tombstoned, or one with no sealed assembly. A job being re-assembled, or whose
+        re-assembly failed, still offers the sealed version it had (ready_version); the body job is pinned."""
+        if self.library.is_job_deleted(job, metadata):
+            return None
+        slots = job.get('requested_slots')
+        if slots and all(metadata['parts'].get(f"{job['id']}:{slot}", {}).get('deleted') for slot in slots):
+            return None
+        version = pinned or job.get('ready_version') or job.get('assembly_version')
+        return version if version and _ID.fullmatch(version) else None
+
+    def _require_member(self, job_id, slot, message, body=None):
+        """404 unless parts() could list this job's part: the job is a registered body's own or built on one (on
+        `body` when given), is not deleted or archived, and the slot is not tombstoned. It reads the few records
+        that takes, not the listing of every job."""
+        registered = {(b['job_id'], b['version']) for b in self._stored()['bodies']}
+        jobs = _JobRecords(self.factory, self.owner)
+        job = jobs.get(job_id)
+        if body:
+            member = job_id == body['job_id'] or lineage_body(jobs, job_id, registered) == (body['job_id'], body['version'])
+        else:
+            member = any(job_id == registered_job for registered_job, _ in registered) or lineage_body(jobs, job_id, registered) is not None
+        metadata = self.library.metadata()
+        if (not job or not member or self.library.is_job_deleted(job, metadata)
+                or metadata['parts'].get(f'{job_id}:{slot}', {}).get('deleted')):
+            raise PipelineError('not_found', message, 404)
+
     def parts(self, job_id):
         """Every part made on a wardrobe body: the body job's own and its descendants', newest first.
 
         A slot this job did not request came from another job (a variant copies its base's models or
         fitted files) and is listed only under the job that made it; slots a refit froze were
-        requested here and stay listed.
+        requested here and stay listed. A job offers the last sealed version of its assembly, so its
+        parts stay listed while a refit is running or after one failed, and switch when the new
+        version is sealed.
         """
         body = self._body(job_id)
         registered = {(b['job_id'], b['version']) for b in self._stored()['bodies']}
@@ -160,10 +218,8 @@ class Wardrobe:
             own = job['id'] == body['job_id']
             if not own and lineage_body(jobs_by_id, job['id'], registered) != (body['job_id'], body['version']):
                 continue
-            if self.library.is_job_deleted(job, metadata) or metadata['items'].get(job['id'], {}).get('archived'):
-                continue
-            version = body['version'] if own else job.get('assembly_version')
-            if version and _ID.fullmatch(version):
+            version = self._offered(job, metadata, body['version'] if own else None)
+            if version:
                 members.append((job, version))
         # Records are read in parallel on the first listing; later ones come from memory.
         records = list(_READERS.map(lambda member: self._record(member[0]['id'], member[1]), members))
@@ -202,6 +258,7 @@ class Wardrobe:
         from src.services.avatar_worn_images import _rgba, dilate, erode, key_mask
         if not _ID.fullmatch(job_id) or not _ID.fullmatch(version) or not _SLOT.fullmatch(slot):
             raise PipelineError('not_found', '미리보기를 찾을 수 없습니다.', 404)
+        self._require_member(job_id, slot, '미리보기를 찾을 수 없습니다.')
         record = self._record(job_id, version)
         if f'{slot}.glb' not in record.get('files', {}):
             raise PipelineError('not_found', '미리보기를 찾을 수 없습니다.', 404)
@@ -215,22 +272,27 @@ class Wardrobe:
         target = self.library.root/'wardrobe-previews'/f'{sha[:32]}-{key or "plain"}-v2.png'
         if target.is_file():
             return target
-        rgba = _rgba((directory/'output'/name).read_bytes())
-        if key:
-            visible = (rgba[..., 3] > .06) & ~key_mask(rgba, key)
-            # The drawn mannequin outline survives the key colour as thin lines; open them away.
-            visible = dilate(erode(visible, 2), 2)
-            rgba[..., 3] = np.where(visible, rgba[..., 3], 0.)
-        ys, xs = np.nonzero(rgba[..., 3] > .06)
-        image = Image.fromarray((np.clip(rgba, 0, 1)*255).astype(np.uint8), 'RGBA')
-        if len(xs):
-            margin = int(.04*max(np.ptp(xs), np.ptp(ys))) + 4
-            image = image.crop((max(0, xs.min()-margin), max(0, ys.min()-margin),
-                                min(image.width, xs.max()+margin+1), min(image.height, ys.max()+margin+1)))
-        image.thumbnail((384, 384), Image.Resampling.LANCZOS)
-        buffer = io.BytesIO()
-        image.save(buffer, format='PNG')
-        target.write_bytes(buffer.getvalue())
+        # Members open the wardrobe together: the first to ask draws the preview, the others wait and read it.
+        with keyed_lock(('preview', str(target))):
+            if target.is_file():
+                return target
+            with _COMPUTING:
+                rgba = _rgba((directory/'output'/name).read_bytes())
+                if key:
+                    visible = (rgba[..., 3] > .06) & ~key_mask(rgba, key)
+                    # The drawn mannequin outline survives the key colour as thin lines; open them away.
+                    visible = dilate(erode(visible, 2), 2)
+                    rgba[..., 3] = np.where(visible, rgba[..., 3], 0.)
+                ys, xs = np.nonzero(rgba[..., 3] > .06)
+                image = Image.fromarray((np.clip(rgba, 0, 1)*255).astype(np.uint8), 'RGBA')
+                if len(xs):
+                    margin = int(.04*max(np.ptp(xs), np.ptp(ys))) + 4
+                    image = image.crop((max(0, xs.min()-margin), max(0, ys.min()-margin),
+                                        min(image.width, xs.max()+margin+1), min(image.height, ys.max()+margin+1)))
+                image.thumbnail((384, 384), Image.Resampling.LANCZOS)
+                buffer = io.BytesIO()
+                image.save(buffer, format='PNG')
+                target.write_bytes(buffer.getvalue())
         return target
 
     def coverage(self, body_job_id, job_id, slot, version):
@@ -240,19 +302,21 @@ class Wardrobe:
         if slot not in GARMENT_SLOTS or not _ID.fullmatch(job_id) or not _ID.fullmatch(version):
             raise PipelineError('not_found', '가림 영역이 없는 파츠입니다.', 404)
         body = self._body(body_job_id)
-        registered = {(b['job_id'], b['version']) for b in self._stored()['bodies']}
-        jobs_by_id = {job['id']: job for job in self.factory.listing(self.owner)}
-        if job_id != body['job_id'] and lineage_body(jobs_by_id, job_id, registered) != (body['job_id'], body['version']):
-            raise PipelineError('not_found', '이 옷장 몸의 파츠가 아닙니다.', 404)
+        self._require_member(job_id, slot, '이 옷장 몸의 파츠가 아닙니다.', body)
         part_sha = self._record(job_id, version).get('files', {}).get(f'{slot}.glb')
         if not part_sha:
             raise PipelineError('not_found', '파츠 파일을 찾을 수 없습니다.', 404)
         target = self.library.root/'wardrobe-coverage'/f"{body['body_sha256'][:20]}-{part_sha[:20]}-v10.json"
         value = read_json(target)
         if not value:
-            native = AvatarNativeParts(self.factory)
-            value = coverage(self._body_geometry(native, body), native.artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes(), slot)
-            _write_json(target, value)
+            with keyed_lock(('coverage', str(target))):
+                value = read_json(target)
+                if not value:
+                    native = AvatarNativeParts(self.factory)
+                    with _COMPUTING:
+                        value = coverage(self._body_geometry(native, body),
+                                         native.artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes(), slot)
+                    _write_json(target, value)
         if value['covers_bottom'] and self._outerwear(job_id, slot):
             value = {**value, 'covers_bottom': False}
         return value
@@ -269,6 +333,7 @@ class Wardrobe:
         from src.services.avatar_wardrobe_colors import color_regions
         if not _ID.fullmatch(job_id) or not _ID.fullmatch(version) or not _SLOT.fullmatch(slot):
             raise PipelineError('not_found', '색 영역을 찾을 수 없습니다.', 404)
+        self._require_member(job_id, slot, '색 영역을 찾을 수 없습니다.')
         part_sha = self._record(job_id, version).get('files', {}).get(f'{slot}.glb')
         if not part_sha:
             raise PipelineError('not_found', '파츠 파일을 찾을 수 없습니다.', 404)
@@ -277,13 +342,21 @@ class Wardrobe:
         cached = read_json(info)
         if cached:
             return cached, mask
-        result = color_regions(AvatarNativeParts(self.factory).artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes())
-        if not result:
-            raise PipelineError('no_texture', '색을 바꿀 텍스처가 없는 파츠입니다.', 422)
-        png, regions, material = result
-        mask.write_bytes(png)
-        value = {'slot': slot, 'material': material, 'regions': regions}
-        _write_json(info, value)
+        # The json and the mask are fetched together, and the clustering takes seconds and hundreds of MB: one
+        # request computes, the others wait for it and read what it saved.
+        with keyed_lock(('colors', part_sha[:20])):
+            cached = read_json(info)
+            if cached:
+                return cached, mask
+            with _COMPUTING:
+                result = color_regions(AvatarNativeParts(self.factory).artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes())
+            if not result:
+                raise PipelineError('no_texture', '색을 바꿀 텍스처가 없는 파츠입니다.', 422)
+            png, regions, material = result
+            # The mask first: a reader that finds the json must find the mask it describes.
+            mask.write_bytes(png)
+            value = {'slot': slot, 'material': material, 'regions': regions}
+            _write_json(info, value)
         return value, mask
 
     def _body_geometry(self, native, body):
@@ -294,12 +367,18 @@ class Wardrobe:
             if key in _records:
                 _records.move_to_end(key)
                 return _records[key]
-        parsed = skinned_primitives(native.artifact(self.owner, body['job_id'], body['version'], 'body.glb').read_bytes())
-        with _records_lock:
-            _records[key] = parsed
-            while len(_records) > 512:
-                _records.popitem(last=False)
-        return parsed
+        # Several parts of one body are asked for together: parse its GLB once.
+        with keyed_lock(key):
+            with _records_lock:
+                if key in _records:
+                    _records.move_to_end(key)
+                    return _records[key]
+            parsed = skinned_primitives(native.artifact(self.owner, body['job_id'], body['version'], 'body.glb').read_bytes())
+            with _records_lock:
+                _records[key] = parsed
+                while len(_records) > 512:
+                    _records.popitem(last=False)
+            return parsed
 
     # Saved outfits -------------------------------------------------------------
 

@@ -7,6 +7,9 @@ from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
 from src.services.character_pipeline import PipelineError, now, read_json
 
+# Receipts only answer the replay of a lost response; selection.json keeps the newest ones.
+RECEIPTS_KEPT = 64
+
 
 class AvatarNativeOutfits:
     def __init__(self, native):
@@ -69,5 +72,6 @@ class AvatarNativeOutfits:
                       'slots': list(slots), 'hair_color': payload.get('hair_color'), 'saved_at': saved_at}
             state['current'] = result
             state['receipts'][key_hash] = {'fingerprint': fingerprint, 'result': result}
+            state['receipts'] = dict(list(state['receipts'].items())[-RECEIPTS_KEPT:])
             _write_json(path, state)
             return result

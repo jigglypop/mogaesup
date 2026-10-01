@@ -23,11 +23,12 @@ from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_openai_images import DEFAULT_BASE, DEFAULT_MODEL, generate_standard_part_image
-from src.services.character_parts import blender_executable
+from src.services.character_parts import blender_executable, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.model_providers import client as provider_client
-from src.services.object_storage import StoredPath as Path, local_workspace, provider_image
+from src.services.object_storage import StoredPath as Path, local_workspace, provider_image, publish_checkpoint
 from src.services.process_identity import identity, state as process_state
+from src.services.worker_env import worker_environment
 
 LOGGER = logging.getLogger(__name__)
 VIEWS = ('front', 'left', 'back', 'right')
@@ -513,17 +514,28 @@ class AnimalProduction:
         # A new nonce per attempt: files left by an earlier attempt can never pass as this one's result.
         attempt = uuid.uuid4().hex
         with local_workspace(run, inputs=[model]), _QUEUE:
+            runner = read_json(run/'runner.json')
+            if runner and process_state(runner.get('process')) != 'exited':
+                raise StepPaused('이전 Blender 작업이 아직 실행 중입니다. 끝난 뒤 같은 요청으로 이어서 실행할 수 있습니다.')
             _write_json(run/'input.json', {'source': str(model), 'output': str(run), 'attempt': attempt})
             with (run/'blender.log').open('wb') as log:
+                process = subprocess.Popen([blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
+                                            '--python-exit-code', '1', '--threads', '2', '--python',
+                                            str(Path(__file__).with_name('animal_standard_rig_blender.py')), '--',
+                                            str(run/'input.json')],
+                                           stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
+                                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                 try:
-                    code = subprocess.run([blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
-                                           '--python-exit-code', '1', '--threads', '2', '--python',
-                                           str(Path(__file__).with_name('animal_standard_rig_blender.py')), '--',
-                                           str(run/'input.json')],
-                                          stdout=log, stderr=subprocess.STDOUT, timeout=RIG_TIMEOUT,
-                                          env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
-                                          creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0).returncode
+                    _write_json(run/'runner.json', {'process': identity(process.pid)})
+                    publish_checkpoint(run/'runner.json')
+                except BaseException:
+                    # No receipt, no supervision: a Blender nobody can find must not keep running.
+                    stop_process(process)
+                    raise
+                try:
+                    code = process.wait(timeout=RIG_TIMEOUT)
                 except subprocess.TimeoutExpired:
+                    stop_process(process)
                     raise StepPaused('표준 골격 작업 시간이 초과됐습니다. 같은 요청으로 이어서 실행할 수 있습니다.') from None
         if code:
             raise PipelineError('rig_failed', self._rig_error(read_json(run/'error.json'), attempt), 422)

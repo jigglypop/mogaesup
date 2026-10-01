@@ -4,6 +4,7 @@ import base64
 from datetime import datetime, timezone
 import io
 import json
+import logging
 from src.services.object_storage import StoredPath as Path, copy_file
 import re
 
@@ -12,8 +13,9 @@ from PIL import Image
 
 from src.services.asset_editor import _write_json
 from src.services.runtime_activity import paid_request
-from src.services.wardrobe import _digest, download_glb
+from src.services.wardrobe import _digest, download_glb, get_with_retry
 
+LOGGER = logging.getLogger(__name__)
 # Meshy did not accept these requests, so a new submission cannot duplicate a task.
 NOT_ACCEPTED = {400, 401, 402, 403, 404, 422, 429, 503}
 RETRYABLE = ('FAILED', 'CANCELED', 'submission_rejected', 'submission_not_sent', 'submission_uncertain')
@@ -27,11 +29,15 @@ def state(directory: Path) -> dict:
 
 def save_submission_response(directory, name, response):
     # Keep provider evidence in private asset storage, never in a public error.
-    _write_json(directory / f'{name}-submission-response.json', {
-        'http_status': response.status_code,
-        'request_id': response.headers.get('x-request-id'),
-        'body': response.text,
-    })
+    try:
+        _write_json(directory / f'{name}-submission-response.json', {
+            'http_status': response.status_code,
+            'request_id': response.headers.get('x-request-id'),
+            'body': response.text,
+        })
+    except Exception as exc:
+        # The task ID recorded right after is the evidence that matters; a storage hiccup here must not lose it.
+        LOGGER.warning('Submission receipt not saved: run=%s stage=%s type=%s', directory.name, name, type(exc).__name__)
 
 
 def archive_attempt(directory: Path, reason: str) -> int:
@@ -275,27 +281,31 @@ def refresh(directory: Path, client: httpx.Client, task_id: str | None = None) -
     task_id = task_id or value.get("task_id", "")
     if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id):
         raise ValueError("Recover the existing Meshy task ID first")
+    return record_task(directory, value, task_id, fetch_task(client, value, task_id))
+
+
+def fetch_task(client: httpx.Client, value: dict, task_id: str) -> dict:
+    """The provider's current record of a task, as the receipt `value` names its endpoint. Only reads: nothing is saved."""
+    if value.get('provider') == 'tripo':
+        return get_with_retry(client, f'/task/{task_id}').json()
+    endpoint = value.get('generation_endpoint', '/openapi/v1/image-to-3d') if value["stage"] == "generation" else "/openapi/v1/rigging"
+    if endpoint not in ('/openapi/v1/image-to-3d', '/openapi/v1/multi-image-to-3d', '/openapi/v1/rigging'):
+        raise ValueError('Unknown provider endpoint')
+    return get_with_retry(client, f"{endpoint}/{task_id}").json()
+
+
+def record_task(directory: Path, value: dict, task_id: str, task: dict) -> dict:
+    """Save a fetched task and the status it gives the receipt `value`; callers may hold a lock, fetch_task needs none."""
+    _write_json(directory / (value["stage"] + "-result.json"), task)
     if value.get('provider') == 'tripo':
         from src.services.model_providers import tripo_state
-        response = client.get(f'/task/{task_id}')
-        response.raise_for_status()
-        task = response.json()
-        _write_json(directory / (value["stage"] + "-result.json"), task)
         status, progress = tripo_state(task)
         value.update(task_id=task_id, status=status, progress=progress)
         error = (task.get('data') or {}).get('error_code')
         if status in ('FAILED', 'CANCELED') and isinstance(error, int) and not isinstance(error, bool):
             value['provider_error'] = error
-        _write_json(directory / "character.json", value)
-        return value
-    endpoint = value.get('generation_endpoint', '/openapi/v1/image-to-3d') if value["stage"] == "generation" else "/openapi/v1/rigging"
-    if endpoint not in ('/openapi/v1/image-to-3d', '/openapi/v1/multi-image-to-3d', '/openapi/v1/rigging'):
-        raise ValueError('Unknown provider endpoint')
-    response = client.get(f"{endpoint}/{task_id}")
-    response.raise_for_status()
-    task = response.json()
-    _write_json(directory / (value["stage"] + "-result.json"), task)
-    value.update(task_id=task_id, status=task["status"], progress=task.get("progress"))
+    else:
+        value.update(task_id=task_id, status=task["status"], progress=task.get("progress"))
     _write_json(directory / "character.json", value)
     return value
 

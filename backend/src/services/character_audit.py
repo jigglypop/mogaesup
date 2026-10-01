@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from src.paths import data_root, load_environment
 from src.services.object_storage import StoredPath as Path
 import subprocess
 
@@ -156,9 +157,11 @@ def audit(manifest: Path, root: Path) -> list[dict]:
 
 
 def main() -> None:
+    # Before the default below: ASSET_DATA_ROOT may be set only in .env, and the working directory must not decide.
+    load_environment()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
-    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--root", type=Path, default=Path(data_root()))
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     results = audit(args.manifest, args.root.resolve())

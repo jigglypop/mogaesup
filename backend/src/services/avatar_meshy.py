@@ -18,7 +18,7 @@ from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, read_json, now
 from src.services.glb import parse_glb
 from src.services.process_identity import identity, state as process_state
-from src.services.wardrobe import download_glb
+from src.services.wardrobe import download_glb, get_with_retry
 from src.services.meshy_status import BLOCKED, saved_problem
 
 SLOTS = ('idle', 'walk', 'run', 'jump', 'fall', 'sit', 'armsUp', 'crouch')
@@ -435,6 +435,8 @@ class AvatarMeshy:
                 error = problem['message']
             elif isinstance(exc, httpx.HTTPError):
                 error = 'Meshy 응답을 가져오지 못했습니다. 저장된 작업에서 조회를 이어갈 수 있습니다.'
+            elif isinstance(exc, PipelineError) and exc.code == 'download_failed':
+                error = exc.message
             else:
                 error = '리깅·동작 파일 처리 중 중단됐습니다. 저장된 결과에서 이어갈 수 있습니다.'
             # Record the failure location without logging signed URLs or response bodies.
@@ -455,30 +457,38 @@ class AvatarMeshy:
         finally:
             lock.release()
 
+    def _uncertain(self, owner, job_id, run, action_id):
+        """(contract, motion pack or None, receipt) of the submission an operator may recover; raises when there is none now."""
+        if self.get(owner, job_id)['busy']:
+            raise PipelineError('worker_busy', '기존 Meshy 조회가 실행 중입니다.')
+        contract = self._verify_source(run)
+        pack = character_motion.read_pack(run/'actions'/str(action_id)) if action_id is not None else None
+        task = pack.get('tasks', {}).get('clip', {}) if pack is not None else character_jobs.state(run)
+        if task.get('status') != 'submission_uncertain':
+            raise PipelineError('invalid_state', '응답이 불확실한 기존 작업만 복구할 수 있습니다.')
+        return contract, pack, task
+
     def recover(self, owner, job_id, task_id, action_id=None):
         import re
         if not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', task_id):
             raise PipelineError('invalid_task', '올바른 Meshy 작업 ID가 필요합니다.', 422)
         run = self.directory(owner, job_id)
         with _LOCK:
-            if self.get(owner, job_id)['busy']:
-                raise PipelineError('worker_busy', '기존 Meshy 조회가 실행 중입니다.')
-            contract = self._verify_source(run)
-            path = run/'actions'/str(action_id)
-            pack = character_motion.read_pack(path) if action_id is not None else None
-            task = pack.get('tasks', {}).get('clip', {}) if pack is not None else character_jobs.state(run)
-            if task.get('status') != 'submission_uncertain':
-                raise PipelineError('invalid_state', '응답이 불확실한 기존 작업만 복구할 수 있습니다.')
-            with client(contract['meshy_base']) as api:
-                if action_id is None:
-                    character_jobs.refresh(run, api, task_id)
-                else:
-                    response = api.get('/openapi/v1/animations/'+task_id); response.raise_for_status()
-                    value = response.json()
-                    if value.get('rig_task_id', pack['rig_task_id']) != pack['rig_task_id'] or value.get('action_id', action_id) != action_id:
-                        raise PipelineError('task_mismatch', '다른 리깅·동작의 작업 ID입니다.', 422)
-                    task.update(task_id=task_id, status='PENDING', recovery_method='operator_task_id')
-                    _write_json(path/'motion-pack.json', pack)
+            contract, _, task = self._uncertain(owner, job_id, run, action_id)
+        # Meshy is asked without the lock, so a slow answer stalls no other job action; what it said is applied
+        # below only if the submission is still waiting for this recovery.
+        with client(contract['meshy_base']) as api:
+            fetched = (character_jobs.fetch_task(api, task, task_id) if action_id is None
+                       else get_with_retry(api, '/openapi/v1/animations/'+task_id).json())
+        with _LOCK:
+            _, pack, task = self._uncertain(owner, job_id, run, action_id)
+            if action_id is None:
+                character_jobs.record_task(run, task, task_id, fetched)
+            else:
+                if fetched.get('rig_task_id', pack['rig_task_id']) != pack['rig_task_id'] or fetched.get('action_id', action_id) != action_id:
+                    raise PipelineError('task_mismatch', '다른 리깅·동작의 작업 ID입니다.', 422)
+                task.update(task_id=task_id, status='PENDING', recovery_method='operator_task_id')
+                _write_json(run/'actions'/str(action_id)/'motion-pack.json', pack)
         return self.get(owner, job_id)
 
     def provider_artifact(self, owner, job_id, name):

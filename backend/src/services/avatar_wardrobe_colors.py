@@ -49,6 +49,16 @@ def _kmeans(points, count, seed=7, iterations=25):
     return centers
 
 
+def _nearest(points, centers, chunk=200_000):
+    """Index of the nearest centre of each point. The distances are broadcast one chunk of points at a time: for every
+    texel of a 2048 px texture at once they take about a gigabyte, and each point's result does not depend on the rest."""
+    labels = np.empty(len(points), np.int64)
+    for start in range(0, len(points), chunk):
+        block = points[start:start + chunk]
+        labels[start:start + chunk] = np.argmin(((block[:, None] - centers[None])**2).sum(axis=2), axis=1)
+    return labels
+
+
 def _texture(doc, binary):
     """(material index, texCoord set, RGB image) of the first material with a base colour texture."""
     for index, material in enumerate(doc.get('materials', [])):
@@ -100,11 +110,11 @@ def color_regions(part_content):
         if all(np.linalg.norm(center - other) >= MERGE_DISTANCE for other in merged):
             merged.append(center)
     centers = np.array(merged)
-    labels = np.argmin(((features[:, None] - centers[None])**2).sum(axis=2), axis=1)
+    labels = _nearest(features, centers)
     shares = np.bincount(labels, minlength=len(centers))/len(labels)
     keep = np.flatnonzero(shares >= MIN_SHARE)
     centers = centers[keep] if len(keep) else centers[:1]
-    labels = np.argmin(((features[:, None] - centers[None])**2).sum(axis=2), axis=1)
+    labels = _nearest(features, centers)
     order = np.argsort(-np.bincount(labels, minlength=len(centers)))
     remap = np.empty_like(order); remap[order] = np.arange(len(order))
     labels = remap[labels]

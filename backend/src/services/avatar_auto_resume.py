@@ -1,7 +1,8 @@
 """Continue factory stages stopped by a server restart.
 
-Only stages whose executor process has exited are resumed, through the same
-admitted stage runs as the UI. An unconfirmed paid request is never replayed:
+Off unless ASSET_AUTO_RESUME opts in, and started only by the scan at startup: a resume can send paid requests that
+were never attempted, so no GET may trigger one. Only stages whose executor process has exited are resumed, through
+the same admitted stage runs as the UI. An unconfirmed paid request is never replayed:
 its stage stays unavailable until the operator retries that request.
 """
 from datetime import datetime, timedelta, timezone
@@ -24,8 +25,12 @@ _scheduled = set()
 _guard = threading.Lock()
 
 
+def opted_in():
+    return os.getenv('ASSET_AUTO_RESUME', '').strip().lower() in ('1', 'true', 'yes')
+
+
 def enabled():
-    return os.getenv('ASSET_AUTO_RESUME', '1') != '0' and 'pytest' not in sys.modules
+    return opted_in() and 'pytest' not in sys.modules
 
 
 def _recent(value):

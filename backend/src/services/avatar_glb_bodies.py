@@ -13,6 +13,7 @@ from src.services.avatar_production_spec import production_spec, seal_production
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.glb import parse_glb
+from src.services.keyed_lock import keyed_lock
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity
 
@@ -26,6 +27,7 @@ class AvatarGlbBodies(AvatarBaseBodies):
         return self.factory.root/str(int(owner))/'base-body-glb-assets'/asset_id
 
     def upload(self, owner, content):
+        """content: the request body, bytes or a bytearray (it is only read, never copied here)."""
         if not os.getenv('ASSET_S3_BUCKET', '').strip():
             raise PipelineError('storage_unavailable', 'GLB 원본을 저장할 S3 설정이 필요합니다.', 422)
         if not content or len(content) > MAX_GLB_BYTES:
@@ -47,13 +49,19 @@ class AvatarGlbBodies(AvatarBaseBodies):
         receipt = {'id': asset_id, 'bytes': len(content), 'rigged': rigged, 'bone_count': len(joints),
                    'triangles': quality['metrics'].get('triangles', 0),
                    'animations': [clip.get('name', f'clip_{index}') for index, clip in enumerate(doc.get('animations', []))]}
-        with _LOCK:
+        # The id is the hash of the bytes, so only uploads of this very file need to wait for each other: a PUT of
+        # up to 256 MB must not hold up every other request.
+        with keyed_lock(('glb-asset', int(owner), asset_id)):
             root.mkdir(parents=True, exist_ok=True)
             path = root/'source.glb'
             if not path.is_file():
                 path.write_bytes(content)
             if digest(path) != asset_id:
                 raise PipelineError('source_changed', '저장한 GLB 원본을 확인할 수 없습니다.', 409)
+            # Registered assets copy this receipt as their info and are compared with it later: the first one stands.
+            stored = read_json(root/'receipt.json')
+            if stored.get('id') == asset_id:
+                return stored
             _write_json(root/'receipt.json', receipt)
         return receipt
 
@@ -72,12 +80,20 @@ class AvatarGlbBodies(AvatarBaseBodies):
         job_id = hashlib.sha256(f'{owner}:base-body-glb:{key}'.encode()).hexdigest()[:24]
         directory = self.factory.directory(owner, job_id)
         receipt_path = self._receipt(owner, key)
-        with _LOCK:
+
+        def accepted():
             existing = read_json(directory/'job.json')
-            if existing:
-                if _submitted_fingerprint(existing['input']) != submitted:
-                    raise PipelineError('idempotency_conflict', '같은 요청에 다른 GLB 또는 설정이 있습니다.', 409)
-                return self.factory.get(owner, job_id), False
+            if not existing:
+                return None
+            if _submitted_fingerprint(existing['input']) != submitted:
+                raise PipelineError('idempotency_conflict', '같은 요청에 다른 GLB 또는 설정이 있습니다.', 409)
+            return self.factory.get(owner, job_id), False
+        # One request per key at a time. Reading, parsing and copying a GLB of up to 256 MB happens under this lock
+        # alone; the process lock only covers the small records that accept the job.
+        with keyed_lock(('glb-body', job_id)):
+            replay = accepted()
+            if replay:
+                return replay
             rerig = canonical['import_mode'] == 'rig'
             if not os.getenv('ASSET_S3_BUCKET', '').strip() or (rerig and not blender_executable()):
                 raise PipelineError('import_unavailable', 'GLB 저장소 또는 리깅 처리 설정을 확인하세요.', 422)
@@ -103,80 +119,85 @@ class AvatarGlbBodies(AvatarBaseBodies):
                     meshy = AvatarMeshy(self.factory)
                     motion_actions = meshy.default_actions(owner)
                     meshy.validate_actions(owner, motion_actions)
-            marker = f'__base_glb_request_{job_id}__'
-            receipt = receipt or {'request_key': key, 'job_id': job_id, 'input': canonical,
-                                  'fingerprint': fingerprint, 'submitted_fingerprint': submitted,
-                                  'motion_actions': motion_actions, 'status': 'staging', 'created_at': now()}
-            receipt_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_json(receipt_path, receipt)
-            character, receipt = self._character(owner, receipt, marker, canonical['name'], None)
-            output = directory/'output'
-            output.mkdir(parents=True, exist_ok=True)
-            copy_file(source, output/'generated-body.glb')
-            copy_file(source, directory/'source.glb')
-            run = directory/'parts/body'
-            run.mkdir(parents=True, exist_ok=True)
-            copy_file(source, run/'generated.glb')
-            _write_json(run/'generation-artifacts.json', {'generated': {'sha256': asset['id'], 'origin': 'uploaded_glb'}})
-            spec = production_spec('source', ('front', 'side', 'back'))
-            spec['base_body'].update(source_preserved=True, preserve_face_texture=not canonical['prepare_expression_uv'])
-            spec = seal_production_spec(spec)
-            body = {'slot': 'body', 'views': {}, 'image': {'status': 'not_required'},
-                    'model': {'status': 'ready', 'task_id': None, 'origin': 'uploaded_glb'},
-                    'description': '', 'design_prompt': '', 'provenance': {'origin': 'uploaded_glb', 'review': 'pending'}}
-            setup = {'body_type': canonical['body_type'], 'model_asset': asset['id'], 'import_mode': canonical['import_mode']}
-            pipeline = {'parts': [body], 'production_spec': spec, 'production_mode': 'character_parts',
-                        'base_body_setup': setup, 'uploaded_glb': asset, 'fit_profiles': {}, 'blueprint': None,
-                        'reference_preparation': None, 'default_expressions': None, 'hair_length': 'source',
-                        'design_prompts': {}, 'image_provider': 'uploaded', 'image_model': None,
-                        'image_base': None, 'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'),
-                        'motion_actions': motion_actions, 'motion_actions_explicit': False, 'rig_with_meshy': rerig, 'meshy_preserve_geometry': True,
-                        'reuse': {'source_job_id': None, 'slots': []}, 'body_purpose': 'wardrobe_base', 'body_height_m': 1.2}
-            _write_json(directory/'pipeline.json', pipeline)
+            # The job keeps its own copies of the source (server-side copies inside S3, one request each).
+            rig_version = hashlib.sha256(('uploaded-glb:'+asset['id']).encode()).hexdigest()[:24]
+            native_version = hashlib.sha256(('registered-glb:'+asset['id']).encode()).hexdigest()[:24]
+            rig, native = directory/'meshy/versions'/rig_version, directory/'native-parts'/native_version
+            copies = [directory/'output'/'generated-body.glb', directory/'source.glb', directory/'parts/body'/'generated.glb']
             if not rerig and asset['rigged']:
-                version = hashlib.sha256(('uploaded-glb:'+asset['id']).encode()).hexdigest()[:24]
-                destination = directory/'meshy/versions'/version
-                destination.mkdir(parents=True, exist_ok=True)
-                copy_file(source, destination/'model.glb')
-                delivery = {'version': version, 'origin': 'uploaded_glb', 'source_sha256': asset['id'],
-                            'files': {'model.glb': asset['id']}, 'bone_count': asset['bone_count'],
-                            'clips': [{'slot': name, 'source': 'uploaded_glb', 'action_id': None} for name in asset['animations']]}
-                _write_json(destination/'receipt.json', delivery)
-                _write_json(directory/'meshy/delivery.json', delivery)
-                _write_json(directory/'meshy/worker.json', {'status': 'complete', 'origin': 'uploaded_glb', 'error': None})
+                copies.append(rig/'model.glb')
             if not rerig:
-                version = hashlib.sha256(('registered-glb:'+asset['id']).encode()).hexdigest()[:24]
-                native = directory/'native-parts'/version
-                native.mkdir(parents=True, exist_ok=True)
-                for name in ('body.glb', 'model.glb'):
-                    copy_file(source, native/name)
-                _write_json(native/'record.json', {'status': 'review_required', 'created_at': now(), 'error': None,
-                    'files': {'body.glb': asset['id'], 'model.glb': asset['id']},
-                    'result': {'origin': 'uploaded_glb', 'rigged': asset['rigged'], 'bone_count': asset['bone_count'],
-                               'clips': asset['animations'], 'parts': [], 'expression_uv': {'available': False}}})
-                _write_json(directory/'native-parts/current.json', {'version': version})
-            _write_json(output/'progress.json', {'stage': 'rig' if rerig else 'complete',
-                                                'message': '새 리깅 대기' if rerig else 'GLB 등록 완료'})
-            job = {'id': job_id, 'job_kind': 'base_body', 'fingerprint': fingerprint,
-                   'executor': self.factory.instance, 'executor_process': identity(),
-                   'character_id': character['id'], 'character_name': character['name'],
-                   'input_kind': 'glb', 'input': canonical, 'base_body': setup,
-                   'source_sha256': asset['id'], 'production_mode': 'character_parts', 'auto_assemble': rerig,
-                   'profile': {**IMAGE_PROFILE, 'name': canonical['name'], 'height': 1.2, 'body_origin': 'uploaded_glb',
-                               'rig': 'meshy-native' if rerig else 'uploaded' if asset['rigged'] else 'none',
-                               'bones': asset['bone_count'] or None},
-                   'status': 'review_required', 'created_at': now(), 'updated_at': now(), 'error': None,
-                   'review': {'decision': 'pending'}, 'image_provider': 'uploaded', 'image_model': None,
-                   'limits': {'image_tasks': 0, 'reference_tasks': 0, 'expression_tasks': 0, 'meshy_tasks': 0,
-                              'meshy_rig_tasks': int(rerig), 'meshy_animation_tasks': len(set(motion_actions.values()))},
-                   'parts': [{'slot': 'body', 'image_status': 'not_required', 'model_status': 'ready', 'task_id': None,
-                              'progress': 100, 'views': {}, 'provenance': deepcopy(body['provenance'])}],
-                   'production_spec': {name: deepcopy(spec[name]) for name in ('id', 'revision', 'sha256', 'body_height_m', 'axes', 'canvas', 'generated_views', 'release_requires')},
-                   'files': {'generated-body.glb': asset['id']}}
-            _write_json(directory/'job.json', job)
-            _write_json(receipt_path, {**receipt, 'status': 'accepted', 'accepted_at': now()})
-            self.factory._listings.pop(int(owner), None)
-            return self.factory.get(owner, job_id), True
+                copies += [native/'body.glb', native/'model.glb']
+            for target in copies:
+                copy_file(source, target)
+            with _LOCK:
+                replay = accepted()
+                if replay:
+                    return replay
+                marker = f'__base_glb_request_{job_id}__'
+                receipt = receipt or {'request_key': key, 'job_id': job_id, 'input': canonical,
+                                      'fingerprint': fingerprint, 'submitted_fingerprint': submitted,
+                                      'motion_actions': motion_actions, 'status': 'staging', 'created_at': now()}
+                receipt_path.parent.mkdir(parents=True, exist_ok=True)
+                _write_json(receipt_path, receipt)
+                character, receipt = self._character(owner, receipt, marker, canonical['name'], None)
+                output = directory/'output'
+                output.mkdir(parents=True, exist_ok=True)
+                run = directory/'parts/body'
+                run.mkdir(parents=True, exist_ok=True)
+                _write_json(run/'generation-artifacts.json', {'generated': {'sha256': asset['id'], 'origin': 'uploaded_glb'}})
+                spec = production_spec('source', ('front', 'side', 'back'))
+                spec['base_body'].update(source_preserved=True, preserve_face_texture=not canonical['prepare_expression_uv'])
+                spec = seal_production_spec(spec)
+                body = {'slot': 'body', 'views': {}, 'image': {'status': 'not_required'},
+                        'model': {'status': 'ready', 'task_id': None, 'origin': 'uploaded_glb'},
+                        'description': '', 'design_prompt': '', 'provenance': {'origin': 'uploaded_glb', 'review': 'pending'}}
+                setup = {'body_type': canonical['body_type'], 'model_asset': asset['id'], 'import_mode': canonical['import_mode']}
+                pipeline = {'parts': [body], 'production_spec': spec, 'production_mode': 'character_parts',
+                            'base_body_setup': setup, 'uploaded_glb': asset, 'fit_profiles': {}, 'blueprint': None,
+                            'reference_preparation': None, 'default_expressions': None, 'hair_length': 'source',
+                            'design_prompts': {}, 'image_provider': 'uploaded', 'image_model': None,
+                            'image_base': None, 'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'),
+                            'motion_actions': motion_actions, 'motion_actions_explicit': False, 'rig_with_meshy': rerig, 'meshy_preserve_geometry': True,
+                            'reuse': {'source_job_id': None, 'slots': []}, 'body_purpose': 'wardrobe_base', 'body_height_m': 1.2}
+                _write_json(directory/'pipeline.json', pipeline)
+                if not rerig and asset['rigged']:
+                    rig.mkdir(parents=True, exist_ok=True)
+                    delivery = {'version': rig_version, 'origin': 'uploaded_glb', 'source_sha256': asset['id'],
+                                'files': {'model.glb': asset['id']}, 'bone_count': asset['bone_count'],
+                                'clips': [{'slot': name, 'source': 'uploaded_glb', 'action_id': None} for name in asset['animations']]}
+                    _write_json(rig/'receipt.json', delivery)
+                    _write_json(directory/'meshy/delivery.json', delivery)
+                    _write_json(directory/'meshy/worker.json', {'status': 'complete', 'origin': 'uploaded_glb', 'error': None})
+                if not rerig:
+                    native.mkdir(parents=True, exist_ok=True)
+                    _write_json(native/'record.json', {'status': 'review_required', 'created_at': now(), 'error': None,
+                        'files': {'body.glb': asset['id'], 'model.glb': asset['id']},
+                        'result': {'origin': 'uploaded_glb', 'rigged': asset['rigged'], 'bone_count': asset['bone_count'],
+                                   'clips': asset['animations'], 'parts': [], 'expression_uv': {'available': False}}})
+                    _write_json(directory/'native-parts/current.json', {'version': native_version})
+                _write_json(output/'progress.json', {'stage': 'rig' if rerig else 'complete',
+                                                    'message': '새 리깅 대기' if rerig else 'GLB 등록 완료'})
+                job = {'id': job_id, 'job_kind': 'base_body', 'fingerprint': fingerprint,
+                       'executor': self.factory.instance, 'executor_process': identity(),
+                       'character_id': character['id'], 'character_name': character['name'],
+                       'input_kind': 'glb', 'input': canonical, 'base_body': setup,
+                       'source_sha256': asset['id'], 'production_mode': 'character_parts', 'auto_assemble': rerig,
+                       'profile': {**IMAGE_PROFILE, 'name': canonical['name'], 'height': 1.2, 'body_origin': 'uploaded_glb',
+                                   'rig': 'meshy-native' if rerig else 'uploaded' if asset['rigged'] else 'none',
+                                   'bones': asset['bone_count'] or None},
+                       'status': 'review_required', 'created_at': now(), 'updated_at': now(), 'error': None,
+                       'review': {'decision': 'pending'}, 'image_provider': 'uploaded', 'image_model': None,
+                       'limits': {'image_tasks': 0, 'reference_tasks': 0, 'expression_tasks': 0, 'meshy_tasks': 0,
+                                  'meshy_rig_tasks': int(rerig), 'meshy_animation_tasks': len(set(motion_actions.values()))},
+                       'parts': [{'slot': 'body', 'image_status': 'not_required', 'model_status': 'ready', 'task_id': None,
+                                  'progress': 100, 'views': {}, 'provenance': deepcopy(body['provenance'])}],
+                       'production_spec': {name: deepcopy(spec[name]) for name in ('id', 'revision', 'sha256', 'body_height_m', 'axes', 'canvas', 'generated_views', 'release_requires')},
+                       'files': {'generated-body.glb': asset['id']}}
+                _write_json(directory/'job.json', job)
+                _write_json(receipt_path, {**receipt, 'status': 'accepted', 'accepted_at': now()})
+                self.factory._listings.pop(int(owner), None)
+                return self.factory.get(owner, job_id), True
 
 
 def publish_import_views(factory, owner, job_id, version):

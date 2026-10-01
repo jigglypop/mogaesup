@@ -7,17 +7,21 @@
 
 `import` copies the JSON records of the S3-mapped namespaces from ASSET_S3_BUCKET into the database. It
 never writes to or deletes from those S3 keys, skips rows that are already identical, and never
-overwrites a row the server changed since it was imported; such differences are reported. Run it while
-the character server is stopped, then start the server with CHARACTER_DATABASE_URL set.
+overwrites a row the server changed since it was imported, not even one it changed while the import
+ran; such differences are reported. Run it while the character server is stopped, then start the server
+with CHARACTER_DATABASE_URL set. Last, it leaves the marker object <prefix>/.records-in-database: a server
+without CHARACTER_DATABASE_URL refuses to start while the marker exists, instead of reading the S3 JSON
+that is stale from now on.
 
 `export` is the rollback aid: it writes the records created or changed in the database since their import
-back to their S3 keys, so the server can run without CHARACTER_DATABASE_URL again.
+back to their S3 keys and removes the marker, so the server can run without CHARACTER_DATABASE_URL again.
 """
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
+import json
 import os
 import sys
 
@@ -140,7 +144,7 @@ def _get(s3, bucket, key):
 
 
 def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=False):
-    from src.services.object_storage import _upload, record_blob_key
+    from src.services.object_storage import _upload, record_blob_key, records_marker_key
     from src.services.record_store import INLINE_LIMIT
     schema = _schema()
     report = Report(prefix)
@@ -163,11 +167,13 @@ def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=Fal
             continue
         wanted.append(item)
 
+    # The snapshot above is old by the time a batch is written, and the server may be running: the row itself says
+    # whether it is still as imported. A row the server created or changed since is left alone, and writes nothing.
     write = (f'INSERT INTO {schema}.records AS r (prefix, path, content, blob_key, size, sha256, imported_sha256, '
              f'created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) '
              f'ON CONFLICT (prefix, path) DO UPDATE SET content = excluded.content, blob_key = excluded.blob_key, '
              f'size = excluded.size, sha256 = excluded.sha256, imported_sha256 = excluded.imported_sha256, '
-             f'version = r.version + 1, updated_at = excluded.updated_at')
+             f'version = r.version + 1, updated_at = excluded.updated_at WHERE r.sha256 = r.imported_sha256')
     with ThreadPoolExecutor(max_workers=16) as pool:
         for start in range(0, len(wanted), 256):
             batch = wanted[start:start + 256]
@@ -185,21 +191,23 @@ def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=Fal
                     if current and current[0] != current[1]:
                         report.conflicts.append(item.path)
                         continue
+                    inline, blob = content, None
+                    if len(content) > INLINE_LIMIT:
+                        inline, blob = None, record_blob_key(prefix, digest)
+                        if not dry_run:
+                            _upload(bucket, blob, content, 'application/json')
+                    if not dry_run and not conn.execute(write, (prefix, item.path, inline, blob, len(content), digest,
+                                                                digest, item.modified, item.modified)).rowcount:
+                        report.conflicts.append(item.path)
+                        continue
                     if current:
                         report.updated += 1
                         report.updated_bytes += len(content)
                     else:
                         report.inserted += 1
                         report.inserted_bytes += len(content)
-                    inline, blob = content, None
-                    if len(content) > INLINE_LIMIT:
+                    if blob:
                         report.blobs += 1
-                        inline, blob = None, record_blob_key(prefix, digest)
-                        if not dry_run:
-                            _upload(bucket, blob, content, 'application/json')
-                    if not dry_run:
-                        conn.execute(write, (prefix, item.path, inline, blob, len(content), digest, digest,
-                                             item.modified, item.modified))
     for path, (sha, imported) in rows.items():
         if path in objects:
             continue
@@ -214,12 +222,16 @@ def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=Fal
         conn.execute(f'INSERT INTO {schema}.namespaces (prefix, imported_at, source) VALUES (%s, %s, %s) '
                      'ON CONFLICT (prefix) DO UPDATE SET imported_at = excluded.imported_at, source = excluded.source',
                      (prefix, started, 's3'))
+        # Last, so that a marker means the import finished: servers without CHARACTER_DATABASE_URL then refuse to start.
+        _upload(bucket, records_marker_key(prefix), json.dumps(
+            {'records': 'postgresql', 'schema': schema, 'imported_at': started.isoformat()}, indent=2).encode(),
+            'application/json')
     return report
 
 
 def export_prefix(conn, s3, bucket, prefix, *, dry_run=False, out=print):
     """Write the records created or changed in the database since their import back to their S3 keys."""
-    from src.services.object_storage import _content_type, _upload
+    from src.services.object_storage import _content_type, _upload, records_marker_key
     schema = _schema()
     rows = conn.execute(f'SELECT path, content, blob_key, sha256 FROM {schema}.records '
                         f'WHERE prefix = %s AND imported_sha256 IS DISTINCT FROM sha256 ORDER BY path', (prefix,)).fetchall()
@@ -244,10 +256,15 @@ def export_prefix(conn, s3, bucket, prefix, *, dry_run=False, out=print):
         out(f'  JSON in S3 without a record (left in place): {len(stale)}')
         for path in stale[:20]:
             out(f'    {path}')
+    if not dry_run:
+        # S3 holds the records again, so a server without CHARACTER_DATABASE_URL may start.
+        s3.delete_object(Bucket=bucket, Key=records_marker_key(prefix))
     return written
 
 
-def status(conn, prefixes, out=print):
+def status(conn, prefixes, out=print, s3=None, bucket=None):
+    """Per prefix: the import state and record counts, and with `s3` the marker that keeps servers without the database away."""
+    from src.services.object_storage import records_marker_key, records_marker_present
     schema = _schema()
     namespaces = {prefix: at for prefix, at in conn.execute(f'SELECT prefix, imported_at FROM {schema}.namespaces')}
     rows = conn.execute(
@@ -260,6 +277,12 @@ def status(conn, prefixes, out=print):
         state = f'imported {imported.isoformat()}' if imported else 'not imported (the server refuses its records)'
         out(f'{prefix or "(no prefix)"}: {state}; {count} records ({size} bytes, {blobs} in S3 blobs), '
             f'{changed} created or changed since their import')
+        if s3 is not None:
+            try:
+                marker = 'present' if records_marker_present(s3, bucket, prefix) else 'absent'
+            except Exception as exc:
+                marker = f'unknown ({type(exc).__name__})'
+            out(f'  S3 marker {records_marker_key(prefix)}: {marker}')
 
 
 def main(argv=None):
@@ -291,7 +314,15 @@ def main(argv=None):
         if args.command == 'migrate':
             migrate(conn)
         elif args.command == 'status':
-            status(conn, prefixes)
+            # Without a bucket there is no marker to look for.
+            bucket, s3 = os.getenv('ASSET_S3_BUCKET', '').strip(), None
+            if bucket:
+                from src.services.object_storage import _s3
+                try:
+                    s3 = _s3()
+                except Exception as exc:
+                    print(f'S3 marker not checked: {type(exc).__name__}')
+            status(conn, prefixes, s3=s3, bucket=bucket)
         else:
             from src.services.object_storage import _s3
             s3, bucket = _s3(), _bucket()

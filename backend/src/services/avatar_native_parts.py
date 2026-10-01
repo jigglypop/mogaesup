@@ -13,12 +13,25 @@ from src.services.avatar_meshy import AvatarMeshy
 from src.services.character_parts import blender_executable, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity, state as process_state
-from src.services.object_storage import copy_file, local_workspace, publish_checkpoint
+from src.services.object_storage import WorkspaceUploadError, copy_file, local_workspace, publish_checkpoint
 from src.services.avatar_production_spec import production_spec, refresh_fitting_spec
 from src.services.avatar_equipment import is_native_part_set
+from src.services.worker_env import worker_environment
 
 SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 RECIPE = 'native-parts-v14-matte-limb-fit'
+
+
+def workspace_inputs(payload):
+    """Files the Blender worker reads from outside its output directory: the body, every part model, the drawings it
+    fits to or registers against, and a refit's saved fallback. A worn hat has drawings but no image_paths."""
+    parts = payload['parts']
+    paths = [payload['source'], *(part['path'] for part in parts if part.get('path')),
+             *(part['path'] for part in payload.get('prefit_parts', [])),
+             *(path for part in parts for path in part.get('image_paths', {}).values()),
+             *(path for part in parts for path in part.get('drawings', {}).values()),
+             *(part['fallback_path'] for part in parts if part.get('fallback_path'))]
+    return list(dict.fromkeys(paths))
 
 
 def placed_head_bounds(bounds, spec, slot):
@@ -247,7 +260,7 @@ class AvatarNativeParts:
             if refit_matches:
                 pipeline['local_refit']['target_version'] = version
                 _write_json(pipeline_path, pipeline)
-            _write_json(root/'current.json', {'version': version})
+            self._move_current(root, version)
         runner = read_json(root/version/'runner.json')
         if runner.get('process') and process_state(runner['process']) != 'exited':
             return self.get(owner, job, version), False
@@ -258,6 +271,14 @@ class AvatarNativeParts:
             _write_json(root/version/'record.json', record)
             return self.get(owner, job, version), True
         raise PipelineError('assembly_missing', '저장된 피팅 요청을 확인할 수 없습니다.', 409)
+
+    def _move_current(self, root, version):
+        """Point current.json at a version that is not sealed yet. The sealed version it leaves is kept in
+        ready.json, which the wardrobe goes on offering until this one is sealed."""
+        previous = read_json(root/'current.json').get('version')
+        if previous and previous != version and read_json(root/previous/'record.json').get('status') == 'review_required':
+            _write_json(root/'ready.json', {'version': previous})
+        _write_json(root/'current.json', {'version': version})
 
     def execute_refit(self, owner, job):
         self.execute(owner, job)
@@ -464,7 +485,7 @@ class AvatarNativeParts:
             else:
                 pipeline['native_assembly_version'] = version
             _write_json(job_directory/'pipeline.json', pipeline)
-            _write_json(root/'current.json', {'version': version})
+            self._move_current(root, version)
         return self.get(owner, job), True
 
     def execute(self, owner, job):
@@ -474,12 +495,20 @@ class AvatarNativeParts:
         payload = read_json(directory/'input.json')
         # Reassembly needs the saved input GLBs and this output version, not every
         # prior render, provider response, and .blend in the job's history.
-        inputs = [payload['source'], *(part['path'] for part in payload['parts'] if part.get('path')),
-                  *(part['path'] for part in payload.get('prefit_parts', [])),
-                  *(path for part in payload['parts'] for path in part.get('image_paths', {}).values()),
-                  *(part['fallback_path'] for part in payload['parts'] if part.get('fallback_path'))]
-        with local_workspace(directory, inputs=inputs):
-            return self._execute_local(owner, job, version)
+        try:
+            with local_workspace(directory, inputs=workspace_inputs(payload)):
+                return self._execute_local(owner, job, version)
+        except WorkspaceUploadError:
+            self._fail_unstored(directory)
+
+    def _fail_unstored(self, directory):
+        """The workspace ended with files the store did not take, so the record there is still the running checkpoint
+        with this process's id, which would stand until a restart. It fails instead, and a resume assembles again."""
+        record = read_json(directory/'record.json')
+        if record.get('status') in ('accepted', 'running'):
+            record.update(status='failed', error='조립 산출물 저장 실패', error_type='WorkspaceUploadError',
+                          error_stage='upload', files={}, result={})
+            _write_json(directory/'record.json', record)
 
     def _execute_local(self, owner, job, version):
         root = self.root(owner, job)
@@ -496,7 +525,7 @@ class AvatarNativeParts:
                 command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
                            '--python-exit-code', '1', '--python', str(Path(__file__).with_name('avatar_native_parts_blender.py')),
                            '--', str(directory/'input.json')]
-                environment = {**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'}
+                environment = worker_environment()
                 if read_json(self.factory.directory(owner, job)/'pipeline.json').get('uploaded_glb'):
                     # An imported base body publishes its front/side/back renders as the frozen
                     # body views later part requests draw on (publish_import_views).
@@ -504,8 +533,13 @@ class AvatarNativeParts:
                 with (directory/'blender.log').open('wb') as log:
                     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment,
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                    _write_json(directory/'runner.json', {'process': identity(process.pid)})
-                    publish_checkpoint(directory/'runner.json')
+                    try:
+                        _write_json(directory/'runner.json', {'process': identity(process.pid)})
+                        publish_checkpoint(directory/'runner.json')
+                    except BaseException:
+                        # Without its receipt nothing watches this worker, and the next resume would start a second one.
+                        stop_process(process)
+                        raise
                     try:
                         code = process.wait(timeout=1800)
                     except subprocess.TimeoutExpired:

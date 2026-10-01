@@ -1,5 +1,28 @@
 """Progress is derived from durable receipts, never elapsed-time animation."""
+import re
+
 from src.services.character_pipeline import read_json
+
+
+def ready_version(root, pointer, record):
+    """The assembly version the wardrobe offers: the current one once it is sealed. While a newer one is accepted,
+    running or failed, the sealed version it replaced (native-parts/ready.json, written when the current pointer
+    moves off a sealed version), or for a job from before that file the newest sealed version, or None.
+    root: the job's native-parts directory; pointer: its current.json; record: the current version's record.json."""
+    if not pointer:
+        return None
+    if record.get('status') == 'review_required':
+        return pointer['version']
+    saved = read_json(root/'ready.json').get('version')
+    if (isinstance(saved, str) and re.fullmatch(r'[a-f0-9]{24}', saved)
+            and read_json(root/saved/'record.json').get('status') == 'review_required'):
+        return saved
+    sealed = []
+    for path in root.glob('*/record.json'):
+        candidate = read_json(path)
+        if candidate.get('status') == 'review_required':
+            sealed.append((candidate.get('created_at') or '', path.parent.name))
+    return max(sealed)[1] if sealed else None
 
 
 def production_progress(directory, job):
@@ -25,6 +48,8 @@ def production_progress(directory, job):
     native_ready = native.get('status') == 'review_required'
     incomplete = {p['slot']: p for p in native.get('result', {}).get('incomplete_parts', [])}
     job['assembly_version'] = pointer.get('version') if native_ready else None
+    # The wardrobe keeps offering the last sealed version while a newer one is being assembled or has failed.
+    job['ready_version'] = ready_version(directory/'native-parts', pointer, native)
     # An uploaded GLB registered without assembly cannot be the body of new parts.
     job['assembly_origin'] = native.get('result', {}).get('origin') if native_ready else None
     # Reuse the saved assembly receipt already read for progress. Gallery cards

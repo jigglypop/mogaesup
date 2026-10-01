@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 from src.services.character_parts import blender_executable
+from src.services.worker_env import worker_environment
 
 
 def measure(directory, *, images=None, canvas=None):
@@ -26,7 +27,8 @@ def measure(directory, *, images=None, canvas=None):
         (scratch/'input.json').write_text(json.dumps(payload), encoding='utf8')
         process = subprocess.run([executable, '--background', '--factory-startup', '--disable-autoexec',
                                   '--python-exit-code', '1', '--python', str(worker), '--', str(scratch/'input.json')],
-                                 capture_output=True, text=True, encoding='utf8', errors='replace')
+                                 capture_output=True, text=True, encoding='utf8', errors='replace',
+                                 env=worker_environment())
         if process.returncode:
             raise SystemExit(f'Quality worker failed for {directory}:\n{process.stdout[-2000:]}{process.stderr[-2000:]}')
         return json.loads((scratch/'metrics.json').read_text(encoding='utf8'))

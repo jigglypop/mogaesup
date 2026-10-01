@@ -9,7 +9,7 @@ import time
 from threading import RLock, Semaphore
 import uuid
 
-from src.services.asset_editor import _write_json
+from src.services.asset_editor import _write_json, update_json
 from src.services.character_pipeline import CharacterPipeline, PipelineError, read_json, now
 from src.services.process_identity import state as process_state
 from src.services.object_storage import changed_since, child_names, sha256
@@ -50,18 +50,27 @@ class AvatarFactory:
             raise PipelineError('not_found', '생산 작업을 찾을 수 없습니다.', 404)
         return self.root/str(int(owner))/job_id
 
+    def _executor_gone(self, job):
+        """Queued or running for another server instance whose process has exited."""
+        return (job.get('status') in ('pipeline_queued', 'pipeline_running') and job.get('executor') != self.instance
+                and process_state(job.get('executor_process')) == 'exited')
+
     def get(self, owner, job_id):
         directory = self.directory(owner, job_id); job = read_json(directory/'job.json')
         if not job:
             raise PipelineError('not_found', '생산 작업을 찾을 수 없습니다.', 404)
-        if job['status'] in ('pipeline_queued', 'pipeline_running') and job['executor'] != self.instance and process_state(job.get('executor_process')) == 'exited':
-            # The last recorded activity dates the stop; detecting it late must not make it look recent.
-            job.update(status='pipeline_paused', error='서버 재시작으로 중단됨',
-                       interrupted={'stage': job.get('resume_stage', 'images'),
-                                    'at': job.get('updated_at') or job.get('created_at'), 'detected_at': now()})
-            _write_json(directory/'job.json', job)
-            from src.services.avatar_auto_resume import schedule
-            schedule(self, owner, job_id)
+        if self._executor_gone(job):
+            def pause(current):
+                # A resume or a finished run may have landed since the read; only a record still stopped is paused.
+                if not self._executor_gone(current):
+                    return None
+                # The last recorded activity dates the stop; detecting it late must not make it look recent.
+                return {**current, 'status': 'pipeline_paused', 'error': '서버 재시작으로 중단됨',
+                        'interrupted': {'stage': current.get('resume_stage', 'images'),
+                                        'at': current.get('updated_at') or current.get('created_at'), 'detected_at': now()}}
+            # A GET only records the stop. Continuing the job sends paid requests, so only the operator or the startup scan does.
+            with _LOCK:
+                job = update_json(directory/'job.json', pause)
         if job.get('input_kind') == 'image' and job['status'] in ('pipeline_paused', 'failed', 'recovery_required'):
             job = self._settle_interrupted(owner, job_id) or job
         if job['status'] in ('accepted', 'running') and job.get('executor') != self.instance:
@@ -224,20 +233,3 @@ class AvatarFactory:
         if not path.is_file() or digest(path) != job['files'][filename]:
             raise PipelineError('artifact_changed', '검증한 생산 파일과 현재 파일이 다릅니다.')
         return path
-
-
-def factory_records(root, owner):
-    if owner is None:
-        return []
-    records = []
-    for path in (Path(root)/'avatar-factory'/str(int(owner))).glob('*/job.json'):
-        job = read_json(path)
-        if job.get('status') in ('review_required', 'approved'):
-            # Native Meshy characters keep their arbitrary rig outside the 23-bone wardrobe catalog.
-            if 'catalog.json' not in job.get('files', {}):
-                continue
-            catalog = path.parent/'output/catalog.json'
-            if digest(catalog) != job.get('files', {}).get('catalog.json'):
-                raise PipelineError('catalog_changed', '생산 카탈로그가 변경되었습니다.')
-            records.extend(read_json(catalog).get('assets', []))
-    return records

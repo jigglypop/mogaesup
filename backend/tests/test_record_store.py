@@ -21,6 +21,7 @@ from botocore.exceptions import ClientError
 
 from src import records
 from src.services import object_storage, record_store
+from src.services.asset_editor import WriteConflict, update_json
 from src.services.object_storage import StoredPath, child_names, local_workspace, sha256
 
 ADMIN = 'host=127.0.0.1 port=55432 user=postgres password=postgres-dev connect_timeout=3'
@@ -340,6 +341,49 @@ def test_exclusive_create_admits_one_writer(cloud):
     assert json.loads(path.read_bytes()) == {'n': winners[0]}
 
 
+def test_update_json_never_loses_a_concurrent_change(cloud):
+    root, _ = cloud
+    path = StoredPath(root) / 'avatar-factory' / '1' / ('l' * 24) / 'job.json'
+
+    def bump(_):
+        update_json(path, lambda document: {**document, 'n': document.get('n', 0) + 1}, attempts=200)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(bump, range(48)))
+    assert json.loads(path.read_bytes()) == {'n': 48}
+
+
+def test_a_stale_version_is_refused(cloud):
+    root, _ = cloud
+    path = StoredPath(root) / 'avatar-factory' / '1' / ('m' * 24) / 'job.json'
+    assert object_storage.read_json_versioned(path) == ({}, 0)
+    assert object_storage.write_json_if_version(path, {'v': 1}, 0)
+    assert not object_storage.write_json_if_version(path, {'v': 'again'}, 0)
+    document, version = object_storage.read_json_versioned(path)
+    assert document == {'v': 1} and version >= 1
+    assert object_storage.write_json_if_version(path, {'v': 2}, version)
+    assert not object_storage.write_json_if_version(path, {'v': 3}, version)
+    assert json.loads(path.read_bytes()) == {'v': 2}
+
+
+def test_update_json_gives_up_when_the_record_keeps_changing(cloud, monkeypatch):
+    root, _ = cloud
+    path = StoredPath(root) / 'avatar-factory' / '1' / ('n' * 24) / 'job.json'
+    object_storage.write_json(path, {'n': 0})
+    monkeypatch.setattr(object_storage, 'write_json_if_version', lambda *args: False)
+    with pytest.raises(WriteConflict):
+        update_json(path, lambda document: {**document, 'n': 1}, attempts=3)
+    assert json.loads(path.read_bytes()) == {'n': 0}
+
+
+def test_update_json_on_plain_files(disk):
+    path = StoredPath(disk) / 'avatar-factory' / '1' / ('o' * 24) / 'job.json'
+    path.parent.mkdir(parents=True)
+    assert update_json(path, lambda document: {**document, 'a': 1}) == {'a': 1}
+    assert update_json(path, lambda document: None) == {'a': 1}
+    assert json.loads(path.read_text(encoding='utf-8')) == {'a': 1}
+
+
 def test_another_process_write_shows_within_the_cache_horizon(cloud, database, monkeypatch):
     root, prefix = cloud
     path = StoredPath(root) / 'avatar-factory' / '1' / ('g' * 24) / 'job.json'
@@ -457,7 +501,9 @@ def test_import_copies_records_and_skips_what_is_already_there(importing, s3, da
     s3.calls.clear()
     again = records.import_prefix(conn, s3, 'fixture-bucket', prefix)
     assert (again.inserted, again.updated, again.unchanged_since_import) == (0, 0, 5)
-    assert 'get_object' not in s3.calls and 'put_object' not in s3.calls and 'delete_object' not in s3.calls
+    assert 'get_object' not in s3.calls and 'delete_object' not in s3.calls
+    # Its one write is the marker beside the records (see test_import_leaves_a_marker_...), never a record or artifact.
+    assert s3.calls['put_object'] == 1 and f'{prefix}/.records-in-database' in s3.objects
     assert {key: value for key, value in s3.objects.items() if key.startswith(prefix + '/avatar')} == before
 
 
@@ -521,3 +567,193 @@ def test_command_line(database, s3, monkeypatch, capsys):
     records.main(['status', '--prefix', prefix])
     out = capsys.readouterr().out
     assert 'insert 5' in out and f'{prefix}: imported' in out and '5 records' in out
+
+
+def test_remote_paths_are_told_from_local_files(cloud):
+    root, _ = cloud
+    assert object_storage.is_remote(StoredPath(root) / 'avatar-factory' / '1' / ('p' * 24) / 'output' / 'a.glb')
+    assert not object_storage.is_remote(StoredPath(root) / 'elsewhere' / 'a.glb')
+    job = StoredPath(root) / 'avatar-factory' / '1' / ('q' * 24)
+    with local_workspace(job):
+        assert not object_storage.is_remote(job / 'output' / 'a.glb')
+
+
+# --- import while the server runs, and the marker that keeps a server without the database away -----
+
+def test_import_never_overwrites_a_row_the_server_changes_while_it_runs(importing, s3, database, monkeypatch):
+    conn, prefix = importing
+    records.import_prefix(conn, s3, 'fixture-bucket', prefix)
+    job = f'avatar-factory/1/{"a" * 24}'
+    later = datetime.now(timezone.utc) + timedelta(minutes=5)
+    s3.put(f'{prefix}/{job}/job.json', b'{"status": "s3"}', modified=later)
+    s3.put(f'{prefix}/{job}/parts/top/character.json', b'{"task_id": "t2"}', modified=later)
+    s3.put(f'{prefix}/{job}/parts/new.json', b'{"new": "s3"}', modified=later)
+    get = s3.get_object
+    server = psycopg.connect(database, autocommit=True)
+
+    def get_while_the_server_writes(**kwargs):
+        # The import has its snapshot of the rows by now; the server writes before the batch does.
+        if kwargs['Key'].endswith(f'{job}/job.json'):
+            server.execute("UPDATE character_records.records SET content = %s, sha256 = %s, version = version + 1 "
+                           "WHERE prefix = %s AND path = %s", (b'{"status": "server"}',
+                           hashlib.sha256(b'{"status": "server"}').hexdigest(), prefix, f'{job}/job.json'))
+        if kwargs['Key'].endswith('/parts/new.json'):
+            server.execute('INSERT INTO character_records.records (prefix, path, content, size, sha256) VALUES (%s, %s, %s, %s, %s)',
+                           (prefix, f'{job}/parts/new.json', b'{"new": "server"}', 16,
+                            hashlib.sha256(b'{"new": "server"}').hexdigest()))
+        return get(**kwargs)
+
+    monkeypatch.setattr(s3, 'get_object', get_while_the_server_writes)
+    with server:
+        report = records.import_prefix(conn, s3, 'fixture-bucket', prefix)
+    # Both rows are reported, and neither was written; the record nobody touched was updated as usual.
+    assert sorted(report.conflicts) == [f'{job}/job.json', f'{job}/parts/new.json']
+    assert (report.updated, report.inserted) == (1, 0)
+    rows = _rows(database, prefix)
+    assert rows[f'{job}/job.json'][0] == b'{"status": "server"}'
+    assert rows[f'{job}/parts/new.json'][0] == b'{"new": "server"}'
+    assert rows[f'{job}/parts/top/character.json'][0] == b'{"task_id": "t2"}'
+    assert conn.execute('SELECT version FROM character_records.records WHERE prefix = %s AND path = %s',
+                        (prefix, f'{job}/job.json')).fetchone()[0] == 2
+    assert 'changed in both S3 and the database' in '\n'.join(report.lines(False))
+
+
+def _marker(prefix):
+    return f'{prefix}/.records-in-database'
+
+
+def test_import_leaves_a_marker_and_export_removes_it(importing, s3, database):
+    conn, prefix = importing
+    records.import_prefix(conn, s3, 'fixture-bucket', prefix, dry_run=True)
+    assert _marker(prefix) not in s3.objects
+    records.import_prefix(conn, s3, 'fixture-bucket', prefix)
+    marker = json.loads(s3.objects[_marker(prefix)]['Body'])
+    assert marker['records'] == 'postgresql' and marker['schema'] == 'character_records' and marker['imported_at']
+    # It lies outside the mapped namespaces: no import takes it for a record, no listing of a job shows it.
+    assert records.import_prefix(conn, s3, 'fixture-bucket', prefix).listed == 5
+    lines = []
+    records.status(conn, [prefix], out=lines.append, s3=s3, bucket='fixture-bucket')
+    assert lines[-1] == f'  S3 marker {_marker(prefix)}: present'
+    # A dry run and a failed export leave it; only an export that put the records back removes it.
+    records.export_prefix(conn, s3, 'fixture-bucket', prefix, dry_run=True, out=lambda line: None)
+    assert _marker(prefix) in s3.objects
+    job = f'avatar-factory/1/{"a" * 24}'
+    conn.execute('UPDATE character_records.records SET sha256 = %s WHERE prefix = %s AND path = %s',
+                 ('0' * 64, prefix, f'{job}/job.json'))
+    with pytest.raises(SystemExit, match='do not match'):
+        records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lambda line: None)
+    assert _marker(prefix) in s3.objects
+    conn.execute('UPDATE character_records.records SET sha256 = %s WHERE prefix = %s AND path = %s',
+                 (hashlib.sha256(b'{"status": "approved"}').hexdigest(), prefix, f'{job}/job.json'))
+    records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lambda line: None)
+    assert _marker(prefix) not in s3.objects
+    lines.clear()
+    records.status(conn, [prefix], out=lines.append, s3=s3, bucket='fixture-bucket')
+    assert lines[-1] == f'  S3 marker {_marker(prefix)}: absent'
+
+
+def test_status_without_s3_names_no_marker_and_an_s3_error_does_not_fail_it(importing, s3, monkeypatch):
+    conn, prefix = importing
+    lines = []
+    records.status(conn, [prefix], out=lines.append)
+    assert len(lines) == 1 and 'marker' not in lines[0]
+
+    def refuse(**kwargs):
+        raise ClientError({'Error': {'Code': 'AccessDenied'}}, 'ListObjectsV2')
+
+    monkeypatch.setattr(s3, 'list_objects_v2', refuse)
+    records.status(conn, [prefix], out=lines.append, s3=s3, bucket='fixture-bucket')
+    assert lines[-1] == f'  S3 marker {_marker(prefix)}: unknown (ClientError)'
+
+
+def test_command_line_reports_and_clears_the_marker(database, s3, monkeypatch, capsys):
+    monkeypatch.setenv('ASSET_S3_BUCKET', 'fixture-bucket')
+    monkeypatch.setenv('CHARACTER_DATABASE_URL', database)
+    prefix = f'cli-{uuid.uuid4().hex[:8]}'
+    _seed(s3, prefix)
+    records.main(['migrate'])
+    records.main(['status', '--prefix', prefix])
+    assert f'S3 marker {_marker(prefix)}: absent' in capsys.readouterr().out
+    records.main(['import', '--prefix', prefix])
+    records.main(['status', '--prefix', prefix])
+    assert f'S3 marker {_marker(prefix)}: present' in capsys.readouterr().out
+    records.main(['export', '--prefix', prefix])
+    assert _marker(prefix) not in s3.objects
+
+
+@pytest.fixture
+def without_database(monkeypatch, s3):
+    """A server with a bucket and no CHARACTER_DATABASE_URL, as after an instance lost its environment file."""
+    monkeypatch.delenv('ASSET_STORAGE_WORKER_LOCAL', raising=False)
+    monkeypatch.setenv('ASSET_S3_BUCKET', 'fixture-bucket')
+    monkeypatch.setenv('ASSET_S3_PREFIX', 'assets')
+    monkeypatch.setenv('CHARACTER_DATABASE_URL', '')
+    return s3
+
+
+def test_a_server_that_lost_the_database_refuses_to_use_the_stale_records(without_database):
+    s3 = without_database
+    object_storage.assert_records_mode()
+    assert s3.calls == {'list_objects_v2': 1}
+    s3.put('assets/.records-in-database', b'{}')
+    with pytest.raises(RuntimeError) as refused:
+        object_storage.assert_records_mode()
+    message = str(refused.value)
+    assert "'assets'" in message and 'CHARACTER_DATABASE_URL is not set' in message
+    assert 'python -m src.records export --prefix assets' in message
+
+
+def test_nothing_is_asked_of_s3_unless_records_could_have_moved(without_database, monkeypatch):
+    s3 = without_database
+    s3.put('assets/.records-in-database', b'{}')
+    monkeypatch.setenv('CHARACTER_DATABASE_URL', 'postgresql://u:p@db.invalid/records')
+    object_storage.assert_records_mode()
+    monkeypatch.setenv('CHARACTER_DATABASE_URL', '')
+    monkeypatch.setenv('ASSET_S3_BUCKET', '')
+    object_storage.assert_records_mode()
+    monkeypatch.setenv('ASSET_S3_BUCKET', 'fixture-bucket')
+    monkeypatch.setenv('ASSET_STORAGE_WORKER_LOCAL', '1')
+    object_storage.assert_records_mode()
+    assert s3.calls == {}
+
+
+@pytest.mark.parametrize('failure', [ClientError({'Error': {'Code': 'AccessDenied'}}, 'ListObjectsV2'), OSError('no route to S3')])
+def test_a_check_that_cannot_answer_does_not_stop_the_server(without_database, monkeypatch, caplog, failure):
+    def unavailable(**kwargs):
+        raise failure
+
+    monkeypatch.setattr(without_database, 'list_objects_v2', unavailable)
+    with caplog.at_level('WARNING', logger='src.services.object_storage'):
+        object_storage.assert_records_mode()
+    assert "Could not check whether the records of storage prefix 'assets'" in caplog.text
+    assert type(failure).__name__ in caplog.text
+
+
+def test_a_check_that_takes_too_long_does_not_stop_the_server(without_database, monkeypatch, caplog):
+    hang = threading.Event()
+    monkeypatch.setattr(without_database, 'list_objects_v2', lambda **kwargs: hang.wait(10))
+    try:
+        with caplog.at_level('WARNING', logger='src.services.object_storage'):
+            started = datetime.now()
+            object_storage.assert_records_mode(timeout=.05)
+        assert (datetime.now() - started).total_seconds() < 5
+        assert 'TimeoutError: no answer within 0.05 s' in caplog.text
+    finally:
+        hang.set()
+
+
+def test_the_marker_follows_the_records_through_import_and_rollback(importing, s3, monkeypatch):
+    conn, prefix = importing
+    monkeypatch.delenv('ASSET_STORAGE_WORKER_LOCAL', raising=False)
+    monkeypatch.setenv('ASSET_S3_PREFIX', prefix)
+    monkeypatch.setenv('CHARACTER_DATABASE_URL', '')
+    object_storage.assert_records_mode()
+    records.import_prefix(conn, s3, 'fixture-bucket', prefix)
+    with pytest.raises(RuntimeError, match=f"'{prefix}' live in PostgreSQL"):
+        object_storage.assert_records_mode()
+    # Another prefix of the same bucket is not affected.
+    monkeypatch.setenv('ASSET_S3_PREFIX', 'elsewhere')
+    object_storage.assert_records_mode()
+    monkeypatch.setenv('ASSET_S3_PREFIX', prefix)
+    records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lambda line: None)
+    object_storage.assert_records_mode()

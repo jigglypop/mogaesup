@@ -67,8 +67,9 @@ if ! docker inspect "$service_name" >/dev/null 2>&1 && docker inspect "$rollback
   fi
 fi
 
-# Replace the running release only once it reports no paid requests and no background work.
-# A release that cannot be reached is replaced as before. The default
+# Replace the running release only once it reports no paid requests and no background work. A release whose health cannot
+# be read may be in the middle of a paid stage, which `docker stop` below would cut off: the deploy stops (as
+# idle-stop.sh keeps the instance on) unless ALLOW_UNKNOWN_DRAIN=1 says to replace it anyway. The default
 # drain leaves room for the image build and health check inside the 900 s SSM command timeout.
 drain_deadline=$((SECONDS + ${ASSET_DEPLOY_DRAIN_SECONDS:-420}))
 while docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; do
@@ -76,7 +77,15 @@ while docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep 
 import json, sys
 activity = json.load(sys.stdin).get("activity") or {}
 print(int(activity.get("paid_requests", 0)) + int(activity.get("running_tasks", 0)))' 2>/dev/null || echo unknown)"
-  [[ "$busy" == 0 || "$busy" == unknown ]] && break
+  if [[ "$busy" == unknown ]]; then
+    if [[ "${ALLOW_UNKNOWN_DRAIN:-}" == 1 ]]; then
+      echo 'running release health cannot be read; replacing it anyway (ALLOW_UNKNOWN_DRAIN=1)' >&2
+      break
+    fi
+    echo 'running release health cannot be read, so paid or background work cannot be ruled out; deploy again once it answers, or with ALLOW_UNKNOWN_DRAIN=1 to replace it anyway' >&2
+    exit 5
+  fi
+  [[ "$busy" == 0 ]] && break
   if (( SECONDS >= drain_deadline )); then
     echo "running release still has $busy paid or background tasks; deploy again once it is idle" >&2
     exit 4
@@ -122,6 +131,7 @@ if docker inspect "$service_name" >/dev/null 2>&1; then
 fi
 
 docker run -d --restart unless-stopped --name "$candidate" --network host \
+  --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
   --label gaesup.release.sha256="$release_sha" \
   -e ASSET_S3_BUCKET="$ASSET_S3_BUCKET" \
   -e ASSET_S3_REGION="$AWS_REGION" \

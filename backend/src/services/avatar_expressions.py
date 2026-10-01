@@ -14,6 +14,7 @@ from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.character_pipeline import PipelineError, read_json, now
 from src.services.glb import parse_glb, build_glb
+from src.services.keyed_lock import keyed_lock
 from src.services.avatar_expression_bake import bake_expression, _texture_image, MAX_EXPRESSION_TEXTURE_EDGE
 
 
@@ -183,7 +184,9 @@ class AvatarExpressions:
             'maps': [(index, hashlib.sha256(raw).hexdigest()) for index, raw in images], 'recipe': 'uv-expression-v2-body-model'}
         expression_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
         directory = self.root/expression_id
-        with _LOCK:
+        # Everything below is named by this expression's identity, so identical saves wait for each other and nothing
+        # else does: parsing the full model and writing two GLBs must not hold up every request behind the process lock.
+        with keyed_lock(('expression', str(directory))):
             from src.services.avatar_expression_pipeline import saved_expression_valid
             existing = read_json(directory/'record.json')
             if (existing.get('composition') == COMPOSITION
@@ -267,7 +270,8 @@ class AvatarExpressions:
                         'gpu': {'texture_edge_max': texture_edge_max, 'mipmaps': True, 'extra_draw_calls': 0}}
             _write_json(directory/'manifest.json', manifest)
             files['manifest.json'] = digest(directory/'manifest.json')
-            _write_json(directory/'record.json', {**manifest, 'files': files})
+            with _LOCK:
+                _write_json(directory/'record.json', {**manifest, 'files': files})
         return self.get(expression_id)
 
     def save_generated(self, face_path, name):

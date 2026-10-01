@@ -1,10 +1,15 @@
 """Separate adjacent sheet views in original pixel coordinates, without rescaling."""
 from PIL import Image
 
+from src.services.character_pipeline import PipelineError
+
 
 def _seam(alpha, width, height, anchor, radius):
     low, high = max(1, anchor-radius), min(width-1, anchor+radius)
     candidates = list(range(low, high+1))
+    if not candidates:
+        # A boundary on the first or last pixel has no inner column to cut along.
+        raise PipelineError('invalid_grid', '경계가 이미지 가장자리에 너무 가깝습니다. 경계를 안쪽으로 옮기세요.', 422)
     previous = [0.0] * len(candidates)
     parents = []
     for y in range(height):
@@ -74,9 +79,3 @@ def crop_rows(image, yedges, xedges_by_row, *, remove_skin=False):
         row.putalpha(Image.frombytes('L', row.size, bytes(alpha)))
         rows.append(_crop_views(row, xedges))
     return rows
-
-
-def crop_row(image, y0, y1, xedges, *, remove_skin=False):
-    from src.services.avatar_part_batches import isolate_hair
-    row = image.crop((0, y0, image.width, y1)).convert('RGBA')
-    return _crop_views(isolate_hair(row) if remove_skin else row, xedges)

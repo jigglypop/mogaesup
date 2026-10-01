@@ -2,6 +2,7 @@
 from copy import deepcopy
 import hashlib
 import json
+import logging
 import re
 
 from src.services.asset_editor import _write_json
@@ -12,6 +13,7 @@ from src.services.avatar_variants import AvatarVariants
 from src.services.character_pipeline import PipelineError, now, read_json
 
 
+LOGGER = logging.getLogger(__name__)
 SLOTS = ('body', 'hair', 'hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses', 'prop')
 FIT_SLOTS = frozenset(SLOTS) - {'body', 'prop'}
 
@@ -75,7 +77,15 @@ class StudioGlbAssets:
         return self.get(asset_id), True
 
     def listing(self):
-        items = [self.get(path.parent.name) for path in self.root.glob('*/record.json')]
+        items = []
+        for path in self.root.glob('*/record.json'):
+            try:
+                items.append(self.get(path.parent.name))
+            except PipelineError as exc:
+                # One record that cannot be read (its upload receipt differs from the one it was registered with) must
+                # not make the whole library unavailable. A deleted record is simply not listed.
+                if exc.code != 'not_found':
+                    LOGGER.warning('GLB asset %s is left out of the library: %s', path.parent.name, exc.code)
         return {'items': sorted(items, key=lambda item: item['created_at'], reverse=True)}
 
     def _saved(self, asset_id, *, verify_content=False):

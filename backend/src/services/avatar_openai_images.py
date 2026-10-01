@@ -4,6 +4,7 @@ from contextlib import closing
 import hashlib
 import io
 import json
+import logging
 import os
 from src.services.object_storage import StoredPath as Path
 import re
@@ -16,9 +17,10 @@ from PIL import Image
 
 from src.services.character_pipeline import PipelineError
 from src.services.asset_editor import _write_json
-from src.services.object_storage import provider_image
+from src.services.object_storage import is_remote, provider_image
 from src.services.runtime_activity import paid_request
 
+LOGGER = logging.getLogger(__name__)
 DEFAULT_MODEL = 'gpt-image-2.5-sunburst'
 DEFAULT_BASE = 'https://api.openai.com/v1'
 ERROR_RESPONSE_LIMIT = 64 * 1024
@@ -184,6 +186,34 @@ def _read_error_response(response):
     }
 
 
+def promote_partial_response(receipt):
+    """True when a complete answer left as .response.partial was moved into place as .response.json.
+
+    A stop between writing the whole answer as .response.partial and renaming it left a paid answer that nothing read:
+    the next run called the request uncertain, and only another paid request could replace it. A cut-off answer stays as evidence.
+    """
+    receipt = Path(receipt)
+    response_path, partial = receipt.with_suffix('.response.json'), receipt.with_suffix('.response.partial')
+    if response_path.is_file() or not partial.is_file():
+        return False
+    try:
+        raw = partial.read_bytes()
+        saved = json.loads(raw)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(saved, dict) or 'data' not in saved:
+        return False
+    if is_remote(response_path):
+        response_path.write_bytes(raw)
+        try:
+            partial.unlink(missing_ok=True)
+        except Exception as exc:
+            LOGGER.warning('Image response promoted, leftover partial kept: type=%s', type(exc).__name__)
+    else:
+        partial.replace(response_path)
+    return True
+
+
 def edit_response(client, base, key, payload, receipt=None, *, multipart=False, input_sha256=None, endpoint='/images/edits'):
     """Keep response bytes before decoding; a cached response never re-enters POST."""
     if endpoint not in ('/images/edits', '/images/generations') or (multipart and endpoint != '/images/edits'):
@@ -192,6 +222,9 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
     response_path = receipt.with_suffix('.response.json') if receipt else None
     error_path = receipt.with_suffix('.error.json') if receipt else None
     request_path = receipt.with_suffix('.request.json') if receipt else None
+    partial_path = receipt.with_suffix('.response.partial') if receipt else None
+    if receipt:
+        promote_partial_response(receipt)
     if response_path and response_path.is_file():
         return json.loads(response_path.read_bytes())
     if error_path and error_path.is_file():
@@ -258,7 +291,11 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
             metadata['request_body_complete'] = True
             metadata['body_complete_seconds'] = elapsed()
         metadata['elapsed_seconds'] = elapsed()
-        record()
+        try:
+            record()
+        except Exception as exc:
+            # httpx runs this inside the request: raising here would abort a paid request in flight over a receipt update.
+            LOGGER.warning('Image request receipt not updated at %s: type=%s', event, type(exc).__name__)
     headers = {'Authorization': 'Bearer '+key, 'X-Client-Request-Id': metadata['client_request_id']}
     if multipart:
         headers['Content-Type'] = 'multipart/form-data; boundary=factory-'+metadata['boundary_id']
@@ -311,12 +348,22 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                     record()
                     raise OpenAIImageHTTPError(response.status_code, category, diagnostic_id,
                                                provider_error)
-                if response_path:
-                    partial = receipt.with_suffix('.response.partial')
-                    with partial.open('wb') as output:
+                if response_path and is_remote(response_path):
+                    # One PUT of the final key is atomic; staging a .partial and renaming it costs a copy and a delete.
+                    received = bytearray()
+                    try:
+                        for chunk in response.iter_bytes():
+                            received.extend(chunk)
+                    except BaseException:
+                        partial_path.write_bytes(received)  # What arrived before the cut stays as evidence.
+                        raise
+                    response_path.write_bytes(received)
+                    raw = bytes(received)
+                elif response_path:
+                    with partial_path.open('wb') as output:
                         for chunk in response.iter_bytes():
                             output.write(chunk)
-                    partial.replace(response_path)
+                    partial_path.replace(response_path)
                     raw = response_path.read_bytes()
                 else:
                     raw = response.read()

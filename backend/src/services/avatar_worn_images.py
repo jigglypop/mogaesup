@@ -13,6 +13,8 @@ from PIL import Image
 from src.services.avatar_part_methods import KEY_COLORS
 
 REVISION = 'worn-parts-v1'
+# The API and the studio accept a design brief of this many characters; the prompt carries all of it.
+BRIEF_MAX = 2000
 VIEW_TEXT = {
     'front': 'FRONT view: the camera faces the figure.',
     'side': "LEFT view: the camera is at the figure's left side; the figure faces image-left.",
@@ -61,7 +63,7 @@ def build_prompt(slot, view, *, key_name, notes='', kind='source', has_appearanc
         'Transparent background. No text, cast shadow, floor, extra objects or inset views. One image.',
     ]
     if notes:
-        lines.append('Design brief: ' + notes.strip()[:1200])
+        lines.append('Design brief: ' + notes.strip()[:BRIEF_MAX])
     return '\n'.join(lines)
 
 

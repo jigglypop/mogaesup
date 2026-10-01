@@ -9,6 +9,7 @@ import os
 import re
 from threading import Lock, Semaphore
 
+import numpy as np
 from PIL import Image
 
 from src.services.asset_editor import _write_json
@@ -60,27 +61,38 @@ def isolate_hair(tile):
     Warm/colored hair matches the same RGB rule. Normal intake preserves every
     color and alpha value; only explicitly selected monochrome cleanup uses it.
     """
-    tile = tile.convert('RGBA'); pixels = list(tile.getdata()); w, h = tile.size
-    mask = bytearray(w*h)
-    for i, (r, g, b, a) in enumerate(pixels):
-        skin = r-b > 12 and r-g > 4 and g-b > -6
-        matte = max(r, g, b)-min(r, g, b) > 100
-        mask[i] = int(a > 24 and not skin and not matte and min(r, g, b) <= 245)
+    tile = tile.convert('RGBA'); w, h = tile.size
+    pixels = np.asarray(tile)
+    # A tile of 32 MP as Python tuples takes gigabytes: the rule runs on bands of rows, in integers.
+    marked = np.empty((h, w), np.uint8)
+    for top in range(0, h, 256):
+        band = pixels[top:top+256].astype(np.int16)
+        r, g, b, a = band[..., 0], band[..., 1], band[..., 2], band[..., 3]
+        high, low = band[..., :3].max(axis=2), band[..., :3].min(axis=2)
+        skin = (r-b > 12) & (r-g > 4) & (g-b > -6)
+        matte = high-low > 100
+        marked[top:top+256] = (a > 24) & ~skin & ~matte & (low <= 245)
+    mask = bytearray(marked.tobytes())
     kept = bytearray(w*h)
-    for start in range(w*h):
-        if not mask[start]:
-            continue
-        mask[start] = 0; queue = deque([start]); component = []
+    start = mask.find(1)
+    while start >= 0:
+        mask[start] = 0; queue = deque([start]); size = 0; first = []
         while queue:
-            index = queue.popleft(); component.append(index); x, y = index % w, index // w
+            index = queue.popleft(); x, y = index % w, index // w
+            kept[index] = 1; size += 1
+            if size < 12:
+                first.append(index)
             for other in (index-1 if x else -1, index+1 if x+1 < w else -1,
                           index-w if y else -1, index+w if y+1 < h else -1):
                 if other >= 0 and mask[other]:
                     mask[other] = 0; queue.append(other)
-        if len(component) >= 12:
-            for index in component:
-                kept[index] = 1
-    tile.putdata([(r, g, b, a if kept[i] else 0) for i, (r, g, b, a) in enumerate(pixels)])
+        if size < 12:
+            # A speck: only its few pixels were marked, so they are all in `first`.
+            for index in first:
+                kept[index] = 0
+        start = mask.find(1, start+1)
+    keep = np.frombuffer(kept, np.uint8).reshape(h, w).astype(bool)
+    tile.putalpha(Image.fromarray(np.where(keep, pixels[..., 3], np.uint8(0))))
     return tile
 
 
@@ -98,6 +110,24 @@ def _validate_source_image(content):
             source.load()
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         raise PipelineError('invalid_part_image', '3,200만 픽셀 이하의 PNG/JPEG 파츠 이미지를 선택하세요.', 422) from None
+
+
+def _validate_batch_images(factory, owner, items):
+    """Every hair has its three views, saved and unchanged, and each is an image that decodes. The uploads are
+    immutable, so nothing here depends on state a lock protects."""
+    assets = AvatarBlueprints(factory.data)
+    checked = set()
+    for item in items:
+        if set(item['views']) != {'front', 'side', 'back'}:
+            raise PipelineError('invalid_views', '헤어마다 정면·측면·후면 3뷰가 필요합니다.', 422)
+        for asset_id in item['views'].values():
+            if asset_id in checked:
+                continue
+            content = assets.asset(owner, asset_id).read_bytes()
+            if hashlib.sha256(content).hexdigest() != asset_id:
+                raise PipelineError('source_changed', '헤어 원본이 변경되었습니다.', 409)
+            _validate_source_image(content)
+            checked.add(asset_id)
 
 
 def _transparent_view_edges(image):
@@ -172,7 +202,7 @@ def split_sheet(factory, owner, payload):
                 canvas.alpha_composite(tile, ((side-tile.width)//2, (side-tile.height)//2))
                 output = io.BytesIO(); canvas.save(output, format='PNG')
                 views[view] = assets.upload(owner, output.getvalue())['id']
-            items.append({'name': f'여성 헤어 {len(items)+1:02}', 'views': views,
+            items.append({'name': f'헤어 {len(items)+1:02}', 'views': views,
                           'row': row+1, 'column': col+1})
     record = {'id': sheet_id, 'source_asset': payload['asset_id'], 'contract': contract,
               'items': items, 'created_at': now()}
@@ -208,7 +238,7 @@ class PartBatches:
             raise PipelineError('base_changed', '저장된 기본 몸 버전을 다시 선택하세요.', 409)
         artifact = next((item for item in native.get('artifacts', []) if item.get('name') == 'body.glb'), None)
         if not artifact or not _ASSET_ID.fullmatch(str(artifact.get('sha256', ''))):
-            raise PipelineError('base_incomplete', '기준 여성 몸의 저장 영수증을 확인할 수 없습니다.', 409)
+            raise PipelineError('base_incomplete', '기준 몸의 저장 영수증을 확인할 수 없습니다.', 409)
         if native.get('origin') == 'uploaded_glb':
             raise PipelineError('body_preparation_required', '피팅·조립이 끝난 기준 몸을 선택하세요.', 422)
         pipeline = read_json(self.factory.directory(owner, payload['base_job_id'])/'pipeline.json')
@@ -218,7 +248,7 @@ class PartBatches:
         body = AvatarNativeParts(self.factory).artifact(
             owner, payload['base_job_id'], payload['base_version'], 'body.glb')
         if digest(body) != artifact['sha256']:
-            raise PipelineError('base_changed', '기준 여성 몸 파일이 변경되었습니다.', 409)
+            raise PipelineError('base_changed', '기준 몸 파일이 변경되었습니다.', 409)
         return {'job_id': payload['base_job_id'], 'version': payload['base_version'],
                 'body_sha256': artifact['sha256']}
 
@@ -305,24 +335,17 @@ class PartBatches:
         if not read_json(path):
             from src.services.meshy_status import require_credits
             require_credits(len(payload['items']))
+            if len(payload['items']) > 48:
+                raise PipelineError('batch_too_large', '일괄 작업은 최대 48개입니다.', 422)
+            # Up to 144 images are read and decoded: not under the process lock and the batch lease.
+            _validate_batch_images(self.factory, owner, payload['items'])
         with _LOCK, _batch_lease(self.root(owner, batch)):
             old = read_json(path)
             if old:
                 if old['fingerprint'] != fingerprint:
                     raise PipelineError('idempotency_conflict', '접수한 일괄 작업 입력이 다릅니다.', 409)
                 return self._public(owner, old), False
-            if len(payload['items']) > 48:
-                raise PipelineError('batch_too_large', '일괄 작업은 최대 48개입니다.', 422)
             base_receipt = self._base_receipt(owner, payload)
-            assets = AvatarBlueprints(self.factory.data)
-            for item in payload['items']:
-                if set(item['views']) != {'front', 'side', 'back'}:
-                    raise PipelineError('invalid_views', '헤어마다 정면·측면·후면 3뷰가 필요합니다.', 422)
-                for asset_id in item['views'].values():
-                    content = assets.asset(owner, asset_id).read_bytes()
-                    if hashlib.sha256(content).hexdigest() != asset_id:
-                        raise PipelineError('source_changed', '헤어 원본이 변경되었습니다.', 409)
-                    _validate_source_image(content)
             prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
             frozen_context = {'prompt_snapshot': prompt_snapshot,
                 'meshy_options': {'hair': freeze_options(self.factory, owner, payload['meshy_options'],
@@ -377,7 +400,7 @@ class PartBatches:
             if not record:
                 raise PipelineError('not_found', '일괄 작업을 찾을 수 없습니다.', 404)
             if record.get('base_receipt') != self._base_receipt(owner, record['input']):
-                raise PipelineError('base_changed', '접수한 기준 여성 몸이 변경되었습니다.', 409)
+                raise PipelineError('base_changed', '접수한 기준 몸이 변경되었습니다.', 409)
             public = self._public(owner, record)
             if public['status'] == 'complete' or not public['can_resume']:
                 return public, False
@@ -397,7 +420,7 @@ class PartBatches:
                 if not record or record.get('status') != 'accepted':
                     return
                 if record.get('base_receipt') != self._base_receipt(owner, record['input']):
-                    raise PipelineError('base_changed', '접수한 기준 여성 몸이 변경되었습니다.', 409)
+                    raise PipelineError('base_changed', '접수한 기준 몸이 변경되었습니다.', 409)
                 record.update(status='running', process=identity(), error=None)
                 self._save(owner, record)
             explicit_resume = bool(record.get('resume_requested_at'))

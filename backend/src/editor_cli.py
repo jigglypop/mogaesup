@@ -13,10 +13,12 @@ import subprocess
 import sys
 import time
 
+from src.paths import data_root, load_environment
 from src.services.asset_delivery import DeliveryRecipe, build_delivery
 from src.services.asset_editor import AssetEditor
 from src.services.blender_edits import EditRecipe
 from src.services.blender_mcp import BlenderMCP
+from src.services.worker_env import worker_environment
 
 
 def start_blender(executable: Path, root: Path, port: int) -> dict:
@@ -41,7 +43,8 @@ def start_blender(executable: Path, root: Path, port: int) -> dict:
             [str(executable.resolve()), "--factory-startup", "--disable-autoexec", "--python",
              str(Path(__file__).with_name("blender_bootstrap.py")), "--", "--addon", str(addon), "--port", str(port)],
             stdout=log, stderr=log, stdin=subprocess.DEVNULL, startupinfo=startupinfo,
-            env={**os.environ, "DISABLE_TELEMETRY": "true"},
+            # .env is loaded in main(); provider keys must not reach a Blender that runs addon code.
+            env=worker_environment(DISABLE_TELEMETRY="true"),
         )
     for _ in range(100):
         if process.poll() is not None:
@@ -58,8 +61,10 @@ def start_blender(executable: Path, root: Path, port: int) -> dict:
 
 
 def main() -> None:
+    # Before the default below: ASSET_DATA_ROOT may be set only in .env, and the working directory must not decide.
+    load_environment()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path("data/editor"))
+    parser.add_argument("--root", type=Path, default=data_root() / "editor")
     parser.add_argument("--port", type=int, default=9876)
     parser.add_argument("--timeout", type=float, default=180)
     commands = parser.add_subparsers(dest="command", required=True)

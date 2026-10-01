@@ -9,6 +9,7 @@ import subprocess
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
+from src.services.avatar_fitting_management import FittingManagement, body_facts
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_production_spec import production_spec, seal_production_spec
 from src.services.avatar_fit_profiles import normalize_fit_profile, reject_generation_fit_profile
@@ -16,13 +17,13 @@ from src.services.avatar_image_prompts import DEFAULT_DESIGN_PROMPTS
 from src.services.avatar_reference_preparation import initial_state as initial_reference_state, uses_legacy_side_pose
 from src.services.avatar_openai_images import DEFAULT_BASE
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
-from src.services.glb import parse_glb
 from src.services.character_parts import blender_executable, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json
-from src.services.object_storage import StoredPath as Path, copy_file, copy_tree, local_workspace, publish_checkpoint
+from src.services.object_storage import StoredPath as Path, WorkspaceUploadError, copy_file, copy_tree, local_workspace, publish_checkpoint
 from src.services.process_identity import identity, state as process_state
 from src.services.studio_library import StudioLibrary
 from src.services.studio_prompts import StudioPrompts
+from src.services.worker_env import worker_environment
 
 VARIANT_SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes', *EQUIPMENT)
 
@@ -91,6 +92,15 @@ class AvatarVariants:
             variant['redraw'] = payload['redraw']
         return self.create(owner, key, variant, frozen_context=frozen_context)
 
+    def _warm_body(self, owner, payload):
+        """Parse the base body before the process lock is taken, so the checks under it read the result from memory.
+        What is wrong with the base is reported by those checks; a failure here is not."""
+        try:
+            body_file = self.factory.directory(owner, payload['base_job_id'])/'native-parts'/payload['base_version']/'body.glb'
+            body_facts(body_file, digest(body_file))
+        except Exception:
+            pass
+
     def create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
@@ -124,6 +134,11 @@ class AvatarVariants:
                 worn_redraw=bool((payload.get('redraw') or {}).get('worn')))
             if resolve_provider(source_input.get('model_provider')) == 'meshy':
                 require_credits(0 if payload.get('uploaded_model') else sum(needs_provider(m) for m in estimate.values()))
+        if not read_json(target/'job.json'):
+            self._warm_body(owner, payload)
+        # Copies of stored files (one request each in S3) are made after every check has passed and without the
+        # process lock; the lock is taken again only to accept the job.
+        staged = []
         with _LOCK:
             prior = read_json(target/'job.json')
             if prior:
@@ -197,10 +212,10 @@ class AvatarVariants:
             body_hash = next((a['sha256'] for a in native['artifacts'] if a['name'] == 'body.glb'), None)
             if not body_hash or digest(body_file) != body_hash:
                 raise PipelineError('body_changed', '기본 몸 파일을 확인할 수 없습니다.', 409)
-            from src.services.avatar_fitting_management import FittingManagement, geometry_identity
             default_profile = FittingManagement(self.factory, owner).body_default()
             default_body = default_profile.get('body') or {}
-            body_geometry_sha256 = geometry_identity(body_file.read_bytes())
+            facts = body_facts(body_file, body_hash)
+            body_geometry_sha256 = facts['identity']
             historical_body = (photo_input is not None and AvatarNativeParts(self.factory).get(owner, base_id).get('version') != native['version'])
             if historical_body and (
                     default_body.get('job_id') != base_id
@@ -234,7 +249,7 @@ class AvatarVariants:
             # Acceptance is the final write. Interrupted staging can be repeated using
             # the same key; no provider call occurs until a complete job is accepted.
             (target/'output').mkdir(parents=True, exist_ok=True)
-            copy_file(image_source, target/'source.png')
+            staged.append((copy_file, image_source, target/'source.png'))
             state = deepcopy(original)
             # A prepared body has no image provider. New part requests still
             # freeze the configured image provider at their own acceptance.
@@ -284,7 +299,7 @@ class AvatarVariants:
                                 continue
                             if Path(name).name != name or digest(source/'output'/name) != image.get(hash_field):
                                 raise PipelineError('reference_changed', '저장된 공통 규격 원본이 변경되었습니다.', 409)
-                            copy_file(source/'output'/name, target/'output'/name)
+                            staged.append((copy_file, source/'output'/name, target/'output'/name))
                 else:
                     state['reference_preparation'] = None
             hair_length = (requested_hair_length(payload) if 'hair' in slots
@@ -416,7 +431,7 @@ class AvatarVariants:
                     if uploaded_model:
                         model_path = target/'parts'/slot/'generated.glb'
                         model_path.parent.mkdir(parents=True, exist_ok=True)
-                        copy_file(Path(uploaded_model['path']), model_path)
+                        staged.append((copy_file, Path(uploaded_model['path']), model_path))
                         _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
                             'path': str(model_path), 'sha256': uploaded_model['sha256'],
                             'origin': 'uploaded_glb', 'asset_id': uploaded_model['asset_id']}})
@@ -428,7 +443,7 @@ class AvatarVariants:
                             if digest(asset) != asset_id:
                                 raise PipelineError('source_changed', '파츠 원본이 변경되었습니다.', 409)
                             name = f'{slot}-source-{view}.png' if redraw else f'{slot}-{view}.png'
-                            copy_file(asset, target/'output'/name)
+                            staged.append((copy_file, asset, target/'output'/name))
                             collection = part.setdefault('source_views', {}) if redraw else part['views']
                             collection[view] = {'status': 'succeeded', 'file': name, 'sha256': asset_id,
                                                 'asset': asset_id, 'origin': 'uploaded_part'}
@@ -446,7 +461,7 @@ class AvatarVariants:
                 if photo_input is not None and slot == 'body':
                     model_path = target/'parts'/'body'/'generated.glb'
                     model_path.parent.mkdir(parents=True, exist_ok=True)
-                    copy_file(body_file, model_path)
+                    staged.append((copy_file, body_file, model_path))
                     _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
                         'path': str(model_path), 'sha256': body_hash,
                         'reused_from': {'job_id': base_id, 'version': native['version'], 'slot': 'body'}}})
@@ -455,12 +470,12 @@ class AvatarVariants:
                     name = view['file']
                     if Path(name).name != name or digest(source/'output'/name) != view['sha256']:
                         raise PipelineError('image_changed', '기본 파츠 이미지가 변경되었습니다.', 409)
-                    copy_file(source/'output'/name, target/'output'/name)
+                    staged.append((copy_file, source/'output'/name, target/'output'/name))
                     if view.get('raw_file'):
                         raw_name = view['raw_file']
                         if Path(raw_name).name != raw_name or digest(source/'output'/raw_name) != view.get('raw_sha256'):
                             raise PipelineError('image_changed', '저장된 고화질 원본 이미지가 변경되었습니다.', 409)
-                        copy_file(source/'output'/raw_name, target/'output'/raw_name)
+                        staged.append((copy_file, source/'output'/raw_name, target/'output'/raw_name))
                     # Reused views are not charged against this request's limit.
                     for field in ('attempted_at', 'previous_attempts'):
                         view.pop(field, None)
@@ -468,15 +483,15 @@ class AvatarVariants:
                     name = view['file']
                     if Path(name).name != name or digest(source/'output'/name) != view.get('sha256'):
                         raise PipelineError('image_changed', '저장된 헤어 입력 원본이 변경되었습니다.', 409)
-                    copy_file(source/'output'/name, target/'output'/name)
+                    staged.append((copy_file, source/'output'/name, target/'output'/name))
                 # An uploaded 3D part has no generated views.
                 part['image'] = deepcopy(part['views']['front']) if part.get('views') else deepcopy(part.get('image') or {'status': 'not_required'})
                 if part.get('part_method') == 'body_shell':
                     continue
-                copy_tree(source/'parts'/slot, target/'parts'/slot)
-                receipt = read_json(target/'parts'/slot/'generation-artifacts.json')['generated']
-                if digest(target/'parts'/slot/'generated.glb') != receipt['sha256']:
+                receipt = read_json(source/'parts'/slot/'generation-artifacts.json')['generated']
+                if digest(source/'parts'/slot/'generated.glb') != receipt['sha256']:
                     raise PipelineError('model_changed', '저장된 파츠 모델이 변경되었습니다.', 409)
+                staged.append((copy_tree, source/'parts'/slot, target/'parts'/slot))
             state['reuse'] = {'source_job_id': base_id, 'slots': reused}
             if redraw:
                 body_part = next(part for part in state['parts'] if part['slot'] == 'body')
@@ -497,22 +512,29 @@ class AvatarVariants:
                     if not expected or not fitted.is_file() or digest(fitted) != expected:
                         raise PipelineError('fitted_part_changed', f'저장된 {slot} 피팅 파츠를 확인할 수 없습니다.', 409)
                     target_name = f'{slot}.glb'
-                    copy_file(fitted, target/'prefit-parts'/target_name)
+                    staged.append((copy_file, fitted, target/'prefit-parts'/target_name))
                     frozen_parts[slot] = {'file': target_name, 'sha256': expected,
                                           'report': native_reports.get(slot, {})}
                 state['native_part_reuse'] = {
                     'source_job_id': base_id, 'source_version': native['version'], 'parts': frozen_parts}
-            # A minimal sealed rig delivery contains the actual chosen body and its
-            # clips. It never copies another job's active provider worker or intent.
             version = body_hash[:24]
             rigdir = target/'meshy/versions'/version
+            staged.append((copy_file, body_file, rigdir/'model.glb'))
+        for copy, origin, destination in staged:
+            copy(origin, destination)
+        with _LOCK:
+            prior = read_json(target/'job.json')
+            if prior:
+                # Another request with this key was accepted while the files were copied.
+                if prior['fingerprint'] != fingerprint:
+                    raise PipelineError('idempotency_conflict', '같은 요청의 입력이 변경되었습니다.', 409)
+                return self.factory.get(owner, job_id), False
+            # A minimal sealed rig delivery contains the actual chosen body and its
+            # clips. It never copies another job's active provider worker or intent.
             rigdir.mkdir(parents=True, exist_ok=True)
-            copy_file(body_file, rigdir/'model.glb')
-            doc, _ = parse_glb(body_file.read_bytes(), strict=True)
             receipt = {'version': version, 'files': {'model.glb': body_hash},
                        'bone_count': native['bone_count'],
-                       'clips': [{'slot': a.get('name', f'clip_{i}'), 'source': 'frozen_body', 'action_id': None}
-                                 for i, a in enumerate(doc.get('animations', []))],
+                       'clips': [{'slot': name, 'source': 'frozen_body', 'action_id': None} for name in facts['clips']],
                        'origin': 'frozen_body'}
             _write_json(rigdir/'receipt.json', receipt)
             _write_json(target/'meshy/delivery.json', receipt)
@@ -574,17 +596,22 @@ def prepare_body(service, owner, job_id, state):
             copy_file(cache/name, output/name)
         _write_json(output/'complete.json', {'input_sha256': digest(output/'input.json'),
             'files': {name: shared['files'][name] for name in required}, 'reused_from': cache_key})
-    with local_workspace(output, inputs=[body]):
-        seal = read_json(output/'complete.json')
-        cached = (seal.get('input_sha256') == digest(output/'input.json')
-                  and required <= seal.get('files', {}).keys()
-                  and all((output/name).is_file() and digest(output/name) == seal['files'][name] for name in required))
-        if not cached:
-            render_body_reference(output, worker)
-        seal = read_json(output/'complete.json')
-        if (seal.get('input_sha256') != digest(output/'input.json') or not required <= seal.get('files', {}).keys()
-                or any(not (output/name).is_file() or digest(output/name) != seal['files'][name] for name in required)):
-            raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 확인 실패', 409)
+    try:
+        with local_workspace(output, inputs=[body]):
+            seal = read_json(output/'complete.json')
+            cached = (seal.get('input_sha256') == digest(output/'input.json')
+                      and required <= seal.get('files', {}).keys()
+                      and all((output/name).is_file() and digest(output/name) == seal['files'][name] for name in required))
+            if not cached:
+                render_body_reference(output, worker)
+            seal = read_json(output/'complete.json')
+            if (seal.get('input_sha256') != digest(output/'input.json') or not required <= seal.get('files', {}).keys()
+                    or any(not (output/name).is_file() or digest(output/name) != seal['files'][name] for name in required)):
+                raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 확인 실패', 409)
+    except WorkspaceUploadError:
+        # The render stays on disk and is stored when the next one ends. The job pauses with this message, not with
+        # an internal error, and a resume renders again.
+        raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 실패', 409) from None
     if not shared.get('files'):
         for name in required:
             copy_file(output/name, cache/name)
@@ -611,10 +638,15 @@ def render_body_reference(output, worker):
         with _QUEUE, (output/'blender.log').open('wb') as log:
             process = subprocess.Popen([blender_executable(), '--background', '--disable-autoexec', '--python-exit-code', '1', '--threads', '2', '--python',
                 str(worker), '--', str(output/'input.json')],
-                stdout=log, stderr=subprocess.STDOUT, env={**os.environ, 'ASSET_STORAGE_WORKER_LOCAL': '1'},
+                stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-            _write_json(output/'runner.json', {'process': identity(process.pid)})
-            publish_checkpoint(output/'runner.json')
+            try:
+                _write_json(output/'runner.json', {'process': identity(process.pid)})
+                publish_checkpoint(output/'runner.json')
+            except BaseException:
+                # Without its receipt nothing watches this worker, and the next render would start a second one.
+                stop_process(process)
+                raise
             try:
                 code = process.wait(timeout=240)
             except subprocess.TimeoutExpired:

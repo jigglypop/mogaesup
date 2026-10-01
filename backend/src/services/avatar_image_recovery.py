@@ -6,7 +6,7 @@ import json
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity
-from src.services.avatar_openai_images import image_error_message, _error_category
+from src.services.avatar_openai_images import image_error_message, _error_category, promote_partial_response
 
 RETRYABLE = {'submission_uncertain', 'rejected', 'failed', 'qc_failed'}
 REFERENCE = 'reference'
@@ -51,6 +51,8 @@ def settle_interrupted(directory, state):
         nonlocal changed
         if image.get('status') != 'submitting' or image.get('failure'):
             return
+        # An answer that was complete when the server stopped is a saved response, not an unconfirmed request.
+        promote_partial_response(receipt)
         saved = receipt.with_suffix('.response.json').is_file()
         request_path = receipt.with_suffix('.request.json')
         request = read_json(request_path)

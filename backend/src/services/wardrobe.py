@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
+import time
 import uuid
 from contextlib import contextmanager
 from src.services.object_storage import StoredPath as Path
-from src.services.object_storage import sha256
+from src.services.object_storage import is_remote, sha256
 
 import httpx
 
@@ -17,18 +19,83 @@ from src.services.asset_editor import _write_json
 from src.services.blender_mcp import BlenderMCP
 from src.services.blender_mcp import BlenderExecutionUncertain
 from src.services.glb import parse_glb
+from src.services.runtime_activity import paid_request
+
+# Reading a task or a download link again changes nothing at the provider, so a busy or unreachable provider is asked again.
+GET_RETRY_STATUSES = (429, 500, 502, 503, 504)
+GET_BACKOFF_SECONDS = (1, 2, 4)
+GET_RETRY_AFTER_LIMIT = 30
 
 
 def _digest(path: Path) -> str:
     return sha256(path)
 
 
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def transient(exc: Exception) -> bool:
+    """A failed GET that another attempt may answer: no answer at all, or a provider that is busy or erroring."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in GET_RETRY_STATUSES
+    return isinstance(exc, httpx.TransportError)
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    delay = GET_BACKOFF_SECONDS[attempt]
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            hint = float(exc.response.headers.get("retry-after", ""))
+        except ValueError:
+            return delay
+        if math.isfinite(hint) and hint > 0:
+            return min(GET_RETRY_AFTER_LIMIT, max(delay, hint))
+    return delay
+
+
+def get_with_retry(client: httpx.Client, url: str, **kwargs) -> httpx.Response:
+    """GET and raise_for_status, asking again after a transient failure (4 attempts, waiting 1, 2 and 4 s).
+
+    For idempotent reads only. A POST that may have been billed is never sent again from here.
+    """
+    attempt = 0
+    while True:
+        try:
+            response = client.get(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            if attempt >= len(GET_BACKOFF_SECONDS) or not transient(exc):
+                raise
+            _sleep(_retry_delay(exc, attempt))
+            attempt += 1
+
+
+def download_failure(exc: httpx.HTTPError):
+    """The public error of a download that failed. It names the status and never reads the response body."""
+    from src.services.character_pipeline import PipelineError
+    reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else "연결 오류"
+    return PipelineError("download_failed", f"3D 파일을 내려받지 못했습니다 ({reason}). 저장된 작업 기록은 그대로이며 다시 시도할 수 있습니다.", 502)
+
+
+@contextmanager
+def download_stream(client: httpx.Client, url: str):
+    """Stream a CDN file. A failed request is PipelineError('download_failed'): an error response is streamed,
+    so its body was never read and cannot be shown, and callers need not tell httpx error types apart."""
+    try:
+        with client.stream("GET", url) as response:
+            response.raise_for_status()
+            yield response
+    except httpx.HTTPError as exc:
+        raise download_failure(exc) from None
+
+
 def download_glb(client: httpx.Client, url: str, output: Path, *, preserve_detail: bool = False) -> dict:
     """Validate a CDN download before replacing an artifact; client has no API key."""
     policy = DeliveryPolicy(max_file_bytes=256 * 1024 * 1024) if preserve_detail else DeliveryPolicy()
     data = bytearray()
-    with client.stream("GET", url) as response:
-        response.raise_for_status()
+    with download_stream(client, url) as response:
         for chunk in response.iter_bytes():
             data.extend(chunk)
             if len(data) > policy.max_file_bytes:
@@ -36,9 +103,13 @@ def download_glb(client: httpx.Client, url: str, output: Path, *, preserve_detai
     quality = inspect_glb(bytes(data), policy, budget_warnings=preserve_detail)
     if quality["errors"]:
         raise ValueError("Generated GLB rejected: " + "; ".join(quality["errors"]))
-    temporary = output.with_suffix(".glb.part")
-    temporary.write_bytes(data)
-    temporary.replace(output)
+    if is_remote(output):
+        # One PUT of the final key is atomic; staging a temporary object and renaming it costs a copy and a delete.
+        output.write_bytes(data)
+    else:
+        temporary = output.with_suffix(".glb.part")
+        temporary.write_bytes(data)
+        temporary.replace(output)
     return quality
 
 
@@ -138,7 +209,8 @@ class Wardrobe:
         # Persist before POST: a timeout must never cause an automatic second charge.
         state["status"] = "submission_uncertain"
         self.save(state)
-        response = api.post("/openapi/v1/retexture", json=payload)
+        with paid_request():
+            response = api.post("/openapi/v1/retexture", json=payload)
         response.raise_for_status()
         task_id = response.json().get("result")
         if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id):
@@ -152,9 +224,7 @@ class Wardrobe:
         task_id = task_id or state.get("task_id")
         if not task_id or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id):
             raise ValueError("Provide a valid task ID from the Meshy dashboard")
-        response = api.get(f"/openapi/v1/retexture/{task_id}")
-        response.raise_for_status()
-        task = response.json()
+        task = get_with_retry(api, f"/openapi/v1/retexture/{task_id}").json()
         state.update(task_id=task_id, provider_status=task.get("status"), progress=task.get("progress"))
         if task.get("status") == "SUCCEEDED":
             state["garment_url"] = task.get("model_urls", {}).get("glb")

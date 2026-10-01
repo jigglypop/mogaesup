@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import re
 import sys
 from datetime import timedelta
 
-
-# The MCP server runs arbitrary Blender code; provider keys and credentials never reach it.
-_SECRET_NAME = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|DATABASE_URL|DSN", re.IGNORECASE)
+from src.services.worker_env import without_secrets
 
 
 class BlenderExecutionError(RuntimeError):
@@ -38,8 +34,8 @@ class BlenderMCP:
         parameters = StdioServerParameters(
             command=sys.executable, args=["-c", "import logging; from blender_mcp.server import main; "
                 "logging.disable(logging.INFO); main()"],
-            env={**{name: value for name, value in os.environ.items() if not _SECRET_NAME.search(name)},
-                 "BLENDER_HOST": "127.0.0.1", "BLENDER_PORT": str(self.port),
+            # The MCP server runs arbitrary Blender code; provider keys and credentials never reach it.
+            env={**without_secrets(), "BLENDER_HOST": "127.0.0.1", "BLENDER_PORT": str(self.port),
                  "DISABLE_TELEMETRY": "true"},
         )
         submitted = False

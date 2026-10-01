@@ -3,7 +3,7 @@ import hashlib
 import re
 from threading import Lock
 
-from src.services.asset_editor import _write_json
+from src.services.asset_editor import _write_json, update_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.character_jobs import RETRYABLE
 from src.services.character_pipeline import PipelineError, now, read_json
@@ -291,9 +291,8 @@ class AvatarStageResume:
                     else:
                         expressions_execute(self.factory, owner, job_id, pointer['version'], retry_blocked=explicit)
                         result = summary(directory, pointer['version'])
-                    job_record = read_json(directory/'job.json')
-                    job_record['error'] = (result.get('error') or '기본 표정 텍스처 처리 대기') if result and result['status'] != 'complete' else None
-                    _write_json(directory/'job.json', job_record)
+                    pending_error = (result.get('error') or '기본 표정 텍스처 처리 대기') if result and result['status'] != 'complete' else None
+                    update_json(directory/'job.json', lambda current: {**current, 'error': pending_error})
                 else:
                     publish_saved_models(directory, pipeline)
                     if stage == 'rig':

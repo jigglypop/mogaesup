@@ -5,7 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
-from src.api.avatar_factory import get_factory
+from src.api.avatar_factory import GLB_UPLOADS, get_factory, read_glb
 from src.auth import UserContext, get_current_user
 from src.services.avatar_image_pipeline import AvatarImagePipeline
 from src.services.avatar_stage_resume import AvatarStageResume
@@ -35,12 +35,9 @@ class PrepareInput(BaseModel):
 @router.post('/upload', status_code=201)
 async def upload_glb(request: Request, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_glb_bodies import MAX_GLB_BYTES
-    content = bytearray()
-    async for chunk in request.stream():
-        content.extend(chunk)
-        if len(content) > MAX_GLB_BYTES:
-            raise PipelineError('glb_too_large', 'GLB는 256MiB 이하여야 합니다.', 413)
-    return await run_in_threadpool(StudioGlbAssets(factory, user.user_id).upload, bytes(content))
+    async with GLB_UPLOADS.slot():
+        content = await read_glb(request, MAX_GLB_BYTES, PipelineError('glb_too_large', 'GLB는 256MiB 이하여야 합니다.', 413))
+        return await run_in_threadpool(StudioGlbAssets(factory, user.user_id).upload, content)
 
 
 @router.get('')

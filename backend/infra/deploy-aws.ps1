@@ -5,7 +5,9 @@ param(
   [Parameter(Mandatory)][string]$ReleaseKey,
   [string]$Region = 'ap-northeast-2',
   [string]$Profile = '',
-  [ValidateRange(60, 1800)][int]$TimeoutSeconds = 900
+  [ValidateRange(60, 1800)][int]$TimeoutSeconds = 900,
+  # deploy-on-instance.sh stops when the running release's health cannot be read, since it might be in a paid stage.
+  [switch]$AllowUnknownDrain
 )
 $ErrorActionPreference = 'Stop'
 if ($InstanceId -notmatch '^i-[0-9a-f]{8,17}$') { throw 'Invalid EC2 instance ID.' }
@@ -30,6 +32,7 @@ $headResult = Invoke-Aws @('s3api', 'head-object', '--bucket', $Bucket, '--key',
 $head = $headResult.Text | ConvertFrom-Json
 if ($head.Metadata.sha256 -ne $releaseSha) { throw 'S3 release metadata does not match its content-addressed key.' }
 
+$unknownDrain = if ($AllowUnknownDrain) { 'ALLOW_UNKNOWN_DRAIN=1 ' } else { '' }
 $remote = @"
 set -Eeuo pipefail
 release_key='$ReleaseKey'
@@ -43,7 +46,7 @@ aws s3 cp 's3://$Bucket/$ReleaseKey' "`$incoming/release.tar.gz" --region '$Regi
 printf '%s  %s\n' "`$release_sha" "`$incoming/release.tar.gz" | sha256sum -c -
 tar -xzf "`$incoming/release.tar.gz" -C "`$incoming/source"
 printf '%s\n' "`$release_sha" > "`$incoming/source/.release-sha256"
-/bin/bash "`$incoming/source/infra/deploy-on-instance.sh" "`$release_key" "`$release_sha" "`$incoming/source"
+${unknownDrain}/bin/bash "`$incoming/source/infra/deploy-on-instance.sh" "`$release_key" "`$release_sha" "`$incoming/source"
 rm -f "`$incoming/release.tar.gz"
 "@
 
