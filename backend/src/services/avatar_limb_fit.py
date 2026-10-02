@@ -27,6 +27,7 @@ MIN_SHIFT_M = .005
 MAX_SHIFT_M = .06
 FAIL_MARGIN_M = -.005
 FAIL_ANGLE_DEG = 3.
+DEGENERATE = 1e-6   # a bone or a direction shorter than this has no usable direction
 NAMES = {'arm': ('왼팔', '오른팔'), 'leg': ('왼다리', '오른다리')}
 DIRECTIONS = {'up': '위', 'down': '아래', 'front': '앞', 'back': '뒤', 'left': '왼', 'right': '오른'}
 
@@ -39,17 +40,30 @@ def _limbs(slot, garment_kind=None):
     return ()
 
 
+def _perpendicular(axis, *candidates):
+    """The first candidate with a usable part across the axis, as a unit vector.
+
+    A candidate parallel to the axis (a vertical arm bone has no 'up' across it) leaves
+    nothing to normalise; the next one is used. Of the coordinate axes at least one always fits.
+    """
+    for candidate in candidates:
+        rest = candidate - axis*(axis @ candidate)
+        norm = np.linalg.norm(rest)
+        if norm > DEGENERATE:
+            return rest/norm
+    raise ValueError('No direction across the bone')
+
+
 def _frame(kind, axis):
     """Two unit directions across the bone: (vector, positive name, negative name) each."""
     front = np.array([0., -1., 0.])
+    up, lateral = np.array([0., 0., 1.]), np.array([1., 0., 0.])
     if kind == 'arm':
-        up = np.array([0., 0., 1.]) - axis*axis[2]
-        up /= np.linalg.norm(up)
+        up = _perpendicular(axis, up, front, lateral)
         across = np.cross(axis, up)
         across = across if across @ front > 0 else -across
         return (up, 'up', 'down'), (across, 'front', 'back')
-    front = front - axis*(axis @ front)
-    front /= np.linalg.norm(front)
+    front = _perpendicular(axis, front, up, lateral)
     left = np.cross(front, axis)
     left = left if left[0] > 0 else -left
     return (front, 'front', 'back'), (left, 'left', 'right')
@@ -102,8 +116,12 @@ class _Limb:
         self.kind, self.side = kind, side
         self.root = joints[(CHAINS[kind][0], side)]
         end = joints[(CHAINS[kind][1], side)]
-        self.length = float(np.linalg.norm(end - self.root))   # to the wrist / ankle
-        self.axis = (end - self.root)/self.length
+        bone = end - self.root
+        self.length = float(np.linalg.norm(bone))   # to the wrist / ankle
+        if self.length > DEGENERATE:
+            self.axis = bone/self.length
+        else:   # no bone to follow: no ring fits inside it, so the limb is reported unmeasured
+            self.length, self.axis = 0., np.array([side*1., 0., 0.] if kind == 'arm' else [0., 0., -1.])
         self.frame = _frame(kind, self.axis)
         self.name = f"{'left' if side > 0 else 'right'}_{kind}"
 
@@ -120,6 +138,20 @@ class _Limb:
             inside &= points[:, 0]*self.side > 0   # this leg's side of the midline
         return t, inside
 
+    def closed(self, points):
+        """Whether a ring's points go round the ring's own centre.
+
+        The centre is the garment's, not the body's: a sleeve hanging off the arm by about its
+        radius no longer has the body's centre inside it, and is still a ring to measure. It is the
+        circle fitted through the points rather than their mean, which an open arc drags into
+        itself and so makes look closed.
+        """
+        x, y = points @ self.frame[0][0], points @ self.frame[1][0]
+        x, y = x - x.mean(), y - y.mean()
+        (cx, cy, _), *_ = np.linalg.lstsq(np.stack([2*x, 2*y, np.ones(len(x))], axis=1), x*x + y*y, rcond=None)
+        angle = np.arctan2(y - cy, x - cx)
+        return len(np.unique(((angle + np.pi)/(2*np.pi)*SECTORS).astype(int) % SECTORS)) >= CLOSED_SECTORS
+
     def rings(self, garment, body):
         g_reach, b_reach = REACH_M[self.kind]
         gt, g_in = self.region(garment, g_reach)
@@ -133,10 +165,11 @@ class _Limb:
             b = body[b_in & (bt >= start) & (bt < start + RING_M)]
             if len(g) < RING_POINTS or len(b) < RING_POINTS:
                 continue
-            centre = b.mean(axis=0)
-            around = np.arctan2((g - centre) @ self.frame[1][0], (g - centre) @ self.frame[0][0])
-            if len(np.unique(((around + np.pi)/(2*np.pi)*SECTORS).astype(int) % SECTORS)) < CLOSED_SECTORS:
+            if not self.closed(g):
                 continue   # a slanted hem or an open sleeve: no clearance to measure here
+            # Clearances are differences of reach in one direction, the same for any origin
+            # (g.max - b.max = (g - o).max - (b - o).max): the body's centre serves, however far the sleeve sits.
+            centre = b.mean(axis=0)
             row = {'t': float(start + RING_M/2), 'count': int(min(len(g), len(b))), 'margins': {}}
             for vector, positive, negative in self.frame:
                 reach_g, reach_b = (g - centre) @ vector, (b - centre) @ vector
@@ -228,8 +261,11 @@ def _angle(limb, rings):
     """Angle between the garment tube and the limb, when the tube is long enough.
 
     Per ring the garment's cross-section box is off the body's by half the difference of
-    opposite clearances (what centring removes); the slope of that offset is the tilt.
+    opposite clearances (what centring removes); the slope of that offset is the tilt. Only
+    rings past the centring ramp count: nearer the joint they are corrected in part by design,
+    and that fade would read as a slope.
     """
+    rings = [row for row in rings if row['t'] >= SEAM_M[limb.kind] + RAMP_M]
     if len(rings) < MIN_RINGS or rings[-1]['t'] - rings[0]['t'] < .06:
         return None
     t = np.array([row['t'] for row in rings])
@@ -238,10 +274,18 @@ def _angle(limb, rings):
     return float(np.degrees(np.arctan(np.hypot(*slopes))))
 
 
+def _verdict(failures, measured):
+    """'fail' on any failure; 'pass' only when a limb was really measured; otherwise 'unchecked'."""
+    return 'fail' if failures else 'pass' if measured else 'unchecked'
+
+
 def check_limbs(objects, body, rig, slot, garment_kind=None):
-    """Final pre-rig measurement: per limb the worst clearance, the opening's four clearances and the angle."""
+    """Final pre-rig measurement: per limb the worst clearance, the opening's four clearances and the angle.
+
+    A garment with no measurable ring on any limb is 'unchecked', neither a pass nor a failure.
+    """
     kinds = _limbs(slot, garment_kind)
-    report = {'method': 'ring_margins_v1', 'status': 'pass', 'limbs': {}, 'failures': [],
+    report = {'method': 'ring_margins_v1', 'status': 'unchecked', 'limbs': {}, 'failures': [],
               'thresholds': {'margin_cm': FAIL_MARGIN_M*100, 'angle_deg': FAIL_ANGLE_DEG}}
     if not kinds:
         report['status'] = 'not_applicable'
@@ -249,6 +293,7 @@ def check_limbs(objects, body, rig, slot, garment_kind=None):
     joints = _joints(rig)
     body_points = _body_surface(body, rig)
     garment = _garment_surface(objects)
+    measured = 0
     for kind in kinds:
         for index, side in enumerate((1, -1)):
             if (CHAINS[kind][0], side) not in joints or (CHAINS[kind][1], side) not in joints:
@@ -258,6 +303,7 @@ def check_limbs(objects, body, rig, slot, garment_kind=None):
             if not rings:
                 report['limbs'][limb.name] = {'rings': 0}
                 continue
+            measured += 1
             worst = min(((value, row['t'], direction) for row in rings
                          for direction, value in row['margins'].items()), key=lambda item: item[0])
             angle = _angle(limb, rings)
@@ -274,6 +320,5 @@ def check_limbs(objects, body, rig, slot, garment_kind=None):
             if angle is not None and angle > FAIL_ANGLE_DEG:
                 report['failures'].append({'limb': limb.name, 'reason': 'angle',
                                            'message': f'{label} 각도 {angle:.1f}°'})
-    if report['failures']:
-        report['status'] = 'fail'
+    report['status'] = _verdict(report['failures'], measured)
     return report
