@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ApiError, isRevisionConflict } from '../api';
 import type { WardrobePart, WardrobeUnavailable } from '../factory/api';
-import { fitReason, reshapable, unfittedParts, wearableParts } from '../studio/wardrobe-view';
+import { fitReason, reshapable, unfittedParts } from '../studio/wardrobe-view';
 
 const part = (slot: string, changes: Partial<WardrobePart> = {}): WardrobePart => ({
   job_id: 'job',
@@ -11,25 +11,6 @@ const part = (slot: string, changes: Partial<WardrobePart> = {}): WardrobePart =
   name: slot,
   sha256: 'sha',
   ...changes,
-});
-
-describe('옷장 목록', () => {
-  const good = part('top', { name: '좋은 옷', fit_check: { status: 'pass', failures: [] } });
-  const unchecked = part('top', { name: '검사 전', fit_check: null });
-  const bad = part('top', { name: '맞지 않는 옷', fit_check: { status: 'fail', failures: ['소매가 몸을 뚫습니다.'] } });
-  const parts = [good, unchecked, bad];
-
-  it('운영자가 아니면 핏 검사에서 떨어진 파츠를 보지 못한다', () => {
-    expect(wearableParts(parts, false).map((item) => item.name)).toEqual(['좋은 옷', '검사 전']);
-  });
-
-  it('운영자는 떨어진 파츠도 본다', () => {
-    expect(wearableParts(parts, true)).toBe(parts);
-  });
-
-  it('검사 기록이 없는 파츠는 입을 수 있다', () => {
-    expect(wearableParts([part('hat'), part('shoes', { fit_check: undefined })], false)).toHaveLength(2);
-  });
 });
 
 describe('피팅하지 못한 파츠', () => {

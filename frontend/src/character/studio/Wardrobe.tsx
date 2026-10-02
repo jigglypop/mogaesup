@@ -14,7 +14,7 @@ import { usePolling } from '../use-polling';
 import { ModelViewer } from '../viewer';
 import type { Tuck } from '../native-wardrobe';
 import { createHeldLoads } from './held-loads';
-import { fitReason, reshapable, unfittedParts, wearableParts } from './wardrobe-view';
+import { fitReason, reshapable, unfittedParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
 import './wardrobe.css';
 
@@ -83,8 +83,7 @@ export default function Wardrobe() {
     library.setValue(value);
     return value.parts;
   }, [body?.job_id, library.setValue]);
-  // Parts whose fit check failed are known-bad fits; only operators see them.
-  const parts = body && library.value?.body.job_id === body.job_id ? wearableParts(library.value.parts, admin) : [];
+  const parts = body && library.value?.body.job_id === body.job_id ? library.value.parts : [];
   const unfitted = body && library.value?.body.job_id === body.job_id ? unfittedParts(library.value.unavailable, admin) : [];
   const slots = slotOrder.filter(slot => parts.some(part => part.slot === slot));
   const [slot, setSlot] = useState('hair');
@@ -152,7 +151,7 @@ export default function Wardrobe() {
   useEffect(() => { viewer?.setHairColor(hairColor); }, [viewer, hairColor]);
   // A refit gives a job a new version: wear it in place of the one the list no longer has.
   useEffect(() => {
-    const listed = library.value?.body.job_id === body?.job_id && library.value ? wearableParts(library.value.parts, admin) : undefined;
+    const listed = library.value?.body.job_id === body?.job_id && library.value ? library.value.parts : undefined;
     if (!listed) return;
     setWorn(current => {
       const next = { ...current }; let changed = false;
@@ -163,7 +162,7 @@ export default function Wardrobe() {
       }
       return changed ? next : current;
     });
-  }, [library.value, body?.job_id, admin]);
+  }, [library.value, body?.job_id]);
 
   const coverageKey = (part: WardrobePart) => `${body?.job_id}|${keyOf(part, part.slot)}`;
   // Skin under worn garments: fetch each garment's covered body triangles once.
@@ -250,8 +249,8 @@ export default function Wardrobe() {
     const outfit = pendingOutfit.current;
     if (!outfit || !viewer || !body || outfit.body.job_id !== body.job_id || library.value?.body.job_id !== body.job_id) return;
     pendingOutfit.current = null;
-    applyOutfit(outfit, wearableParts(library.value.parts, admin));
-  }, [viewer, library.value, body?.job_id, admin]);
+    applyOutfit(outfit, library.value.parts);
+  }, [viewer, library.value, body?.job_id]);
 
   function toggle(part: WardrobePart) {
     setWearError(''); setNotice('');

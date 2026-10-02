@@ -7,10 +7,6 @@ const FIT_REASONS = new Map([
   ['fit_exception', '피팅 중 오류'],
 ]);
 
-/** The parts a person is offered: operators see every fit, everyone else only the parts that passed the fit check. */
-export const wearableParts = (parts: WardrobePart[], operator: boolean): WardrobePart[] =>
-  operator ? parts : parts.filter((part) => part.fit_check?.status !== 'fail');
-
 /** The parts that could not be fitted, for operators only. */
 export const unfittedParts = (parts: WardrobeUnavailable[] | undefined, operator: boolean): WardrobeUnavailable[] => (operator ? (parts ?? []) : []);
 

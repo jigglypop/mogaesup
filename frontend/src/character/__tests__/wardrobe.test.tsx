@@ -113,11 +113,12 @@ describe('옷장', () => {
   });
 
   describe('누가 무엇을 보는가', () => {
-    it('운영자가 아니면 핏 검사에서 떨어진 파츠를 목록에서 보지 못한다', async () => {
+    it('운영자가 아니어도 핏 검사에서 떨어진 파츠를 목록에서 본다', async () => {
       const { container, unmount } = await open();
       await settle();
-      expect(cardNames(container)).toEqual(['후드']);
-      expect(tab(container, '상의')?.textContent).toContain('1');
+      expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
+      expect(tab(container, '상의')?.textContent).toContain('2');
+      expect(container.textContent).not.toContain('소매가 몸을 뚫습니다.');
       await unmount();
     });
 
