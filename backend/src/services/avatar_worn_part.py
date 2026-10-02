@@ -19,6 +19,10 @@ DEFAULT_KEY_RGB = (1., 0., 1.)
 HEAD_SLOTS = ('hair', 'hat', 'hairFront', 'hairBack')
 FRINGE_HUE_DEG = 40.   # the key's shaded and compressed edges drift further in hue than its body
 ANCHOR_HUE_DEG = 60.   # a provider's muted key stays this close to the requested hue
+KEY_SATURATION = .35   # a mannequin colour is at least this saturated ...
+FAINT_SATURATION = .15  # ... or, for the pale highlights a provider bakes onto it, this saturated
+KEY_VALUE = .2         # and brighter than this
+GAP_BLOCK_BYTES = 64 << 20  # the most temporary memory one block of pairwise distances may take
 HOOD_VERTICES = 500    # garment surface over the head beyond this is a raised hood (or a cowl)
 HOOD_BLEND_M = .04     # above the collar a hood moves from the body's registration to the head's
 
@@ -143,7 +147,7 @@ def key_likelihood(colors, key_rgb, *, faint=False, hue_deg=28., anchor=None):
     if anchor is not None:
         requested = _hue_distance(hue, _hue(np.array(anchor, dtype=float)[None])[0])
         matched = (matched | (requested < hue_deg)) & (requested < ANCHOR_HUE_DEG)
-    return (matched & (saturation > (.15 if faint else .35)) & (high > .2)).astype(float)
+    return (matched & (saturation > (FAINT_SATURATION if faint else KEY_SATURATION)) & (high > KEY_VALUE)).astype(float)
 
 
 def observed_key(colors, key_rgb, *, share=.03):
@@ -421,6 +425,21 @@ def initial_alignment(points, body_points):
     return transform @ rotation
 
 
+def nearest_gap(points, others, *, block_bytes=GAP_BLOCK_BYTES):
+    """Smallest distance from any of `points` to any of `others` ((n, 3) float64 each).
+
+    The offsets of every pair at once take 24 bytes a pair, plus as much again for their squares:
+    thousands of points against thousands is gigabytes. Rows are taken in blocks whose temporaries
+    stay within block_bytes; the minimum of the blocks' minima is the minimum of all pairs, so the
+    result is the same.
+    """
+    pair_bytes = 56    # offsets (24), their squares (24) and the summed squares (8) of one pair
+    rows = max(1, block_bytes//(pair_bytes*max(len(others), 1)))
+    nearest = min(((points[start:start+rows][:, None, :] - others[None, :, :])**2).sum(axis=2).min()
+                  for start in range(0, len(points), rows))
+    return float(np.sqrt(nearest))
+
+
 def remove_small_islands(obj, min_fraction=.01, *, hugging=None, mannequin=None, detached_m=.05,
                          residue_fraction=.1):
     """Delete small disconnected pieces. Vertices split at UV seams count as joined.
@@ -468,7 +487,7 @@ def remove_small_islands(obj, min_fraction=.01, *, hugging=None, mannequin=None,
         for label in list(small):
             members = np.unique(np.concatenate([polygon_vertices[i] for i in np.flatnonzero(labels == label)]))
             keyed = mannequin is not None and mannequin[members].mean() > .5
-            gap = float(np.sqrt(((points[members][:, None, :] - main[None, :, :])**2).sum(axis=2).min()))
+            gap = nearest_gap(points[members], main)
             if np.median(distance[members]) > .01 and not keyed and gap <= detached_m:
                 small.discard(label)
     doomed = [i for i, label in enumerate(labels) if label in small]

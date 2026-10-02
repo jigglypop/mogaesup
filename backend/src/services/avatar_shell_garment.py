@@ -832,6 +832,27 @@ def component_mask(triangles, weld_like, *, min_fraction=.03):
     return np.isin(roots, large)
 
 
+def drop_small_islands(triangles, weld_like, parents, covered):
+    """(triangles that stay, body coverage that stays, body vertices uncovered) after component_mask.
+
+    parents: per shell vertex (i, j, t) from iso_cut; a vertex the cut left in place is (i, i, 0).
+    A body vertex that was covered only through a removed island is not under the garment any more:
+    its faces must stay visible, so it leaves `covered`. Raises when no island is large enough, which
+    would leave an empty shell.
+    """
+    kept = component_mask(triangles, weld_like)
+    if not kept.any():
+        raise ValueError('Garment shell has only small disconnected pieces')
+    if kept.all():
+        return triangles, covered, 0
+    only_removed = np.setdiff1d(np.unique(triangles[~kept]), np.unique(triangles[kept]))
+    uncovered = np.unique([parents[v][0] for v in only_removed if parents[v][0] == parents[v][1]]).astype(np.int64)
+    count = int((covered[uncovered] >= .5).sum())
+    covered = covered.copy()
+    covered[uncovered] = 0.
+    return triangles[kept], covered, count
+
+
 def clear_body(positions, tree, minimum=.002):
     """Move shell vertices that sit inside or on the body back out by `minimum`."""
     result = positions.copy()
@@ -1087,7 +1108,8 @@ def build_shell_garment(body, rig, slot, image_paths, canvas, *, kind='source', 
         extras = silhouette_extras(views, data, vertex_region, vertex_side, axes)
         positions = inflate(positions, normals, regions, sides, axes, extras, triangles, weld_like, marks, fit)
         positions = clear_body(positions, tree)
-        triangles = triangles[component_mask(triangles, weld_like)]
+        triangles, covered, uncovered = drop_small_islands(triangles, weld_like, parents, covered)
+        report['covered_body_vertices'] -= uncovered
         used = np.unique(triangles)
         remap = -np.ones(len(positions), dtype=np.int64); remap[used] = np.arange(len(used))
         positions, weights, triangles = positions[used], weights[used], remap[triangles]
