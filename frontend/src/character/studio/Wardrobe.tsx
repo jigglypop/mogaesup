@@ -14,7 +14,7 @@ import { usePolling } from '../use-polling';
 import { ModelViewer } from '../viewer';
 import type { Tuck } from '../native-wardrobe';
 import { createHeldLoads } from './held-loads';
-import { reshapable, wearableParts } from './wardrobe-view';
+import { fitReason, reshapable, unfittedParts, wearableParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
 import './wardrobe.css';
 
@@ -85,6 +85,7 @@ export default function Wardrobe() {
   }, [body?.job_id, library.setValue]);
   // Parts whose fit check failed are known-bad fits; only operators see them.
   const parts = body && library.value?.body.job_id === body.job_id ? wearableParts(library.value.parts, admin) : [];
+  const unfitted = body && library.value?.body.job_id === body.job_id ? unfittedParts(library.value.unavailable, admin) : [];
   const slots = slotOrder.filter(slot => parts.some(part => part.slot === slot));
   const [slot, setSlot] = useState('hair');
   const activeSlot = slots.includes(slot) ? slot : slots[0];
@@ -381,6 +382,8 @@ export default function Wardrobe() {
             {admin && part.fit_check?.status === 'fail' && <small className="wardrobe-card-fit">{part.fit_check.failures.join(' · ')}</small>}
           </button>;
         })}</div>
+        {unfitted.length > 0 && <ul className="wardrobe-unfit">{unfitted.map(item => <li key={keyOf(item, item.slot)}>
+          <strong>{item.name}</strong><small>{labels[item.slot] || item.slot} · {fitReason(item.reason)}</small></li>)}</ul>}
         <div className="wardrobe-worn"><h2>입은 파츠</h2>
           {Object.keys(worn).length === 0 ? <p className="wardrobe-empty">기본 몸만 입고 있습니다.</p>
             : <ul>{slotOrder.filter(slotName => worn[slotName]).map(slotName => <li key={slotName}>

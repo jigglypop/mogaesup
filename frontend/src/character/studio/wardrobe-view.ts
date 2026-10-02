@@ -1,10 +1,20 @@
-import type { WardrobePart } from '../factory/api';
+import type { WardrobePart, WardrobeUnavailable } from '../factory/api';
 
 const SHAPE_SLOTS = ['top', 'bottom'];
+const FIT_REASONS = new Map([
+  ['needs_anchors', '피팅 기준점 필요'],
+  ['garment_fit_incomplete', '피팅 미완료'],
+  ['fit_exception', '피팅 중 오류'],
+]);
 
 /** The parts a person is offered: operators see every fit, everyone else only the parts that passed the fit check. */
 export const wearableParts = (parts: WardrobePart[], operator: boolean): WardrobePart[] =>
   operator ? parts : parts.filter((part) => part.fit_check?.status !== 'fail');
+
+/** The parts that could not be fitted, for operators only. */
+export const unfittedParts = (parts: WardrobeUnavailable[] | undefined, operator: boolean): WardrobeUnavailable[] => (operator ? (parts ?? []) : []);
+
+export const fitReason = (code: string): string => FIT_REASONS.get(code) ?? '피팅 실패';
 
 /**
  * The worn tops and bottoms whose shape can be rebuilt. A rebuild refits the part in its own job, which is paid studio

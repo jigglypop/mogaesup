@@ -111,3 +111,40 @@ def test_a_body_file_is_parsed_once_per_hash(tmp_path, monkeypatch):
     first = body_facts(path, digest)
     assert body_facts(path, digest) is first and calls == [1]
     assert first['identity'] == real(content) and first['clips'] == ['provider_clip']
+
+
+# A body registered again at a new version keeps the parts built on the version it replaced, when the geometry is the same.
+
+PART, PART_VERSION, NEXT_VERSION = 'd' * 24, '3' * 24, '4' * 24
+
+
+def part_on_the_first_version(library):
+    library.job(PART, base=(BODY, VERSION), requested=['hair'])
+    library.assembly(PART, PART_VERSION, slots=('hair',))
+    library.current(PART, PART_VERSION)
+    library.assembly(BODY, NEXT_VERSION, slots=())
+
+
+def test_parts_stay_with_a_body_registered_again_with_the_same_geometry(library, monkeypatch):
+    part_on_the_first_version(library)
+    Parsing(monkeypatch)
+    library.wardrobe.register(BODY, VERSION, '0')
+    assert [part[:3] for part in library.listed(BODY)] == [(PART, PART_VERSION, 'hair')]
+    revision = library.wardrobe.bodies()['revision']
+    library.wardrobe.register(BODY, NEXT_VERSION, revision)
+    stored = library.wardrobe._stored()['bodies']
+    assert [(body['version'], body.get('aliases')) for body in stored] == [(NEXT_VERSION, [VERSION])]
+    assert [part[:3] for part in library.listed(BODY)] == [(PART, PART_VERSION, 'hair')]
+    assert library.wardrobe.bodies()['bodies'][0]['part_jobs'] == 1
+
+
+def test_parts_do_not_follow_a_body_whose_geometry_changed(library, monkeypatch):
+    part_on_the_first_version(library)
+    Parsing(monkeypatch)
+    library.wardrobe.register(BODY, VERSION, '0')
+    changed = {**entry(BODY, NEXT_VERSION), 'geometry_sha256': sha('another shape')}
+    monkeypatch.setattr(FittingManagement, 'body_entry',
+                        lambda management, job, version: (changed, {'character_name': '몸', 'base_body': {'body_type': 'male'}}))
+    library.wardrobe.register(BODY, NEXT_VERSION, library.wardrobe.bodies()['revision'])
+    assert 'aliases' not in library.wardrobe._stored()['bodies'][0]
+    assert library.listed(BODY) == []

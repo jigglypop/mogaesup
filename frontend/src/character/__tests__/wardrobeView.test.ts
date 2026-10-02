@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { ApiError, isRevisionConflict } from '../api';
-import type { WardrobePart } from '../factory/api';
-import { reshapable, wearableParts } from '../studio/wardrobe-view';
+import type { WardrobePart, WardrobeUnavailable } from '../factory/api';
+import { fitReason, reshapable, unfittedParts, wearableParts } from '../studio/wardrobe-view';
 
 const part = (slot: string, changes: Partial<WardrobePart> = {}): WardrobePart => ({
   job_id: 'job',
@@ -29,6 +29,30 @@ describe('옷장 목록', () => {
 
   it('검사 기록이 없는 파츠는 입을 수 있다', () => {
     expect(wearableParts([part('hat'), part('shoes', { fit_check: undefined })], false)).toHaveLength(2);
+  });
+});
+
+describe('피팅하지 못한 파츠', () => {
+  const missing: WardrobeUnavailable[] = [{ job_id: 'job', version: 'v1', slot: 'top', name: '후드', reason: 'needs_anchors' }];
+
+  it('운영자에게만 보인다', () => {
+    expect(unfittedParts(missing, true)).toBe(missing);
+    expect(unfittedParts(missing, false)).toEqual([]);
+  });
+
+  it('서버가 목록을 주지 않으면 비어 있다', () => {
+    expect(unfittedParts(undefined, true)).toEqual([]);
+  });
+
+  it('이유 코드를 한글로 바꾸고 모르는 코드는 피팅 실패로 둔다', () => {
+    expect(['needs_anchors', 'garment_fit_incomplete', 'fit_exception', 'failed', 'fit_incomplete', 'constructor'].map(fitReason)).toEqual([
+      '피팅 기준점 필요',
+      '피팅 미완료',
+      '피팅 중 오류',
+      '피팅 실패',
+      '피팅 실패',
+      '피팅 실패',
+    ]);
   });
 });
 

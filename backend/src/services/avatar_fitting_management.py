@@ -65,6 +65,33 @@ def geometry_identity(content):
     return signature.hexdigest()
 
 
+# The fits that prove how a sealed slot was built when its assembly input does not say.
+_FIT_METHODS = {'body-shell-v1': 'body_shell', 'worn-extract-v1': 'worn'}
+
+
+def saved_build(entry):
+    """(part_method, shape) one slot of a sealed assembly was built with; (None, None) when its input does not say.
+
+    A slot built in that assembly names both. A slot it only carried over has the fit report it was sealed with: the
+    body-shell and worn fits identify themselves, any other fit is the saved model's. The shape is the requested one:
+    sleeve and hem when set, fit when it is not the default.
+    """
+    method = entry.get('part_method')
+    if method in ('isolated', 'body_shell', 'worn'):
+        return method, (entry.get('shape') or None) if method == 'body_shell' else None
+    report = entry.get('report') or {}
+    if not report.get('fit_method'):
+        return None, None
+    method = _FIT_METHODS.get(report['fit_method'], 'isolated')
+    if method != 'body_shell':
+        return method, None
+    resolved = report.get('shape') or {}
+    shape = {key: resolved[key] for key in ('sleeve', 'hem') if resolved.get(key) is not None}
+    if resolved.get('fit') not in (None, 'normal'):
+        shape['fit'] = resolved['fit']
+    return method, shape or None
+
+
 class FittingManagement:
     def __init__(self, factory, owner):
         self.factory, self.owner = factory, owner
@@ -157,7 +184,9 @@ class FittingManagement:
             # derived cuff/hem targets here would override later length edits.
             profile['anchors'] = [{'name': name, 'source': point}
                                   for name, point in landmarks.items() if isinstance(point, list) and len(point) == 3]
-        profile['source_sha256'] = raw_sha
+        # A profile keeps the hash of the mesh its anchors were measured on, so that a refit refuses anchors of an
+        # older mesh; only a profile that never recorded one is taken to belong to the file as it is now.
+        profile['source_sha256'] = profile.get('source_sha256') or raw_sha
         return {'slot': slot, 'source_version': version, 'source_sha256': raw_sha,
                 'fit_profile': profile, 'measurement': measurement,
                 'body_profile': record.get('result', {}).get('body_profile')}
@@ -225,6 +254,7 @@ class FittingManagement:
                                  for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
             selected_kinds = {p['slot']: p.get('garment_kind') or p.get('report', {}).get('garment_kind')
                               for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
+            selected_builds = {p['slot']: saved_build(p) for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
             for part in pipeline.get('parts', []):
                 if part['slot'] in selected_profiles:
                     profile = selected_profiles[part['slot']]
@@ -234,6 +264,16 @@ class FittingManagement:
                         part.pop('fit_profile', None)
                     part['garment_kind'] = (selected_kinds.get(part['slot'])
                                             or (profile or {}).get('kind') or 'source')
+                    # How the slot was built goes back with its fit: a refit that follows starts from this
+                    # version's method and shape, not from a later version's.
+                    method, shape = selected_builds[part['slot']]
+                    if method:
+                        if method != part.get('part_method', 'isolated'):
+                            part['part_method'] = method
+                        if shape:
+                            part['shape'] = deepcopy(shape)
+                        else:
+                            part.pop('shape', None)
             _write_json(directory/'pipeline.json', pipeline)
             _write_json(root/'current.json', {'version': version})
             _write_json(receipt, {'input': intent, 'status': 'complete'})

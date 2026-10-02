@@ -8,7 +8,7 @@ import { lookApi } from '../../api/endpoints';
 import type { PermissionName, User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
 import { ApiError } from '../api';
-import { factoryApi, type WardrobeBody, type WardrobeOutfit, type WardrobePart } from '../factory/api';
+import { factoryApi, type WardrobeBody, type WardrobeOutfit, type WardrobePart, type WardrobeUnavailable } from '../factory/api';
 import Wardrobe from '../studio/Wardrobe';
 
 const auth = vi.hoisted(() => ({ user: null as unknown }));
@@ -66,6 +66,7 @@ const tab = (container: HTMLElement, label: string) => [...container.querySelect
 const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button')].find((item) => item.textContent?.trim() === label);
 
 let parts: WardrobePart[];
+let unavailable: WardrobeUnavailable[];
 let outfits: Record<string, WardrobeOutfit>;
 let colors: MockInstance<typeof factoryApi.wardrobeColors>;
 let outfitList: MockInstance<typeof factoryApi.wardrobeOutfits>;
@@ -90,6 +91,7 @@ describe('옷장', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     parts = [part('top-job', 'top', '후드'), part('top-bad', 'top', '맞지 않는 옷', { fit_check: { status: 'fail', failures: ['소매가 몸을 뚫습니다.'] } })];
+    unavailable = [];
     outfits = {};
     viewers.length = 0;
     textures.length = 0;
@@ -97,7 +99,7 @@ describe('옷장', () => {
     outfitList = vi.spyOn(factoryApi, 'wardrobeOutfits');
     loadMask = vi.spyOn(TextureLoader.prototype, 'loadAsync');
     vi.spyOn(factoryApi, 'wardrobeBodies').mockResolvedValue({ revision: '1', bodies: [body], default: { job_id: body.job_id, version: body.version } });
-    vi.spyOn(factoryApi, 'wardrobeParts').mockImplementation(async () => ({ body, parts }));
+    vi.spyOn(factoryApi, 'wardrobeParts').mockImplementation(async () => ({ body, parts, unavailable }));
     outfitList.mockImplementation(async () => ({ revision: '1', outfits }));
     colors.mockImplementation(async (item) => ({ slot: item.slot, material: 0, regions: [{ index: 0, color: '#ff0000', share: 1, light: 0.5 }] }));
     vi.spyOn(factoryApi, 'wardrobeCoverage').mockImplementation(async (_body, item) => ({ slot: item.slot, hidden: {}, triangles: {}, covers_bottom: false }));
@@ -126,6 +128,44 @@ describe('옷장', () => {
       expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
       expect(container.textContent).toContain('소매가 몸을 뚫습니다.');
       await unmount();
+    });
+
+    describe('피팅하지 못한 파츠', () => {
+      beforeEach(() => {
+        unavailable = [
+          { job_id: 'anchors', version: 'v1', slot: 'top', name: '긴 코트', reason: 'needs_anchors' },
+          { job_id: 'broken', version: 'v1', slot: 'bottom', name: '청바지', reason: 'fit_exception' },
+          { job_id: 'other', version: 'v1', slot: 'hat', name: '모자', reason: 'something_new' },
+        ];
+      });
+
+      it('운영자는 이름, 파츠 종류, 이유를 본다', async () => {
+        auth.user = user('operator');
+        const { container, unmount } = await open();
+        await settle();
+        const rows = [...container.querySelectorAll('.wardrobe-unfit li')].map((item) => item.textContent);
+        expect(rows).toEqual(['긴 코트상의 · 피팅 기준점 필요', '청바지하의 · 피팅 중 오류', '모자모자·머리 장식 · 피팅 실패']);
+        expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
+        await unmount();
+      });
+
+      it('회원에게는 아무것도 보이지 않는다', async () => {
+        const { container, unmount } = await open();
+        await settle();
+        expect(container.querySelector('.wardrobe-unfit')).toBeNull();
+        expect(container.textContent).not.toContain('긴 코트');
+        expect(container.textContent).not.toContain('피팅 기준점 필요');
+        await unmount();
+      });
+
+      it('목록이 비어 있으면 아무것도 그리지 않는다', async () => {
+        unavailable = [];
+        auth.user = user('operator');
+        const { container, unmount } = await open();
+        await settle();
+        expect(container.querySelector('.wardrobe-unfit')).toBeNull();
+        await unmount();
+      });
     });
 
     it.each([

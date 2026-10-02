@@ -3,8 +3,12 @@ from __future__ import annotations
 import base64
 
 import numpy as np
+import pytest
 
 from src.services import avatar_wardrobe_coverage as cov
+from wardrobe_fixture import Library, put
+
+BODY, BODY_VERSION, PART, V1 = 'b' * 24, '1' * 24, 'c' * 24, 'a' * 24
 
 
 def sphere(radius, centre, rows=18, columns=24):
@@ -53,3 +57,49 @@ def test_a_hood_hides_the_torso_under_it_but_never_the_scalp(monkeypatch):
     # Hair still tucks under the raised hood.
     assert value['covers_head']
     assert fraction(value['over']['0:0'], len(head_faces)) > .3
+
+
+@pytest.fixture
+def closet(tmp_path):
+    library = Library(tmp_path)
+    library.job(BODY)
+    library.assembly(BODY, BODY_VERSION, slots=())
+    library.current(BODY, BODY_VERSION)
+    library.register((BODY, BODY_VERSION))
+    library.job(PART, base=(BODY, BODY_VERSION), requested=['top'])
+    library.assembly(PART, V1, slots=('top',))
+    library.current(PART, V1)
+    return library
+
+
+def describe(library, text):
+    put(library.directory(PART)/'pipeline.json', {'parts': [{'slot': 'top', 'description': text}]})
+
+
+def reaching_the_legs(library):
+    """The coverage a long top has once computed: it reaches the lower thighs, so it would take the bottom off."""
+    body_sha = library.file_sha(BODY, BODY_VERSION, 'body')
+    put(library.wardrobe.library.root/'wardrobe-coverage'/f"{body_sha[:20]}-{library.file_sha(PART, V1, 'top')[:20]}-v10.json",
+        {'slot': 'top', 'covers_bottom': True})
+
+
+@pytest.mark.parametrize('text, outerwear', [
+    ('긴 코트', True), ('점퍼', True), ('Cardigan', True),
+    ('롱 후드 집업', True), ('후디', True), ('집업 후드티', True), ('oversized zip-up hoodie', True),
+    ('long hooded zip up', True), ('hoodie', True), ('Zip-Up Jacket', True),
+    ('점퍼스커트', False), ('체크 점퍼 스커트', False), ('navy jumper skirt', False), ('Jumper-Dress', False),
+    ('pinafore', False),
+    ('후드 원피스', False), ('hoodie dress', False), ('롱 코트 드레스', False), ('원피스', False),
+    ('흰색 긴 티셔츠', False), ('', False),
+])
+def test_outerwear_is_told_from_a_dress_by_the_description(closet, text, outerwear):
+    describe(closet, text)
+    assert closet.wardrobe._outerwear(PART, 'top') is outerwear
+
+
+def test_a_long_hooded_zip_up_stays_over_the_bottom_but_a_jumper_skirt_takes_it_off(closet):
+    reaching_the_legs(closet)
+    describe(closet, '롱 후드 집업')
+    assert closet.wardrobe.coverage(BODY, PART, 'top', V1)['covers_bottom'] is False
+    describe(closet, '체크 점퍼스커트')
+    assert closet.wardrobe.coverage(BODY, PART, 'top', V1)['covers_bottom'] is True

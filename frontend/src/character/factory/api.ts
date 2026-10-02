@@ -53,7 +53,7 @@ export type MeshyState = { provider: 'meshy'; status: string; rig_task_id?: stri
   clips: {slot: string; source: string; action_id: number | null}[]; selected: Record<string, number>;
   actions: {action_id: number; task_id?: string; status?: string; progress?: number}[] };
 /** Pre-rig ring measurement of sleeves / trouser legs against the body (worn parts). */
-export type LimbFitCheck = { status: 'pass' | 'fail' | 'not_applicable'; failures: { limb: string; message: string }[];
+export type LimbFitCheck = { status: 'pass' | 'fail' | 'unchecked' | 'not_applicable'; failures: { limb: string; message: string }[];
   limbs: Record<string, { rings?: number; min_margin_cm?: number; angle_deg?: number | null }> };
 export type NativePartsState = {
   origin?: string;
@@ -78,7 +78,9 @@ export type GarmentShape = { sleeve?: number; hem?: number; fit?: 'tight' | 'nor
 export type WardrobePart = { job_id: string; version: string; slot: string; name: string; character_name?: string | null; fit_method?: string | null;
   shape?: GarmentShape | null;
   fit_check?: { status: 'pass' | 'fail'; failures: string[] } | null; sha256: string; created_at?: string | null };
-type WardrobeParts = { body: WardrobeBody; parts: WardrobePart[] };
+/** A part whose fitting did not produce a wearable file: `reason` is a code (needs_anchors, garment_fit_incomplete, fit_exception, ...). */
+export type WardrobeUnavailable = { job_id: string; version: string; slot: string; name: string; reason: string };
+type WardrobeParts = { body: WardrobeBody; parts: WardrobePart[]; unavailable?: WardrobeUnavailable[] };
 export type WardrobePartRef = { job_id: string; version: string; sha256: string };
 export type WardrobeOutfit = { name: string; body: { job_id: string; version: string }; parts: Record<string, WardrobePartRef>; hair_color?: string | null; colors?: Record<string, Record<string, string>>; saved_at?: string };
 export type WardrobeColors = { slot: string; material: number; regions: { index: number; color: string; share: number; light: number }[] };

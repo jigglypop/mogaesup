@@ -24,9 +24,12 @@ MAX_OUTFITS = 200
 _FIELDS = ('job_id', 'version', 'profile_id', 'geometry_sha256', 'body_sha256')
 _ID = re.compile(r'[a-f0-9]{24}')
 _SLOT = re.compile(r'[A-Za-z]{2,20}')
-# A long coat reaches the lower thighs like a dress but is worn over a bottom; its description says which.
-_OUTERWEAR = re.compile(r'코트|재킷|자켓|점퍼|가디건|야상|블레이저|파카|패딩|바람막이|\b(coat|jacket|cardigan|parka|blazer|anorak)\b')
-_DRESS = re.compile(r'원피스|드레스|\bdress\b')
+_CODE = re.compile(r'[a-z][a-z0-9_]{0,39}')
+# A long coat or hooded zip-up reaches the lower thighs like a dress but is worn over a bottom; its description says
+# which. A jumper skirt is a dress: 점퍼 in it is the pinafore, not a jacket.
+_OUTERWEAR = re.compile(r'코트|재킷|자켓|점퍼|가디건|야상|블레이저|파카|패딩|바람막이|후드|후디|집업|지퍼\s*업|'
+                        r'\b(coat|jacket|cardigan|parka|blazer|anorak|hood(?:ed|ie|y)?|hoodies|zip[\s-]*up)\b')
+_DRESS = re.compile(r'원피스|드레스|점퍼\s*스커트|점퍼\s*치마|\b(dress|jumper[\s-]*(?:skirt|dress)|pinafore)\b')
 # Assembly records never change after a version is sealed; keep recent ones in memory.
 _records = OrderedDict()
 _records_lock = RLock()
@@ -35,8 +38,21 @@ _READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='wardrobe-record
 _COMPUTING = Semaphore(2)
 
 
+def registered_bodies(bodies):
+    """Every (job_id, version) a registered body answers to, mapped to its current (job_id, version). A body registered
+    again at a version with the same geometry keeps the version it replaced as an alias, so the parts built on that
+    version stay with it."""
+    pairs = {}
+    for body in bodies:
+        current = (body['job_id'], body['version'])
+        pairs[current] = current
+        for version in body.get('aliases', []):
+            pairs[(body['job_id'], version)] = current
+    return pairs
+
+
 def lineage_body(jobs_by_id, job_id, registered):
-    """(job_id, version) of the registered body a job builds on, or None."""
+    """(job_id, version) of the registered body a job builds on, or None. `registered` is registered_bodies()."""
     seen = set()
     current = jobs_by_id.get(job_id)
     while current and current['id'] not in seen and len(seen) < 16:
@@ -45,9 +61,19 @@ def lineage_body(jobs_by_id, job_id, registered):
         if not base[0]:
             return None
         if base in registered:
-            return base
+            return registered[base]
         current = jobs_by_id.get(base[0])
     return None
+
+
+def _reason(part):
+    """Short code for why a part report is not offered: the report's reason, else its fit status. Only a code is
+    taken from the report; its error messages can carry worker text and are never passed on."""
+    for key in ('unavailable_reason', 'fit_status'):
+        value = part.get(key)
+        if isinstance(value, str) and _CODE.fullmatch(value):
+            return value
+    return 'fit_incomplete'
 
 
 class _JobRecords:
@@ -84,7 +110,7 @@ class Wardrobe:
         from src.services.avatar_fitting_management import FittingManagement
         value = self._stored()
         default = FittingManagement(self.factory, self.owner).body_default().get('body') or None
-        registered = {(body['job_id'], body['version']) for body in value['bodies']}
+        registered = registered_bodies(value['bodies'])
         try:
             jobs = self.factory.listing(self.owner)
         except PipelineError:
@@ -130,9 +156,14 @@ class Wardrobe:
                     if len(others) >= MAX_BODIES:
                         raise PipelineError('too_many_bodies', f'옷장 몸은 {MAX_BODIES}개까지 등록할 수 있습니다.', 422)
                     name = self.library.metadata()['items'].get(job, {}).get('name')
+                    replaced = next((b for b in previous['bodies'] if b['job_id'] == job), None)
+                    aliases = [version for version in (replaced or {}).get('aliases', []) if version != body['version']]
+                    if replaced and replaced['version'] != body['version'] and replaced.get('geometry_sha256') == body['geometry_sha256']:
+                        aliases.append(replaced['version'])
                     entry = {**{key: body[key] for key in _FIELDS},
                              'name': name or source_job.get('character_name') or job,
-                             'body_type': (source_job.get('base_body') or {}).get('body_type'), 'registered_at': now()}
+                             'body_type': (source_job.get('base_body') or {}).get('body_type'), 'registered_at': now(),
+                             **({'aliases': aliases} if aliases else {})}
                     self._write(others + [entry])
         return self.bodies()
 
@@ -187,7 +218,7 @@ class Wardrobe:
         """404 unless parts() could list this job's part: the job is a registered body's own or built on one (on
         `body` when given), is not deleted or archived, and the slot is not tombstoned. It reads the few records
         that takes, not the listing of every job."""
-        registered = {(b['job_id'], b['version']) for b in self._stored()['bodies']}
+        registered = registered_bodies(self._stored()['bodies'])
         jobs = _JobRecords(self.factory, self.owner)
         job = jobs.get(job_id)
         if body:
@@ -209,7 +240,7 @@ class Wardrobe:
         version is sealed.
         """
         body = self._body(job_id)
-        registered = {(b['job_id'], b['version']) for b in self._stored()['bodies']}
+        registered = registered_bodies(self._stored()['bodies'])
         jobs = self.factory.listing(self.owner)
         jobs_by_id = {job['id']: job for job in jobs}
         metadata = self.library.metadata()
@@ -223,7 +254,7 @@ class Wardrobe:
                 members.append((job, version))
         # Records are read in parallel on the first listing; later ones come from memory.
         records = list(_READERS.map(lambda member: self._record(member[0]['id'], member[1]), members))
-        items = []
+        items, missing = [], []
         for (job, version), record in zip(members, records):
             if record.get('status') != 'review_required':
                 continue
@@ -232,14 +263,21 @@ class Wardrobe:
                 slot, name = part.get('slot'), f"{part.get('slot')}.glb"
                 made_elsewhere = (slot not in requested if requested is not None
                                   else part.get('origin') == 'reused_fitted_native')
-                if slot == 'body' or part.get('available') is False or name not in record.get('files', {}) or made_elsewhere:
+                if slot == 'body' or made_elsewhere:
                     continue
                 entry = metadata['parts'].get(f"{job['id']}:{slot}", {})
                 if entry.get('deleted'):
                     continue
+                label = entry.get('name') or job.get('part_name') or job.get('character_name') or job['id']
+                if part.get('available') is False:
+                    # Why a part is missing from the list: its code only, never the worker's messages or paths.
+                    missing.append((job.get('created_at') or '', {'job_id': job['id'], 'version': version, 'slot': slot,
+                                                                  'name': label, 'reason': _reason(part)}))
+                    continue
+                if name not in record.get('files', {}):
+                    continue
                 check = (part.get('limb_fit') or {}).get('check') or {}
-                items.append({'job_id': job['id'], 'version': version, 'slot': slot,
-                              'name': entry.get('name') or job.get('part_name') or job.get('character_name') or job['id'],
+                items.append({'job_id': job['id'], 'version': version, 'slot': slot, 'name': label,
                               'character_name': job.get('character_name'), 'fit_method': part.get('fit_method'),
                               'fit_check': ({'status': check['status'],
                                              'failures': [f['message'] for f in check.get('failures', [])]}
@@ -249,7 +287,8 @@ class Wardrobe:
                                         if part.get('fit_method') == 'body-shell-v1' else None),
                               'sha256': record['files'][name], 'created_at': job.get('created_at')})
         items.sort(key=lambda item: item.get('created_at') or '', reverse=True)
-        return {'body': deepcopy(body), 'parts': items}
+        missing.sort(key=lambda row: row[0], reverse=True)
+        return {'body': deepcopy(body), 'parts': items, 'unavailable': [row[1] for row in missing]}
 
     def preview(self, job_id, slot, version):
         """Front drawing of a part without the key-coloured mannequin, cropped; cached by drawing hash."""
