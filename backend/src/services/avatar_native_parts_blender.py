@@ -1,6 +1,7 @@
 """Local fitting candidates on the original Meshy skeleton; never a visual approval."""
 from copy import deepcopy
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -237,15 +238,23 @@ def compatible_rig(source, target, tolerance=1e-4):
         target_bone = target_bones[name]
         if source_bone['parent'] != target_bone['parent']:
             return False
-        if any(abs(a-b) > tolerance for a, b in zip(source_bone['world_rest'], target_bone['world_rest'])):
+        a_values, b_values = source_bone['world_rest'], target_bone['world_rest']
+        if len(a_values) != len(b_values) or not all(math.isfinite(v) for v in (*a_values, *b_values)):
+            return False
+        if any(abs(a-b) > tolerance for a, b in zip(a_values, b_values)):
             return False
     return True
 
 
-def load_prefit_part(part, rig):
+def load_prefit_part(part, rig, *, body_source=None):
     """Attach an already fitted slot to the identical canonical rig without touching its mesh."""
     if sha(part['path']) != part['sha256']:
         raise ValueError('Prefit part changed')
+    if part.get('uploaded_native_hair'):
+        if part['slot'] != 'hair': raise ValueError('Only uploaded native hair is supported')
+        from src.services.native_hair_upload import validate_native_hair
+        validate_native_hair(Path(part['path']).read_bytes(),
+            body_content=Path(body_source).read_bytes() if body_source else None, inspect=False)
     additions = load(part['path'])
     imported_rigs = [obj for obj in additions if obj.type == 'ARMATURE']
     if len(imported_rigs) != 1:
@@ -258,6 +267,15 @@ def load_prefit_part(part, rig):
         modifiers = [modifier for modifier in obj.modifiers if modifier.type == 'ARMATURE']
         if not modifiers or any(modifier.object != imported_rig for modifier in modifiers):
             raise ValueError('Prefit part skin binding changed')
+        if part.get('uploaded_native_hair'):
+            bone_names = {bone.name for bone in imported_rig.data.bones}
+            group_names = {group.index: group.name for group in obj.vertex_groups}
+            for vertex in obj.data.vertices:
+                weights = [group for group in vertex.groups if group.weight > 0]
+                if (not weights or any(not math.isfinite(group.weight) or not 0 <= group.weight <= 1
+                        or group_names.get(group.group) not in bone_names for group in vertex.groups)
+                        or abs(sum(group.weight for group in weights)-1.) > 1e-5):
+                    raise ValueError('Prefit part vertex binding changed')
         world = obj.matrix_world.copy()
         for modifier in modifiers:
             modifier.object = rig
@@ -398,7 +416,7 @@ def run(payload):
     imported, imported_additions, prefit_paths = {}, {}, {}
     rejected = {}
     for part in payload.get('prefit_parts', []):
-        meshes, report = load_prefit_part(part, rig)
+        meshes, report = load_prefit_part(part, rig, body_source=payload['source'])
         imported[part['slot']] = meshes
         prefit_paths[part['slot']] = part['path']
         reports.append(report)
@@ -407,7 +425,27 @@ def run(payload):
         if part.get('part_method') == 'body_shell':
             continue
         if sha(part['path']) != part['sha256']:
+            if part.get('uploaded_native_hair'):
+                rejected[part['slot']] = ValueError('Uploaded native hair source changed')
+                continue
             raise InputChanged('Part source changed')
+        if part.get('uploaded_native_hair'):
+            known_objects = set(bpy.data.objects.keys())
+            try:
+                if part.get('native_upload_error') or part['slot'] != 'hair':
+                    raise ValueError('Uploaded native hair is not eligible')
+                frozen_part = {**part, 'report': {'runtime_budget': part['native_hair_budget'],
+                    'fit_method': 'uploaded-native-hair-v1', 'available': True,
+                    'clearance': {'method': 'preserved_uploaded_source'}}}
+                meshes, report = load_prefit_part(frozen_part, rig, body_source=payload['source'])
+                imported[part['slot']] = meshes
+                prefit_paths[part['slot']] = part['path']
+                reports.append(report)
+                fitted += meshes
+            except Exception:
+                discard_objects([bpy.data.objects[name] for name in set(bpy.data.objects.keys())-known_objects])
+                rejected[part['slot']] = ValueError('Uploaded native hair could not be attached to the frozen body')
+            continue
         for view, path in part.get('image_paths', {}).items():
             if sha(path) != part.get('image_sha256', {}).get(view):
                 raise InputChanged('Part reference image changed')
@@ -433,6 +471,8 @@ def run(payload):
         slot = part['slot']
         if slot in rejected:
             reports.append(fit_failure(part, rejected[slot]))
+            continue
+        if slot in prefit_paths:
             continue
         known_objects = set(bpy.data.objects.keys())
         try:

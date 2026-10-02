@@ -1,6 +1,6 @@
 # 모개숲 코드 감사와 수정 결과
 
-2026년 10월 2일, main의 e8b476b와 기존 작업 폴더 변경을 기준으로 웹·Rust 서버·캐릭터 서버·DB·실시간 방·캐릭터 산출물·배포 경로를 검토했다. 이 문서는 최초 감사에서 찾은 결함과 후속 수정·검증을 함께 기록한다. 기존 변경은 보존했고 브랜치 생성·커밋·푸시·운영 애플리케이션 배포·유료 생성은 하지 않았다.
+2026년 10월 2일, main의 e8b476b와 기존 작업 폴더 변경을 기준으로 웹·Rust 서버·캐릭터 서버·DB·실시간 방·캐릭터 산출물·배포 경로를 검토했다. 이 문서는 최초 감사에서 찾은 결함과 후속 수정·검증을 함께 기록한다. 최초 감사에서는 기존 변경을 보존하고 브랜치 생성·푸시·운영 배포·유료 생성을 하지 않았다. 이후 사용자가 승인한 배포 단계에서 `f131f12`와 `9935dc7`을 main에 반영했고 실제 CI·운영 배포를 검증했다. 유료 생성은 실행하지 않았다.
 
 “수정 완료”는 아래 코드 경계와 회귀 검사에 대한 상태다. 모든 기기에서의 화면 품질·FPS나 운영 배포 성공을 뜻하지 않는다.
 
@@ -84,28 +84,33 @@ server/src/war의 누락 routes 선언을 제거하고 lib의 실제 컴파일·
 
 [파이프라인](../.github/workflows/pipeline.yml)은 PR·main push에서 변경 영역을 검사한다. 통과한 main push만 마지막 성공 실행 이후 변경을 서버 → 웹 → 스튜디오 순으로 배포한다. 첫 push는 전체, 수동 실행은 all/server/web/studio 선택이며 main 외에는 배포하지 않는다. 실행 중 배포는 취소하지 않고 직렬화하며 실패한 이전 변경도 다음 실행의 비교 범위에 남는다. vendor 엔진 변경도 웹 재배포 대상이다.
 
-AWS의 mogaesup-github-deploy OIDC 역할 스택은 CREATE_COMPLETE이고 main 브랜치·해당 저장소에 한정된다. 릴리스 S3·지정 SSM·CloudFront 무효화·스택 읽기를 허용하며 IAM·CloudFormation 변경·EC2 시작은 허용하지 않는다. 실제 GitHub OIDC workflow 실행은 아직 하지 않았다.
+AWS의 mogaesup-github-deploy OIDC 역할을 배포했고 main 브랜치·해당 저장소에 한정한다. 릴리스 S3·지정 SSM·CloudFront 무효화·스택 읽기를 허용하며 IAM·CloudFormation 변경·EC2 시작은 허용하지 않는다. 실제 GitHub OIDC 인증은 최초 `f131f12` 실행에서 immutable repository ID 기반 subject에 맞춘 trust 교정 후 통과했고, 후속 `9935dc7` 실행도 전체 성공했다.
 
 웹은 index 마지막 업로드·기존 hashed asset 보존·CloudFront 대기 후 index/API와 필수 WASM 두 개·기본 GLB의 MIME·SHA256을 검사한다. 스튜디오는 수락 차단→기존 API/CLI/Blender 완료→닫힌 후보 검증→commit→개방 순서다. 실패·중단 시 기존 설정·컨테이너·접수를 복원하고, 개방 후 응답이 불확실하면 새로 수락된 유료 작업을 자르지 않도록 후보를 보존한다.
 
-**drain 없는 운영 구버전의 최초 스튜디오 교체는 자동으로 강행하지 않는다.** [백엔드 AWS 절차](../backend/README.md#aws-배포)에 따라 전체 접수·CLI를 닫고 실제 작업 종료를 확인하는 점검 시간에 최초 전환해야 한다. 이후부터 자동 drain 배포를 사용할 수 있다. 꺼진 studio 인스턴스도 CI가 켜지 않는다.
+**drain 없는 운영 구버전의 최초 스튜디오 교체는 자동으로 강행하지 않는다.** [백엔드 AWS 절차](../backend/README.md#aws-배포)에 따라 접수·CLI를 닫고 실제 작업 종료를 확인한 뒤 일회성 최초 전환을 완료했다. 후속 배포는 자동 drain 계약으로 통과했다. 꺼진 studio 인스턴스는 CI가 켜지 않는다.
+
+최초 [36997500756](https://github.com/jigglypop/mogaesup/actions/runs/36997500756) attempt 2와 후속 [37000544937](https://github.com/jigglypop/mogaesup/actions/runs/37000544937) attempt 1 모두 서버·웹·스튜디오 배포가 성공했다. 후속 운영 index는 SHA256 `5ba6df60c3dd0918c913c97f5f964024b53ce1c7c50e4dd5c3b0c63a65621e3b`이고, 실제 파일 19개의 MIME·SHA·크기, 직접 링크 6개, API health 검사를 통과했다. 스튜디오 후속 릴리스 SHA256은 `3c06f692c0d9bd5b92f68de373eccc2b4321a10f6bba94c0a46c3e933b15136c`이다. [배포 기록](production-release-2026-10-02.md)에 실행·SSM 식별자와 복구 이력을 기록했다.
 
 ## 검증 결과와 남은 확인
 
-| 검사 | 현재 결과 |
+검증 수는 소스 버전별로 구분한다. 최초 배포 `f131f12`의 CI 기준은 프런트엔드 276개, Python 731개, Rust 147개였다. 아래 최신 전체 게이트는 후속 배포 `9935dc7`의 287/769/148개 기준이며, 이후 변경의 검증 결과는 별도 기록한다.
+
+| 검사 | 확인한 결과 |
 | --- | --- |
-| Rust fmt·all-target clippy -D warnings·전체 cargo test --locked --no-fail-fast | 통과, 147개 |
-| backend compileall·전체 offline pytest | 통과, 731개. 기존 TestClient deprecation 경고 2개 |
-| frontend TypeScript·Vite build | 통과, 996 modules |
-| frontend 비캐릭터 Vitest | 통과, 25 files / 180 tests |
+| Rust fmt·all-target clippy -D warnings·전체 cargo test --locked --no-fail-fast | `9935dc7` 통과, 148개 |
+| backend compileall·전체 offline pytest | `9935dc7` 통과, 769개. CI Python 3.11/3.12 모두 통과 |
+| frontend TypeScript·Vite build·전체 CI Vitest | `9935dc7` 통과, 287개 |
+| 최초 감사의 로컬 비캐릭터 Vitest | 당시 통과, 25 files / 180 tests. 최신 전체 CI 수와 다른 검사 범위 |
 | 정확한 엔진 릴리스의 회귀·전체 타입·ESM/CJS/declarations build·publint·fresh consumer | 통과, focused 38 tests |
 | 변경 감지 실제 Git fixture 회귀 | 통과, 15개 |
 | actionlint·cfn-lint·배포 PowerShell 구문·Bash 구문 | 통과 |
 | 웹 배포 script의 모의 MIME·SHA 검증 | 정상 1개·잘못된 MIME 3개·잘못된 SHA 3개 통과, AWS 쓰기 없음 |
 | 새 npm checkout의 file 패키지·lock 설치 | 격리 npm ci 통과, lifecycle·정상 peer 검사 유지·lock 불변. Linux native optional dependency 누락 없음 |
-| 실제 운영 변경 반영·GitHub 실행·Linux release/PowerShell 7 배포 | 미실행 |
-| 캐릭터 unit 실행·Playwright·실제 유료 생성·새 버전 GPU 시각 검수 | 로컬 캐릭터 지침에 따라 미실행 |
+| 실제 GitHub OIDC·Linux release/PowerShell 7·서버/웹/스튜디오 배포 | `f131f12`, `9935dc7` 두 실행 모두 성공. 후속 운영 index·19개 파일·6개 링크·API health 일치 |
+| 로컬 캐릭터 unit·Playwright·유료 생성 | 로컬 캐릭터 지침에 따라 미실행. 캐릭터를 포함한 CI 결과와 구분 |
+| 두 물리 네트워크의 WebGPU·원격 색/방향·걷기→정지·브라우저 FPS/GPU 수치 | 미검증 |
 
 임시 DB의 실제 소켓·동시성 회귀와 외부 서비스를 대체한 테스트를 구분했다. 캐릭터 빌드 성공을 생성 공급자 성공이나 사람의 시각 승인으로 보고하지 않는다. 확인된 결함은 위 코드에서 수정됐으며, 다른 네트워크·기기의 전체 체감 품질과 무거운 섬 진입 성능은 아직 측정하지 않았다.
 
-새 npm 설치 검증 환경은 Windows·Node 24이다. Ubuntu·Node 22의 GitHub 실행을 대신한 결과로 보고하지 않는다.
+새 npm 설치의 격리 로컬 검증 환경은 Windows·Node 24이다. 이후 Ubuntu·Node 22의 실제 GitHub 실행도 통과했으며, 로컬 검사와 실제 CI 기록을 구분했다. 배포·공개 GET 일치 검사는 두 물리 네트워크의 브라우저 체감·GPU 검증을 대신하지 않는다.

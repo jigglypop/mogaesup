@@ -56,6 +56,23 @@ Blender 5.2.1 LTS의 독립 CPU 프로세스에서 기존 백엔드 조명·카�
 - [v2 품질 영수증](../.data/audit/studio-quality/female-hair-a-refit-v2/quality-record.json)
 - [기존 native 실행 영수증](../.data/audit/studio-quality/female-hair-a-native-refit-v1/complete.json), [웹 파생 영수증](../.data/audit/studio-quality/female-hair-a-native-refit-v1/web-1024/web-derivative-receipt.json)
 
+## 네 가지 무료 헤어 후보와 연결 경로
+
+원본 a의 후면을 보강한 롱 웨이브, 하단 곡률을 유지한 미디엄 웨이브, 목 주변으로 둥글게 정리한 단발, g의 눈을 드러낸 핑크 번을 만들었다. 색상 복제 네 개가 아니라 서로 다른 geometry의 로컬 후보 네 개이며, 원본 몸·UV·스킨·동작 파일은 보존했다. 각 후보의 1K 헤어는 2.6~2.9 MB이고 헤어 삼각형은 40,000개 이하이다. 정면·양 측면·후면·걷기 렌더를 확인했으며 사람의 품질 승인 상태는 변경하지 않았다.
+
+기존 미리 맞춰진 헤어를 unrigged 입력으로 바꾸어 다시 피팅하면 g의 앞머리가 늘어나 눈을 다시 가리는 문제가 실제 Blender 재현에서 나왔다. 따라서 소유자가 업로드한 native hair만 기존 `fit` 경로에서 형태를 보존한다. 본 이름·부모·world rest·inverse-bind·동작·정규화된 Head 계열 스킨·명시적 hair 태그·40k/2K 예산이 고정한 몸과 일치해야 하며, 잘못된 입력은 착용 불가로 기록한다. 제공자가 만든 리깅 파츠에 이 예외를 주거나 새로운 HTTP action을 추가하지 않는다. 기존 일반 파츠 피팅과 sealed prefit 경로는 유지한다.
+
+`backend/infra/import-studio-glb.py --fitted-native-hair`는 고정한 로컬 SHA·운영 몸 job/version/SHA를 실제 파일과 대조한 뒤 기존 업로드→라이브러리 등록→fit API를 호출한다. 요청 키와 의도 영수증은 POST 전에 저장하며 불확실한 응답은 동일 요청 조회로 복구한다. 접수된 fit에는 여섯 공급자 예산이 모두 0이어야 한다. 기존 owner-1 운영 채널을 사용하므로 Rust의 월간 요청 집계를 통과하지 않으며, 이 사실을 영수증에 남긴다. 운영 키를 출력·파일 저장하거나 다른 소유권을 가장하지 않는다.
+
+실제 Blender 조립 경로에 네 후보를 넣고 다시 GLB를 불러온 결과, 네 헤어 모두 출력 `hair.glb`가 입력과 SHA256까지 동일했고 원본 몸도 바뀌지 않았다. 전체 조립본의 기존 몸 텍스처는 원본 예산 경고가 있어 1K 웹 파생본을 별도로 만들었으며, 파생본은 구조·텍스처 예산 검사와 정면·양 측면·후면·walk 25% 재입력 렌더를 통과했다. [조립 후 네 스타일 비교](../.data/audit/studio-quality/strict-native-four-styles.png), [기술 영수증](../.data/audit/studio-quality/strict-native-fit-acceptance.json).
+
+운영 등록과 옷장 미리보기 검수는 이 경로가 실제 배포된 뒤 실행한다. 아래 로컬 결과가 운영 등록 완료를 뜻하지 않는다.
+
+- [a 롱 웨이브](../.data/audit/studio-quality/female-hair-a-refit-v2/)
+- [a 미디엄 웨이브](../.data/audit/studio-quality/female-hair-a-medium-v1/)
+- [a 라운드 단발](../.data/audit/studio-quality/female-hair-a-bob-v1/)
+- [g 핑크 번](../.data/audit/studio-quality/female-hair-g-refit-v1/)
+
 ## 공통 신규 스타일 규격
 
 규격은 현재 `backend/assets/avatars/production-v1.json` revision 22를 기준으로 동결한다. 단위는 미터, +Y 위, +Z 정면, 바닥의 양발 사이가 원점, **몸 높이 1.2m**다. 헤어·모자까지 포함한 전신 bbox를 1.2m로 강제로 줄이지 않는다. 저장된 몸의 앵커·캔버스·스킨·표정 UV를 유지한다.

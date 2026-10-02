@@ -21,6 +21,29 @@ SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 RECIPE = 'native-parts-v14-matte-limb-fit'
 
 
+def uploaded_native_hair(factory, owner, part, path, body):
+    """Only the owner's immutable uploaded source can opt into native shape reuse."""
+    provenance = part.get('provenance') or {}
+    if provenance.get('origin') != 'uploaded_glb':
+        return {}
+    from src.services.avatar_glb_bodies import AvatarGlbBodies
+    uploads = AvatarGlbBodies(factory)
+    asset_id = provenance.get('asset_id')
+    from src.services.native_hair_upload import validate_native_hair
+    result = {'uploaded_native_hair': True}
+    try:
+        info = uploads.asset(owner, asset_id)
+        if info.get('rigged') is not True:
+            return {}
+        source = uploads._asset_root(owner, asset_id)/'source.glb'
+        if digest(source) != asset_id or digest(path) != asset_id:
+            raise ValueError('Uploaded native source changed')
+        result['native_hair_budget'] = validate_native_hair(path.read_bytes(), body_content=body.read_bytes())
+    except (PipelineError, ValueError, KeyError, TypeError, IndexError, OSError):
+        result['native_upload_error'] = 'Uploaded native hair validation failed'
+    return result
+
+
 def workspace_inputs(payload):
     """Files the Blender worker reads from outside its output directory: the body, every part model, the drawings it
     fits to or registers against, and a refit's saved fallback. A worn hat has drawings but no image_paths."""
@@ -405,6 +428,8 @@ class AvatarNativeParts:
                             fallback_report=next((p for p in source_record.get('result', {}).get('parts', []) if p['slot'] == slot), {}))
             entry['preserve_generated_detail'] = bool(
                 part_inputs[slot].get('preserve_generated_detail') or part_inputs[slot].get('meshy_options'))
+            if slot == 'hair':
+                entry.update(uploaded_native_hair(self.factory, owner, part_inputs[slot], path, body))
             parts.append(entry)
         contract = {'recipe': RECIPE, 'worker_sha256': digest(Path(__file__).with_name('avatar_native_parts_blender.py')),
                     'canonical_pose': canonical_pose,
@@ -423,6 +448,8 @@ class AvatarNativeParts:
                     'hood_room_sha256': digest(Path(__file__).with_name('avatar_hood_room.py')),
                     'wardrobe_coverage_sha256': digest(Path(__file__).with_name('avatar_wardrobe_coverage.py')),
                     'glb_sha256': digest(Path(__file__).with_name('glb.py')),
+                    'native_hair_upload_sha256': digest(Path(__file__).with_name('native_hair_upload.py')),
+                    'asset_delivery_sha256': digest(Path(__file__).with_name('asset_delivery.py')),
                     'garment_kinds': garment_kinds,
                     'part_methods': {p['slot']: p.get('part_method', 'isolated') for p in parts},
                     'front_axes': {p['slot']: p['front_axis'] for p in parts if p.get('front_axis')},
@@ -431,6 +458,9 @@ class AvatarNativeParts:
                     'worn_worker_sha256': digest(Path(__file__).with_name('avatar_worn_part.py')),
                     'fit_profiles': {p['slot']: p.get('fit_profile') for p in parts if p.get('fit_profile')},
                     'preserve_generated_detail': [p['slot'] for p in parts if p.get('preserve_generated_detail')],
+                    'uploaded_native_hair': {p['slot']: {k: p[k] for k in
+                        ('sha256', 'native_hair_budget', 'native_upload_error') if k in p}
+                        for p in parts if p.get('uploaded_native_hair')},
                     'fit_images': {p['slot']: p.get('image_sha256', {}) for p in parts if p.get('image_paths')},
                     'head_part_reference_bounds': {p['slot']: p['reference_bounds_m'] for p in parts if p.get('reference_bounds_m')},
                     'body': digest(body), 'parts': [(p['slot'], p['sha256']) for p in parts],
