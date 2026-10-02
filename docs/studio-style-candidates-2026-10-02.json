@@ -1,0 +1,197 @@
+{
+  "schema": "studio-style-candidates-v1",
+  "status": "draft_not_submitted",
+  "created_at": "2026-10-02",
+  "production_spec_ref": "backend/assets/avatars/production-v1.json",
+  "production_spec_revision": 22,
+  "body_job_id": null,
+  "body_version": null,
+  "body_sha256": null,
+  "spend_ceiling": null,
+  "body_height_m": 1.2,
+  "units": "metres",
+  "axes": {
+    "up": "+Y",
+    "front": "+Z",
+    "right": "+X"
+  },
+  "generated_views": [
+    "front",
+    "side",
+    "back"
+  ],
+  "asymmetric_add_view": "opposite",
+  "look": "rounded SD, clean large forms, matte, restrained harmonious palette",
+  "negative_prompt": "photorealistic, gloss, metal shine, baked lighting, tiny fibers, logos, text, added body or skin in parts, disconnected rear hair roots, incompatible camera or pose",
+  "palette": {
+    "cream": "#E9E1CE",
+    "butter": "#EAD97D",
+    "mint": "#98BCA9",
+    "navy": "#344A67",
+    "coral": "#CD8E7D",
+    "cocoa": "#6A5048"
+  },
+  "runtime_targets": {
+    "part_triangles": {
+      "body": 24000,
+      "hair": 20000,
+      "top": 12000,
+      "bottom": 8000,
+      "shoes": 6000,
+      "hat": 5000
+    },
+    "assembled_triangles": 80000,
+    "texture_max_edge": 2048,
+    "world_derivative_texture_max_edge": 1024
+  },
+  "pilot_ids": [
+    "short-clean",
+    "cream-tee"
+  ],
+  "items": [
+    {
+      "id": "short-clean",
+      "slot": "hair",
+      "name": "단정 숏컷",
+      "brief": "Rounded short crop, compact back and side volume, readable eyebrows, no loose strands.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "round-bob",
+      "slot": "hair",
+      "name": "귀밑 둥근 단발",
+      "brief": "Rounded chin-length bob, clean side silhouette, closed crown and rear root backing, clear face opening.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "shoulder-straight",
+      "slot": "hair",
+      "name": "어깨 길이 스트레이트",
+      "brief": "Straight shoulder-length hair in few broad clumps, balanced back silhouette, clear shoulders.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "low-tied",
+      "slot": "hair",
+      "name": "낮은 묶음머리",
+      "brief": "Low gathered ponytail with compact tie, no added ornaments, connected rear roots.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "cream-tee",
+      "slot": "top",
+      "name": "크림 반팔 티",
+      "brief": "Plain cream short-sleeve tee, regular ease, open neck/cuffs/hem, no logos.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "butter-hoodie",
+      "slot": "top",
+      "name": "버터 후드티",
+      "brief": "Simple butter yellow pullover hoodie with hood down on upper back, long sleeves, large clean pocket.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "mint-cardigan",
+      "slot": "top",
+      "name": "민트 단순 가디건",
+      "brief": "Simple mint cardigan with large plain buttons, long sleeves, regular ease, no knit microdetail.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "navy-shorts",
+      "slot": "bottom",
+      "name": "네이비 반바지",
+      "brief": "Plain navy straight shorts, separate leg openings, regular ease, above-knee hem.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "coral-skirt",
+      "slot": "bottom",
+      "name": "코랄 A라인 치마",
+      "brief": "Plain coral A-line skirt with one continuous open hem, no legs or underwear inside.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "cream-lowtops",
+      "slot": "shoes",
+      "name": "크림 로우탑 운동화",
+      "brief": "Pair of cream rounded low-top sneakers, short simple laces and thin soles, correct left/right foot openings.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "cocoa-loafers",
+      "slot": "shoes",
+      "name": "코코아 둥근 로퍼",
+      "brief": "Pair of cocoa rounded loafers, matte finish, thin soles, no metallic buckles.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    },
+    {
+      "id": "navy-beret",
+      "slot": "hat",
+      "name": "네이비 베레모",
+      "brief": "Simple navy rounded beret, scalp cavity and thin rim, no hair or skin embedded.",
+      "status": "candidate",
+      "existing_equivalent_checked": false,
+      "provider_task_id": null,
+      "source_image_sha256": null,
+      "source_model_sha256": null,
+      "visual_review": "pending"
+    }
+  ]
+}

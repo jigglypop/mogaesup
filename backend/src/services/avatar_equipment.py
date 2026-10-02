@@ -31,6 +31,12 @@ NATIVE_BODY_SLOTS = frozenset(('body', 'hair', 'head', 'hairBack', 'hairFront',
                                'hat', 'top', 'bottom', 'shoes'))
 
 
+def conflicting_head_parts(slots):
+    selected = set(slots)
+    return (('head' in selected and bool(selected & {'hair', 'hairBack', 'hairFront', 'hat'}))
+            or ('hair' in selected and bool(selected & {'hairBack', 'hairFront'})))
+
+
 def is_native_part_set(slots):
     slots = list(slots)
     selected = set(slots)
@@ -40,11 +46,7 @@ def is_native_part_set(slots):
         return False
     # ``head`` is a legacy combined replacement. Likewise ``hair`` is the
     # combined hairstyle and cannot be mixed with split front/back assets.
-    if 'head' in selected and selected & {'hair', 'hairBack', 'hairFront', 'hat'}:
-        return False
-    if 'hair' in selected and selected & {'hairBack', 'hairFront'}:
-        return False
-    return True
+    return not conflicting_head_parts(selected)
 
 
 def equipment_layer(slot, order):

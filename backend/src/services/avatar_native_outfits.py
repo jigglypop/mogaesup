@@ -5,6 +5,7 @@ import re
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
+from src.services.avatar_equipment import conflicting_head_parts
 from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 
 # Receipts only answer the replay of a lost response; selection.json keeps the newest ones.
@@ -61,7 +62,7 @@ class AvatarNativeOutfits:
             if expected_revision != current['revision']:
                 raise PipelineError('revision_conflict', '저장된 조합이 변경되었습니다. 다시 불러오세요.', 409)
             slots = payload['slots']
-            if len(slots) != len(set(slots)) or any(slot not in allowed for slot in slots):
+            if len(slots) != len(set(slots)) or any(slot not in allowed for slot in slots) or conflicting_head_parts(slots):
                 raise PipelineError('invalid_parts', '이 조립 버전의 파츠만 한 번씩 선택할 수 있습니다.', 422)
             for name in ['body.glb', *(f'{slot}.glb' for slot in slots)]:
                 self.native.artifact(owner, job, version, name)

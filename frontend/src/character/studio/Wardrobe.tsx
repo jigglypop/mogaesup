@@ -8,7 +8,7 @@ import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
 import { isDefinitiveRejection, isRevisionConflict } from '../api';
 import { factoryApi, wardrobeUrls, type WardrobeColors, type WardrobeCoverage, type WardrobeOutfit, type WardrobePart } from '../factory/api';
-import { garmentSlots, partLabels as labels, variantSlots } from '../factory/parts';
+import { compatiblePartSlots, garmentSlots, hasConflictingPartSlots, partLabels as labels, selectPartSlot, variantSlots } from '../factory/parts';
 import '../factory/meshy-motion.css';
 import { usePolling } from '../use-polling';
 import { ModelViewer } from '../viewer';
@@ -80,16 +80,19 @@ export default function Wardrobe() {
   const [bodyId, setBodyId] = useState('');
   const registered = bodies.value?.bodies || [];
   const body = registered.find(item => item.job_id === bodyId) || registered.find(item => item.is_default) || registered[0];
-  const readParts = useCallback((signal: AbortSignal) => body ? factoryApi.wardrobeParts(body.job_id, signal) : Promise.resolve(null), [body?.job_id]);
+  const readParts = useCallback((signal: AbortSignal) => body ? factoryApi.wardrobeParts(body.job_id, signal) : Promise.resolve(null), [body?.job_id, body?.version, body?.body_sha256]);
   const library = usePolling(readParts, 30000);
+  const sameBody = (value: { job_id: string; version: string; body_sha256: string }) => body?.job_id === value.job_id && body.version === value.version && body.body_sha256 === value.body_sha256;
+  const libraryMatchesBody = !!library.value && sameBody(library.value.body);
   const reloadParts = useCallback(async (signal?: AbortSignal) => {
     if (!body) return [];
     const value = await factoryApi.wardrobeParts(body.job_id, signal);
+    if (!sameBody(value.body)) throw new Error('옷장 몸 버전이 바뀌었습니다. 몸과 파츠를 다시 불러와 주세요.');
     library.setValue(value);
     return value.parts;
-  }, [body?.job_id, library.setValue]);
-  const parts = body && library.value?.body.job_id === body.job_id ? library.value.parts : [];
-  const unfitted = body && library.value?.body.job_id === body.job_id ? unfittedParts(library.value.unavailable, admin) : [];
+  }, [body?.job_id, body?.version, body?.body_sha256, library.setValue]);
+  const parts = libraryMatchesBody ? library.value!.parts : [];
+  const unfitted = libraryMatchesBody ? unfittedParts(library.value!.unavailable, admin) : [];
   const slots = slotOrder.filter(slot => parts.some(part => part.slot === slot));
   const [slot, setSlot] = useState('hair');
   const activeSlot = slots.includes(slot) ? slot : slots[0];
@@ -191,7 +194,7 @@ export default function Wardrobe() {
   useEffect(() => { viewer?.setHairColor(hairColor); }, [viewer, hairColor]);
   // A refit gives a job a new version: wear it in place of the one the list no longer has.
   useEffect(() => {
-    const listed = library.value?.body.job_id === body?.job_id && library.value ? library.value.parts : undefined;
+    const listed = libraryMatchesBody ? library.value!.parts : undefined;
     if (!listed) return;
     setWorn(current => {
       const next = { ...current }; let changed = false;
@@ -202,9 +205,9 @@ export default function Wardrobe() {
       }
       return changed ? next : current;
     });
-  }, [library.value, body?.job_id]);
+  }, [library.value, libraryMatchesBody]);
 
-  const coverageKey = (part: WardrobePart) => `${body?.job_id}|${keyOf(part, part.slot)}`;
+  const coverageKey = (part: WardrobePart) => `${body?.job_id}:${body?.version}:${body?.geometry_sha256}|${keyOf(part, part.slot)}`;
   // Skin under worn garments: fetch each garment's covered body triangles once.
   useEffect(() => {
     if (!body) return;
@@ -212,11 +215,11 @@ export default function Wardrobe() {
     for (const part of Object.values(applied.current)) {
       if (!coveredSlots.includes(part.slot) || coverages[coverageKey(part)]) continue;
       void factoryApi.wardrobeCoverage(body.job_id, part, controller.signal)
-        .then(value => setCoverages(current => ({ ...current, [`${body.job_id}|${keyOf(part, part.slot)}`]: value })))
+        .then(value => { if (!controller.signal.aborted) setCoverages(current => ({ ...current, [coverageKey(part)]: value })); })
         .catch(reason => { if (!controller.signal.aborted) setWearError(`${labels[part.slot] || part.slot} 가림 영역: ${(reason as Error).message}`); });
     }
     return () => controller.abort();
-  }, [appliedKey, body?.job_id]);
+  }, [appliedKey, body?.job_id, body?.version, body?.geometry_sha256]);
   useEffect(() => {
     if (!viewer) return;
     const top = applied.current.top;
@@ -250,7 +253,9 @@ export default function Wardrobe() {
 
   function applyOutfit(outfit: WardrobeOutfit, listed: WardrobePart[]) {
     const next: Worn = {};
+    const slots = compatiblePartSlots(Object.keys(outfit.parts));
     for (const [slotName, ref] of Object.entries(outfit.parts)) {
+      if (!slots.includes(slotName)) continue;
       const part = listed.find(item => item.slot === slotName && item.job_id === ref.job_id && item.version === ref.version && item.sha256 === ref.sha256)
         // A refit gives the job a new version; its current part in that slot is the same part refitted.
         || listed.find(item => item.slot === slotName && item.job_id === ref.job_id);
@@ -258,6 +263,8 @@ export default function Wardrobe() {
       next[slotName] = part;
     }
     setWearError(''); setWorn(next); setHairColor(outfit.hair_color || null);
+    const removed = Object.keys(outfit.parts).filter(slot => !slots.includes(slot));
+    setNotice(removed.length ? `겹치는 머리 파츠를 벗겼습니다: ${removed.map(slot => labels[slot] || slot).join(', ')}` : '');
     setColors(current => {
       const updated = { ...current };
       Object.entries(next).forEach(([slotName, part]) => {
@@ -291,11 +298,11 @@ export default function Wardrobe() {
       pendingOutfit.current = null; restoreLook.current = false; setLookReady(true);
       setWearError('저장된 몸 버전을 옷장에서 찾을 수 없습니다.'); return;
     }
-    if (!outfit || !viewer || !body || outfit.body.job_id !== body.job_id || library.value?.body.job_id !== body.job_id) return;
+    if (!outfit || !viewer || !body || outfit.body.job_id !== body.job_id || outfit.body.version !== body.version || !libraryMatchesBody) return;
     pendingOutfit.current = null;
-    applyOutfit(outfit, library.value.parts);
+    applyOutfit(outfit, library.value!.parts);
     if (restoreLook.current) { restoreLook.current = false; setLookReady(true); }
-  }, [viewer, library.value, body?.job_id, bodies.value, look?.request]);
+  }, [viewer, library.value, libraryMatchesBody, body?.job_id, body?.version, bodies.value, look?.request]);
 
   function toggle(part: WardrobePart) {
     setWearError(''); setNotice('');
@@ -305,6 +312,8 @@ export default function Wardrobe() {
       const next = { ...current }, prior = current[part.slot];
       if (prior && keyOf(prior, part.slot) === keyOf(part, part.slot)) delete next[part.slot];
       else {
+        const selected = selectPartSlot(Object.keys(current), part.slot);
+        for (const slot of Object.keys(next)) if (!selected.includes(slot)) delete next[slot];
         next[part.slot] = part;
         if (part.slot === 'bottom' && dress) delete next.top;
       }
@@ -324,7 +333,8 @@ export default function Wardrobe() {
     else setWearError('이 조합의 옷장 몸이 등록돼 있지 않거나 버전이 바뀌었습니다.');
   }
   async function saveOutfit() {
-    if (!body || !outfits.value || busy) return;
+    if (!body || !libraryMatchesBody || !outfits.value || busy) return;
+    if (hasConflictingPartSlots(Object.keys(applied.current))) { setSaveError('겹치는 머리 파츠를 벗긴 뒤 저장해 주세요.'); return; }
     const input: WardrobeOutfit = {
       name: outfitName.trim(), body: { job_id: body.job_id, version: body.version }, hair_color: hairColor,
       parts: Object.fromEntries(Object.entries(applied.current).map(([slotName, part]) => [slotName, { job_id: part.job_id, version: part.version, sha256: part.sha256 }])),
@@ -361,7 +371,8 @@ export default function Wardrobe() {
   }
   async function saveLook() {
     const request = currentLook();
-    if (!request || !lookReady || lookPending.current) return;
+    if (!request || !libraryMatchesBody || !lookReady || lookPending.current) return;
+    if (hasConflictingPartSlots(Object.keys(request.parts))) { setLookError('겹치는 머리 파츠를 벗긴 뒤 저장해 주세요.'); return; }
     lookPending.current = true;
     const mine = ++lookGeneration.current;
     lookRead.current?.abort();
@@ -391,7 +402,7 @@ export default function Wardrobe() {
     finally { setBusy(false); }
   }
 
-  const settled = !!viewer && !wearing && wornKey === appliedKey;
+  const settled = !!viewer && libraryMatchesBody && !wearing && wornKey === appliedKey;
   const savedOutfits = Object.entries(outfits.value?.outfits || {}).sort(([, a], [, b]) => (b.saved_at || '').localeCompare(a.saved_at || ''));
   const shapes = reshapable(worn, paidOperator);
   if (bodies.value && registered.length === 0) {
@@ -420,9 +431,10 @@ export default function Wardrobe() {
         <div className="wardrobe-slots" role="tablist" aria-label="파츠 종류">{slots.map(slotName =>
           <button key={slotName} role="tab" aria-selected={slotName === activeSlot} onClick={() => setSlot(slotName)}>
             {labels[slotName] || slotName} <span>{parts.filter(part => part.slot === slotName).length}</span></button>)}</div>
-        {body && !library.value && !library.error && <p role="status">파츠 목록을 불러오는 중…</p>}
+        {body && !libraryMatchesBody && !library.error && <p role="status">파츠 목록을 불러오는 중…</p>}
+        {library.value && !libraryMatchesBody && <p role="alert">몸과 파츠의 버전이 다릅니다. 새 몸의 파츠를 기다리는 중입니다.</p>}
         {library.error && <p role="alert">{library.error}</p>}
-        {library.value && parts.length === 0 && <p className="wardrobe-empty">이 몸으로 만든 파츠가 없습니다.</p>}
+        {libraryMatchesBody && parts.length === 0 && <p className="wardrobe-empty">이 몸으로 만든 파츠가 없습니다.</p>}
         <div className="wardrobe-cards">{parts.filter(part => part.slot === activeSlot).map(part => {
           const wornPart = worn[part.slot], selected = !!wornPart && keyOf(wornPart, part.slot) === keyOf(part, part.slot);
           return <button key={keyOf(part, part.slot)} type="button" className="wardrobe-card" aria-pressed={selected} disabled={!viewer || !lookReady} onClick={() => toggle(part)}>

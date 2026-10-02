@@ -167,6 +167,65 @@ describe('옷장', () => {
     expect(container.querySelector('.wardrobe-look')).toBeNull();
   });
 
+  it('전체 헤어와 분리 헤어를 교체하면서 앞뒤만 함께 저장한다', async () => {
+    parts = [part('full', 'hair', '전체 머리'), part('front', 'hairFront', '분리 앞머리'), part('back', 'hairBack', '분리 뒷머리')];
+    const save = vi.spyOn(lookApi, 'save').mockImplementation(async request => ({ look: { request, status: 'baking', worn: false, modelUrl: null, error: null, updatedAt: '' } }));
+    const { container, unmount } = await open(); await settle();
+    await click(card(container, '전체 머리')); await settle();
+    await click(tab(container, '앞머리')); await click(card(container, '분리 앞머리')); await settle();
+    await click(tab(container, '뒷머리')); await click(card(container, '분리 뒷머리')); await settle();
+    expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('전체 머리');
+    await click(button(container, '내 캐릭터로 입기')); await settle();
+    expect(Object.keys(save.mock.calls[0]![0].parts)).toEqual(['hairFront', 'hairBack']);
+    await click(tab(container, '헤어')); await click(card(container, '전체 머리')); await settle();
+    expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('분리 앞머리');
+    expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('분리 뒷머리');
+    await unmount();
+  });
+
+  it('이전 저장에서 겹친 헤어를 복원해도 미리보기와 새 저장에는 전체 헤어만 쓴다', async () => {
+    parts = [part('full', 'hair', '전체 머리'), part('front', 'hairFront', '분리 앞머리')];
+    const request: Look['request'] = { body: { jobId: body.job_id, version: body.version }, parts: {
+      hair: { jobId: 'full', version: 'v1', sha256: 'full-sha' }, hairFront: { jobId: 'front', version: 'v1', sha256: 'front-sha' },
+    }, hairColor: null, colors: {} };
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: { request, status: 'ready', worn: true, modelUrl: '/models/old.glb', error: null, updatedAt: '' } });
+    const save = vi.spyOn(lookApi, 'save').mockImplementation(async request => ({ look: { request, status: 'baking', worn: false, modelUrl: null, error: null, updatedAt: '' } }));
+    const { container, unmount } = await open(); await settle();
+    expect(container.textContent).toContain('겹치는 머리 파츠를 벗겼습니다: 앞머리');
+    expect(viewers[0]!.wear.mock.calls.at(-1)![0].map((value: { slot: string }) => value.slot)).toEqual(['hair']);
+    await click(button(container, '내 캐릭터로 입기')); await settle();
+    expect(Object.keys(save.mock.calls[0]![0].parts)).toEqual(['hair']);
+    await unmount();
+  });
+
+  it('같은 몸 작업의 버전이 교체되면 파츠를 즉시 다시 읽고 이전 버전 파츠를 거부한다', async () => {
+    const next = { ...body, version: 'v2', body_sha256: 'new-body', geometry_sha256: 'new-geometry' };
+    const { container, unmount } = await open(); await settle();
+    const before = vi.mocked(factoryApi.wardrobeParts).mock.calls.length;
+    vi.mocked(factoryApi.wardrobeBodies).mockResolvedValue({ revision: '2', bodies: [next], default: { job_id: next.job_id, version: next.version } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); }); await settle();
+    expect(vi.mocked(factoryApi.wardrobeParts).mock.calls.length).toBeGreaterThan(before + 1);
+    expect(cardNames(container)).toEqual([]);
+    expect(container.textContent).toContain('몸과 파츠의 버전이 다릅니다');
+    expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(true);
+    await unmount();
+  });
+
+  it('새 몸 버전에서 같은 파츠를 다시 입으면 이전 가림 영역을 재사용하지 않는다', async () => {
+    let selectedBody = body;
+    vi.mocked(factoryApi.wardrobeBodies).mockImplementation(async () => ({ revision: selectedBody.version, bodies: [selectedBody], default: { job_id: selectedBody.job_id, version: selectedBody.version } }));
+    vi.mocked(factoryApi.wardrobeParts).mockImplementation(async () => ({ body: selectedBody, parts, unavailable: [] }));
+    const { container, unmount } = await open(); await settle();
+    await click(card(container, '후드')); await settle();
+    expect(factoryApi.wardrobeCoverage).toHaveBeenCalledTimes(1);
+    selectedBody = { ...body, version: 'v2', body_sha256: 'new-body', geometry_sha256: 'new-geometry' };
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); }); await settle();
+    await click(card(container, '후드')); await settle();
+    expect(factoryApi.wardrobeCoverage).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('후드');
+    await unmount();
+  });
+
   describe('누가 무엇을 보는가', () => {
     it('운영자가 아니어도 핏 검사에서 떨어진 파츠를 목록에서 본다', async () => {
       const { container, unmount } = await open();

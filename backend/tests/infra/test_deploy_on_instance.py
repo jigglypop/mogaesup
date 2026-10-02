@@ -247,7 +247,11 @@ def run_host_deploy(bash, tmp_path, **env):
     (source / 'infra/idle-stop.sh').write_text('#!/bin/bash\nexit 0\n')
     (source / '.release-sha256').write_text('a' * 64 + '\n')
     (root / 'studio/provider.json').write_text(json.dumps({'revision': 'old'}))
-    (root / 'config.env').write_text('ASSET_S3_BUCKET=fixture\nAWS_REGION=fixture\nPROVIDER_SECRET_ARN=fixture\n')
+    (root / 'config.env').write_text('ASSET_S3_BUCKET=fixture\nAWS_REGION=fixture\nPROVIDER_SECRET_ARN=fixture\n'
+                                   + 'PUBLIC_STUDIO=' + env.pop('FAKE_PUBLIC', 'false') + '\n')
+    secret = {'OPENAI_API_KEY': 'offline', 'MESHY_API_KEY': 'offline', 'revision': 'new'}
+    if 'FAKE_GATEWAY_KEY' in env:
+        secret['STUDIO_GATEWAY_KEY'] = env.pop('FAKE_GATEWAY_KEY')
     containers = [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
     if env.get('FAKE_LEFTOVER'):
         name = ('gaesup-asset-studio-candidate-' + 'a'*12 if env['FAKE_LEFTOVER'] == 'candidate'
@@ -264,16 +268,15 @@ def run_host_deploy(bash, tmp_path, **env):
         'docker() { "$PYTHON_EXE" "$FAKE_COMMANDS" docker "$@"; '
         'if [[ "${FAKE_TERMINATE:-}" == 1 && "$1" == stop ]]; then kill -TERM $$; fi; }',
         'curl() { "$PYTHON_EXE" "$FAKE_COMMANDS" curl "$@"; }',
-        'aws() { printf "%s" \'{"OPENAI_API_KEY":"offline","MESHY_API_KEY":"offline","revision":"new"}\'; }',
+        'aws() { printf "%s" "$FAKE_SECRET_PAYLOAD"; }',
         'python3() { "$PYTHON_EXE" "$@"; }', 'sleep() { :; }', 'seq() { echo "1 2 3"; }',
         # A stub file descriptor lock: no other fake host shares this directory.
         'flock() { :; }', 'chmod() { :; }',
         'install() { shift 3; mkdir -p "$@"; }',
         'set -- "releases/studio/' + 'a'*64 + '.tar.gz" "' + 'a'*64 + '" "$FAKE_SOURCE"', text])
     done = run_bash(bash, script, FAKE_HOST_ROOT=str(root), FAKE_COMMANDS=str(fixture),
-                    FAKE_SOURCE=source.as_posix(), ASSET_DEPLOY_DRAIN_SECONDS='0', **env)
-    assert (root / 'events.jsonl').exists(), (done.code, done.out, done.err)
-    events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()]
+                    FAKE_SOURCE=source.as_posix(), FAKE_SECRET_PAYLOAD=json.dumps(secret), ASSET_DEPLOY_DRAIN_SECONDS='0', **env)
+    events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()] if (root / 'events.jsonl').exists() else []
     return done, json.loads((root / 'state.json').read_text()), events, root
 
 
@@ -292,6 +295,25 @@ def test_a_busy_drain_reopens_admission_and_keeps_previous_configuration(bash, t
     assert not any(event[:2] == ['docker', 'stop'] for event in events)
     assert events[-1][:2] == ['curl', 'DELETE']
     assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+
+
+@pytest.mark.parametrize('key', [None, 'short', 'punctuation+invalid/key='])
+def test_invalid_public_gateway_configuration_is_rejected_before_closing_the_running_release(bash, tmp_path, key):
+    env = {'FAKE_PUBLIC': 'true'}
+    if key is not None:
+        env['FAKE_GATEWAY_KEY'] = key
+    done, state, events, root = run_host_deploy(bash, tmp_path, **env)
+    assert done.code != 0 and 'valid STUDIO_GATEWAY_KEY' in done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining'] and not events
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+    assert not list((root / 'studio').glob('provider.json.*'))
+
+
+def test_valid_public_gateway_configuration_can_reach_the_normal_closed_candidate_deploy(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_PUBLIC='true', FAKE_GATEWAY_KEY='a'*32, FAKE_READY='1')
+    assert done.code == 0 and 'deployment healthy' in done.out
+    assert not state['draining'] and ['candidate-admission', True] in events
 
 
 def test_a_failed_candidate_restores_old_container_configuration_and_admission(bash, tmp_path):

@@ -108,6 +108,12 @@ pub fn request(body: LookBody) -> ApiResult<Value> {
     if !ids(&body.body.job_id, &body.body.version) || body.parts.len() > MAX_PARTS {
         return Err(INVALID);
     }
+    let worn = |slot: &str| body.parts.contains_key(slot);
+    if (worn("head") && ["hair", "hairFront", "hairBack", "hat"].into_iter().any(worn))
+        || (worn("hair") && ["hairFront", "hairBack"].into_iter().any(worn))
+    {
+        return Err(INVALID);
+    }
     let mut parts = Map::new();
     for (slot, part) in &body.parts {
         if !slot_name(slot) || !ids(&part.job_id, &part.version) || !is_sha256(&part.sha256) {
@@ -605,6 +611,29 @@ mod tests {
             serde_json::from_value::<LookBody>(json!({"body": {"jobId": "b", "version": "v"}, "modelUrl": "x"}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn full_and_split_hair_cannot_be_baked_on_top_of_each_other() {
+        let look = |slots: &[&str]| {
+            let parts: Map<String, Value> = slots
+                .iter()
+                .map(|slot| (slot.to_string(), json!({"jobId": "part", "version": "v1", "sha256": sha('a')})))
+                .collect();
+            request(body(json!({"body": {"jobId": "body", "version": "v1"}, "parts": parts})))
+        };
+        for slots in [
+            &["hair", "hairFront"][..],
+            &["hair", "hairBack"],
+            &["head", "hair"],
+            &["head", "hairFront"],
+            &["head", "hairBack"],
+            &["head", "hat"],
+        ] {
+            assert_eq!(look(slots).unwrap_err().code, "invalid_look", "{slots:?}");
+        }
+        assert!(look(&["hairFront", "hairBack", "hat"]).is_ok());
+        assert!(look(&["hair", "hat"]).is_ok());
     }
 
     #[test]

@@ -6,6 +6,16 @@ Parameters:
     Type: String
     Default: jigglypop/mogaesup
     Description: GitHub repository allowed to assume the role
+  RepositoryOwnerId:
+    Type: String
+    Default: '52653682'
+    AllowedPattern: '[0-9]+'
+    Description: Immutable GitHub owner ID used in the OIDC subject
+  RepositoryId:
+    Type: String
+    Default: '1393605828'
+    AllowedPattern: '[0-9]+'
+    Description: Immutable GitHub repository ID used in the OIDC subject
   Branch:
     Type: String
     Default: main
@@ -45,7 +55,10 @@ Resources:
             Condition:
               StringEquals:
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
-                'token.actions.githubusercontent.com:sub': !Sub 'repo:${Repository}:ref:refs/heads/${Branch}'
+                'token.actions.githubusercontent.com:sub': !Sub
+                  - 'repo:${Owner}@${RepositoryOwnerId}/${Name}@${RepositoryId}:ref:refs/heads/${Branch}'
+                  - Owner: !Select [0, !Split ['/', !Ref Repository]]
+                    Name: !Select [1, !Split ['/', !Ref Repository]]
       Policies:
         - PolicyName: ReleaseOnly
           PolicyDocument:

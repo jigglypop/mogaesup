@@ -57,7 +57,14 @@ chmod 600 "$secret_tmp"
 aws secretsmanager get-secret-value \
   --secret-id "$PROVIDER_SECRET_ARN" \
   --query SecretString --output text --region "$AWS_REGION" > "$secret_tmp"
-python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert value.get("OPENAI_API_KEY") and value.get("MESHY_API_KEY")' "$secret_tmp"
+python3 -c '
+import json,re,sys
+value=json.load(open(sys.argv[1]))
+if not value.get("OPENAI_API_KEY") or not value.get("MESHY_API_KEY"):
+    raise SystemExit("Provider credentials are not configured")
+if sys.argv[2].strip().lower() == "true" and not re.fullmatch(r"[A-Za-z0-9._~-]{16,}", str(value.get("STUDIO_GATEWAY_KEY") or "").strip()):
+    raise SystemExit("PUBLIC_STUDIO requires a valid STUDIO_GATEWAY_KEY; the running release was preserved")
+' "$secret_tmp" "$PUBLIC_STUDIO"
 # The character records database (the mogaesup server stack's CharacterDatabaseSecret on the shared PostgreSQL), once
 # backend/infra/records-to-postgres.py has imported the records and named it in the config.
 if [[ -n "${CHARACTER_DB_SECRET_ARN:-}" && -n "${CHARACTER_DB_HOST:-}" ]]; then

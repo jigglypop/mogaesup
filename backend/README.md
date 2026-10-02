@@ -53,7 +53,7 @@ Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있
 
 ## 구성
 
-- 캐릭터 공장 저장소: `ASSET_S3_BUCKET`, `ASSET_S3_REGION=ap-northeast-2`, `ASSET_S3_PREFIX=assets`, 선택 `ASSET_AWS_PROFILE`. 원본·파츠·생성 응답·작업 기록·GLB는 비공개 S3에 저장합니다. 다운로드는 인증 API가 소유권을 확인한 뒤 15분 서명 URL로 전달합니다. 기존 `data/` 자료는 읽기 호환용으로 보존합니다.
+- 캐릭터 공장 저장소: `ASSET_S3_BUCKET`, `ASSET_S3_REGION=ap-northeast-2`, `ASSET_S3_PREFIX=assets`, 선택 `ASSET_AWS_PROFILE`. 원본·파츠·생성 응답·작업 기록·GLB는 비공개 S3에 저장합니다. 다운로드는 인증 API가 소유권을 확인한 뒤 같은 origin에서 스트리밍합니다. 기존 `data/` 자료는 읽기 호환용으로 보존합니다.
 - 이미지 생성: `OPENAI_API_KEY`, `AVATAR_IMAGE_MODEL=gpt-image-2.5-sunburst`. TLS 1.3 연결이 끊기는 환경은 `AVATAR_IMAGE_TLS_MAX_VERSION=1.2`를 사용합니다.
 - 캐릭터 공장 3D 공급자: `AVATAR_3D_PROVIDER=meshy|tripo`(기본 meshy). Tripo는 `TRIPO_API_KEY`, 선택 `TRIPO_API_BASE_URL`, `TRIPO_MODEL_VERSION`(기본 `v3.1-20260211`). 키가 둘 다 있으면 파츠 화면에서 요청마다 고릅니다.
 - `BLENDER_CONCURRENCY`(기본 2): 동시에 실행하는 Blender 피팅 수. vCPU 2개당 1이 기준입니다.
@@ -118,6 +118,10 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
 `deploy-on-instance.sh`는 실제 loopback의 `POST /internal/drain`에 점검별 32자리 hex token을 보내 새 작업 수락을 먼저 닫습니다. API·CLI·Blender는 데이터 루트 `.runtime`의 동일한 잠금과 실제 OS work lease를 쓰며, 이미 수락한 작업은 병렬 공급자 단계와 Blender 실행을 끝낼 수 있습니다. mutation은 drain 중 503으로 답하고 GET·HEAD 상태/산출물 조회는 열어 둡니다. `health.admission`의 `version=1`, `draining=true`, `verified=true`와 정확한 음수 없는 정수 activity를 확인한 뒤 두 count가 모두 0일 때만 이전 컨테이너를 멈춥니다. `ASSET_DEPLOY_DRAIN_SECONDS`(기본 420)초 안에 비지 않으면 종료 코드 4, 확인할 수 없거나 구버전에 drain 제어가 없으면 종료 코드 5로 멈추고 이전 컨테이너를 유지합니다. 강제 통과 옵션은 없습니다. 실패·SIGTERM은 같은 token으로 수락을 다시 열고, 후보 실패 시 이전 provider 설정과 컨테이너를 함께 복원합니다.
 
 최초 구버전에서 이 계약으로 넘어갈 때는 운영자가 작업 접수를 닫는 점검 시간을 잡아야 합니다. 앱 게이트웨이·공개 nginx·직접 API 접수와 CLI를 모두 막고, 기존 공급자 요청의 영수증/상태 및 Blender runner와 실제 프로세스가 종료된 것을 확인한 뒤 drain 지원 런타임을 설치합니다. 불확실한 유료 요청은 재제출하지 않고 복구 대상으로 남깁니다. 자동 파이프라인은 이 확인을 대신하거나 실행 중인 구버전을 강제 종료하지 않습니다. 이후 배포는 위 drain 계약으로 진행합니다.
+
+`infra/bootstrap-legacy-runtime.py`는 검토한 기존 release `971e9eebd0937efa37e8d91eae67d7b8c8031e3ff0a44ed33dd0b1417a4ac4b2`만 전환하는 root 점검 도구입니다. 다음 archive·image를 먼저 준비하고, 운영자 CLI·SSM 새 실행과 CI 배포를 같은 점검 시간 동안 멈춘 상태에서 `python3 infra/bootstrap-legacy-runtime.py --expected-release <위 SHA>`를 실행합니다. prepare/deploy lock과 idle timer를 보호하고, 기존 health 연결을 유지한 채 loopback API의 새 TCP 연결을 차단합니다. 실제 접속 거절, health 연결 외 모든 진행 중 TCP 상태, middleware의 background 작업 카운터, 별도 Python·Blender 프로세스, runner 프로세스 종료와 auto-resume 비활성을 확인합니다. 10초 연속 비고 마지막 재확인까지 통과해야 TERM만 보내며 실제 종료를 기다립니다. SIGKILL이나 제한시간 후 강제 종료는 없습니다.
+
+점검 진행과 복구 정보는 `/opt/asset-studio/legacy-maintenance.json`(0600)에 남습니다. TERM 전 실패는 접수와 기존 idle timer를 복원합니다. 종료 확인이 불확실하면 idle timer를 계속 막고 기존 프로세스를 관찰해야 합니다. 성공하면 접수 차단 규칙을 제거하되 컨테이너는 멈춘 채로 두고, 즉시 정상 `deploy-on-instance.sh`를 실행합니다. 정상 배포가 새 idle timer를 설치합니다. 배포 준비나 배포가 실패하면 receipt의 기존 container ID와 이미지가 그대로인지, 다른 후보가 실행 중이지 않은지 확인하고 그 컨테이너를 다시 시작한 뒤 기존 `unless-stopped` 정책을 복원합니다. 구버전 idle timer는 꺼 둔 채로 유지하며 새 안전한 idle 스크립트가 설치된 뒤에만 켭니다. 종료가 불확실한 runtime이나 미확인 유료 요청을 다시 제출하지 않습니다.
 
 후보는 `ASSET_START_DRAIN_TOKEN`으로 새 작업 수락을 닫은 상태로 시작합니다. `status=healthy`, 검증 가능한 닫힌 admission과 유효 activity를 만족해야 하며 DB가 설정되어 있으면 해당 prefix의 import 완료·record schema 조회까지 성공(`ok=true`)할 때까지 기다립니다. 확인 중(`ok=null`)과 degraded는 통과하지 않습니다. 건강·버전 확인 및 release commit이 모두 끝나야 수락을 열며, 열린 뒤 응답이 불확실해도 새 작업을 끊는 강제 rollback은 하지 않습니다. 실행 중인 leftover candidate/rollback은 지우지 않고 복구를 요구합니다. 프로세스/컨테이너 재시작은 진행 중 drain을 유지하고 실제 instance reboot만 이전 boot의 drain을 해제합니다. DB URL이 없을 때 S3 marker 조회가 실패/timeout이면 stale JSON 사용을 막기 위해 시작을 거절합니다. 산출물은 S3를 256KiB씩 읽어 인증된 같은-origin API로 보내고 Content-Type·Length·ETag, 단일 Range·HEAD를 지원하며 연결 종료/오류에도 S3 body를 닫습니다. 컨테이너 로그는 `json-file` 50 MB 3개로 돌립니다.
 

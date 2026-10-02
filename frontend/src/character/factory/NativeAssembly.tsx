@@ -9,7 +9,7 @@ import './meshy-motion.css';
 import { Expressions } from '../studio/Expressions';
 import { ImportedGlbPreview } from './ImportedGlbPreview';
 import { NativePartRefit } from './NativePartRefit';
-import { partLabels as labels } from './parts';
+import { compatiblePartSlots, hasConflictingPartSlots, partLabels as labels, selectPartSlot } from './parts';
 
 const views = [['front', '정면'], ['side', '왼쪽'], ['back', '후면'], ['opposite', '오른쪽']] as const;
 const reviewGroups = [['', '전체'], ['body', '기본몸'], ['wardrobe', '의상'], ['head', '머리 착용 모습'], ['hair', '머리카락'], ['hairFront', '앞머리'], ['hairBack', '뒷머리'], ['hat', '머리 장식']] as const;
@@ -79,6 +79,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
   const [mode, setMode] = useState<'studio' | 'world'>('studio');
   const [reviewGroup, setReviewGroup] = useState('');
   const [modelError, setModelError] = useState(''), [wearError, setWearError] = useState(''), [saveError, setSaveError] = useState('');
+  const [selectionNotice, setSelectionNotice] = useState('');
   const selectedKey = JSON.stringify(selected);
 
   async function restore() {
@@ -88,8 +89,10 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
       if (!alive.current) return;
       if (outfit.body_sha256 !== body?.sha256) throw new Error('저장된 조합의 몸 버전이 다릅니다.');
       const request = readPending(storage);
-      const slots = request?.input.slots || outfit.slots;
-      if (slots.some(slot => !parts.some(part => part.slot === slot))) throw new Error('저장된 파츠를 찾을 수 없습니다.');
+      const requested = request?.input.slots || outfit.slots;
+      if (requested.some(slot => !parts.some(part => part.slot === slot))) throw new Error('저장된 파츠를 찾을 수 없습니다.');
+      const slots = compatiblePartSlots(requested);
+      setSelectionNotice(requested.filter(slot => !slots.includes(slot)).map(slot => labels[slot] || slot).join(', '));
       setRevision(outfit.revision); setSaved(outfit.slots); setSelected(slots); setPending(!!request); setRestored(true);
       setSavedHairColor(outfit.hair_color || null); setHairColor((request ? request.input.hair_color : outfit.hair_color) || null);
     } catch (e) { if (alive.current) setSaveError((e as Error).message); }
@@ -132,15 +135,23 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
   async function save() {
     if (saving.current || !body) return;
     saving.current = true; setBusy(true); setSaveError('');
-    const request = readPending(storage) || { key: crypto.randomUUID(), revision, input: { body_sha256: body.sha256, slots: [...applied.current], hair_color: hairColor } };
+    const recovering = readPending(storage);
+    const request = recovering || { key: crypto.randomUUID(), revision, input: { body_sha256: body.sha256, slots: [...applied.current], hair_color: hairColor } };
     try {
+      // A lost response keeps its original key/input. The server either replays its receipt or refuses an old conflict.
+      if (!recovering && hasConflictingPartSlots(request.input.slots)) throw new Error('겹치는 머리 파츠를 벗긴 뒤 저장해 주세요.');
       sessionStorage.setItem(storage, JSON.stringify(request));
       await factoryApi.saveNativeOutfit(jobId, version, request.input, request.revision, request.key);
       // Replaying a receipt can return an older save after another tab has
       // written a new combination. Restore the current revision, not the receipt.
       const result = await factoryApi.nativeOutfit(jobId, version);
       sessionStorage.removeItem(storage);
-      if (alive.current) { setRevision(result.revision); setSaved(result.slots); setSelected(result.slots); setHairColor(result.hair_color || null); setSavedHairColor(result.hair_color || null); }
+      if (alive.current) {
+        const slots = compatiblePartSlots(result.slots);
+        setRevision(result.revision); setSaved(result.slots); setSelected(slots);
+        setSelectionNotice(result.slots.filter(slot => !slots.includes(slot)).map(slot => labels[slot] || slot).join(', '));
+        setHairColor(result.hair_color || null); setSavedHairColor(result.hair_color || null);
+      }
     } catch (e) {
       if (isDefinitiveRejection(e)) sessionStorage.removeItem(storage);
       if (alive.current) setSaveError((e as Error).message);
@@ -170,8 +181,8 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
     {body && <Expressions key={`${jobId}:${version}:${mode}`} job={jobId} version={version} bodySha={body.sha256} viewer={readyViewer} />}
     <fieldset className="assembly-parts" disabled={!ready || !restored || busy || pending}><legend>착용 파츠</legend>
       <span>기본 몸 · 항상 포함</span>
-      {parts.map(part => <label key={part.slot}><input type="checkbox" checked={selected.includes(part.slot)} onChange={e => { const checked = e.target.checked; setWearError(''); setSelected(current => checked ? [...current, part.slot] : current.filter(slot => slot !== part.slot)); }} />{labels[part.slot] || part.slot}</label>)}
-      <button onClick={() => { setWearError(''); setSelected(parts.map(part => part.slot)); }}>모두 착용</button>
+      {parts.map(part => <label key={part.slot}><input type="checkbox" checked={selected.includes(part.slot)} onChange={e => { const checked = e.target.checked; setWearError(''); setSelectionNotice(''); setSelected(current => checked ? selectPartSlot(current, part.slot) : current.filter(slot => slot !== part.slot)); }} />{labels[part.slot] || part.slot}</label>)}
+      <button onClick={() => { setWearError(''); setSelectionNotice(''); setSelected(compatiblePartSlots(parts.map(part => part.slot))); }}>모두 착용</button>
     </fieldset>
     {parts.some(part => ['hair','hairFront','hairBack'].includes(part.slot)) && <fieldset className="assembly-parts" disabled={!ready || !restored || busy || pending}><legend>헤어 색상</legend>
       <label>색상<input type="color" aria-label="헤어 색상" value={hairColor || '#8a7998'} onChange={event => setHairColor(event.target.value)} /></label><span>{hairColor || '원본 색상'}</span><button onClick={() => setHairColor(null)}>원본 색상</button>
@@ -179,6 +190,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
     {(!ready || wearing) && !modelError && <p role="status">캐릭터와 착용 파츠를 불러오는 중…</p>}
     {modelError && <p role="alert">{modelError} <button onClick={() => setAttempt(value => value + 1)}>캐릭터 다시 불러오기</button></p>}
     {wearError && <p role="alert">{wearError} 이전에 적용된 조합을 유지했습니다.</p>}
+    {selectionNotice && <p role="status">겹치는 머리 파츠를 벗겼습니다: {selectionNotice}</p>}
     {saveError && <p role="alert">{saveError}</p>}
     {pending && <p role="status">저장 응답이 확인되지 않았습니다. 같은 요청으로 결과를 복구할 수 있습니다.</p>}
     <div className="meshy-buttons"><button disabled={busy || !appliedSelection || !!wearError || (!pending && equal(selected, saved) && hairColor === savedHairColor && revision !== '0')} onClick={() => void save()}>{pending ? '조합 저장 결과 복구' : '현재 조합 저장'}</button><button disabled={busy || pending} onClick={() => void restore()}>저장한 조합 다시 불러오기</button></div>

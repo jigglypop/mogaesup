@@ -15,6 +15,7 @@ from threading import RLock, Semaphore
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
+from src.services.avatar_equipment import conflicting_head_parts
 from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 from src.services.keyed_lock import keyed_lock
 from src.services.studio_library import StudioLibrary
@@ -447,6 +448,8 @@ class Wardrobe:
             return self.outfits()
         if set(payload.get('colors') or {}) - set(payload['parts']):
             raise PipelineError('invalid_colors', '입은 파츠의 색만 저장할 수 있습니다.', 422)
+        if conflicting_head_parts(payload['parts']):
+            raise PipelineError('invalid_parts', '전체 머리와 분리 머리는 함께 입을 수 없습니다.', 422)
         # The listing read can take seconds; check parts before taking the shared lock.
         body = self._body(payload['body']['job_id'])
         if body['version'] != payload['body']['version']:

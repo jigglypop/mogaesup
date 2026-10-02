@@ -5,6 +5,7 @@ import { loadFailure } from './assets/load-failure';
 import { hairColorControl } from './hair-color';
 import { regionColorControl } from './region-color';
 import { matteCharacter } from './matte-materials';
+import { hasConflictingPartSlots } from './factory/parts';
 
 export type Wearable = { id: string; slot: string; url: string; sha256: string };
 /** An inner garment's tuck: per "mesh:primitive", the body vertex under each vertex (index into keys
@@ -251,6 +252,7 @@ export class NativeWardrobe {
   async equip(parts: Wearable[]): Promise<boolean> {
     if (this.disposed) throw new Error('옷장 화면이 닫혔습니다.');
     if (new Set(parts.map(p => p.slot)).size !== parts.length || new Set(parts.map(p => p.id)).size !== parts.length) throw new Error('한 슬롯에는 의상 하나만 선택하세요.');
+    if (hasConflictingPartSlots(parts.map(part => part.slot))) throw new Error('전체 헤어와 앞·뒷머리 또는 기존 머리 파츠를 함께 입을 수 없습니다.');
     const generation = ++this.generation;
     parts.forEach(part => this.references.set(part.id, (this.references.get(part.id) || 0)+1));
     try {
