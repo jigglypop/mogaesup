@@ -418,6 +418,11 @@ class AvatarNativeParts:
                     'equipment_sha256': digest(Path(__file__).with_name('avatar_equipment.py')),
                     'expression_bake_sha256': digest(Path(__file__).with_name('avatar_expression_bake.py')),
                     'expression_uv_sha256': digest(Path(__file__).with_name('avatar_expression_uv_blender.py')),
+                    # The rest of what the Blender worker imports: a change to any of them must make a new version.
+                    'limb_fit_sha256': digest(Path(__file__).with_name('avatar_limb_fit.py')),
+                    'hood_room_sha256': digest(Path(__file__).with_name('avatar_hood_room.py')),
+                    'wardrobe_coverage_sha256': digest(Path(__file__).with_name('avatar_wardrobe_coverage.py')),
+                    'glb_sha256': digest(Path(__file__).with_name('glb.py')),
                     'garment_kinds': garment_kinds,
                     'part_methods': {p['slot']: p.get('part_method', 'isolated') for p in parts},
                     'front_axes': {p['slot']: p['front_axis'] for p in parts if p.get('front_axis')},

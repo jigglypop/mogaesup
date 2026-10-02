@@ -111,6 +111,11 @@ def bind(meshes, body, rig, contract, *, transform=None):
         fitting = 'shared_frame_axis_alignment'
     tree, points, triangles, weights = weight_surface(body, rig)
     distances, inside = [], 0
+    rigid_bone = contract['bone']
+    if contract['binding'] == 'rigid' and rigid_bone not in rig.data.bones:
+        # A skeleton may prefix its bone names ('mixamorig:Head'); the worn parts already look them up this way.
+        wanted = rigid_bone.lower().split(':')[-1]
+        rigid_bone = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] == wanted), rigid_bone)
     for obj in meshes:
         # Unrigged source only: do not silently discard an independently authored skin.
         if any(mod.type == 'ARMATURE' for mod in obj.modifiers):
@@ -127,7 +132,7 @@ def bind(meshes, body, rig, contract, *, transform=None):
             distances.append(distance)
             inside += int((vertex.co-hit).dot(normal) < -.002)
             if contract['binding'] == 'rigid':
-                row = {contract['bone']: 1.}
+                row = {rigid_bone: 1.}
             else:
                 maximum_distance = contract.get('max_transfer_distance_m')
                 if maximum_distance is not None and distance > maximum_distance:

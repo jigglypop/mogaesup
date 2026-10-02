@@ -31,12 +31,34 @@ from src.services.avatar_garment_geometry import (
 )
 
 
+class InputChanged(ValueError):
+    """A saved input differs from the one the request was accepted with: nothing is fitted from it."""
+
+
+def discard_objects(objects):
+    for obj in objects:
+        try:
+            if obj.name in bpy.data.objects:
+                bpy.data.objects.remove(obj, do_unlink=True)
+        except ReferenceError:
+            pass  # Removed already together with its parent.
+
+
+def fit_failure(part, exc):
+    """The receipt of a slot whose fitting raised: no mesh, not offered, and the other slots still assemble."""
+    return {'slot': part['slot'], 'source_sha256': part['sha256'], 'objects': [], 'anchors': [],
+            'available': False, 'unavailable_reason': 'fit_exception', 'fit_status': 'failed',
+            'errors': [{'code': 'fit_exception', 'message': f'{type(exc).__name__}: {exc}'[:300]}],
+            'runtime_budget': {'preserved': True, 'optimization': 'not_applied'},
+            'clearance': {'method': 'not_applied'}}
+
+
 def build_body_shell_part(part, body, rig, spec):
     """Garment from the frozen body surface and the registered canvas views."""
     from src.services.avatar_shell_garment import build_shell_garment
     for view, path in part.get('image_paths', {}).items():
         if sha(path) != part.get('image_sha256', {}).get(view):
-            raise ValueError('Part reference image changed')
+            raise InputChanged('Part reference image changed')
     canvas = dict(spec['canvas'])
     meshes, report, covered = build_shell_garment(body, rig, part['slot'], part['image_paths'], canvas,
                                                   kind=part.get('garment_kind', 'source'), shape=part.get('shape'),
@@ -64,7 +86,7 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
         from src.services.avatar_shell_garment import CanvasView
         for view, path in part['drawings'].items():
             if sha(path) != part.get('drawing_sha256', {}).get(view):
-                raise ValueError('Part drawing changed')
+                raise InputChanged('Part drawing changed')
             drawings.append(CanvasView(view, path, dict(spec['canvas'])))
     extracted, report = extract_worn_part(meshes, body, rig, part['slot'], key_rgb=part.get('key_rgb'), drawings=drawings)
     garment_kind = (part.get('fit_profile') or {}).get('kind') or part.get('garment_kind')
@@ -374,6 +396,7 @@ def run(payload):
     for i, obj in enumerate(body):
         obj.name = f'body_{i}'; obj['part_role'] = 'body'; body_names.append(obj.name)
     imported, imported_additions, prefit_paths = {}, {}, {}
+    rejected = {}
     for part in payload.get('prefit_parts', []):
         meshes, report = load_prefit_part(part, rig)
         imported[part['slot']] = meshes
@@ -384,10 +407,10 @@ def run(payload):
         if part.get('part_method') == 'body_shell':
             continue
         if sha(part['path']) != part['sha256']:
-            raise ValueError('Part source changed')
+            raise InputChanged('Part source changed')
         for view, path in part.get('image_paths', {}).items():
             if sha(path) != part.get('image_sha256', {}).get(view):
-                raise ValueError('Part reference image changed')
+                raise InputChanged('Part reference image changed')
         additions = load(part['path'])
         if part.get('front_axis') == '+x':
             # glTF +X arrives as Blender +X; the fitting code expects the front at Blender -Y.
@@ -398,7 +421,9 @@ def run(payload):
             bpy.context.view_layer.update()
         meshes = [o for o in additions if o.type == 'MESH']
         if not meshes or any(o.type == 'ARMATURE' for o in additions):
-            raise ValueError('Expected an unrigged generated part')
+            discard_objects(additions)
+            rejected[part['slot']] = ValueError('Expected an unrigged generated part')
+            continue
         imported[part['slot']] = meshes
         imported_additions[part['slot']] = additions
     hat_palette = headwear_palette(imported.get('hat', []))
@@ -406,205 +431,224 @@ def run(payload):
     # Headwear uses the already fitted hairstyle even if the request listed the hat first.
     for part in sorted(payload['parts'], key=lambda part: part['slot'] == 'hat'):
         slot = part['slot']
-        method = part.get('part_method', 'isolated')
-        if method == 'body_shell':
-            meshes, report, covered = build_body_shell_part(part, body, rig, spec)
-            shell_coverage[slot] = covered
-            imported[slot] = meshes
-            names = []
-            for i, obj in enumerate(meshes):
-                obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
-            a, b = bounds(meshes)
-            report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
-            reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names, 'anchors': [], **report})
-            fitted += meshes
+        if slot in rejected:
+            reports.append(fit_failure(part, rejected[slot]))
             continue
-        meshes = imported[slot]
-        if method == 'worn':
-            meshes, report = extract_worn_meshes(part, meshes, body, rig, spec)
-            imported[slot] = meshes
-            names = []
-            for i, obj in enumerate(meshes):
-                obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
-            a, b = bounds(meshes)
-            report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
-            reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names, 'anchors': [], **report})
-            fitted += meshes
-            continue
-        profiled = part.get('fit_profile') is not None
-        if uniform_parts and slot not in EQUIPMENT and slot != 'shoes':
-            reports.append(fit_uniform_part(part, meshes, body, rig, spec, targets, imported))
-            fitted += meshes
-            continue
-        garment_report, garment_masks = None, None
-        runtime_budget = None
-        if runtime_policy:
-            # Provider detail controls the immutable source, not the wearable.
-            # Reduce before fitting/BVH/weight transfer, retaining source UVs.
-            target = runtime_policy['part_triangles'].get(slot, 12000)
-            grid = fitting.get('hair_backing_grid', [81, 97])
-            reserve = 2*(grid[0]-1)*(grid[1]-1) if slot == 'hair' and reference_hair and part.get('image_paths', {}).get('back') else 0
-            runtime_budget = optimize_part(meshes, slot, target_triangles=max(100, target-reserve),
-                texture_max_edge=runtime_policy['texture_max_edge'], preserve_appearance=True, merge=not profiled)
-            runtime_budget.update(target_triangles=target, backing_reserved_triangles=reserve,
-                                  revision=runtime_policy['revision'])
-        if profiled:
-            if runtime_budget is None:
-                runtime_budget = {'preserved': True, 'source_mesh_detail': True,
-                                  'source_uv': True, 'optimization': 'skipped_for_profiled_garment'}
-            supplied_source = part['fit_profile'].get('source_sha256')
-            if supplied_source and supplied_source != part['sha256']:
-                garment_report = {'fit_profile': part['fit_profile'], 'fit_status': 'failed',
-                                  'errors': [{'code': 'source_sha256_mismatch',
-                                              'message': 'Fit profile belongs to a different source mesh'}],
-                                  'source_landmarks': {}, 'target_landmarks': {}, 'coverage': None}
-                garment_masks = {obj: {} for obj in meshes}
-            else:
-                garment_report, garment_masks = fit_profiled_garment(
-                    meshes, body, rig, slot, part['fit_profile'], body_profile=body_profile,
-                    image_paths=part.get('image_paths'), canvas=spec.get('canvas'))
-            if garment_report['fit_status'] != 'fitted' and part.get('fallback_path'):
-                for obj in imported_additions.get(slot, []):
-                    if obj.name in bpy.data.objects:
-                        bpy.data.objects.remove(obj, do_unlink=True)
-                fallback_path = part['fallback_path']
-                fallback = {'slot': slot, 'path': fallback_path,
-                            'sha256': part.get('fallback_sha256') or sha(fallback_path),
-                            'report': part.get('fallback_report') or {}}
-                meshes, fallback_report = load_prefit_part(fallback, rig)
-                fallback_report['fit_status'] = 'fallback_preserved'
-                fallback_report['attempted_fit'] = garment_report
-                fallback_report['available'] = True
+        known_objects = set(bpy.data.objects.keys())
+        try:
+            method = part.get('part_method', 'isolated')
+            if method == 'body_shell':
+                meshes, report, covered = build_body_shell_part(part, body, rig, spec)
+                shell_coverage[slot] = covered
                 imported[slot] = meshes
-                prefit_paths[slot] = fallback_path
-                reports.append(fallback_report); fitted += meshes
+                names = []
+                for i, obj in enumerate(meshes):
+                    obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
+                a, b = bounds(meshes)
+                report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+                reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names, 'anchors': [], **report})
+                fitted += meshes
                 continue
-            if garment_report['fit_status'] != 'fitted':
-                # Preserve the generated source artifact outside this worker, but
-                # never bind or export an ambiguously placed raw mesh as wearable.
-                for obj in imported_additions.get(slot, []):
-                    if obj.name in bpy.data.objects:
-                        bpy.data.objects.remove(obj, do_unlink=True)
-                imported[slot] = []
-                reports.append({'slot': slot, 'source_sha256': part['sha256'],
-                    'objects': [], 'anchors': [], 'available': False,
-                    'unavailable_reason': 'garment_fit_incomplete',
-                    'measurement': garment_report, 'runtime_budget': runtime_budget,
-                    'clearance': {'method': 'not_applied'}, **garment_report})
+            meshes = imported[slot]
+            if method == 'worn':
+                meshes, report = extract_worn_meshes(part, meshes, body, rig, spec)
+                imported[slot] = meshes
+                names = []
+                for i, obj in enumerate(meshes):
+                    obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
+                a, b = bounds(meshes)
+                report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+                reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names, 'anchors': [], **report})
+                fitted += meshes
                 continue
-            transform, anchors, measurement = Matrix.Identity(4), [], garment_report
-        elif runtime_budget is None:
-            runtime_budget = ({'preserved': True, 'source_mesh_detail': True, 'source_uv': True,
-                               'optimization': 'skipped_for_accepted_meshy_options'}
-                              if part.get('preserve_generated_detail') else optimize_part(meshes, slot))
-        if not profiled and slot in EQUIPMENT:
-            transform, anchors, measurement = fit_equipment(meshes, spec['equipment'][slot])
-        elif not profiled and slot == 'shoes':
-            measurement, shoe_regions = fit_shoes_rigid(meshes, shoe_targets)
-            transform, anchors = Matrix.Identity(4), []
-        elif not profiled and slot == 'hat':
-            headwear_seat = None
-            if imported.get('hair'):
-                targets[slot], headwear_seat = hat_target_over_hair(targets[slot], imported['hair'], spec)
-            transform, anchors, measurement = fit_hat(meshes, targets[slot], fitting.get('hat_width_scale', 1),
-                                                       part.get('reference_bounds_m') if bounded_hair else None)
-            if headwear_seat:
-                measurement['seat'] = headwear_seat
-        elif not profiled and slot in ('hair', 'hairFront', 'hairBack'):
-            transform, anchors, measurement = fit_hair(meshes, targets[slot], spec, slot, measured_head,
-                                                       part.get('reference_bounds_m'))
-        elif not profiled:
-            transform, anchors, measurement = measured_fit(meshes, targets[slot])
-        skirt = slot == 'bottom' and (part.get('fit_profile') or {}).get('kind', part.get('garment_kind')) == 'skirt'
-        rigid = (skirt and not profiled) or slot in ('hair', 'head', 'hairBack', 'hairFront', 'hat', *EQUIPMENT)
-        bone = EQUIPMENT.get(slot, 'Head')
-        if skirt:
-            pelvis = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] in ('hips', 'pelvis')), None)
-            if not pelvis:
-                raise ValueError('Missing pelvis for skirt attachment')
-            bone = pelvis
-        contract = {'anchors': anchors, 'max_anchor_error_m': .0001,
-                    'binding': 'rigid' if rigid else 'transfer', 'bone': bone,
-                    'slot': slot, 'max_transfer_distance_m': None}
-        if not profiled:
-            place(meshes, transform)
-        if slot == 'hair' and reference_hair:
-            measurement['cavity_fitting'] = fit_hair_cavity(meshes, body, rig, spec)
-        if slot in ('hair', 'hairFront', 'hairBack'):
-            measurement['length_fitting'] = fit_hair_length(meshes, targets[slot], spec, measured_head[0].z)
-        if slot == 'top' and not profiled:
-            measurement['sleeves'], sleeve_masks = fit_sleeves(meshes, rig, spec)
-        # Preserve fitted strands. Derive a separate rear surface only from an
-        # accepted rear image and the measured skull after clearance.
-        head_preparation = (prepare_rear_hair(meshes, body, hat_palette, spec)
-                            if slot == 'hairBack' and not bounded_hair else None)
-        if slot == 'shoes':
-            adjustment = {'method': 'rigid_foot_fit_no_surface_projection',
-                          'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
-        elif slot in EQUIPMENT:
-            adjustment = {'method': 'rigid_socket', 'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
-        elif profiled:
-            adjustment = {'method': 'profiled_regional_fit_no_surface_projection',
-                          'adjusted_vertices': sum(len(row) for row in garment_masks.values()),
-                          'maximum_adjustment_m': None}
-        elif slot in fitting.get('garment_margin_m', {}):
-            # Keep the generated garment's volume and folds. Vertex projection
-            # onto the body turns loose sleeves and hems into a skin-tight shell.
-            adjustment = {'method': 'loose_fit_no_surface_projection',
-                          'body_margin_xz_m': fitting['garment_margin_m'][slot],
-                          'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
-        elif slot in ('hair', 'hairFront', 'hairBack') and bounded_hair:
-            adjustment = fit_hair_scalp_bounded(meshes, body, rig, spec)
-        elif slot in ('hair', 'hairFront', 'hairBack') and fitting.get('hair_surface_fit') == 'measured-skull-v1':
-            adjustment = fit_hair_scalp(meshes, body, rig, spec)
-        elif slot in ('hair', 'head', 'hairFront', 'hairBack'):
-            maximum = max(fitting.get('hair_clearance_m', .025),
-                          spec['tolerances'].get('max_surface_adjustment_m', .015))
-            adjustments = [clearance([obj], body, fitting.get('scalp_clearance_m', .003) if obj.get('scalp_backing')
-                                    else fitting.get('hair_clearance_m', .025), maximum) for obj in meshes]
-            adjustment = {'adjusted_vertices': sum(a['adjusted_vertices'] for a in adjustments),
-                          'maximum_adjustment_m': max(a['maximum_adjustment_m'] for a in adjustments),
-                          'maximum_allowed_m': maximum,
-                          'bounded': True}
-        else:
-            adjustment = clearance(meshes, body, spec['tolerances']['clearance_m'],
-                spec['tolerances']['max_surface_adjustment_m'] if slot == 'hat' else None)
-        if slot in ('hairBack', 'hairFront') and 'hat' in imported and not bounded_hair:
-            seat_legacy_hair_roots(meshes, body, spec)
-        if slot == 'hair' and reference_hair:
-            head_preparation = repair_hair_backing(meshes, body, rig, spec, part.get('image_paths'),
-                                                  shared_canvas=bool(part.get('reference_bounds_m')))
-            head_preparation['source_image_sha256'] = part.get('image_sha256', {}).get('back')
-            runtime_budget['backing_added_triangles'] = head_preparation.get('added_faces', 0)*2
-        scalp_cap = add_scalp_cap(meshes, body, rig, spec) if slot == 'hair' else None
-        # Transfer weights only after the final garment size has been applied.
-        report = (bind_shoes_rigid(meshes, rig, shoe_regions) if slot == 'shoes'
-                  else bind(meshes, body, rig, contract, transform=Matrix.Identity(4)))
-        if profiled:
-            report['regional_binding'] = bind_garment_regions(meshes, rig, slot, garment_masks)
-            report['weights'] = 'profiled_anatomical_regions'
-        elif slot == 'top':
-            bind_top_regions(meshes, rig, sleeve_masks)
-            report['weights'] = 'anatomical_sleeves_and_torso'
-        report['measurement'] = measurement
-        if profiled:
-            report.update(garment_report)
-        if slot == 'bottom':
-            report['garment_kind'] = garment_report.get('resolved_kind', part['fit_profile'].get('kind')) if profiled else part.get('garment_kind', 'source')
-        report['runtime_budget'] = runtime_budget
-        report['clearance'] = adjustment
-        if head_preparation is not None:
-            report['head_preparation'] = head_preparation
-        if scalp_cap is not None:
-            report['scalp_cap'] = scalp_cap
-        a, b = bounds(meshes)
-        report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
-        names = []
-        for i, obj in enumerate(meshes):
-            obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
-        reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names,
-                        'anchors': anchors, 'available': True, **report})
-        fitted += meshes
+            profiled = part.get('fit_profile') is not None
+            if uniform_parts and slot not in EQUIPMENT and slot != 'shoes':
+                reports.append(fit_uniform_part(part, meshes, body, rig, spec, targets, imported))
+                fitted += meshes
+                continue
+            garment_report, garment_masks = None, None
+            runtime_budget = None
+            if runtime_policy:
+                # Provider detail controls the immutable source, not the wearable.
+                # Reduce before fitting/BVH/weight transfer, retaining source UVs.
+                target = runtime_policy['part_triangles'].get(slot, 12000)
+                grid = fitting.get('hair_backing_grid', [81, 97])
+                reserve = 2*(grid[0]-1)*(grid[1]-1) if slot == 'hair' and reference_hair and part.get('image_paths', {}).get('back') else 0
+                runtime_budget = optimize_part(meshes, slot, target_triangles=max(100, target-reserve),
+                    texture_max_edge=runtime_policy['texture_max_edge'], preserve_appearance=True, merge=not profiled)
+                runtime_budget.update(target_triangles=target, backing_reserved_triangles=reserve,
+                                      revision=runtime_policy['revision'])
+            if profiled:
+                if runtime_budget is None:
+                    runtime_budget = {'preserved': True, 'source_mesh_detail': True,
+                                      'source_uv': True, 'optimization': 'skipped_for_profiled_garment'}
+                supplied_source = part['fit_profile'].get('source_sha256')
+                if supplied_source and supplied_source != part['sha256']:
+                    garment_report = {'fit_profile': part['fit_profile'], 'fit_status': 'failed',
+                                      'errors': [{'code': 'source_sha256_mismatch',
+                                                  'message': 'Fit profile belongs to a different source mesh'}],
+                                      'source_landmarks': {}, 'target_landmarks': {}, 'coverage': None}
+                    garment_masks = {obj: {} for obj in meshes}
+                else:
+                    garment_report, garment_masks = fit_profiled_garment(
+                        meshes, body, rig, slot, part['fit_profile'], body_profile=body_profile,
+                        image_paths=part.get('image_paths'), canvas=spec.get('canvas'))
+                if garment_report['fit_status'] != 'fitted' and part.get('fallback_path'):
+                    for obj in imported_additions.get(slot, []):
+                        if obj.name in bpy.data.objects:
+                            bpy.data.objects.remove(obj, do_unlink=True)
+                    fallback_path = part['fallback_path']
+                    fallback = {'slot': slot, 'path': fallback_path,
+                                'sha256': part.get('fallback_sha256') or sha(fallback_path),
+                                'report': part.get('fallback_report') or {}}
+                    meshes, fallback_report = load_prefit_part(fallback, rig)
+                    fallback_report['fit_status'] = 'fallback_preserved'
+                    fallback_report['attempted_fit'] = garment_report
+                    fallback_report['available'] = True
+                    imported[slot] = meshes
+                    prefit_paths[slot] = fallback_path
+                    reports.append(fallback_report); fitted += meshes
+                    continue
+                if garment_report['fit_status'] != 'fitted':
+                    # Preserve the generated source artifact outside this worker, but
+                    # never bind or export an ambiguously placed raw mesh as wearable.
+                    for obj in imported_additions.get(slot, []):
+                        if obj.name in bpy.data.objects:
+                            bpy.data.objects.remove(obj, do_unlink=True)
+                    imported[slot] = []
+                    reports.append({'slot': slot, 'source_sha256': part['sha256'],
+                        'objects': [], 'anchors': [], 'available': False,
+                        'unavailable_reason': 'garment_fit_incomplete',
+                        'measurement': garment_report, 'runtime_budget': runtime_budget,
+                        'clearance': {'method': 'not_applied'}, **garment_report})
+                    continue
+                transform, anchors, measurement = Matrix.Identity(4), [], garment_report
+            elif runtime_budget is None:
+                runtime_budget = ({'preserved': True, 'source_mesh_detail': True, 'source_uv': True,
+                                   'optimization': 'skipped_for_accepted_meshy_options'}
+                                  if part.get('preserve_generated_detail') else optimize_part(meshes, slot))
+            if not profiled and slot in EQUIPMENT:
+                transform, anchors, measurement = fit_equipment(meshes, spec['equipment'][slot])
+            elif not profiled and slot == 'shoes':
+                measurement, shoe_regions = fit_shoes_rigid(meshes, shoe_targets)
+                transform, anchors = Matrix.Identity(4), []
+            elif not profiled and slot == 'hat':
+                headwear_seat = None
+                if imported.get('hair'):
+                    targets[slot], headwear_seat = hat_target_over_hair(targets[slot], imported['hair'], spec)
+                transform, anchors, measurement = fit_hat(meshes, targets[slot], fitting.get('hat_width_scale', 1),
+                                                           part.get('reference_bounds_m') if bounded_hair else None)
+                if headwear_seat:
+                    measurement['seat'] = headwear_seat
+            elif not profiled and slot in ('hair', 'hairFront', 'hairBack'):
+                transform, anchors, measurement = fit_hair(meshes, targets[slot], spec, slot, measured_head,
+                                                           part.get('reference_bounds_m'))
+            elif not profiled:
+                transform, anchors, measurement = measured_fit(meshes, targets[slot])
+            skirt = slot == 'bottom' and (part.get('fit_profile') or {}).get('kind', part.get('garment_kind')) == 'skirt'
+            rigid = (skirt and not profiled) or slot in ('hair', 'head', 'hairBack', 'hairFront', 'hat', *EQUIPMENT)
+            bone = EQUIPMENT.get(slot, 'Head')
+            if skirt:
+                pelvis = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] in ('hips', 'pelvis')), None)
+                if not pelvis:
+                    raise ValueError('Missing pelvis for skirt attachment')
+                bone = pelvis
+            contract = {'anchors': anchors, 'max_anchor_error_m': .0001,
+                        'binding': 'rigid' if rigid else 'transfer', 'bone': bone,
+                        'slot': slot, 'max_transfer_distance_m': None}
+            if not profiled:
+                place(meshes, transform)
+            if slot == 'hair' and reference_hair:
+                measurement['cavity_fitting'] = fit_hair_cavity(meshes, body, rig, spec)
+            if slot in ('hair', 'hairFront', 'hairBack'):
+                measurement['length_fitting'] = fit_hair_length(meshes, targets[slot], spec, measured_head[0].z)
+            if slot == 'top' and not profiled:
+                measurement['sleeves'], sleeve_masks = fit_sleeves(meshes, rig, spec)
+            # Preserve fitted strands. Derive a separate rear surface only from an
+            # accepted rear image and the measured skull after clearance.
+            head_preparation = (prepare_rear_hair(meshes, body, hat_palette, spec)
+                                if slot == 'hairBack' and not bounded_hair else None)
+            if slot == 'shoes':
+                adjustment = {'method': 'rigid_foot_fit_no_surface_projection',
+                              'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
+            elif slot in EQUIPMENT:
+                adjustment = {'method': 'rigid_socket', 'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
+            elif profiled:
+                adjustment = {'method': 'profiled_regional_fit_no_surface_projection',
+                              'adjusted_vertices': sum(len(row) for row in garment_masks.values()),
+                              'maximum_adjustment_m': None}
+            elif slot in fitting.get('garment_margin_m', {}):
+                # Keep the generated garment's volume and folds. Vertex projection
+                # onto the body turns loose sleeves and hems into a skin-tight shell.
+                adjustment = {'method': 'loose_fit_no_surface_projection',
+                              'body_margin_xz_m': fitting['garment_margin_m'][slot],
+                              'adjusted_vertices': 0, 'maximum_adjustment_m': 0.0}
+            elif slot in ('hair', 'hairFront', 'hairBack') and bounded_hair:
+                adjustment = fit_hair_scalp_bounded(meshes, body, rig, spec)
+            elif slot in ('hair', 'hairFront', 'hairBack') and fitting.get('hair_surface_fit') == 'measured-skull-v1':
+                adjustment = fit_hair_scalp(meshes, body, rig, spec)
+            elif slot in ('hair', 'head', 'hairFront', 'hairBack'):
+                maximum = max(fitting.get('hair_clearance_m', .025),
+                              spec['tolerances'].get('max_surface_adjustment_m', .015))
+                adjustments = [clearance([obj], body, fitting.get('scalp_clearance_m', .003) if obj.get('scalp_backing')
+                                        else fitting.get('hair_clearance_m', .025), maximum) for obj in meshes]
+                adjustment = {'adjusted_vertices': sum(a['adjusted_vertices'] for a in adjustments),
+                              'maximum_adjustment_m': max(a['maximum_adjustment_m'] for a in adjustments),
+                              'maximum_allowed_m': maximum,
+                              'bounded': True}
+            else:
+                adjustment = clearance(meshes, body, spec['tolerances']['clearance_m'],
+                    spec['tolerances']['max_surface_adjustment_m'] if slot == 'hat' else None)
+            if slot in ('hairBack', 'hairFront') and 'hat' in imported and not bounded_hair:
+                seat_legacy_hair_roots(meshes, body, spec)
+            if slot == 'hair' and reference_hair:
+                head_preparation = repair_hair_backing(meshes, body, rig, spec, part.get('image_paths'),
+                                                      shared_canvas=bool(part.get('reference_bounds_m')))
+                head_preparation['source_image_sha256'] = part.get('image_sha256', {}).get('back')
+                runtime_budget['backing_added_triangles'] = head_preparation.get('added_faces', 0)*2
+            scalp_cap = add_scalp_cap(meshes, body, rig, spec) if slot == 'hair' else None
+            # Transfer weights only after the final garment size has been applied.
+            report = (bind_shoes_rigid(meshes, rig, shoe_regions) if slot == 'shoes'
+                      else bind(meshes, body, rig, contract, transform=Matrix.Identity(4)))
+            if profiled:
+                report['regional_binding'] = bind_garment_regions(meshes, rig, slot, garment_masks)
+                report['weights'] = 'profiled_anatomical_regions'
+            elif slot == 'top':
+                bind_top_regions(meshes, rig, sleeve_masks)
+                report['weights'] = 'anatomical_sleeves_and_torso'
+            report['measurement'] = measurement
+            if profiled:
+                report.update(garment_report)
+            if slot == 'bottom':
+                report['garment_kind'] = garment_report.get('resolved_kind', part['fit_profile'].get('kind')) if profiled else part.get('garment_kind', 'source')
+            report['runtime_budget'] = runtime_budget
+            report['clearance'] = adjustment
+            if head_preparation is not None:
+                report['head_preparation'] = head_preparation
+            if scalp_cap is not None:
+                report['scalp_cap'] = scalp_cap
+            a, b = bounds(meshes)
+            report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+            names = []
+            for i, obj in enumerate(meshes):
+                obj.name = f'{slot}_{i}'; obj['part_role'] = slot; names.append(obj.name)
+            reports.append({'slot': slot, 'source_sha256': part['sha256'], 'objects': names,
+                            'anchors': anchors, 'available': True, **report})
+            fitted += meshes
+        except InputChanged:
+            raise
+        except Exception as exc:
+            # One part that cannot be fitted must not take the others down with it: it is reported as not offered.
+            try:
+                if bpy.context.object is not None and bpy.context.object.mode != 'OBJECT':
+                    bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+            strays = [bpy.data.objects[name] for name in set(bpy.data.objects.keys()) - known_objects]
+            discard_objects([*imported_additions.get(slot, []), *imported.get(slot, []), *strays])
+            imported[slot] = []
+            shell_coverage.pop(slot, None)
+            reports.append(fit_failure(part, exc))
     # Hair and hat retain independent meshes, files and equip slots. A complete
     # hairstyle comes from its own generation job, never from joining headwear.
     # Keep the original skin as the weight-transfer source, then slim the core

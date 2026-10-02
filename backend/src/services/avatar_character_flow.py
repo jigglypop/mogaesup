@@ -46,8 +46,11 @@ def character_flow(directory, job):
             incomplete = native.get('result', {}).get('incomplete_parts', [])
             if incomplete and not busy:
                 status, stage = 'paused', 'assemble'
-                slots = ', '.join({'top': '상의', 'bottom': '하의'}.get(p['slot'], p['slot']) for p in incomplete)
-                message = f'{slots} 피팅 기준점 보정 필요'
+                labels = {'top': '상의', 'bottom': '하의'}
+                anchors = [labels.get(p['slot'], p['slot']) for p in incomplete if p.get('status') == 'needs_anchors']
+                failed = [labels.get(p['slot'], p['slot']) for p in incomplete if p.get('status') != 'needs_anchors']
+                message = ', '.join(filter(None, [f"{', '.join(anchors)} 피팅 기준점 보정 필요" if anchors else '',
+                                                  f"{', '.join(failed)} 피팅 실패" if failed else '']))
                 job['next_actions'] = []
         else:
             stage = 'assemble' if active_run(native) or worker.get('status') == 'complete' else 'rig'
@@ -98,9 +101,9 @@ def assemble_character(factory, owner, job_id):
             from src.services.avatar_expression_reuse import reuse_saved_expressions
             reuse_saved_expressions(factory, owner, job_id, state['version'])
             if state.get('incomplete_parts'):
-                _write_json(directory/'output/progress.json', {'stage': 'assemble', 'message': '일부 파츠 피팅 기준점 보정 필요'})
+                _write_json(directory/'output/progress.json', {'stage': 'assemble', 'message': '일부 파츠 피팅 보정 필요'})
                 record = read_json(directory/'job.json')
-                record['error'] = '일부 파츠 피팅 기준점 보정 필요'
+                record['error'] = '일부 파츠 피팅 보정 필요'
                 _write_json(directory/'job.json', record)
                 return
             from src.services.avatar_expression_pipeline import execute, summary
