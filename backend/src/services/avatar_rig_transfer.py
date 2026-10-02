@@ -1,20 +1,17 @@
 """Local recovery of a rejected rig using an owner-selected saved body skeleton."""
 import hashlib
-import os
-import re
 import subprocess
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_native_parts import AvatarNativeParts
-from src.services.character_parts import blender_executable, stop_process
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_parts import blender_executable, blender_process, stop_process
+from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 from src.services.glb import parse_glb
-from src.services.object_storage import StoredPath as Path, copy_file, local_workspace, publish_checkpoint
+from src.services.object_storage import StoredPath as Path, copy_file, local_workspace
 from src.services.process_identity import identity, state as process_state
-from src.services.wardrobe import run_lock
+from src.services.run_lock import run_lock
 from src.services.studio_library import StudioLibrary
-from src.services.worker_env import worker_environment
 
 
 class AvatarRigTransfer:
@@ -90,8 +87,7 @@ class AvatarRigTransfer:
                                                if status == 'paused' else None)}
 
     def start(self, owner, job_id, source_job_id, source_version, key, *, during_pipeline=False):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '복구 요청 식별자가 필요합니다.', 422)
+        require_request_key(key, '복구 요청 식별자가 필요합니다.')
         root = self.root(owner, job_id)
         request_id = hashlib.sha256(key.encode()).hexdigest()[:24]
         directory = root/request_id
@@ -186,16 +182,8 @@ class AvatarRigTransfer:
                     command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
                                '--python-exit-code', '1', '--python', str(Path(__file__).with_name('avatar_rig_transfer_blender.py')),
                                '--', str(directory/'input.json')]
-                    with _QUEUE, (directory/'blender.log').open('wb') as log:
-                        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
-                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                        try:
-                            _write_json(directory/'runner.json', {'process': identity(process.pid)})
-                            publish_checkpoint(directory/'runner.json')
-                        except BaseException:
-                            # No receipt, no supervision: a Blender nobody can find must not keep running.
-                            stop_process(process)
-                            raise
+                    with _QUEUE, blender_process(command, directory/'blender.log', directory/'runner.json',
+                                                 write_json=_write_json) as process:
                         try:
                             code = process.wait(timeout=1200)
                         except subprocess.TimeoutExpired:

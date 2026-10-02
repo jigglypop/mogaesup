@@ -20,7 +20,7 @@ from src.services.avatar_openai_images import (
     generate_standard_part_image,
     image_error_message,
 )
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity, lease_guard, state as process_state
 
@@ -144,8 +144,7 @@ class AvatarExpressionGeneration:
         }
 
     def create(self, key, payload, *, require_reference=False):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
+        require_request_key(key)
         name = payload['name']
         prompt = payload['prompt'].strip()
         if name not in NAMES or not 1 <= len(prompt) <= 4000:
@@ -156,9 +155,7 @@ class AvatarExpressionGeneration:
             input_data['reference_assets'] = payload['reference_assets']
         fingerprint_data = {**input_data, 'body_sha256': self.body_sha256}
         fingerprint = hashlib.sha256(json.dumps(fingerprint_data, sort_keys=True).encode()).hexdigest()
-        generation_id = hashlib.sha256(
-            f'{self.owner}:{self.job}:{self.version}:expression:{key}'.encode()
-        ).hexdigest()[:24]
+        generation_id = request_job_id(self.owner, f'{self.job}:{self.version}:expression', key)
         directory = self.directory(generation_id)
         with _LOCK, expression_lease(directory):
             previous = read_json(directory/'record.json')

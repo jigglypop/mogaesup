@@ -10,7 +10,7 @@ from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_fitting_management import FittingManagement
 from src.services.avatar_glb_bodies import AvatarGlbBodies
 from src.services.avatar_variants import AvatarVariants
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 
 
 LOGGER = logging.getLogger(__name__)
@@ -37,8 +37,7 @@ class StudioGlbAssets:
         return self.uploads.upload(self.owner, content)
 
     def create(self, key, payload):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자는 8~100자의 영문, 숫자, 밑줄, 하이픈이어야 합니다.', 422)
+        require_request_key(key, '요청 식별자는 8~100자의 영문, 숫자, 밑줄, 하이픈이어야 합니다.')
         name = payload.get('name')
         slot = payload.get('slot')
         model_asset = payload.get('model_asset')
@@ -52,7 +51,7 @@ class StudioGlbAssets:
             raise PipelineError('source_changed', '등록한 GLB 원본이 변경되었습니다.', 409)
         submitted = {'name': name.strip(), 'slot': slot, 'model_asset': model_asset}
         fingerprint = _fingerprint(submitted)
-        asset_id = hashlib.sha256(f'{self.owner}:studio-glb:{key}'.encode()).hexdigest()[:24]
+        asset_id = request_job_id(self.owner, 'studio-glb', key)
         directory = self._directory(asset_id)
         with _LOCK:
             previous = read_json(directory/'record.json')
@@ -147,8 +146,7 @@ class StudioGlbAssets:
         return job, False
 
     def prepare(self, asset_id, key, payload):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자는 8~100자의 영문, 숫자, 밑줄, 하이픈이어야 합니다.', 422)
+        require_request_key(key, '요청 식별자는 8~100자의 영문, 숫자, 밑줄, 하이픈이어야 합니다.')
         record = self._saved(asset_id, verify_content=True)
         submitted = deepcopy(payload)
         fingerprint = _fingerprint(submitted)

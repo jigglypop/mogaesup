@@ -5,7 +5,7 @@ import os
 from threading import RLock
 
 from src.services.asset_editor import _write_json
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, require_bucket
 
 
 DEFAULTS = {
@@ -191,8 +191,7 @@ class StudioPrompts:
                     for group, (title, limit, rule) in GROUPS.items()]}
 
     def save(self, changes, revision):
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
         allowed = {f'{group}.{key}': GROUPS[group][1] for group, values in DEFAULTS.items() for key in values}
         if not changes or set(changes) - allowed.keys():
             raise PipelineError('invalid_prompt', '수정할 프롬프트를 선택하세요.', 422)

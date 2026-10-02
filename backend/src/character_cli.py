@@ -10,8 +10,10 @@ import httpx
 from src.paths import load_environment as load_dotenv, data_root
 from src.services import character_jobs
 from src.services.character_pipeline import PipelineError
+from src.services.model_providers import MESHY_BASE
 from src.services.object_storage import StoredPath as Path
-from src.services.wardrobe import download_glb, run_lock
+from src.services.provider_http import download_glb
+from src.services.run_lock import run_lock
 
 
 def download(directory: Path, stage: str) -> dict:
@@ -55,7 +57,7 @@ def main():
         elif args.command == "download":
             result = download(args.run, args.stage)
         else:
-            with httpx.Client(base_url=os.getenv("MESHY_API_BASE_URL", "https://api.meshy.ai"),
+            with httpx.Client(base_url=os.getenv("MESHY_API_BASE_URL", MESHY_BASE),
                               headers={"Authorization": f"Bearer {key}"}, timeout=120) as client:
                 try:
                     if args.command == "generate":

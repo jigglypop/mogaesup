@@ -7,7 +7,7 @@ from pathlib import Path
 from src.services.asset_delivery import DeliveryPolicy, inspect_glb, read_model
 from src.services.asset_editor import _write_json
 from src.services.blender_mcp import BlenderMCP
-from src.services.wardrobe import _digest
+from src.services.object_storage import sha256 as _digest
 
 
 def validate_recipe(recipe: dict, model: Path) -> None:

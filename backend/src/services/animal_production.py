@@ -10,7 +10,6 @@ import io
 import json
 import logging
 import os
-import re
 import subprocess
 import time
 import uuid
@@ -23,12 +22,11 @@ from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_openai_images import DEFAULT_BASE, DEFAULT_MODEL, generate_standard_part_image
-from src.services.character_parts import blender_executable, stop_process
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_parts import blender_executable, blender_process, stop_process
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, valid_request_key
 from src.services.model_providers import client as provider_client
-from src.services.object_storage import StoredPath as Path, local_workspace, provider_image, publish_checkpoint
+from src.services.object_storage import StoredPath as Path, local_workspace, provider_image
 from src.services.process_identity import identity, state as process_state
-from src.services.worker_env import worker_environment
 
 LOGGER = logging.getLogger(__name__)
 VIEWS = ('front', 'left', 'back', 'right')
@@ -162,7 +160,7 @@ class AnimalProduction:
         return self.library.directory(animal_id)/'jobs'
 
     def start(self, animal_id, key, payload):
-        if not isinstance(key, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
+        if not isinstance(key, str) or not valid_request_key(key):
             raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
         views = [view for view in VIEWS if view in payload.get('views', [])]
         # Redrawn views make the model stale, and a new model makes the rig stale.
@@ -174,8 +172,7 @@ class AnimalProduction:
         note = (payload.get('note') or '').strip()
         if len(note) > 400:
             raise PipelineError('invalid_note', '수정 요청은 400자 이내로 입력하세요.', 422)
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
         if views and not os.getenv('OPENAI_API_KEY', '').strip():
             raise PipelineError('image_provider_unavailable', 'OpenAI 이미지 생성 키가 필요합니다.', 422)
         if model and not os.getenv('MESHY_API_KEY', '').strip():
@@ -183,7 +180,7 @@ class AnimalProduction:
         if not blender_executable():
             raise PipelineError('blender_unavailable', 'Blender 연결이 필요합니다.', 503)
         request = {'views': views, 'note': note, 'steps': steps}
-        job_id = hashlib.sha256(f'{self.owner}:animal-job:{animal_id}:{key}'.encode()).hexdigest()[:24]
+        job_id = request_job_id(self.owner, f'animal-job:{animal_id}', key)
         directory = self.library.directory(animal_id)
         with _LOCK:
             record = read_json(directory/'record.json')
@@ -518,20 +515,10 @@ class AnimalProduction:
             if runner and process_state(runner.get('process')) != 'exited':
                 raise StepPaused('이전 Blender 작업이 아직 실행 중입니다. 끝난 뒤 같은 요청으로 이어서 실행할 수 있습니다.')
             _write_json(run/'input.json', {'source': str(model), 'output': str(run), 'attempt': attempt})
-            with (run/'blender.log').open('wb') as log:
-                process = subprocess.Popen([blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
-                                            '--python-exit-code', '1', '--threads', '2', '--python',
-                                            str(Path(__file__).with_name('animal_standard_rig_blender.py')), '--',
-                                            str(run/'input.json')],
-                                           stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
-                                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                try:
-                    _write_json(run/'runner.json', {'process': identity(process.pid)})
-                    publish_checkpoint(run/'runner.json')
-                except BaseException:
-                    # No receipt, no supervision: a Blender nobody can find must not keep running.
-                    stop_process(process)
-                    raise
+            command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',
+                       '--python-exit-code', '1', '--threads', '2', '--python',
+                       str(Path(__file__).with_name('animal_standard_rig_blender.py')), '--', str(run/'input.json')]
+            with blender_process(command, run/'blender.log', run/'runner.json', write_json=_write_json) as process:
                 try:
                     code = process.wait(timeout=RIG_TIMEOUT)
                 except subprocess.TimeoutExpired:

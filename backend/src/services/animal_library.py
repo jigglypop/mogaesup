@@ -7,7 +7,6 @@ Older animals keep their files at <name>, which is read only when its digest sti
 import hashlib
 import io
 import json
-import os
 from pathlib import PurePosixPath
 import re
 
@@ -15,7 +14,7 @@ from PIL import Image, ImageOps
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, valid_request_key
 from src.services.object_storage import copy_file
 from src.services.process_identity import state as process_state
 
@@ -26,7 +25,6 @@ MAX_REFERENCE_PIXELS = 32_000_000
 # The reference is an appearance input for 1024px view images; a larger photo adds upload cost only.
 REFERENCE_EDGE = 2048
 _SHA = re.compile(r'[a-f0-9]{64}')
-_KEY = re.compile(r'[a-zA-Z0-9_-]{8,100}')
 
 
 def normalized_reference(content):
@@ -145,8 +143,7 @@ class AnimalLibrary:
 
     @staticmethod
     def require_storage():
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
 
     def upload_reference(self, content):
         """Keep one content-addressed reference picture; creating an animal refers to it by digest."""
@@ -172,7 +169,7 @@ class AnimalLibrary:
 
     def create(self, key, payload):
         """A new animal with its reference picture only; paid production starts from a regenerate request."""
-        if not isinstance(key, str) or not _KEY.fullmatch(key):
+        if not isinstance(key, str) or not valid_request_key(key):
             raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
         name, species, reference = payload.get('name'), payload.get('species'), payload.get('reference')
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
@@ -184,7 +181,7 @@ class AnimalLibrary:
         self.require_storage()
         submitted = {'name': name.strip(), 'species': species, 'reference': reference}
         fingerprint = hashlib.sha256(json.dumps(submitted, sort_keys=True).encode()).hexdigest()
-        animal_id = hashlib.sha256(f'{self.owner}:animal:{key}'.encode()).hexdigest()[:24]
+        animal_id = request_job_id(self.owner, 'animal', key)
         directory = self.directory(animal_id)
         with _LOCK:
             previous = read_json(directory/'record.json')

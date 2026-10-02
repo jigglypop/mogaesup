@@ -17,8 +17,10 @@ from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, read_json, now
 from src.services.glb import parse_glb
+from src.services.model_providers import MESHY_BASE
 from src.services.process_identity import identity, state as process_state
-from src.services.wardrobe import download_glb, get_with_retry
+from src.services.provider_http import download_glb
+from src.services.wardrobe import get_with_retry
 from src.services.meshy_status import BLOCKED, saved_problem
 
 SLOTS = ('idle', 'walk', 'run', 'jump', 'fall', 'sit', 'armsUp', 'crouch')
@@ -51,7 +53,7 @@ class AvatarMeshy:
         if cached and time.time()-cached['fetched_at'] < 300:
             return cached['items']
         try:
-            with client(os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai')) as api:
+            with client(os.getenv('MESHY_API_BASE_URL', MESHY_BASE)) as api:
                 items = character_motion.library(api)
         except httpx.HTTPError:
             raise PipelineError('library_unavailable', 'Meshy 동작 목록을 불러오지 못했습니다. 다시 연결해 주세요.', 502) from None

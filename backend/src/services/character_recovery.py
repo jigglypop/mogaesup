@@ -6,7 +6,7 @@ import tempfile
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import lease_guard, state
-from src.services.wardrobe import _digest
+from src.services.object_storage import sha256 as _digest
 
 
 def recover(pipeline, character_id, user_id, operation_id, revision):

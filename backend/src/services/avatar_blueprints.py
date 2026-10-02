@@ -4,7 +4,6 @@ import hashlib
 import io
 import json
 import math
-import os
 from src.services.object_storage import StoredPath as Path
 import re
 from threading import RLock
@@ -14,7 +13,7 @@ from PIL import Image
 
 from src.paths import BACKEND_ROOT
 from src.services.asset_editor import _write_json
-from src.services.character_pipeline import CharacterPipeline, PipelineError, read_json, now
+from src.services.character_pipeline import CharacterPipeline, PipelineError, read_json, now, require_bucket, require_request_key
 from src.services.avatar_equipment import EQUIPMENT, equipment_layer
 
 LOCK = RLock()
@@ -92,8 +91,7 @@ class AvatarBlueprints:
         return path
 
     def upload(self, owner, content):
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
         if len(content) > 32*1024*1024:
             raise PipelineError('image_too_large', '이미지는 32MB 이하로 올려 주세요.', 422)
         try:
@@ -112,8 +110,7 @@ class AvatarBlueprints:
 
     def save(self, owner, character_id, layers, revision, key):
         directory = self.directory(owner, character_id)
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '저장 요청 식별자가 필요합니다.', 422)
+        require_request_key(key, '저장 요청 식별자가 필요합니다.')
         slots = {layer['slot'] for layer in layers}
         if len(slots) != len(layers) or slots not in (set(LEGACY_SLOTS), set(SLOTS)):
             raise PipelineError('invalid_layers', '몸·의상·장비 공통 슬롯을 유지해 주세요.', 422)

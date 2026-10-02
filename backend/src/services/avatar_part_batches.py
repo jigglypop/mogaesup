@@ -18,7 +18,7 @@ from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_variants import AvatarVariants
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.meshy_options import freeze_options
 from src.services.process_identity import identity, lease_guard, state as process_state
 from src.services.studio_library import StudioLibrary
@@ -37,8 +37,7 @@ def _hash(value):
 
 
 def _require_s3():
-    if not os.getenv('ASSET_S3_BUCKET', '').strip():
-        raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+    require_bucket()
 
 
 @contextmanager
@@ -328,9 +327,8 @@ class PartBatches:
 
     def create(self, owner, key, payload):
         _require_s3()
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
-        batch = hashlib.sha256(f'{owner}:part-batch:{key}'.encode()).hexdigest()[:24]
+        require_request_key(key)
+        batch = request_job_id(owner, 'part-batch', key)
         path = self._path(owner, batch); fingerprint = _hash(payload)
         if not read_json(path):
             from src.services.meshy_status import require_credits
@@ -364,7 +362,7 @@ class PartBatches:
             children = []
             for index, source in enumerate(payload['items']):
                 child_key = f'{batch}-{index:03}'
-                job_id = hashlib.sha256(f'{owner}:variant:{child_key}'.encode()).hexdigest()[:24]
+                job_id = request_job_id(owner, 'variant', child_key)
                 children.append({'index': index, 'name': source['name'], 'status': 'queued',
                                  'key': child_key, 'job_id': job_id, 'task_id': None, 'error': None})
             record = {'id': batch, 'fingerprint': fingerprint, 'input': payload,

@@ -19,7 +19,7 @@ from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, generate_image,
                                               generate_standard_part_image, OpenAIImageHTTPError,
                                               image_error_message)
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.illustration_motion import FORMATS, MOTION_REVISION, encode, render_frames
 from src.services.illustration_rig import build_rig
 from src.services.illustration_vector import VECTOR_REVISION, trace_illustration
@@ -129,8 +129,7 @@ class StudioGenerations:
                               for name, sha in record['files'].items()]}
 
     def create(self, key, payload):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
+        require_request_key(key)
         payload = dict(payload)
         # The 3D provider is how the job runs, not what it makes: it stays out of the fingerprint, so a replay
         # naming another provider gets the saved job with the provider it was accepted with.
@@ -147,7 +146,7 @@ class StudioGenerations:
             raise PipelineError('invalid_reference', '기준 원화는 2D 원화 생성에서만 사용할 수 있습니다.', 422)
         if not 1 <= len(payload['name'].strip()) <= 80 or not 1 <= len(payload['prompt'].strip()) <= 8000:
             raise PipelineError('invalid_prompt', '이름과 프롬프트를 입력하세요.', 422)
-        job_id = hashlib.sha256(f'{self.owner}:studio:{key}'.encode()).hexdigest()[:24]
+        job_id = request_job_id(self.owner, 'studio', key)
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         directory = self.directory(job_id)
         with _LOCK:
@@ -181,7 +180,7 @@ class StudioGenerations:
                       'created_at': now(), 'error': None,
                       'image_model': os.getenv('AVATAR_IMAGE_MODEL', DEFAULT_MODEL),
                       'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
-                      'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/')}
+                      'meshy_base': base_url('meshy')}
             if provider:
                 record['provider'] = provider
                 if provider == 'tripo':
@@ -480,8 +479,7 @@ class StudioGenerations:
         return {'selected': selected, 'revision': state.get('revision', '0')}
 
     def select_illustration(self, generation_id, revision):
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
         if generation_id is not None:
             record = self._record(generation_id)
             if record.get('kind') != 'illustration' or record.get('status') != 'complete':

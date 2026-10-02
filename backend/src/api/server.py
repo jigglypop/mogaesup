@@ -140,13 +140,14 @@ def health() -> dict:
             "activity": activity_snapshot()}
 
 
+# async: health only reads in-memory state, so it never waits for a worker thread the long background tasks hold.
 @app.get("/health")
-def root_health() -> dict:
+async def root_health() -> dict:
     return health()
 
 
 @app.get("/api/health")
-def api_health() -> dict:
+async def api_health() -> dict:
     return health()
 
 

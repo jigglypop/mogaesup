@@ -28,8 +28,8 @@ from src.services.avatar_openai_images import (DEFAULT_MODEL, DEFAULT_BASE, Open
                                                 generate_part_image as generate_openai_part_image)
 from src.services.avatar_factory import IMAGE_PROFILE as PROFILE, _LOCK, digest
 from src.services.character_parts import blender_executable
-from src.services.model_providers import failure_text, uncertain_text
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.model_providers import base_url, failure_text, uncertain_text
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.process_identity import identity, state as process_state
 from src.services.wardrobe import transient
 from src.services.avatar_production_spec import (
@@ -229,8 +229,7 @@ class AvatarImagePipeline:
         return reused
 
     def create(self, owner, key, payload):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '생산 요청 식별자가 필요합니다.', 422)
+        require_request_key(key, '생산 요청 식별자가 필요합니다.')
         payload = dict(payload)
         if payload.get('meshy_options') is None:
             payload.pop('meshy_options', None)  # Keep pre-options requests recoverable with the same key.
@@ -299,7 +298,7 @@ class AvatarImagePipeline:
             payload['rig_with_meshy'] = True
             if payload.get('reuse_job_id') and not re.fullmatch(r'[a-f0-9]{24}', payload['reuse_job_id']):
                 raise PipelineError('invalid_reuse', '올바른 재사용 작업 ID가 필요합니다.', 422)
-        job_id = hashlib.sha256(f'{owner}:image:{key}'.encode()).hexdigest()[:24]
+        job_id = request_job_id(owner, 'image', key)
         directory = self.factory.directory(owner, job_id)
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         meshy_actions = []
@@ -436,7 +435,7 @@ class AvatarImagePipeline:
                 'fit_profiles_revision': next(iter(fit_profiles.values()))['revision'],
                 'fit_profiles_sha256': (frozen_production_spec or {}).get('fit_profiles_sha256'),
                 'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
-                'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/')})
+                'meshy_base': base_url('meshy')})
             _write_json(directory/'job.json', {'id': job_id, 'fingerprint': fingerprint, 'executor': self.factory.instance,
                 'executor_process': identity(), 'character_id': character['id'], 'character_name': character['name'],
                 'input_kind': 'image', 'input': {**payload, 'design_prompts': design_prompts},

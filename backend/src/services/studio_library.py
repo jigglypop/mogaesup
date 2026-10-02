@@ -3,7 +3,6 @@ import hashlib
 import io
 import json
 import math
-import os
 import random
 import re
 from array import array
@@ -11,7 +10,7 @@ from array import array
 from PIL import Image
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
-from src.services.character_pipeline import PipelineError, read_json, now
+from src.services.character_pipeline import PipelineError, read_json, now, require_bucket
 
 SURFACES = {'snow': (224, 234, 244), 'sand': (202, 174, 119),
             'grass': (79, 112, 54), 'soil': (104, 76, 52), 'stone': (123, 128, 133),
@@ -136,8 +135,7 @@ class StudioLibrary:
         self.root = factory.root/str(int(owner))/'library'
 
     def require_storage(self):
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
 
     def metadata(self):
         catalog = read_json(self.root/'catalog.json', {'revision': '0', 'items': {}})

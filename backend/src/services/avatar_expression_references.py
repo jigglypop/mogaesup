@@ -1,13 +1,12 @@
 """Owner-scoped facial-feature artwork, separate from the body reference."""
 import hashlib
 import json
-import os
 import re
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_blueprints import AvatarBlueprints
 from src.services.avatar_factory import _LOCK
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, require_bucket
 
 
 class AvatarExpressionReferences:
@@ -38,8 +37,7 @@ class AvatarExpressionReferences:
                            for index, asset in enumerate(assets)]}
 
     def save(self, assets, revision):
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
         if assets:
             self.sources(assets)
         with _LOCK:

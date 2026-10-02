@@ -15,7 +15,7 @@ from threading import RLock, Semaphore
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 from src.services.keyed_lock import keyed_lock
 from src.services.studio_library import StudioLibrary
 
@@ -394,8 +394,7 @@ class Wardrobe:
         """Create or replace one outfit; parts must still be the listed files of the chosen body."""
         if not re.fullmatch(r'[a-f0-9]{32}', outfit_id):
             raise PipelineError('invalid_outfit', '조합 식별자가 올바르지 않습니다.', 422)
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
+        require_request_key(key)
         self.library.require_storage()
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         receipt_key = hashlib.sha256(key.encode()).hexdigest()

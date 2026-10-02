@@ -7,7 +7,7 @@ from threading import Lock
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
 from src.services.avatar_expression_generation import expression_lease
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.process_identity import identity, state as process_state
 from src.services.studio_prompts import StudioPrompts
 
@@ -61,14 +61,12 @@ class AvatarExpressionBatches:
                                    and (not alive or status == 'accepted'))}
 
     def create(self, key, payload):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
+        require_request_key(key)
         generation = self.generation
         assets = payload['reference_assets']
         fingerprint = hashlib.sha256(json.dumps({'reference_assets': assets,
             'body_sha256': generation.body_sha256}, sort_keys=True).encode()).hexdigest()
-        batch_id = hashlib.sha256(
-            f'{generation.owner}:{generation.job}:{generation.version}:expression-batch:{key}'.encode()).hexdigest()[:24]
+        batch_id = request_job_id(generation.owner, f'{generation.job}:{generation.version}:expression-batch', key)
         with _LOCK, expression_lease(self.directory(batch_id)):
             previous = read_json(self.directory(batch_id)/'record.json')
             if previous:

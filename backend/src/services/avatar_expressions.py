@@ -4,7 +4,6 @@ from copy import deepcopy
 import hashlib
 import io
 import json
-import os
 import re
 
 from PIL import Image
@@ -12,7 +11,7 @@ from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_native_parts import AvatarNativeParts
-from src.services.character_pipeline import PipelineError, read_json, now
+from src.services.character_pipeline import PipelineError, read_json, now, require_bucket
 from src.services.glb import parse_glb, build_glb
 from src.services.keyed_lock import keyed_lock
 from src.services.avatar_expression_bake import bake_expression, _texture_image, MAX_EXPRESSION_TEXTURE_EDGE
@@ -112,8 +111,7 @@ class AvatarExpressions:
         return result
 
     def select(self, expression_id, revision=None):
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
         if expression_id is not None:
             self.get(expression_id)
         path = self.root/'selection.json'
@@ -148,8 +146,7 @@ class AvatarExpressions:
         return result
 
     def save(self, payload, *, face_content=None):
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_bucket()
         body_sha = digest(self.body)
         if payload['body_sha256'] != body_sha:
             raise PipelineError('body_changed', '표정을 적용한 기본 몸 버전이 다릅니다.', 409)

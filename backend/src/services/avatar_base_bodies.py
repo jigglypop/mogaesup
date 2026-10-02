@@ -3,15 +3,15 @@ from copy import deepcopy
 import hashlib
 import json
 import os
-import re
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_blueprints import AvatarBlueprints
 from src.services.avatar_factory import IMAGE_PROFILE, _LOCK, digest
 from src.services.avatar_production_spec import production_spec, seal_production_spec
 from src.services.character_parts import blender_executable
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.glb import parse_glb
+from src.services.model_providers import base_url
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity
 from src.services.studio_library import StudioLibrary
@@ -96,11 +96,10 @@ class AvatarBaseBodies:
         return character, receipt
 
     def create(self, owner, key, payload):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '생산 요청 식별자는 8~100자의 영문, 숫자, 밑줄, 하이픈이어야 합니다.', 422)
+        require_request_key(key, '생산 요청 식별자는 8~100자의 영문, 숫자, 밑줄, 하이픈이어야 합니다.')
         canonical = json.loads(json.dumps(payload))
         submitted_fingerprint = _submitted_fingerprint(canonical)
-        job_id = hashlib.sha256(f'{owner}:base-body:{key}'.encode()).hexdigest()[:24]
+        job_id = request_job_id(owner, 'base-body', key)
         directory = self.factory.directory(owner, job_id)
         receipt_path = self._receipt(owner, key)
         with _LOCK:
@@ -110,8 +109,7 @@ class AvatarBaseBodies:
                     raise PipelineError('idempotency_conflict', '같은 요청 식별자에 다른 기본 몸 입력이 사용되었습니다.', 409)
                 return self.factory.get(owner, job_id), False
 
-            if not os.getenv('ASSET_S3_BUCKET', '').strip():
-                raise PipelineError('storage_unavailable', '기본 몸 원본을 저장할 S3 버킷 설정이 필요합니다.', 422)
+            require_bucket('storage_unavailable', '기본 몸 원본을 저장할 S3 버킷 설정이 필요합니다.', 422)
             if not os.getenv('MESHY_API_KEY', '').strip():
                 raise PipelineError('meshy_unavailable', '기본 몸 3D 생성에 Meshy API 키가 필요합니다.', 422)
             if not blender_executable():
@@ -198,7 +196,7 @@ class AvatarBaseBodies:
                 'body_prompt': 'Preserve the supplied base-body views exactly.', 'body_height_m': 1.2,
                 'base_body_setup': setup, 'uploaded_views': list(VIEWS),
                 'image_provider': 'uploaded', 'image_model': None,
-                'image_base': None, 'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/')}
+                'image_base': None, 'meshy_base': base_url('meshy')}
             _write_json(directory/'pipeline.json', state)
             _write_json(output/'progress.json', {'stage': 'models', 'message': '기본 몸 3D 생성 대기 중',
                                                  'images_received': 3, 'images_total': 3,

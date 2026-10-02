@@ -4,7 +4,7 @@ import base64
 import json
 import re
 import time
-from src.services.object_storage import StoredPath as Path
+from src.services.object_storage import StoredPath as Path, sha256 as _digest
 
 import httpx
 
@@ -12,7 +12,8 @@ from src.services import character_jobs
 from src.services.animation_glb import merge_character_clips
 from src.services.asset_editor import _write_json
 from src.services.asset_delivery import inspect_glb
-from src.services.wardrobe import _digest, download_glb, get_with_retry
+from src.services.provider_http import download_glb
+from src.services.wardrobe import get_with_retry
 from src.services.meshy_status import BLOCKED
 from src.services.runtime_activity import paid_request
 

@@ -1,5 +1,6 @@
 """Run a fixed material-boundary recipe in an isolated Blender process."""
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
@@ -8,7 +9,7 @@ import json
 
 from src.services.asset_delivery import DeliveryPolicy, inspect_glb
 from src.services.asset_editor import _write_json
-from src.services.wardrobe import _digest
+from src.services.object_storage import publish_checkpoint, sha256 as _digest
 from src.services.process_identity import identity
 from src.services.worker_env import worker_environment
 
@@ -40,6 +41,26 @@ def stop_process(process: subprocess.Popen, grace: float = 10) -> None:
         process.wait(timeout=grace)
 
 
+@contextmanager
+def blender_process(command, log_path, runner_path, *, env=None, write_json, receipt=None, checkpoint=True):
+    """Start a Blender worker, write its runner.json receipt, and yield the process for the caller to wait on.
+
+    A worker whose receipt cannot be written is stopped: nothing would supervise it, and the next resume would start
+    a second one. `write_json` is the caller's own writer; `receipt` returns extra receipt fields once the process exists.
+    """
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=worker_environment() if env is None else env,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        try:
+            write_json(runner_path, {"process": identity(process.pid), **(receipt() if receipt else {})})
+            if checkpoint:
+                publish_checkpoint(runner_path)
+        except BaseException:
+            stop_process(process)
+            raise
+        yield process
+
+
 def separate_materials(model: Path, output: Path, selections: list[dict] | None = None, source_sha256: str | None = None) -> dict:
     executable = blender_executable()
     if not executable:
@@ -64,15 +85,8 @@ def separate_materials(model: Path, output: Path, selections: list[dict] | None 
     # One BLENDER_CONCURRENCY slot, as for assembly. The only caller holds non-blocking
     # run/Blender file locks, never this semaphore, so waiting here cannot deadlock.
     # The worker's own timeout starts once a slot is granted.
-    with _QUEUE, (output / "blender.log").open("wb") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
-                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        try:
-            _write_json(output / "runner.json", {"process": identity(process.pid), "source_sha256": _digest(model)})
-        except BaseException:
-            # No receipt, no supervision: a Blender nobody can find must not keep running.
-            stop_process(process)
-            raise
+    with _QUEUE, blender_process(command, output / "blender.log", output / "runner.json", write_json=_write_json,
+                                 receipt=lambda: {"source_sha256": _digest(model)}, checkpoint=False) as process:
         try:
             code = process.wait(timeout=240)
         except subprocess.TimeoutExpired:

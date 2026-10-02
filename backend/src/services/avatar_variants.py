@@ -17,13 +17,13 @@ from src.services.avatar_image_prompts import DEFAULT_DESIGN_PROMPTS
 from src.services.avatar_reference_preparation import initial_state as initial_reference_state, uses_legacy_side_pose
 from src.services.avatar_openai_images import DEFAULT_BASE
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
-from src.services.character_parts import blender_executable, stop_process
-from src.services.character_pipeline import PipelineError, now, read_json
-from src.services.object_storage import StoredPath as Path, WorkspaceUploadError, copy_file, copy_tree, local_workspace, publish_checkpoint
+from src.services.character_parts import blender_executable, blender_process, stop_process
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
+from src.services.model_providers import base_url
+from src.services.object_storage import StoredPath as Path, WorkspaceUploadError, copy_file, copy_tree, local_workspace
 from src.services.process_identity import identity, state as process_state
 from src.services.studio_library import StudioLibrary
 from src.services.studio_prompts import StudioPrompts
-from src.services.worker_env import worker_environment
 
 VARIANT_SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes', *EQUIPMENT)
 
@@ -102,10 +102,8 @@ class AvatarVariants:
             pass
 
     def create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_required', 'S3 저장소 설정이 필요합니다.', 503)
+        require_request_key(key)
+        require_bucket()
         slots = payload['slots']
         if not slots or len(set(slots)) != len(slots) or not set(slots) <= set(VARIANT_SLOTS):
             raise PipelineError('invalid_slots', '생성할 파츠를 선택하세요.', 422)
@@ -120,7 +118,7 @@ class AvatarVariants:
                 and any(not payload.get('descriptions', {}).get(slot, '').strip() for slot in slots if slot in EQUIPMENT)):
             raise PipelineError('equipment_description_required', '무기·도구·안경의 디자인을 입력하세요.', 422)
         namespace = 'image' if photo_input is not None else 'variant'
-        job_id = hashlib.sha256(f'{owner}:{namespace}:{key}'.encode()).hexdigest()[:24]
+        job_id = request_job_id(owner, namespace, key)
         fingerprint = hashlib.sha256(json.dumps(photo_input if photo_input is not None else payload, sort_keys=True).encode()).hexdigest()
         target = self.factory.directory(owner, job_id)
         if frozen_context is None and not read_json(target/'job.json'):
@@ -255,7 +253,7 @@ class AvatarVariants:
             # freeze the configured image provider at their own acceptance.
             state.update(image_provider='openai', image_model=capabilities()['image_model'],
                          image_base=os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
-                         meshy_base=os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'))
+                         meshy_base=base_url('meshy'))
             if redraw and frozen_context and frozen_context.get('image_settings'):
                 state.update(deepcopy(frozen_context['image_settings']))
             view_mode = (photo_input or payload).get('view_mode')
@@ -635,18 +633,10 @@ def render_body_reference(output, worker):
         # Called by prepare_body inside its local_workspace and never while the queue is held:
         # the same workspace-then-queue order as native assembly. The render timeout starts
         # once a BLENDER_CONCURRENCY slot is granted.
-        with _QUEUE, (output/'blender.log').open('wb') as log:
-            process = subprocess.Popen([blender_executable(), '--background', '--disable-autoexec', '--python-exit-code', '1', '--threads', '2', '--python',
-                str(worker), '--', str(output/'input.json')],
-                stdout=log, stderr=subprocess.STDOUT, env=worker_environment(),
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-            try:
-                _write_json(output/'runner.json', {'process': identity(process.pid)})
-                publish_checkpoint(output/'runner.json')
-            except BaseException:
-                # Without its receipt nothing watches this worker, and the next render would start a second one.
-                stop_process(process)
-                raise
+        with _QUEUE, blender_process(
+                [blender_executable(), '--background', '--disable-autoexec', '--python-exit-code', '1', '--threads', '2', '--python',
+                 str(worker), '--', str(output/'input.json')],
+                output/'blender.log', output/'runner.json', write_json=_write_json) as process:
             try:
                 code = process.wait(timeout=240)
             except subprocess.TimeoutExpired:

@@ -5,7 +5,7 @@ import re
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 
 # Receipts only answer the replay of a lost response; selection.json keeps the newest ones.
 RECEIPTS_KEPT = 64
@@ -43,8 +43,7 @@ class AvatarNativeOutfits:
             payload.pop('hair_color', None)
         elif not re.fullmatch('#[0-9a-fA-F]{6}', payload['hair_color']):
             raise PipelineError('invalid_color', '헤어 색상을 선택하세요.', 422)
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '저장 요청 식별자가 필요합니다.', 422)
+        require_request_key(key, '저장 요청 식별자가 필요합니다.')
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         key_hash = hashlib.sha256(key.encode()).hexdigest()
         with _LOCK:

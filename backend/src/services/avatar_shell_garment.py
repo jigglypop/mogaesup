@@ -90,12 +90,6 @@ def bone_side(name):
     return 1 if 'left' in n else -1 if 'right' in n else 0
 
 
-def region_of(category):
-    return ('arm' if category in ('shoulder', 'upperarm', 'forearm') else
-            'leg' if category in ('thigh', 'shin') else
-            'torso' if category in ('spine', 'hips', 'neck') else None)
-
-
 def key_pixels(rgba, key_rgb, *, hue_deg=40., fringe=2):
     """Pixels of the key-coloured mannequin a worn drawing stands on, with their antialiased edge."""
     rgb = np.clip(rgba[..., :3], 0, 1)
@@ -458,11 +452,6 @@ def iso_cut(positions, scalar, triangles, attributes, level=.5):
     parent = [(i, i, 0.) for i in range(len(positions))] + parents
     return (out_positions[used], remap[all_triangles], [values[used] for values in out_attributes],
             [parent[i] for i in used])
-
-
-def _axis_point(rig, names, fallback):
-    points = [rig.matrix_world @ rig.data.bones[name].head_local for name in names if name in rig.data.bones]
-    return np.mean([list(p) for p in points], axis=0) if points else fallback
 
 
 def _joints(rig):

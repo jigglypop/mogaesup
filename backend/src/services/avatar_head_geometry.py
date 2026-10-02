@@ -443,17 +443,6 @@ def seat_legacy_hair_roots(meshes, body, spec):
         obj.data.update()
 
 
-def expand_hair(meshes, spec):
-    x_scale, depth_scale = spec['fitting'].get('hair_volume_scale_xz', (1, 1))
-    for obj in meshes:
-        if obj.get('scalp_backing'):
-            continue
-        for vertex in obj.data.vertices:
-            vertex.co.x *= x_scale
-            vertex.co.y = -.01+(vertex.co.y+.01)*depth_scale
-        obj.data.update()
-
-
 def head_preview_body(body, collar_height):
     copies = []
     for original in body:

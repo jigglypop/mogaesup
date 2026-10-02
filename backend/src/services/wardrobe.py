@@ -7,28 +7,26 @@ import json
 import math
 import re
 import time
-import uuid
-from contextlib import contextmanager
 from src.services.object_storage import StoredPath as Path
-from src.services.object_storage import is_remote, sha256
+from src.services.object_storage import sha256 as _digest
 
 import httpx
 
 from src.services.asset_delivery import DeliveryPolicy, inspect_glb, read_model
 from src.services.asset_editor import _write_json
 from src.services.blender_mcp import BlenderMCP
-from src.services.blender_mcp import BlenderExecutionUncertain
 from src.services.glb import parse_glb
+from src.services.provider_http import download_failure, download_glb, download_stream
+from src.services.run_lock import run_lock
 from src.services.runtime_activity import paid_request
+
+__all__ = ['Wardrobe', '_digest', '_worker', 'download_failure', 'download_glb', 'download_stream', 'get_with_retry',
+           'run_lock', 'transient']
 
 # Reading a task or a download link again changes nothing at the provider, so a busy or unreachable provider is asked again.
 GET_RETRY_STATUSES = (429, 500, 502, 503, 504)
 GET_BACKOFF_SECONDS = (1, 2, 4)
 GET_RETRY_AFTER_LIMIT = 30
-
-
-def _digest(path: Path) -> str:
-    return sha256(path)
 
 
 def _sleep(seconds: float) -> None:
@@ -72,47 +70,6 @@ def get_with_retry(client: httpx.Client, url: str, **kwargs) -> httpx.Response:
             attempt += 1
 
 
-def download_failure(exc: httpx.HTTPError):
-    """The public error of a download that failed. It names the status and never reads the response body."""
-    from src.services.character_pipeline import PipelineError
-    reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else "연결 오류"
-    return PipelineError("download_failed", f"3D 파일을 내려받지 못했습니다 ({reason}). 저장된 작업 기록은 그대로이며 다시 시도할 수 있습니다.", 502)
-
-
-@contextmanager
-def download_stream(client: httpx.Client, url: str):
-    """Stream a CDN file. A failed request is PipelineError('download_failed'): an error response is streamed,
-    so its body was never read and cannot be shown, and callers need not tell httpx error types apart."""
-    try:
-        with client.stream("GET", url) as response:
-            response.raise_for_status()
-            yield response
-    except httpx.HTTPError as exc:
-        raise download_failure(exc) from None
-
-
-def download_glb(client: httpx.Client, url: str, output: Path, *, preserve_detail: bool = False) -> dict:
-    """Validate a CDN download before replacing an artifact; client has no API key."""
-    policy = DeliveryPolicy(max_file_bytes=256 * 1024 * 1024) if preserve_detail else DeliveryPolicy()
-    data = bytearray()
-    with download_stream(client, url) as response:
-        for chunk in response.iter_bytes():
-            data.extend(chunk)
-            if len(data) > policy.max_file_bytes:
-                raise ValueError("Generated GLB exceeds file budget")
-    quality = inspect_glb(bytes(data), policy, budget_warnings=preserve_detail)
-    if quality["errors"]:
-        raise ValueError("Generated GLB rejected: " + "; ".join(quality["errors"]))
-    if is_remote(output):
-        # One PUT of the final key is atomic; staging a temporary object and renaming it costs a copy and a delete.
-        output.write_bytes(data)
-    else:
-        temporary = output.with_suffix(".glb.part")
-        temporary.write_bytes(data)
-        temporary.replace(output)
-    return quality
-
-
 def _worker(payload: dict) -> str:
     worker = Path(__file__).with_name("wardrobe_blender.py").read_text(encoding="utf-8")
     return (worker + "\nimport bpy, json\np = json.loads(" + repr(json.dumps(payload)) + ")\n"
@@ -123,39 +80,6 @@ def _worker(payload: dict) -> str:
             "region = next(r for r in area.regions if r.type == 'WINDOW')\n"
             "with bpy.context.temp_override(window=window, area=area, region=region):\n"
             "    print('ASSET_EDITOR_RESULT=' + json.dumps(run(p)))\n")
-
-
-@contextmanager
-def run_lock(directory: Path, port: int, *, blender: bool = True):
-    """Serialize CLI processes; keep locks after uncertain Blender execution."""
-    import tempfile
-
-    directory = directory.resolve()
-    directory.parent.mkdir(parents=True, exist_ok=True)
-    from src.services.process_identity import identity, lease_guard
-    lease = {"version": 1, "token": uuid.uuid4().hex, "directory": str(directory), "owner": identity()}
-    locks = [directory.with_name(directory.name + ".lock")]
-    if blender:
-        locks.append(Path(tempfile.gettempdir()) / f"asset-wardrobe-blender-{port}.lock")
-    acquired = []
-    uncertain = False
-    try:
-        with lease_guard(directory):
-            for path in locks:
-                try:
-                    with path.open("x", encoding="utf-8") as stream:
-                        stream.write(json.dumps(lease))
-                except FileExistsError as exc:
-                    raise ValueError(f"Run or Blender is busy; inspect lock: {path}") from exc
-                acquired.append(path)
-        yield
-    except (BlenderExecutionUncertain, KeyboardInterrupt):
-        uncertain = True
-        raise
-    finally:
-        if not uncertain:
-            for path in acquired:
-                path.unlink(missing_ok=True)
 
 
 class Wardrobe:

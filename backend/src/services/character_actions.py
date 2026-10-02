@@ -10,7 +10,8 @@ from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.glb import parse_glb
 from src.services.character_pipeline import CharacterPipeline, PipelineError, now, read_json
-from src.services.wardrobe import _digest
+from src.services.model_providers import MESHY_BASE
+from src.services.object_storage import sha256 as _digest
 from src.services.character_segmentation import CLOTHING_ROLES
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ def perform(pipeline: CharacterPipeline, entry, run, control, operation):
         key = os.getenv("MESHY_API_KEY")
         if not key:
             raise PipelineError("provider_unconfigured", "서버의 Meshy API 설정이 필요합니다.")
-        with httpx.Client(base_url=os.getenv("MESHY_API_BASE_URL", "https://api.meshy.ai"),
+        with httpx.Client(base_url=os.getenv("MESHY_API_BASE_URL", MESHY_BASE),
                           headers={"Authorization": f"Bearer {key}"}, timeout=120) as client:
             if action == "recover_motion_task":
                 recover(run, payload["slot"], payload["task_id"], client)
@@ -79,7 +80,7 @@ def perform(pipeline: CharacterPipeline, entry, run, control, operation):
         key = os.getenv("MESHY_API_KEY")
         if not key:
             raise PipelineError("provider_unconfigured", "서버의 Meshy API 설정이 필요합니다.")
-        with httpx.Client(base_url=os.getenv("MESHY_API_BASE_URL", "https://api.meshy.ai"),
+        with httpx.Client(base_url=os.getenv("MESHY_API_BASE_URL", MESHY_BASE),
                           headers={"Authorization": f"Bearer {key}"}, timeout=120) as client:
             if action in {"refresh_provider", "recover_task"}:
                 character_jobs.refresh(run, client, payload.get("task_id"))

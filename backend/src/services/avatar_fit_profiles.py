@@ -1,5 +1,4 @@
 """Serializable garment fitting contracts for generated avatar parts."""
-from copy import deepcopy
 import hashlib
 import json
 import math
@@ -165,7 +164,3 @@ def reject_generation_fit_profile(profile, *, slot):
 def fit_profiles_sha256(profiles):
     canonical = json.dumps(profiles, sort_keys=True, separators=(',', ':')).encode()
     return hashlib.sha256(canonical).hexdigest()
-
-
-def copy_fit_profile(profile):
-    return deepcopy(profile)

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import io
 import json
 import logging
-from src.services.object_storage import StoredPath as Path, copy_file
+from src.services.object_storage import StoredPath as Path, copy_file, sha256 as _digest
 import re
 
 import httpx
@@ -13,7 +13,8 @@ from PIL import Image
 
 from src.services.asset_editor import _write_json
 from src.services.runtime_activity import paid_request
-from src.services.wardrobe import _digest, download_glb, get_with_retry
+from src.services.provider_http import download_glb
+from src.services.wardrobe import get_with_retry
 
 LOGGER = logging.getLogger(__name__)
 # Meshy did not accept these requests, so a new submission cannot duplicate a task.

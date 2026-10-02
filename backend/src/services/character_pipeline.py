@@ -7,7 +7,7 @@ import hashlib
 import io
 import json
 import os
-from src.services.object_storage import StoredPath as Path
+from src.services.object_storage import StoredPath as Path, sha256 as _digest
 import re
 import uuid
 
@@ -17,7 +17,7 @@ from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _retry_file_io, _write_json
 from src.services.character_audit import inspect_character
 from src.services.glb import parse_glb
-from src.services.wardrobe import _digest, run_lock
+from src.services.run_lock import run_lock
 
 # Character details are read-only; bounded parallel reads keep the list responsive on S3.
 _LISTING_READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='character-listing')
@@ -40,6 +40,28 @@ def read_json(path: Path, default=None):
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_REQUEST_KEY = re.compile(r'[a-zA-Z0-9_-]{8,100}')
+
+
+def valid_request_key(key) -> bool:
+    return _REQUEST_KEY.fullmatch(key) is not None
+
+
+def require_request_key(key, message='요청 식별자가 필요합니다.', status=422) -> None:
+    if not valid_request_key(key):
+        raise PipelineError('invalid_key', message, status)
+
+
+def request_job_id(owner, namespace, key) -> str:
+    """The record id one request key maps to inside a namespace, so a replayed request finds what it created."""
+    return hashlib.sha256(f'{owner}:{namespace}:{key}'.encode()).hexdigest()[:24]
+
+
+def require_bucket(code='storage_required', message='S3 저장소 설정이 필요합니다.', status=503) -> None:
+    if not os.getenv('ASSET_S3_BUCKET', '').strip():
+        raise PipelineError(code, message, status)
 
 
 class CharacterPipeline:
@@ -334,8 +356,7 @@ class CharacterPipeline:
 
     def accept(self, character_id, user_id, action_id, key, revision, payload):
         entry, run, _ = self.entry(character_id, user_id)
-        if not re.fullmatch(r"[a-zA-Z0-9_-]{8,100}", key):
-            raise PipelineError("invalid_key", "요청 식별자가 필요합니다.", 400)
+        require_request_key(key, status=400)
         operation_id = hashlib.sha256(f"{user_id}:{character_id}:{action_id}:{key}".encode()).hexdigest()[:32]
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         path = run / "operations" / operation_id / "operation.json"

@@ -7,6 +7,7 @@ import httpx
 
 from src.services.character_jobs import RETRYABLE
 from src.services.character_pipeline import PipelineError, read_json
+from src.services.model_providers import base_url
 
 # An attempt that is over or was never accepted: what blocks polling and resubmission is what an explicit run may retry.
 BLOCKED = RETRYABLE
@@ -37,7 +38,7 @@ def meshy_balance(*, refresh=False):
         key = os.getenv('MESHY_API_KEY', '').strip()
         if key:
             try:
-                with httpx.Client(base_url=os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'),
+                with httpx.Client(base_url=base_url('meshy'),
                                   headers={'Authorization': 'Bearer '+key}, timeout=5) as client:
                     response = client.get('/openapi/v1/balance')
                 if response.status_code == 200:

@@ -8,7 +8,7 @@ from threading import Lock
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 from src.services.glb import parse_glb
 from src.services.keyed_lock import keyed_lock
 from src.services.studio_library import StudioLibrary
@@ -184,8 +184,7 @@ class FittingManagement:
     def select(self, job, version, expected_version, key):
         from src.services.avatar_native_parts import AvatarNativeParts
         from src.services.avatar_stage_resume import ensure_stage_idle
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
+        require_request_key(key)
         if not re.fullmatch(r'[a-f0-9]{24}', version):
             raise PipelineError('not_found', '조립 버전을 찾을 수 없습니다.', 404)
         self.library.require_storage()

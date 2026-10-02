@@ -1,12 +1,11 @@
 """Resume a selected factory stage from its saved inputs, with durable admission."""
 import hashlib
-import re
 from threading import Lock
 
 from src.services.asset_editor import _write_json, update_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.character_jobs import RETRYABLE
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, valid_request_key
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity, state as process_state
 from src.services.avatar_equipment import is_native_part_set
@@ -210,7 +209,7 @@ class AvatarStageResume:
 
     def start(self, owner, job_id, stage, key, *, explicit=True):
         """explicit: an operator run, which may repeat failed or unaccepted paid requests of this stage."""
-        if stage not in STAGES or not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
+        if stage not in STAGES or not valid_request_key(key):
             raise PipelineError('invalid_request', '시작 단계와 요청 식별자가 필요합니다.', 422)
         directory = self.factory.directory(owner, job_id)
         request_id = hashlib.sha256(key.encode()).hexdigest()

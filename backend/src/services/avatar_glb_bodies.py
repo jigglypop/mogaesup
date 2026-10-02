@@ -11,9 +11,10 @@ from src.services.avatar_base_bodies import AvatarBaseBodies, _submitted_fingerp
 from src.services.avatar_factory import IMAGE_PROFILE, _LOCK, digest
 from src.services.avatar_production_spec import production_spec, seal_production_spec
 from src.services.character_parts import blender_executable
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.glb import parse_glb
 from src.services.keyed_lock import keyed_lock
+from src.services.model_providers import MESHY_BASE, base_url
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity
 
@@ -28,8 +29,7 @@ class AvatarGlbBodies(AvatarBaseBodies):
 
     def upload(self, owner, content):
         """content: the request body, bytes or a bytearray (it is only read, never copied here)."""
-        if not os.getenv('ASSET_S3_BUCKET', '').strip():
-            raise PipelineError('storage_unavailable', 'GLB 원본을 저장할 S3 설정이 필요합니다.', 422)
+        require_bucket('storage_unavailable', 'GLB 원본을 저장할 S3 설정이 필요합니다.', 422)
         if not content or len(content) > MAX_GLB_BYTES:
             raise PipelineError('invalid_glb_size', 'GLB는 0바이트 초과, 256MB 이하로 올려 주세요.', 422)
         quality = inspect_glb(content, DeliveryPolicy(max_file_bytes=MAX_GLB_BYTES), budget_warnings=True)
@@ -73,11 +73,10 @@ class AvatarGlbBodies(AvatarBaseBodies):
         return receipt
 
     def create(self, owner, key, payload):
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
-            raise PipelineError('invalid_key', '등록 요청 식별자가 필요합니다.', 422)
+        require_request_key(key, '등록 요청 식별자가 필요합니다.')
         canonical = deepcopy(payload)
         submitted = _submitted_fingerprint(canonical)
-        job_id = hashlib.sha256(f'{owner}:base-body-glb:{key}'.encode()).hexdigest()[:24]
+        job_id = request_job_id(owner, 'base-body-glb', key)
         directory = self.factory.directory(owner, job_id)
         receipt_path = self._receipt(owner, key)
 
@@ -110,7 +109,7 @@ class AvatarGlbBodies(AvatarBaseBodies):
             motion_actions = deepcopy(receipt.get('motion_actions', {})) if receipt else {}
             if rerig:
                 from src.services.avatar_meshy import AvatarMeshy, client
-                with client(os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai')):
+                with client(os.getenv('MESHY_API_BASE_URL', MESHY_BASE)):
                     pass
                 document, _ = parse_glb(source.read_bytes(), strict=True)
                 if not document.get('textures') or not document.get('images'):
@@ -157,7 +156,7 @@ class AvatarGlbBodies(AvatarBaseBodies):
                             'base_body_setup': setup, 'uploaded_glb': asset, 'fit_profiles': {}, 'blueprint': None,
                             'reference_preparation': None, 'default_expressions': None, 'hair_length': 'source',
                             'design_prompts': {}, 'image_provider': 'uploaded', 'image_model': None,
-                            'image_base': None, 'meshy_base': os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai').rstrip('/'),
+                            'image_base': None, 'meshy_base': base_url('meshy'),
                             'motion_actions': motion_actions, 'motion_actions_explicit': False, 'rig_with_meshy': rerig, 'meshy_preserve_geometry': True,
                             'reuse': {'source_job_id': None, 'slots': []}, 'body_purpose': 'wardrobe_base', 'body_height_m': 1.2}
                 _write_json(directory/'pipeline.json', pipeline)

@@ -14,6 +14,7 @@ from src.services.character_pipeline import PipelineError, read_json
 
 PROVIDERS = ('meshy', 'tripo')
 LABELS = {'meshy': 'Meshy', 'tripo': 'Tripo'}
+MESHY_BASE = 'https://api.meshy.ai'
 TRIPO_BASE = 'https://api.tripo3d.ai/v2/openapi'
 TRIPO_MODEL = 'v3.1-20260211'
 # Tripo task states -> the Meshy-style states the pipeline already understands.
@@ -37,7 +38,7 @@ def resolve_provider(requested=None):
 def base_url(provider, state=None):
     if provider == 'tripo':
         return ((state or {}).get('tripo_base') or os.getenv('TRIPO_API_BASE_URL', TRIPO_BASE)).rstrip('/')
-    return ((state or {}).get('meshy_base') or os.getenv('MESHY_API_BASE_URL', 'https://api.meshy.ai')).rstrip('/')
+    return ((state or {}).get('meshy_base') or os.getenv('MESHY_API_BASE_URL', MESHY_BASE)).rstrip('/')
 
 
 def client(provider, state=None, *, timeout=120):

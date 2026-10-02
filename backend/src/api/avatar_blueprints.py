@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from src.services.object_storage import artifact_response as FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from src.auth import UserContext, get_current_user
 from src.paths import data_root
@@ -47,7 +48,7 @@ async def upload(request: Request, user: UserContext = Depends(get_current_user)
         if len(content) > 32*1024*1024:
             from src.services.character_pipeline import PipelineError
             raise PipelineError('image_too_large', '이미지는 32MB 이하로 올려 주세요.', 422)
-    return service.upload(user.user_id, bytes(content))
+    return await run_in_threadpool(service.upload, user.user_id, bytes(content))
 
 @router.get('/{character_id}')
 def read(character_id: str, user: UserContext = Depends(get_current_user), service=Depends(get_blueprints)):

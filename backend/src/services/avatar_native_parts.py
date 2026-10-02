@@ -1,7 +1,6 @@
 """Versioned local wardrobe candidates; no paid submissions or approval changes."""
 import hashlib
 import json
-import os
 from src.services.object_storage import StoredPath as Path
 import re
 import subprocess
@@ -10,8 +9,8 @@ from copy import deepcopy
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_meshy import AvatarMeshy
-from src.services.character_parts import blender_executable, stop_process
-from src.services.character_pipeline import PipelineError, now, read_json
+from src.services.character_parts import blender_executable, blender_process, stop_process
+from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import WorkspaceUploadError, copy_file, local_workspace, publish_checkpoint
 from src.services.avatar_production_spec import production_spec, refresh_fitting_spec
@@ -125,8 +124,7 @@ class AvatarNativeParts:
     def _start_refit_locked(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None):
         if not re.fullmatch(r'[a-f0-9]{24}', source_version):
             raise PipelineError('not_found', '기준 조립 버전을 찾을 수 없습니다.', 404)
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', request_key):
-            raise PipelineError('invalid_key', '요청 식별자가 필요합니다.', 422)
+        require_request_key(request_key)
         directory = self.factory.directory(owner, job)
         pipeline = read_json(directory/'pipeline.json')
         submitted = {'source_version': source_version, 'slot': slot}
@@ -530,16 +528,8 @@ class AvatarNativeParts:
                     # An imported base body publishes its front/side/back renders as the frozen
                     # body views later part requests draw on (publish_import_views).
                     environment['ASSET_DETAIL_RENDERS'] = '1'
-                with (directory/'blender.log').open('wb') as log:
-                    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment,
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                    try:
-                        _write_json(directory/'runner.json', {'process': identity(process.pid)})
-                        publish_checkpoint(directory/'runner.json')
-                    except BaseException:
-                        # Without its receipt nothing watches this worker, and the next resume would start a second one.
-                        stop_process(process)
-                        raise
+                with blender_process(command, directory/'blender.log', directory/'runner.json', env=environment,
+                                     write_json=_write_json) as process:
                     try:
                         code = process.wait(timeout=1800)
                     except subprocess.TimeoutExpired:

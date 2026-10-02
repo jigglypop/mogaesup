@@ -6,7 +6,7 @@ import httpx
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, read_json
 from src.services.object_storage import copy_file
-from src.services.wardrobe import download_glb, download_stream
+from src.services.provider_http import download_glb, download_stream
 
 
 def publish_extras(directory, job_directory, slot):

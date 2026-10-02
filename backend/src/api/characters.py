@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, Query, Re
 from fastapi.responses import JSONResponse
 from src.services.object_storage import artifact_response as FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from src.auth import UserContext, get_current_user
 from src.paths import data_root
@@ -131,13 +132,12 @@ def update(character_id: str, body: CharacterUpdate, if_match: str = Header(),
 async def upload(character_id: str, request: Request, kind: Literal["image", "model"] = Query(),
                  if_match: str = Header(), user: UserContext = Depends(get_current_user), pipeline=Depends(get_pipeline)):
     # Raw upload avoids base64 expansion; filenames and local paths are never trusted.
-    pipeline.entry(character_id, user.user_id)
+    await run_in_threadpool(pipeline.entry, character_id, user.user_id)
     content = bytearray()
     async for chunk in request.stream():
         content.extend(chunk)
         if len(content) > 25 * 1024 * 1024:
             raise PipelineError("upload_too_large", "파일은 25MB 이하로 준비해 주세요.", 413)
-    from starlette.concurrency import run_in_threadpool
     return await run_in_threadpool(pipeline.upload, character_id, user.user_id, bytes(content), kind, if_match.strip('"'))
 
 
