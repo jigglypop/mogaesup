@@ -7,6 +7,8 @@ use std::env;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     let database_url = env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+    // A bad setting stops the start before the database is connected or migrated.
+    let config = Config::from_env()?;
     let db = PgPoolOptions::new()
         .max_connections(12)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -25,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     if interrupted > 0 {
         tracing::warn!(interrupted, "Looks cut short by the last shutdown were marked failed");
     }
-    let state = AppState::new(db.clone(), Config::from_env()?);
+    let state = AppState::new(db.clone(), config);
     if let (Ok(username), Ok(password)) = (env::var("BOOTSTRAP_ADMIN_USERNAME"), env::var("BOOTSTRAP_ADMIN_PASSWORD")) {
         auth::bootstrap_admin(&state, &username, &password).await.context("bootstrap admin")?;
     }

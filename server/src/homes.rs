@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::{User, current_user, optional_user, username},
-    error::{ApiError, ApiResult, bad, conflict, forbidden, not_found},
+    error::{ApiError, ApiResult, bad, conflict, forbidden, internal, not_found},
     permissions::like_escape,
     rebac::{Checker, Object, Subject},
     security::{client_address, rate_limit},
@@ -478,12 +478,18 @@ async fn save_world(
     rate_limit(&state, format!("world:{}", user.id), WORLD_SAVES_PER_WINDOW)?;
     my_home(&state, &user).await?;
     let world_id = world_id(&body.world_id)?.to_owned();
-    let data = Value::Object(body.data);
-    let byte_size = serde_json::to_vec(&data).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+    let (data, byte_size, problem) = tokio::task::spawn_blocking(move || {
+        let data = Value::Object(body.data);
+        let byte_size = serde_json::to_vec(&data).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+        let problem = if byte_size > MAX_WORLD_BYTES { None } else { data.as_object().and_then(world_problem) };
+        (data, byte_size, problem)
+    })
+    .await
+    .map_err(internal)?;
     if byte_size > MAX_WORLD_BYTES {
         return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "world_too_large", "저장할 섬이 너무 큽니다."));
     }
-    if let Some(problem) = data.as_object().and_then(world_problem) {
+    if let Some(problem) = problem {
         tracing::warn!(problem, user = %user.id, "Rejected world save");
         return Err(bad("invalid_world", "저장할 수 없는 섬 데이터입니다."));
     }

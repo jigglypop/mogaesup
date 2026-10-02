@@ -485,7 +485,16 @@ impl Task {
         let bytes = self.download(&source.model_path).await?;
 
         self.step("verify").await;
-        let details = verify(&self.order.kind, &bytes, source.model_sha256.as_deref(), report)?;
+        let (kind, expected) = (self.order.kind.clone(), source.model_sha256.clone());
+        let mut checked = std::mem::take(report);
+        let (bytes, checked, details) = tokio::task::spawn_blocking(move || {
+            let details = verify(&kind, &bytes, expected.as_deref(), &mut checked);
+            (bytes, checked, details)
+        })
+        .await
+        .map_err(internal)?;
+        *report = checked;
+        let details = details?;
 
         self.step("slim").await;
         let original = bytes.len();

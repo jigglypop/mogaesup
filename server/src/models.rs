@@ -37,11 +37,25 @@ fn content_type(extension: &str) -> Option<&'static str> {
     TYPES.iter().find(|(known, _)| *known == extension).map(|(_, kind)| *kind)
 }
 
+/// Whether `value` is a SHA-256 as 64 lowercase hex digits.
+pub(crate) fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `bytes` with their SHA-256 in hex, hashed on a blocking thread: a model is up to 64 MiB.
+pub(crate) async fn sha256(bytes: Vec<u8>) -> ApiResult<(Vec<u8>, String)> {
+    tokio::task::spawn_blocking(move || {
+        let sha = hex::encode(Sha256::digest(&bytes));
+        (bytes, sha)
+    })
+    .await
+    .map_err(internal)
+}
+
 /// `<64 lowercase hex>.<known extension>`, the only names the store holds.
 fn stored_name(file: &str) -> Option<(&str, &'static str)> {
     let (sha, extension) = file.split_once('.')?;
-    let valid = sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    Some((sha, content_type(extension).filter(|_| valid)?))
+    Some((sha, content_type(extension).filter(|_| is_sha256(sha))?))
 }
 
 /// Whether `url` is the site path of a stored model: `/models/<sha256>.glb`.
@@ -71,7 +85,8 @@ impl Models {
     /// Stores `bytes` under their hash and returns the site URL. A file already stored is not written again.
     pub async fn put(&self, extension: &str, bytes: Vec<u8>) -> ApiResult<String> {
         let kind = content_type(extension).ok_or_else(|| internal("unknown model file kind"))?;
-        let name = format!("{}.{extension}", hex::encode(Sha256::digest(&bytes)));
+        let (bytes, sha) = sha256(bytes).await?;
+        let name = format!("{sha}.{extension}");
         let path = StorePath::from(name.as_str());
         if self.store.head(&path).await.is_err() {
             let attributes = if self.attributes {

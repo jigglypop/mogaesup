@@ -17,7 +17,8 @@ use std::{
 };
 
 use crate::{
-    glb::{IDENTITY, Matrix, index, join, local, multiply, split},
+    glb::{join, split},
+    gltf::{IDENTITY, Matrix, index, pad, walk},
     slim,
 };
 
@@ -217,7 +218,7 @@ fn components(kind: &str) -> Option<usize> {
 }
 
 fn number(value: &Value) -> usize {
-    value.as_u64().and_then(|v| usize::try_from(v).ok()).unwrap_or(0)
+    index(value).unwrap_or(0)
 }
 
 /// Elements (vertices, indices) one accessor may hold here, and the values they flatten to. A file's counts are its own
@@ -354,9 +355,7 @@ impl Out {
     }
 
     fn align(&mut self) {
-        while !self.bin.len().is_multiple_of(4) {
-            self.bin.push(0);
-        }
+        pad(&mut self.bin);
     }
 
     fn push_view(&mut self, bytes: &[u8], target: Option<u64>) -> usize {
@@ -419,29 +418,8 @@ fn single_buffer(json: &Value, what: impl Fn() -> BakeError) -> Result<(), BakeE
 
 /// Every node's world matrix at rest in the default scene (the first, or all root nodes without scenes).
 fn worlds(json: &Value) -> Vec<Option<Matrix>> {
-    let nodes = json["nodes"].as_array().map_or(&[][..], Vec::as_slice);
-    let mut out = vec![None; nodes.len()];
-    let scene = &json["scenes"][json["scene"].as_u64().unwrap_or(0) as usize]["nodes"];
-    let roots: Vec<usize> = match scene.as_array() {
-        Some(roots) => roots.iter().filter_map(index).collect(),
-        None => {
-            let children: HashSet<usize> = nodes
-                .iter()
-                .flat_map(|node| node["children"].as_array().into_iter().flatten().filter_map(index))
-                .collect();
-            (0..nodes.len()).filter(|node| !children.contains(node)).collect()
-        }
-    };
-    let mut stack: Vec<(usize, Matrix)> = roots.into_iter().map(|root| (root, IDENTITY)).collect();
-    while let Some((at, parent)) = stack.pop() {
-        let Some(node) = nodes.get(at) else { continue };
-        if out[at].is_some() {
-            continue;
-        }
-        let world = multiply(&parent, &local(node));
-        out[at] = Some(world);
-        stack.extend(node["children"].as_array().into_iter().flatten().filter_map(index).map(|child| (child, world)));
-    }
+    let mut out = vec![None; json["nodes"].as_array().map_or(0, Vec::len)];
+    walk(json, |at, _, world| out[at] = Some(*world));
     out
 }
 
@@ -1119,9 +1097,7 @@ fn compact(out: &mut Out) -> Result<(), BakeError> {
             .checked_add(number(&view["byteLength"]))
             .and_then(|end| out.bin.get(start..end))
             .ok_or_else(|| fail("look_part", "합친 모델의 데이터가 파일 범위를 벗어나 만들지 못했습니다."))?;
-        while !bin.len().is_multiple_of(4) {
-            bin.push(0);
-        }
+        pad(&mut bin);
         view["byteOffset"] = bin.len().into();
         bin.extend_from_slice(data);
         kept_views.push(view);
@@ -1149,9 +1125,7 @@ fn compact(out: &mut Out) -> Result<(), BakeError> {
             remap_view(view);
         }
     }
-    while !bin.len().is_multiple_of(4) {
-        bin.push(0);
-    }
+    pad(&mut bin);
     json["buffers"] = json!([{"byteLength": bin.len()}]);
     for key in ["textures", "images", "samplers"] {
         if json[key].as_array().is_some_and(Vec::is_empty)

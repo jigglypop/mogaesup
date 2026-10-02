@@ -7,7 +7,10 @@ use image::{DynamicImage, ImageFormat, ImageReader, Limits, codecs::jpeg::JpegEn
 use serde_json::Value;
 use std::{collections::HashMap, io::Cursor};
 
-use crate::glb::{join, split};
+use crate::{
+    glb::{join, split},
+    gltf::{index, pad, view_range},
+};
 
 /// Base colour and emissive maps.
 const COLOR_EDGE: u32 = 1024;
@@ -19,8 +22,8 @@ const JPEG_QUALITY: u8 = 88;
 fn edges(json: &Value) -> Vec<Option<u32>> {
     let mut edges = vec![None; json["images"].as_array().map_or(0, Vec::len)];
     let source = |reference: &Value| -> Option<usize> {
-        let texture = json["textures"].get(usize::try_from(reference["index"].as_u64()?).ok()?)?;
-        usize::try_from(texture["source"].as_u64()?).ok()
+        let texture = json["textures"].get(index(&reference["index"])?)?;
+        index(&texture["source"])
     };
     for material in json["materials"].as_array().into_iter().flatten() {
         let pbr = &material["pbrMetallicRoughness"];
@@ -84,24 +87,16 @@ pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let range = |view: &Value| -> Option<std::ops::Range<usize>> {
-        let start = usize::try_from(view["byteOffset"].as_u64().unwrap_or(0)).ok()?;
-        Some(start..start.checked_add(usize::try_from(view["byteLength"].as_u64()?).ok()?)?)
-    };
     let edges = edges(&json);
     let mut replaced: HashMap<usize, (Vec<u8>, &'static str, usize)> = HashMap::new();
-    for (index, image) in json["images"].as_array()?.iter().enumerate() {
-        let (Some(edge), Some(view)) =
-            (edges[index], image["bufferView"].as_u64().and_then(|v| usize::try_from(v).ok()))
-        else {
-            continue;
-        };
+    for (at, image) in json["images"].as_array()?.iter().enumerate() {
+        let (Some(edge), Some(view)) = (edges[at], index(&image["bufferView"])) else { continue };
         if replaced.contains_key(&view) {
             continue;
         }
-        let original = bin.get(range(views.get(view)?)?)?;
+        let original = bin.get(view_range(views.get(view)?)?)?;
         if let Some((smaller, kind)) = reencode(original, image["mimeType"].as_str().unwrap_or_default(), edge) {
-            replaced.insert(view, (smaller, kind, index));
+            replaced.insert(view, (smaller, kind, at));
         }
     }
     if replaced.is_empty() {
@@ -110,12 +105,10 @@ pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
     // Every view restarts on a four-byte boundary, which keeps each accessor aligned to its component size.
     let mut packed = Vec::with_capacity(bin.len());
     for (index, view) in views.iter().enumerate() {
-        while !packed.len().is_multiple_of(4) {
-            packed.push(0);
-        }
+        pad(&mut packed);
         let data = match replaced.get(&index) {
             Some((bytes, _, _)) => bytes.as_slice(),
-            None => bin.get(range(view)?)?,
+            None => bin.get(view_range(view)?)?,
         };
         json["bufferViews"][index]["byteOffset"] = packed.len().into();
         json["bufferViews"][index]["byteLength"] = data.len().into();

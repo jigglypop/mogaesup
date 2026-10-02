@@ -14,7 +14,6 @@ use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use std::{collections::BTreeMap, panic::AssertUnwindSafe};
 use uuid::Uuid;
@@ -26,6 +25,7 @@ use crate::{
     factory::{self, MAX_MODEL_BYTES},
     glb,
     look_bake::{self, COVERED_SLOTS, Coverage, HAIR_SLOTS, Palette, Part},
+    models::{self, is_sha256},
     security::rate_limit,
     slim,
     studio::segment,
@@ -91,10 +91,6 @@ pub struct LookBody {
     colors: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-fn sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 fn slot_name(value: &str) -> bool {
     (2..=20).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphabetic())
 }
@@ -112,7 +108,7 @@ pub fn request(body: LookBody) -> ApiResult<Value> {
     }
     let mut parts = Map::new();
     for (slot, part) in &body.parts {
-        if !slot_name(slot) || !ids(&part.job_id, &part.version) || !sha256_hex(&part.sha256) {
+        if !slot_name(slot) || !ids(&part.job_id, &part.version) || !is_sha256(&part.sha256) {
             return Err(INVALID);
         }
         parts.insert(slot.clone(), json!({"jobId": part.job_id, "version": part.version, "sha256": part.sha256}));
@@ -161,7 +157,7 @@ pub fn listed(bodies: &Value, listing: &Value, look: &Value) -> ApiResult<String
         .find(|entry| text(entry, "job_id") == text(body, "jobId") && text(entry, "version") == text(body, "version"))
         .ok_or(BODY_CHANGED)?;
     let sha = text(registered, "body_sha256");
-    if !sha256_hex(sha) || text(&listing["body"], "job_id") != text(body, "jobId") {
+    if !is_sha256(sha) || text(&listing["body"], "job_id") != text(body, "jobId") {
         return Err(BODY_CHANGED);
     }
     let parts = listing["parts"].as_array().map_or(&[][..], Vec::as_slice);
@@ -395,7 +391,8 @@ impl Bake {
     /// A file under the character server's `/api/`, checked against the SHA-256 the wardrobe listed for it.
     async fn file(&self, path: &str, sha: &str, changed: ApiError) -> Result<Vec<u8>, Failure> {
         let bytes = factory::fetch_file(&self.state, &self.user.username, path, MAX_MODEL_BYTES, None).await?;
-        if hex::encode(Sha256::digest(&bytes)) != sha {
+        let (bytes, found) = models::sha256(bytes).await?;
+        if found != sha {
             return Err(changed.into());
         }
         Ok(bytes)
@@ -419,9 +416,12 @@ impl Bake {
         let mask = factory::fetch_file(&self.state, &self.user.username, &mask_path, MAX_MASK_BYTES, None)
             .await
             .map_err(|error| if error.status == StatusCode::NOT_FOUND { no_colors(slot) } else { error.into() })?;
-        let Some(mask) = slim::decode(&mask, image::ImageFormat::Png, 4096, 256 * 1024 * 1024) else {
-            return Err(no_colors(slot));
-        };
+        let mask = tokio::task::spawn_blocking(move || {
+            slim::decode(&mask, image::ImageFormat::Png, 4096, 256 * 1024 * 1024).map(|picture| picture.to_rgba8())
+        })
+        .await
+        .map_err(|error| Failure::from(internal(error)))?;
+        let Some(mask) = mask else { return Err(no_colors(slot)) };
         let lights = regions["regions"]
             .as_array()
             .into_iter()
@@ -431,12 +431,7 @@ impl Bake {
         let colors = [0, 1, 2, 3].map(|region: usize| {
             chosen.get(&region.to_string()).and_then(Value::as_str).and_then(look_bake::linear_color)
         });
-        Ok(Some(Palette {
-            material: regions["material"].as_u64().unwrap_or(0) as usize,
-            lights,
-            mask: mask.to_rgba8(),
-            colors,
-        }))
+        Ok(Some(Palette { material: regions["material"].as_u64().unwrap_or(0) as usize, lights, mask, colors }))
     }
 
     /// The model's site path and the bake's report; None when a newer save took over while this one waited for a slot.

@@ -7,6 +7,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::Cursor;
 
+use crate::gltf::{Matrix, index, numbers, pad, view_range, walk};
+
 const MAGIC: u32 = 0x4654_6c67; // "glTF"
 const VERSION: u32 = 2;
 const JSON_CHUNK: u32 = 0x4e4f_534a; // "JSON"
@@ -148,10 +150,6 @@ impl Details {
     }
 }
 
-pub(crate) fn index(value: &Value) -> Option<usize> {
-    usize::try_from(value.as_u64()?).ok()
-}
-
 fn accessor_count(json: &Value, accessor: &Value) -> u64 {
     index(accessor)
         .and_then(|at| json["accessors"].get(at))
@@ -176,58 +174,6 @@ fn mesh_counts(json: &Value, mesh: &Value) -> (u64, u64) {
     totals
 }
 
-/// Column-major 4×4, as glTF writes node matrices.
-pub(crate) type Matrix = [f64; 16];
-pub(crate) const IDENTITY: Matrix = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
-
-pub(crate) fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
-    let mut out = [0.0; 16];
-    for column in 0..4 {
-        for row in 0..4 {
-            out[column * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[column * 4 + k]).sum();
-        }
-    }
-    out
-}
-
-fn numbers<const N: usize>(value: &Value, default: [f64; N]) -> [f64; N] {
-    let mut out = default;
-    if let Some(items) = value.as_array().filter(|items| items.len() == N) {
-        for (slot, item) in out.iter_mut().zip(items) {
-            *slot = item.as_f64().unwrap_or(*slot);
-        }
-    }
-    out
-}
-
-/// A node's own transform: its matrix, or translation × rotation × scale.
-pub(crate) fn local(node: &Value) -> Matrix {
-    if node["matrix"].as_array().is_some_and(|matrix| matrix.len() == 16) {
-        return numbers(&node["matrix"], IDENTITY);
-    }
-    let [tx, ty, tz] = numbers(&node["translation"], [0.0; 3]);
-    let [x, y, z, w] = numbers(&node["rotation"], [0.0, 0.0, 0.0, 1.0]);
-    let [sx, sy, sz] = numbers(&node["scale"], [1.0; 3]);
-    [
-        (1.0 - 2.0 * (y * y + z * z)) * sx,
-        2.0 * (x * y + z * w) * sx,
-        2.0 * (x * z - y * w) * sx,
-        0.0,
-        2.0 * (x * y - z * w) * sy,
-        (1.0 - 2.0 * (x * x + z * z)) * sy,
-        2.0 * (y * z + x * w) * sy,
-        0.0,
-        2.0 * (x * z + y * w) * sz,
-        2.0 * (y * z - x * w) * sz,
-        (1.0 - 2.0 * (x * x + y * y)) * sz,
-        0.0,
-        tx,
-        ty,
-        tz,
-        1.0,
-    ]
-}
-
 fn transform(m: &Matrix, [x, y, z]: [f64; 3]) -> [f64; 3] {
     [
         m[0] * x + m[4] * y + m[8] * z + m[12],
@@ -240,26 +186,9 @@ fn transform(m: &Matrix, [x, y, z]: [f64; 3]) -> [f64; 3] {
 /// Skinned meshes are measured where their nodes place them, which for the character server's exports is the bind pose.
 /// A file without nodes counts each mesh once.
 fn placed(json: &Value) -> (u64, u64, Option<[f64; 3]>) {
-    let nodes = json["nodes"].as_array().map_or(&[][..], Vec::as_slice);
-    let scene = &json["scenes"][json["scene"].as_u64().unwrap_or(0) as usize]["nodes"];
-    let roots: Vec<usize> = match scene.as_array() {
-        Some(roots) => roots.iter().filter_map(index).collect(),
-        None => {
-            let children: Vec<usize> = nodes
-                .iter()
-                .flat_map(|node| node["children"].as_array().into_iter().flatten().filter_map(index))
-                .collect();
-            (0..nodes.len()).filter(|node| !children.contains(node)).collect()
-        }
-    };
     let (mut triangles, mut vertices, mut meshes_placed) = (0, 0, 0);
     let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-    // A node has at most one parent, so each is visited once; a malformed cycle cannot loop.
-    let mut seen = vec![false; nodes.len()];
-    let mut stack: Vec<(usize, Matrix)> = roots.into_iter().map(|root| (root, IDENTITY)).collect();
-    while let Some((at, parent)) = stack.pop() {
-        let Some(node) = nodes.get(at).filter(|_| !std::mem::replace(&mut seen[at], true)) else { continue };
-        let world = multiply(&parent, &local(node));
+    walk(json, |_, node, world| {
         let mesh = index(&node["mesh"]).and_then(|mesh| json["meshes"].get(mesh));
         if let Some(mesh) = mesh {
             let (t, v) = mesh_counts(json, mesh);
@@ -276,15 +205,14 @@ fn placed(json: &Value) -> (u64, u64, Option<[f64; 3]>) {
             }
             for corner in 0..8 {
                 let point = std::array::from_fn(|axis| if corner >> axis & 1 == 0 { min[axis] } else { max[axis] });
-                for (axis, value) in transform(&world, point).into_iter().enumerate() {
+                for (axis, value) in transform(world, point).into_iter().enumerate() {
                     low[axis] = low[axis].min(value);
                     high[axis] = high[axis].max(value);
                 }
             }
         }
-        stack.extend(node["children"].as_array().into_iter().flatten().filter_map(index).map(|child| (child, world)));
-    }
-    if nodes.is_empty() && meshes_placed == 0 {
+    });
+    if json["nodes"].as_array().is_none_or(Vec::is_empty) && meshes_placed == 0 {
         for mesh in json["meshes"].as_array().into_iter().flatten() {
             let (t, v) = mesh_counts(json, mesh);
             (triangles, vertices) = (triangles + t, vertices + v);
@@ -299,8 +227,7 @@ fn view<'a>(json: &Value, bin: &'a [u8], view: usize) -> Option<&'a [u8]> {
     if view["buffer"].as_u64() != Some(0) || json["buffers"][0].get("uri").is_some() {
         return None;
     }
-    let start = usize::try_from(view["byteOffset"].as_u64().unwrap_or(0)).ok()?;
-    bin.get(start..start.checked_add(usize::try_from(view["byteLength"].as_u64()?).ok()?)?)
+    bin.get(view_range(view)?)
 }
 
 fn textures(json: &Value, bin: &[u8]) -> Vec<Texture> {
@@ -364,9 +291,7 @@ pub fn join(json: &Value, bin: &[u8]) -> Vec<u8> {
         chunk.push(b' ');
     }
     let mut data = bin.to_vec();
-    while !data.len().is_multiple_of(4) {
-        data.push(0);
-    }
+    pad(&mut data);
     let total = 12 + 8 + chunk.len() + if data.is_empty() { 0 } else { 8 + data.len() };
     let mut bytes = Vec::with_capacity(total);
     for value in [MAGIC, VERSION, total as u32, chunk.len() as u32, JSON_CHUNK] {

@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod factory;
 pub mod glb;
+mod gltf;
 pub mod homes;
 pub mod imports;
 pub mod look_bake;

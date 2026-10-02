@@ -597,7 +597,10 @@ async fn read_json(response: reqwest::Response) -> ApiResult<Value> {
             return Err(UNAVAILABLE);
         }
     }
-    serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE)
+    tokio::task::spawn_blocking(move || serde_json::from_slice(&bytes))
+        .await
+        .map_err(internal)?
+        .map_err(|_| UNAVAILABLE)
 }
 
 /// JSON from the character server's `/api/`; None for each status in `absent`. Its job listing answers 503
