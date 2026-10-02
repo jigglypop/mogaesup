@@ -23,12 +23,6 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   transition: opacity 0.6s ease;
 }
 .mg-world-loading.is-done { opacity: 0; pointer-events: none; }
-.mg-loading-card { display: grid; justify-items: center; gap: 10px; padding: 32px 44px; text-align: center; }
-.mg-loading-card b { font-size: 17px; font-weight: 800; }
-.mg-loading-card small { min-height: 1.2em; color: var(--mg-muted); font-size: 13px; }
-.mg-loading-card .mg-brand-mark { width: 44px; height: 44px; border-radius: 14px; animation: mg-bob 2.4s ease-in-out infinite; }
-.mg-loading-card .mg-brand-mark svg { width: 24px; height: 24px; }
-@keyframes mg-bob { 50% { transform: translateY(-5px) rotate(-4deg); } }
 
 /* Top bar pieces over the world */
 .mg-island-pill { gap: 10px; padding: 0 10px 0 7px; }

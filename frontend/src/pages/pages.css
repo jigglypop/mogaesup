@@ -1,6 +1,12 @@
 /* Loading, sign-in and the page screens (둘러보기, 운영). */
 .mg-loading { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; }
 .mg-progress.is-indeterminate i { width: 40%; animation: mg-slide 1.3s ease-in-out infinite; }
+.mg-loading-card { display: grid; justify-items: center; gap: 10px; padding: 32px 44px; text-align: center; }
+.mg-loading-card b { font-size: 17px; font-weight: 800; }
+.mg-loading-card small { min-height: 1.2em; color: var(--mg-muted); font-size: 13px; }
+.mg-loading-card .mg-brand-mark { width: 44px; height: 44px; border-radius: 14px; animation: mg-bob 2.4s ease-in-out infinite; }
+.mg-loading-card .mg-brand-mark svg { width: 24px; height: 24px; }
+@keyframes mg-bob { 50% { transform: translateY(-5px) rotate(-4deg); } }
 @keyframes mg-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(260%); } }
 
 .mg-auth {
