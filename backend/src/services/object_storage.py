@@ -171,7 +171,7 @@ def assert_records_mode(timeout=5):
     The records live in PostgreSQL only while CHARACTER_DATABASE_URL is set, and a replaced instance can lose that
     variable. The server would then read and write the old S3 JSON, stale since the import, and still look healthy.
     Raises RuntimeError when the marker of this storage prefix exists but the variable is not set. Whatever keeps the
-    check from answering (no network, no permission, slower than `timeout` seconds) is logged and the start goes on.
+    check from answering (no network, no permission, slower than `timeout` seconds) stops startup as well.
     """
     bucket = os.getenv('ASSET_S3_BUCKET', '').strip()
     if not bucket or record_store.configured() or os.getenv('ASSET_STORAGE_WORKER_LOCAL') == '1':
@@ -195,8 +195,7 @@ def assert_records_mode(timeout=5):
             f'The records of storage prefix {prefix!r} live in PostgreSQL, but CHARACTER_DATABASE_URL is not set. Set it, or '
             f'copy the records back to S3 with `uv run python -m src.records export --prefix {argument}` and run again.')
     if isinstance(found, Exception):
-        LOGGER.warning('Could not check whether the records of storage prefix %r live in PostgreSQL: %s: %s',
-                       prefix, type(found).__name__, found)
+        raise RuntimeError('Could not verify the records storage mode; restore S3 access and retry startup.') from found
 
 
 def _s3():
@@ -776,7 +775,7 @@ def copy_tree(source, target):
 
 
 def artifact_response(path, **kwargs):
-    from fastapi.responses import FileResponse, RedirectResponse, Response
+    from fastapi.responses import FileResponse, Response
     path = StoredPath(path)
     location = _location(path)
     record = _record(path)
@@ -787,17 +786,23 @@ def artifact_response(path, **kwargs):
             from urllib.parse import quote
             headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{quote(kwargs['filename'])}"
         return Response(found[1], media_type=kwargs.get('media_type') or _content_type(path), headers=headers)
+    head = None
     if found:
         location = location[0], found[0].blob_key
-    if found or (location and not record and _head(path)):
-        params = {'Bucket': location[0], 'Key': location[1],
-                  'ResponseContentType': kwargs.get('media_type') or _content_type(path)}
+        head = _s3().head_object(Bucket=location[0], Key=location[1])
+    elif location and not record:
+        head = _head(path)
+    if head:
+        # Studio viewers fetch bytes through the app's authenticated gateway. A redirect sends the browser
+        # to another origin and makes every GLB/texture depend on an external bucket CORS configuration.
+        headers = {'Cache-Control': 'private, no-store', **kwargs.get('headers', {})}
         if kwargs.get('filename'):
             from urllib.parse import quote
-            # Presigned downloads come from another origin, where the page's download attribute is ignored.
-            params['ResponseContentDisposition'] = f"attachment; filename*=UTF-8''{quote(kwargs['filename'])}"
-        url = _s3().generate_presigned_url('get_object', Params=params, ExpiresIn=900)
-        return RedirectResponse(url, status_code=307, headers={'Cache-Control': 'private, no-store'})
+            headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{quote(kwargs['filename'])}"
+
+        from src.services.remote_artifact import RemoteArtifactResponse
+        return RemoteArtifactResponse(_s3(), *location, head,
+                                      media_type=kwargs.get('media_type') or _content_type(path), headers=headers)
     return FileResponse(LocalPath(path), **kwargs)
 
 

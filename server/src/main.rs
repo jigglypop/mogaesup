@@ -1,6 +1,6 @@
 use anyhow::Context;
-use mogaesup_server::{AppState, auth, config::Config, imports, looks, router};
-use sqlx::postgres::PgPoolOptions;
+use mogaesup_server::{AppState, auth, config::Config, imports, looks, router, runtime::ProcessLock};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 
 #[tokio::main]
@@ -14,6 +14,22 @@ async fn main() -> anyhow::Result<()> {
         .acquire_timeout(std::time::Duration::from_secs(10))
         .connect(&database_url)
         .await?;
+    let process_lock = ProcessLock::acquire(&db).await?;
+    // Monitor the ownership connection during migrations and recovery too, before any HTTP listener exists.
+    tokio::select! {
+        result = run(db, config) => result?,
+        result = process_lock.monitor() => result?,
+    }
+    Ok(())
+}
+
+async fn run(db: PgPool, config: Config) -> anyhow::Result<()> {
+    let bootstrap = env::var("BOOTSTRAP_ADMIN_USERNAME").ok().zip(env::var("BOOTSTRAP_ADMIN_PASSWORD").ok());
+    auth::verify_legacy_admin_before_migration(
+        &db,
+        bootstrap.as_ref().map(|(username, password)| (username.as_str(), password.as_str())),
+    )
+    .await?;
     let mut migrator = sqlx::migrate!("./migrations");
     // A rollback restores the previous binary but not the schema, so an older release must start on a database that
     // a newer release already migrated. Migrations stay additive.
@@ -28,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(interrupted, "Looks cut short by the last shutdown were marked failed");
     }
     let state = AppState::new(db.clone(), config);
-    if let (Ok(username), Ok(password)) = (env::var("BOOTSTRAP_ADMIN_USERNAME"), env::var("BOOTSTRAP_ADMIN_PASSWORD")) {
+    if let Some((username, password)) = bootstrap {
         auth::bootstrap_admin(&state, &username, &password).await.context("bootstrap admin")?;
     }
     auth::spawn_cleanup(db);

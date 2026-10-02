@@ -12,51 +12,32 @@ import { can } from '../auth/can';
 import { AdminTabs } from '../pages/AdminTabs';
 import { Loading } from '../pages/Loading';
 import { PageShell } from '../shell/Shell';
-import { retargetStudioLink, studioSections, type Screen } from './screens';
+import { routeOf, studioSections, type Screen } from './screens';
 import { StudioPowerLine, StudioWaking } from './StudioPower';
 
 // The character studio's own screens (src/character), mounted as they are.
 const Workspace = lazy(() => import('../character/studio/Workspace').then((module) => ({ default: module.Workspace })));
 
 /**
- * Hosts the studio's workspace on an app route. The workspace keeps its screen in the query string, reads it once when it
- * mounts and rewrites the address as `/?…`; here the address stays on this route and the route picks the screen.
+ * The pathname selects the screen. Legacy query state is supplied once before the workspace mounts.
  */
 function WorkspaceFrame({ screen }: { screen: Screen }) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
+  const entry = `${pathname}${search}`;
   const [ready, setReady] = useState<string | null>(null);
   useLayoutEffect(() => {
-    const original = history.replaceState;
-    const keep = (url: string | URL | null | undefined) =>
-      typeof url === 'string' && url.startsWith('/?') ? `${pathname}${url.slice(1)}` : url;
-    history.replaceState = function replaceState(data, unused, url) {
-      // The router keeps its own entry state; the studio writes null over it.
-      return original.call(this, data ?? history.state, unused, keep(url));
-    };
-    const query = new URLSearchParams(location.search);
+    const query = new URLSearchParams(search);
     query.set('tab', screen.tab);
     if (screen.mode) query.set('mode', screen.mode);
     else query.delete('mode');
-    original.call(history, history.state, '', `${pathname}?${query}`);
-    setReady(screen.path);
-    return () => {
-      history.replaceState = original;
-    };
-  }, [pathname, screen]);
-  return ready === screen.path ? <Workspace key={screen.path} /> : null;
+    history.replaceState(history.state, '', `${pathname}?${query}${location.hash}`);
+    setReady(entry);
+  }, [entry, pathname, search, screen]);
+  return ready === entry ? <Workspace key={entry} /> : null;
 }
 
 /** The studio's screens on the app's page, scoped so their stylesheets stay inside. */
 export function Stage({ children }: { children: ReactNode }) {
-  useEffect(() => {
-    // Links the studio writes for its own page (`/?tab=prompts…`) go to the matching route here, in its dialogs too.
-    document.addEventListener('click', retargetStudioLink, true);
-    document.addEventListener('auxclick', retargetStudioLink, true);
-    return () => {
-      document.removeEventListener('click', retargetStudioLink, true);
-      document.removeEventListener('auxclick', retargetStudioLink, true);
-    };
-  }, []);
   return (
     <div className="studio-root mg-studio-stage">
       <Suspense fallback={<p className="mg-empty">스튜디오를 여는 중…</p>}>{children}</Suspense>
@@ -96,14 +77,18 @@ function Connection() {
  */
 export default function StudioPage() {
   const { status, user } = useAuth();
-  const { pathname } = useLocation();
+  const { pathname, search, hash } = useLocation();
   const sleep = useStudioSleep();
   if (status === 'loading') return <Loading />;
   if (!user) return <Navigate to="/" replace />;
   if (!can(user, 'operator')) return <Navigate to="/character" replace />;
   const sections = studioSections(can(user, 'paid_operator'));
   const screen = sections.flatMap((section) => section.screens).find((item) => pathname === item.path);
-  if (!screen) return <Navigate to={sections[0]!.screens[0]!.path} replace />;
+  if (!screen) {
+    const legacy = pathname === '/admin/studio' ? routeOf(`/${search}`) : null;
+    const allowed = legacy && sections.some((section) => section.screens.some((item) => item.path === legacy.split('?')[0]));
+    return <Navigate to={allowed ? `${legacy}${hash}` : sections[0]!.screens[0]!.path} replace />;
+  }
 
   return (
     <PageShell title="캐릭터 공장" wide>

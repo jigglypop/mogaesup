@@ -25,7 +25,7 @@
 
 ## 캐릭터 스튜디오
 
-캐릭터 스튜디오 화면(`frontend/src/character/`)은 둘로 나뉜다. `/character`(`frontend/src/studio/CharacterPage.tsx`)는 회원 누구나 쓰는 옷장이고, `/admin/studio`(`frontend/src/studio/StudioPage.tsx`, 운영 탭 '캐릭터 공장')는 스튜디오 운영 권한이 있어야 열리며, 만들기 화면(기본몸·파츠·바닥 타일 등 생성을 시작하는 화면)은 모두 유료 작업 권한이 있을 때만 보여서 그 권한이 없는 운영자는 에셋 라이브러리와 프롬프트만 본다. 옛 `/studio` 주소는 이 둘로 넘긴다. 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`frontend/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 그 밖의 읽기는 스튜디오 보기(운영·카탈로그 편집), 기록 변경은 스튜디오 운영, 비용이 드는 작업은 유료 작업 권한이 있어야 한다(아래 권한). `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택과 이미지만 자르는 `part-batches/split-sheet` 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남고, 월 한도는 동시에 들어온 요청도 넘지 않게 센다. 관리자용 `/api/factory/*`도 같은 `FACTORY_ACCESS`·월 한도·기록을 따른다(읽기는 스튜디오 보기, 바꾸기는 관리자). 요청 경로는 한 번 디코드한 조각마다 검사해서 `.`·`..`·빈 조각·디코드 뒤에도 남은 `%`·`/`·`\`가 있으면 404로 거절하고, 권한 판단과 캐릭터 서버로 보내는 주소에 같은 조각을 쓴다(`%2e%2e`로 옷장 허용 경로를 벗어날 수 없다). 캐릭터 서버와는 연결 10초·응답 대기 600초로 통신하고, JSON 응답은 8 MiB까지 읽으며, 파일 받기는 https이거나 `FACTORY_URL`과 같은 출처인 리다이렉트만 따른다.
+캐릭터 스튜디오 화면(`frontend/src/character/`)은 둘로 나뉜다. `/character`(`frontend/src/studio/CharacterPage.tsx`)는 회원 누구나 쓰는 옷장이고, `/admin/studio`(`frontend/src/studio/StudioPage.tsx`, 운영 탭 '캐릭터 공장')는 스튜디오 운영 권한이 있어야 열리며, 만들기 화면(기본몸·파츠·바닥 타일 등 생성을 시작하는 화면)은 모두 유료 작업 권한이 있을 때만 보여서 그 권한이 없는 운영자는 에셋 라이브러리와 프롬프트만 본다. 옛 `/studio` 주소는 이 둘로 넘긴다. 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`frontend/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 그 밖의 읽기는 스튜디오 보기(운영·카탈로그 편집), 기록 변경은 스튜디오 운영, 비용이 드는 작업은 유료 작업 권한이 있어야 한다(아래 권한). `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택과 이미지만 자르는 `part-batches/split-sheet` 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남고, 월 한도는 동시에 들어온 요청도 넘지 않게 센다. 관리자용 `/api/factory/*`도 같은 `FACTORY_ACCESS`·월 한도·기록을 따른다(읽기는 스튜디오 보기, 바꾸기는 관리자). 요청 경로는 한 번 디코드한 조각마다 검사해서 `.`·`..`·빈 조각·디코드 뒤에도 남은 `%`·`/`·`\`가 있으면 404로 거절하고, 권한 판단과 캐릭터 서버로 보내는 주소에 같은 조각을 쓴다(`%2e%2e`로 옷장 허용 경로를 벗어날 수 없다). 캐릭터 서버와는 연결 10초·응답 대기 600초로 통신하고, JSON 응답은 8 MiB까지 읽는다. 파일 리다이렉트는 `FACTORY_URL`과 같은 출처 또는 표준 HTTPS AWS S3 호스트만 따른다. S3 산출물은 인증된 앱 API가 작은 청크로 전달하며 Range·HEAD·ETag를 보존한다.
 
 ## 캐릭터 가져오기
 
@@ -42,13 +42,13 @@
 - 주민: 섬 주인이 꾸미기의 `주민` 탭에서 공개된 주민을 골라 이름과 인사말을 주고 보는 곳 가운데에 둔다(섬마다 12명). 섬 저장 봉투의 `residents` 영역으로 함께 저장되고, 서버가 모양과 카탈로그의 주민인지 확인한다(`server/src/residents.rs`). 섬은 gaesup-world의 NPC 시스템으로 그리며(idle, 이름표, 화면 밖·먼 주민 생략), 가까이 온 사람을 바라보고, 상호작용(E 키·버튼)하면 인사말을 보여 준다. 방문자도 같은 저장을 읽으니 같은 주민을 본다.
 - 내 캐릭터: 옷장에서 `내 캐릭터로 입기`를 누르면 `PUT /api/looks/me`가 몸·파츠·색을 캐릭터 서버의 옷장 목록과 SHA-256까지 대조한 뒤 뒤에서 하나의 GLB로 조립한다(`server/src/look_bake.rs`: 파츠를 몸의 뼈에 이름으로 묶고, 가려지는 몸 삼각형과 재질을 빼고, 안쪽 옷을 밀착시키고, 머리·옷 색을 새 텍스처로 굽는다). 검사·텍스처 줄이기를 거쳐 가져온 모델처럼 `MODEL_STORE`에 저장되고, 섬의 내 캐릭터와 실시간 방의 `Join.modelUrl`이 그 모델이 된다. 회원은 자기 것(`/api/looks/me`)만 읽고 쓴다. 섬의 미니미를 고르면 내 모습을 벗고, 소개 탭의 `내 모습`으로 다시 입는다. 굽는 동안 미니미를 골랐으면 다 구워져도 입지 않는다(`wear_on_ready`).
   - 가림 영역을 읽지 못한 옷(`look_coverage`)이나 색 정보를 읽지 못한 색 선택(`look_colors`)은 조용히 넘기지 않고 실패한다(몸이 옷을 뚫은 모델을 `ready`로 저장하지 않는다). 그 밖에 건너뛴 항목은 결과 보고서의 `skippedHides`·`skippedTucks`·`unreadableMaps`로 센다. 결과가 16 MiB나 삼각형 15만을 넘으면 `look_too_large`이다.
-  - 굽는 중인 모습이 16개를 넘으면 새 저장은 429 `looks_busy`이고, 이미 밀린 굽기는 시작 전에 자기 차례가 아닌지(수정 번호) 다시 확인한다. 서버가 다시 시작되면 굽던 모습은 `interrupted`로 바로 실패 처리한다. 만든 모델은 해시 이름으로 `MODEL_STORE`에 남고 지우지 않는다. 오래된 모델을 줄이려면 버킷의 `models/` 수명주기 규칙으로 정한다.
+  - 굽는 중인 모습이 이미 16개면 새 저장은 429 `looks_busy`이다. 수락은 DB에서 원자적으로 예약하고, 실제 파일 다운로드와 조립은 두 작업만 동시에 진행한다. 한 작업의 파일·마스크·가림 정보 합계는 64 MiB까지이다. 이미 밀린 굽기는 시작 전에 자기 차례인지(수정 번호) 다시 확인한다. 서버가 다시 시작되면 굽던 모습은 `interrupted`로 바로 실패 처리한다. 같은 DB에 두 서버가 기동해 서로의 작업을 중단하지 않도록 프로세스 잠금을 잡는다. 만든 모델은 해시 이름으로 `MODEL_STORE`에 남고 지우지 않는다. 오래된 모델을 줄이려면 버킷의 `models/` 수명주기 규칙으로 정한다.
 
 
 ## 실시간 방과 섬 저장
 
-- 방: 일회용 티켓으로 들어오고(60초), 방문자가 보내는 `modelUrl`은 `APP_ORIGIN`과 같은 출처의 `/gltf/*.glb`나 `/models/<sha>.glb`만, 색은 `#` 16진 값만 받는다. 한 계정은 소켓을 4개까지 열 수 있고(넘으면 핸드셰이크 429), 섬의 공개 범위를 좁히거나 일촌을 끊으면 접근을 잃은 사람을 close 코드 4403으로 내보낸다.
-- 섬 저장: `PUT /api/homes/me/world`는 10분에 120번까지이고 리비전이 맞을 때만 받는다. 한 계정은 섬 월드 행을 8개까지 두며, 새 월드를 처음 저장해 8개를 넘으면 가장 오래 손대지 않은 월드부터 지운다(예: `minihome-v<N>`의 옛 버전).
+- 방: 일회용 티켓으로 들어오고(60초), 방문자가 보내는 `modelUrl`은 `APP_ORIGIN`과 같은 출처의 `/gltf/*.glb`나 `/models/<sha>.glb`만, 색은 `#` 16진 값만 받는다. 한 계정은 소켓을 4개까지 열 수 있고(넘으면 핸드셰이크 429), 섬의 공개 범위·일촌·직접 권한·그룹 구성 변경으로 접근을 잃으면 close 코드 4403으로 내보낸다. 회전은 정규화해서 전달한다. 연결은 로그인 세션에 바인딩하며 로그아웃·세션 정리 시 닫고, 만료된 세션과 읽기 권한은 15초마다 다시 확인한다.
+- 섬 저장: `PUT /api/homes/me/world`는 10분에 120번까지이고 리비전과 `expectedOwnerId`가 맞을 때만 받는다. 프로필 저장도 `expectedOwnerId`를 요구한다. 계정이 바뀌면 이전 계정의 예약·재시도 요청을 취소한다. 한 계정은 섬 월드 행을 8개까지 두며, 새 월드를 처음 저장해 8개를 넘으면 가장 오래 손대지 않은 월드부터 지운다(예: `minihome-v<N>`의 옛 버전).
 - 둘러보기: `GET /api/homes?limit=&before=&q=`는 공개 섬을 새 순서로 돌려주고, `q`(40자까지)는 아이디·이름·제목에 들어 있는 글자를 대소문자 구분 없이 찾는다.
 
 ## 권한
@@ -62,7 +62,7 @@
 | `group:<이름>` | `member` | |
 | `home:<주인 id>` | `owner`(`homes.owner_id`), `editor`, `viewer` | owner ⊂ editor ⊂ viewer, 공개 섬은 모두, 일촌 공개 섬은 주인의 일촌 |
 
-`FACTORY_ACCESS`와 월 유료 한도는 권한과 따로 서버 전체의 상한으로 남는다. 관리자는 `/admin/permissions`에서 사람을 찾아 역할과 그룹을 바꾸고(사유를 적어야 하며 `auth_audit`에 남는다), 판단 근거와 역할별 보유자, 변경 기록을 본다. 마지막 관리자는 해제되지 않는다. 이 방식 이전의 관리자(`users.role = 'admin'`)와 계정 `ydh2244`는 마이그레이션으로 관리자가 되고, `users.role`은 이전 바이너리로 되돌릴 때를 위해 관리자 튜플을 따라간다.
+`FACTORY_ACCESS`와 월 유료 한도는 권한과 따로 서버 전체의 상한으로 남는다. 관리자는 `/admin/permissions`에서 사람을 찾아 역할과 그룹을 바꾸고(사유를 적어야 하며 `auth_audit`에 남는다), 판단 근거와 역할별 보유자, 변경 기록을 본다. 마지막 관리자는 해제되지 않는다. 이 방식 이전의 관리자(`users.role = 'admin'`)는 마이그레이션으로 관리자 튜플에 연결되고, `users.role`은 이전 바이너리로 되돌릴 때를 위해 관리자 튜플을 따라간다. 기존 이름만으로 bootstrap 관리자에 승격하지 않고 비밀번호로 소유권을 확인한다. 예약된 관리자 이름은 일반 가입으로 선점할 수 없다. 옛 `ydh2244` 이름 기반 승격 마이그레이션이 아직 적용되지 않은 DB에는 기동 전에 소유권 확인을 요구한다.
 
 ## 검증
 
@@ -82,3 +82,18 @@ CloudFront(mogaesup.com, www는 apex로 이동)가 정적 파일은 비공개 S3
 3. 웹: `frontend/scripts/deploy-aws.ps1`. 스택(`mogaesup-web`)을 맞추고 빌드·업로드·무효화한 뒤 운영 주소의 `index.html`과 `/api/health`를 확인한다.
 4. 캐릭터 서버: `backend/infra/prepare-aws.ps1 -Upload` 뒤 `backend/infra/deploy-aws.ps1`(자세한 것은 `backend/README.md`). 컨테이너는 API만 낸다.
 5. 스튜디오 잠금: `python server/scripts/lock-studio.py --allow-ip <주인 IP>`. 캐릭터 스튜디오의 CloudFront에 함수를 붙여 게이트웨이 키를 가진 이 서버와 적은 IP만 통과시킨다(`--unlock`으로 뗀다). 스튜디오 스택(`gaesup-asset-studio`)을 다시 배포하면 떨어지니 그 뒤에 다시 돌린다.
+
+### 자동 배포 (GitHub Actions)
+
+`.github/workflows/pipeline.yml`이 위 1~4를 대신한다. 스택(CloudFormation)과 5번은 자동으로 적용하지 않는다.
+
+- 풀 리퀘스트와 `main` 푸시는 바뀐 곳만 점검한다. 서버는 `cargo fmt --check`·`clippy -D warnings`·`cargo test`(PostgreSQL 17을 55432에 띄움), 캐릭터 서버는 `uv sync --locked`·`compileall`·`pytest`(같은 PostgreSQL, 없으면 32개가 건너뛰어짐), 웹은 `typecheck`·`test`·`build`, 템플릿과 스크립트는 `cfn-lint`·문법 검사·actionlint·변경 감지 회귀 검사다. `npm run smoke`·`test:character`는 브라우저와 GPU가 필요해 돌리지 않는다.
+- `main` 푸시가 점검을 통과하면 마지막으로 성공한 실행 이후 바뀐 곳만 서버 → 웹 → 스튜디오 순서로 배포한다. 점검이 하나라도 실패하면 배포하지 않고, 배포가 실패하면 다음 푸시가 그 곳을 다시 시도한다. 테스트·문서만 바뀐 곳은 배포하지 않는다. 배포 스크립트 변경도 대상 서비스를 다시 배포하고, 워크플로 변경은 전체를 다시 배포한다.
+- 서버는 점검과 같은 Rust 1.95.0의 Alpine 이미지로 musl 바이너리를 만들어 `deploy-rust-server.py --skip-provision`으로, 웹은 `deploy-aws.ps1 -SkipBuild -SkipProvision`으로, 스튜디오는 `prepare-aws.ps1 -Upload`와 `deploy-aws.ps1`로 올린다. 서버는 건강 검사에 실패하면 이전 바이너리로 돌아간다. 스튜디오도 후보 컨테이너의 건강 검사에 실패하면 이전 컨테이너를 복구한다. 웹은 되돌리는 커밋을 푸시하면 이전 모습으로 다시 배포된다. 앞 단계 배포가 실패하면 뒤 단계는 실행하지 않는다.
+- 비교할 이전 성공 실행이 없는 첫 `main` 푸시는 전체를 점검하고 배포한다. 수동 실행은 Actions의 Run workflow에서 `target`(`all`·`server`·`web`·`studio`)을 고른다. `main` 외의 브랜치와 풀 리퀘스트는 배포하지 않는다.
+- 스튜디오 인스턴스가 꺼져 있으면 배포가 멈추고 켜지 않는다. 켠 뒤 `target=studio`로 다시 돌린다. 실행 중인 런타임의 신규 작업 접수를 먼저 닫고 기존 API·CLI·Blender 작업이 끝나야 교체한다. 시간이 지나도 비지 않으면 종료 코드 4, 활동·DB·수락 차단을 확인할 수 없으면 5로 중지하고 기존 서비스를 유지한다. 후보 실패·배포 중단 시 이전 설정과 컨테이너를 복구하고 접수를 다시 연다. drain을 지원하지 않는 구버전의 최초 교체는 [백엔드 배포 절차](backend/README.md#aws-배포)에 따라 접수를 닫고 작업 종료를 확인하는 점검 시간이 필요하다.
+- AWS에는 비밀값 없이 OIDC로 들어간다. 역할 `mogaesup-github-deploy`(`.github/aws/deploy-role.yaml`)는 `main` 브랜치의 이 저장소만 맡을 수 있고, 릴리스 파일 올리기·CloudFront 무효화·SSM 설치 명령·스택 읽기만 허용한다. CloudFormation 변경과 IAM은 못 한다. 한 번 만든다.
+  ```bash
+  aws cloudformation deploy --region ap-northeast-2 --stack-name mogaesup-github-deploy --template-file .github/aws/deploy-role.yaml --capabilities CAPABILITY_NAMED_IAM --tags application=mogaesup
+  ```
+  서버·스튜디오 인스턴스가 교체되거나 웹 배포(CloudFront) ID가 바뀌면 템플릿의 파라미터를 갱신해 다시 배포한다.

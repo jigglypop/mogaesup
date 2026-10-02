@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { factoryApi, type FactoryJob } from './api';
 import { partLabels as labels, variantSlots } from './parts';
+import { studioHref } from '../../studio/screens';
 
 const viewLabels: Record<string, string> = { front: '정면', side: '좌측면', back: '후면', opposite: '우측면' };
 
@@ -61,7 +62,7 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
           {model && <a href={model.url} download>파츠 GLB</a>}
           {job.artifacts.filter(artifact => artifact.name.startsWith(`meshy-${part.slot}-`)).map(artifact => <a key={artifact.name} href={artifact.url} download>{artifact.name.slice(`meshy-${part.slot}-`.length)}</a>)}
           {job.meshy_options?.[part.slot] && <details><summary>접수한 Meshy 7.1 설정</summary><pre className="meshy-saved-options">{JSON.stringify(job.meshy_options[part.slot], null, 2)}</pre></details>}
-          {job.assembly_version && variantSlots.some(slot => slot === part.slot) && part.model_status === 'ready' && !busy && !job.character_flow?.busy && <a href={`/?${new URLSearchParams({ tab: 'character', mode: 'parts', base: job.id, part: part.slot })}`}>3뷰로 다시 생성</a>}
+          {job.assembly_version && variantSlots.some(slot => slot === part.slot) && part.model_status === 'ready' && !busy && !job.character_flow?.busy && <a href={studioHref({ tab: 'character', mode: 'parts', base: job.id, part: part.slot })}>3뷰로 다시 생성</a>}
           {part.slot !== 'body' && part.model_status === 'ready' && part.part_method !== 'body_shell' && (job.assembly_version || pending?.input.slot === part.slot) && <button type="button" disabled={busy || !!refitting || !!recoveryError || (!!pending && pending.input.slot !== part.slot) || (!pending && job.character_flow?.busy)} onClick={() => void refit(part.slot, pending?.input.slot === part.slot ? pending.input.part_method : undefined)}>{refitting === part.slot ? '접수 중' : pending?.input.slot === part.slot ? '같은 피팅 요청 복구' : '기존 모델 위치·크기 맞추기'}</button>}
           {(part.slot === 'top' || part.slot === 'bottom') && part.model_status === 'ready' && job.assembly_version && !pending && <button type="button" disabled={busy || !!refitting || !!recoveryError || job.character_flow?.busy} onClick={() => void refit(part.slot, 'body_shell')}>{refitting === part.slot ? '접수 중' : '몸에 맞춰 다시 만들기'}</button>}
         </div>

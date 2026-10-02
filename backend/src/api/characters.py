@@ -142,6 +142,7 @@ async def upload(character_id: str, request: Request, kind: Literal["image", "mo
 
 
 @router.get("/{character_id}/artifacts/{artifact_id}")
+@router.head("/{character_id}/artifacts/{artifact_id}", include_in_schema=False)
 def artifact(character_id: str, artifact_id: str, user: UserContext = Depends(get_current_user), pipeline=Depends(get_pipeline)):
     path = pipeline.artifact(character_id, user.user_id, artifact_id)
     mime = {".glb": "model/gltf-binary", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(path.suffix, "application/octet-stream")

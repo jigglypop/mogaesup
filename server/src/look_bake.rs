@@ -30,8 +30,8 @@ const SKIN_STAYS: [&str; 4] = ["hair", "head", "hairFront", "hairBack"];
 /// How far a part's bone may stand from the body's at rest, in the files' units, and still be the same bone.
 const REST_TOLERANCE: f64 = 1e-3;
 /// Colour maps a recolour decodes: at most this long a side and this many bytes.
-const MAX_EDGE: u32 = 8192;
-const MAX_ALLOC: u64 = 512 * 1024 * 1024;
+const MAX_EDGE: u32 = 4096;
+const MAX_ALLOC: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BakeError {

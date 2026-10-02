@@ -33,6 +33,26 @@ install -d -m 700 /opt/asset-studio /opt/asset-studio/releases /opt/asset-studio
 # nginx's logs, on the host so infra/idle-stop.sh sees the last request even while no container runs.
 install -d -m 755 /var/log/asset-studio
 secret_tmp="$(mktemp /opt/asset-studio/provider.json.XXXXXX)"
+provider_backup=''
+provider_installed=false
+provider_committed=false
+restore_provider() {
+  if [[ "$provider_installed" == true && "$provider_committed" != true ]]; then
+    if [[ -n "$provider_backup" ]]; then
+      mv -f "$provider_backup" /opt/asset-studio/provider.json
+      provider_backup=''
+    else
+      rm -f /opt/asset-studio/provider.json
+    fi
+    provider_installed=false
+  fi
+}
+cleanup_files() {
+  restore_provider
+  [[ -z "$secret_tmp" ]] || rm -f "$secret_tmp"
+  [[ -z "$provider_backup" ]] || rm -f "$provider_backup"
+}
+trap cleanup_files EXIT
 chmod 600 "$secret_tmp"
 aws secretsmanager get-secret-value \
   --secret-id "$PROVIDER_SECRET_ARN" \
@@ -50,14 +70,17 @@ value["CHARACTER_DATABASE_URL"] = "postgresql://%s:%s@%s:5432/%s?sslmode=require
     urllib.parse.quote(db["username"], safe=""), urllib.parse.quote(db["password"], safe=""), host, db["dbname"])
 json.dump(value, open(path, "w"))' "$secret_tmp" "$CHARACTER_DB_HOST"
 fi
-mv -f "$secret_tmp" /opt/asset-studio/provider.json
 
 image="gaesup-asset-studio:${release_sha}"
 candidate="gaesup-asset-studio-candidate-${release_sha:0:12}"
 if ! docker image inspect "$image" >/dev/null 2>&1; then
   docker build --pull -t "$image" -f "$source_root/infra/Dockerfile" "$source_root"
 fi
-docker rm -f "$candidate" >/dev/null 2>&1 || true
+if docker inspect -f '{{.State.Running}}' "$candidate" 2>/dev/null | grep -qx true; then
+  echo 'a previous candidate is still running; inspect and recover that deployment before submitting another' >&2
+  exit 5
+fi
+docker rm "$candidate" >/dev/null 2>&1 || true
 
 # Recover the stable name first if an earlier process ended between rename and rollback.
 if ! docker inspect "$service_name" >/dev/null 2>&1 && docker inspect "$rollback_name" >/dev/null 2>&1; then
@@ -67,22 +90,66 @@ if ! docker inspect "$service_name" >/dev/null 2>&1 && docker inspect "$rollback
   fi
 fi
 
-# Replace the running release only once it reports no paid requests and no background work. A release whose health cannot
-# be read may be in the middle of a paid stage, which `docker stop` below would cut off: the deploy stops (as
-# idle-stop.sh keeps the instance on) unless ALLOW_UNKNOWN_DRAIN=1 says to replace it anyway. The default
-# drain leaves room for the image build and health check inside the 900 s SSM command timeout.
+health_snapshot() {
+  # Missing counters cannot prove that a release is idle. Readiness also waits for the configured database check.
+  python3 -c '
+import json, sys
+try:
+    health = json.load(sys.stdin)
+    activity = health["activity"]
+    counts = [activity[name] for name in ("paid_requests", "running_tasks")]
+    if any(type(count) is not int or count < 0 for count in counts):
+        raise ValueError("invalid activity counters")
+    admission = health["admission"]
+    if type(admission["version"]) is not int or admission["version"] != 1 or admission["verified"] is not True:
+        raise ValueError("runtime admission cannot be verified")
+    if sys.argv[1] in ("drain", "open"):
+        if admission["draining"] is not (sys.argv[1] == "drain"):
+            raise ValueError("runtime is still admitting work")
+        print(sum(counts))
+    else:
+        database = health["connections"]["database"]
+        if (health["status"] != "healthy" or type(database["configured"]) is not bool
+                or (database["configured"] and database.get("ok") is not True)
+                or admission["draining"] is not (sys.argv[1] == "candidate")):
+            raise ValueError("candidate is not ready")
+except (KeyError, TypeError, ValueError, AttributeError):
+    sys.exit(1)
+' "$1"
+}
+
+drain_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+drain_payload="{\"token\":\"$drain_token\"}"
+drain_acquired=false
+control_admission() {
+  curl --fail --silent --show-error --max-time 5 -X "$1" -H 'Content-Type: application/json' \
+    --data "$drain_payload" http://127.0.0.1:8000/internal/drain
+}
+release_admission() {
+  if [[ "$drain_acquired" == true ]]; then
+    control_admission DELETE >/dev/null || echo 'could not reopen runtime admission; resume the saved local drain before accepting work' >&2
+  fi
+}
+cleanup() { cleanup_files; release_admission; }
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+
+# Close admission atomically before observing work. Old releases without the control endpoint remain running:
+# there is no override that cuts off work whose admission cannot be closed and verified.
+if docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; then
+  drain_acquired=true
+  if ! control_admission POST | health_snapshot drain >/dev/null; then
+    echo 'running release does not support verified admission drain; it was left running. Install the drain-capable runtime during an operator maintenance window before using automatic deployment' >&2
+    exit 5
+  fi
+fi
+
+# Existing admitted work retains its grant until its background and provider stages have finished.
 drain_deadline=$((SECONDS + ${ASSET_DEPLOY_DRAIN_SECONDS:-420}))
 while docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; do
-  busy="$(curl --silent --max-time 5 http://127.0.0.1:8080/api/health | python3 -c '
-import json, sys
-activity = json.load(sys.stdin).get("activity") or {}
-print(int(activity.get("paid_requests", 0)) + int(activity.get("running_tasks", 0)))' 2>/dev/null || echo unknown)"
+  busy="$(curl --fail --silent --max-time 5 http://127.0.0.1:8080/api/health | health_snapshot drain || echo unknown)"
   if [[ "$busy" == unknown ]]; then
-    if [[ "${ALLOW_UNKNOWN_DRAIN:-}" == 1 ]]; then
-      echo 'running release health cannot be read; replacing it anyway (ALLOW_UNKNOWN_DRAIN=1)' >&2
-      break
-    fi
-    echo 'running release health cannot be read, so paid or background work cannot be ruled out; deploy again once it answers, or with ALLOW_UNKNOWN_DRAIN=1 to replace it anyway' >&2
+    echo 'running release health cannot be read, so paid or background work cannot be ruled out; deployment stopped and admission will reopen' >&2
     exit 5
   fi
   [[ "$busy" == 0 ]] && break
@@ -97,6 +164,7 @@ original_id="$(docker inspect -f '{{.Id}}' "$service_name" 2>/dev/null || true)"
 candidate_id=''
 restore_previous() {
   trap - ERR INT TERM
+  restore_provider
   if [[ -z "$candidate_id" ]]; then
     candidate_id="$(docker inspect -f '{{.Id}}' "$candidate" 2>/dev/null || true)"
   fi
@@ -124,8 +192,21 @@ restore_previous() {
 }
 trap 'restore_previous; exit 1' ERR INT TERM
 
+# Keep the previous configuration with its container; a failed candidate must not change rollback credentials.
+if [[ -f /opt/asset-studio/provider.json ]]; then
+  provider_backup="$(mktemp /opt/asset-studio/provider.previous.XXXXXX)"
+  cp -p /opt/asset-studio/provider.json "$provider_backup"
+fi
+mv -f "$secret_tmp" /opt/asset-studio/provider.json
+secret_tmp=''
+provider_installed=true
+
 if docker inspect "$service_name" >/dev/null 2>&1; then
-  docker rm -f "$rollback_name" >/dev/null 2>&1 || true
+  if docker inspect -f '{{.State.Running}}' "$rollback_name" 2>/dev/null | grep -qx true; then
+    echo 'a previous rollback container is still running; recover it before replacing this release' >&2
+    exit 5
+  fi
+  docker rm "$rollback_name" >/dev/null 2>&1 || true
   docker rename "$service_name" "$rollback_name"
   docker stop -t 30 "$rollback_name" >/dev/null
 fi
@@ -137,6 +218,7 @@ docker run -d --restart unless-stopped --name "$candidate" --network host \
   -e ASSET_S3_REGION="$AWS_REGION" \
   -e AWS_REGION="$AWS_REGION" \
   -e STUDIO_RELEASE_SHA="$release_sha" \
+  -e ASSET_START_DRAIN_TOKEN="$drain_token" \
   -e PUBLIC_SITE_ORIGIN="$PUBLIC_SITE_ORIGIN" \
   -e PUBLIC_STUDIO="$PUBLIC_STUDIO" \
   -v /opt/asset-studio/provider.json:/run/studio-secrets.json:ro \
@@ -148,7 +230,7 @@ candidate_id="$(docker inspect -f '{{.Id}}' "$candidate")"
 healthy=false
 for _ in $(seq 1 30); do
   if docker inspect -f '{{.State.Running}}' "$candidate" 2>/dev/null | grep -qx true && \
-     curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/api/health | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(healthy|degraded)"' && \
+     curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/api/health | health_snapshot candidate && \
      curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/version.json | grep -Eq '"release_sha"[[:space:]]*:[[:space:]]*"'"$release_sha"'"'; then
     healthy=true
     break
@@ -172,9 +254,18 @@ else
   mv "$source_root" "$release_dir"
 fi
 printf '{"release_key":"%s","sha256":"%s","deployed_at":"%s"}\n' \
-  "$release_key" "$release_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /opt/asset-studio/current.json
-docker rm -f "$rollback_name" >/dev/null 2>&1 || true
+  "$release_key" "$release_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /opt/asset-studio/current.json.new
+mv -f /opt/asset-studio/current.json.new /opt/asset-studio/current.json
+provider_committed=true
 trap - ERR INT TERM
+# No unverified mutation can run in a candidate before commit. After opening, a lost control response must
+# never force-stop this runtime: a newly accepted paid request may already exist.
+if ! control_admission DELETE | health_snapshot open >/dev/null; then
+  echo 'candidate is committed and healthy, but admission reopen could not be verified; runtime was preserved. Inspect the saved local drain' >&2
+  exit 5
+fi
+drain_acquired=false
+docker rm "$rollback_name" >/dev/null 2>&1 || true
 # Power off after two idle hours; the app starts the instance again on demand. Kept up to date with each release.
 bash "$release_dir/infra/idle-stop.sh" install || echo 'idle stop could not be installed' >&2
 echo "deployment healthy: $release_sha"

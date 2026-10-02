@@ -709,12 +709,11 @@ impl<'a> Checker<'a> {
             "SELECT relation, subject_type, subject_id, subject_relation FROM auth_tuples
              WHERE object_type = $1 AND object_id = $2
                AND (subject_relation IS NOT NULL OR (subject_type = 'user' AND subject_id = $3))
-             ORDER BY relation, subject_type, subject_id LIMIT $4",
+             ORDER BY (subject_type = 'user') DESC, relation, subject_type, subject_id",
         )
         .bind(object.kind.as_str())
         .bind(&object.id)
         .bind(user)
-        .bind(TUPLES_PER_READ)
         .fetch_all(self.db)
         .await?;
         let found: Found = rows

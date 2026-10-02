@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from 'react';
 import { api, request } from '../api';
 import { useLiveCharacters } from '../use-live-characters';
+import { rememberStudioQuery, studioHref } from '../../studio/screens';
 import { usePolling } from '../use-polling';
 import { factoryApi, type BodyProfileState, type FactoryJob, type ImageRetry } from './api';
 import type { Blueprint } from './image-layers';
@@ -129,14 +130,14 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
     const query = new URLSearchParams(location.search);
     if (baseId) { query.set('photoBase', baseId); query.delete('photoBody'); }
     else { query.delete('photoBase'); if (useCommonBody) query.delete('photoBody'); else query.set('photoBody', 'new'); }
-    history.replaceState(null, '', `${location.pathname}?${query}${location.hash}`);
+    rememberStudioQuery(query);
   }, [baseId, useCommonBody]);
   function remember(character: string, job = '') {
     setCharacterId(character); setJobId(job);
     const q = new URLSearchParams(location.search);
     if (character) q.set(characterQuery, character); else q.delete(characterQuery);
     if (job) q.set(jobQuery, job); else q.delete(jobQuery);
-    history.replaceState(null, '', `${location.pathname}?${q}${location.hash}`);
+    rememberStudioQuery(q);
   }
   async function upload(file?: File) {
     if (!file || locked.current) return;
@@ -266,7 +267,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
           {selectedBase?.artifacts.find(item => item.name === 'body-front.png') && <img className="base-portrait" src={selectedBase.artifacts.find(item => item.name === 'body-front.png')!.url} alt="선택한 기본 몸만 미리보기" />}
         </div>}
         <label className="character-history">머리카락 길이<select aria-label="머리카락 길이" disabled={busy || running || !!pending} value={pending ? pending.input.hair_length || 'source' : hairLength} onChange={e => setHairLength(e.target.value as typeof hairLength)}><option value="source">원본대로</option><option value="short">숏컷</option><option value="long">롱컷</option></select></label>
-        <a className="prompt-management-link" href="/?tab=prompts&promptGroup=parts" target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
+        <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'parts' })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
         <MeshyOptionsEditor scope={sharedMeshyScope} value={pending?.input.meshy_options || meshy.options} disabled={busy || running || !!pending} onChange={meshy.setOptions} onUploading={setMeshyUploading} />
         {meshy.storageError && <p role="alert">{meshy.storageError}</p>}
         <button className="character-create" disabled={busy || meshyUploading || !!recovery.error || (!pending && (running || !reference || !compatible || !canGenerate || !baseReady || creditsShort))} onClick={() => void produce()}>{busy ? '접수 중' : pending ? '요청 복구' : running ? '생성 중' : selectedBaseId ? '선택한 몸에 사진 파츠 생성' : '사진으로 전체 생성'}</button>

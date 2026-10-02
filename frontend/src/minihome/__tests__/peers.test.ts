@@ -14,6 +14,8 @@ describe('방에 있는 사람의 색', () => {
       '#ff7a59; background: url(x)',
       '#ff7a59\n',
       '#ff',
+      '#fffff',
+      '#fffffff',
       '#ff7a59801',
       'ff7a59',
       'rgb(1, 2, 3)',

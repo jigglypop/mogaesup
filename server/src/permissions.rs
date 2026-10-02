@@ -440,6 +440,7 @@ async fn revoke(
     };
     if changed {
         tracing::warn!(admin = %admin.username, %tuple, "Permission revoked");
+        crate::rooms::revalidate_all(&state).await;
     }
     Ok(Json(change_json(&tuple, changed)))
 }

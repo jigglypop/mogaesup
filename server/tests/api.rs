@@ -1,4 +1,6 @@
 mod common;
+#[path = "fixtures/character.rs"]
+mod test_glb;
 
 use axum::{
     Json, Router,
@@ -258,11 +260,9 @@ async fn 일촌을_맺으면_일촌_공개_홈을_볼_수_있다() {
 
 /// Rigged, with the clips the character server's Meshy delivery names; `name` makes each copy's bytes its own.
 fn character_glb(name: &str) -> Vec<u8> {
-    glb::join(
-        &json!({"asset": {"version": "2.0", "generator": name}, "skins": [{"joints": [0]}],
-            "animations": [{"name": "idle"}, {"name": "walk"}, {"name": "run"}, {"name": "sit"}]}),
-        &[],
-    )
+    let (mut json, bin) = test_glb::document(&["idle", "walk", "run", "sit"]);
+    json["asset"]["generator"] = name.into();
+    glb::join(&json, &bin)
 }
 
 /// Animated but without a skin: nothing a 미니미 can be.
@@ -275,22 +275,19 @@ fn textured_glb() -> Vec<u8> {
     let mut picture = std::io::Cursor::new(Vec::new());
     image::RgbImage::new(1100, 1100).write_to(&mut picture, image::ImageFormat::Png).unwrap();
     let picture = picture.into_inner();
-    glb::join(
-        &json!({
-            "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
-            "nodes": [{"name": "Armature", "scale": [0.01, 0.01, 0.01], "children": [1]}, {"mesh": 0, "skin": 0}],
-            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "material": 0}]}],
-            "accessors": [{"componentType": 5126, "type": "VEC3", "count": 3, "min": [-20, 0, -10], "max": [20, 170, 10]}],
-            "skins": [{"joints": [0]}],
-            "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
-            "textures": [{"source": 0}],
-            "images": [{"bufferView": 0, "mimeType": "image/png"}],
-            "buffers": [{"byteLength": picture.len()}],
-            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": picture.len()}],
-            "animations": [{"name": "Armature|Idle"}, {"name": "Walking"}],
-        }),
-        &picture,
-    )
+    let (mut json, mut bin) = test_glb::document(&["Armature|Idle", "Walking"]);
+    let image_view = json["bufferViews"].as_array().unwrap().len();
+    json["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer": 0, "byteOffset": bin.len(), "byteLength": picture.len()}));
+    bin.extend(picture);
+    json["buffers"][0]["byteLength"] = bin.len().into();
+    json["meshes"][0]["primitives"][0]["material"] = 0.into();
+    json["materials"] = json!([{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}]);
+    json["textures"] = json!([{"source": 0}]);
+    json["images"] = json!([{"bufferView": image_view, "mimeType": "image/png"}]);
+    glb::join(&json, &bin)
 }
 
 /// What the fake character server serves for a job and chosen face.
@@ -604,7 +601,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     assert_eq!((statue["status"].as_str(), statue["errorCode"].as_str()), (Some("failed"), Some("not_playable")));
     assert_eq!(statue["step"], "verify");
     assert_eq!(check(&statue["report"], "skin")["level"], "error");
-    assert_eq!(check(&statue["report"], "clips")["level"], "ok");
+    assert_eq!(check(&statue["report"], "clips")["level"], "error");
     assert_eq!(failed("tampered").await["errorCode"], "factory_checksum");
     let wip = failed("wip").await;
     assert_eq!((wip["errorCode"].as_str(), wip["step"].as_str()), (Some("factory_not_sealed"), Some("source")));

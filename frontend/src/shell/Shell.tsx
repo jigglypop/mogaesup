@@ -198,6 +198,17 @@ function UserMenu() {
   const navigate = useNavigate();
   const { open, setOpen, ref } = usePopover();
   const [theme, setTheme] = useTheme();
+  const [leaving, setLeaving] = useState(false);
+  const [error, setError] = useState('');
+  const pending = useRef(false);
+  const signOut = async () => {
+    if (pending.current) return;
+    pending.current = true;
+    setLeaving(true); setError('');
+    try { await logout(); setOpen(false); navigate('/'); }
+    catch (problem) { setError(problemText(problem)); }
+    finally { pending.current = false; setLeaving(false); }
+  };
   if (!user) {
     return (
       <Link className="mg-btn is-primary" to="/">
@@ -239,9 +250,10 @@ function UserMenu() {
               ))}
             </div>
           </div>
-          <button role="menuitem" onClick={() => void logout().then(() => navigate('/'))}>
-            <Icon name="logout" /> 로그아웃
+          <button role="menuitem" disabled={leaving} onClick={() => void signOut()}>
+            <Icon name="logout" /> {leaving ? '로그아웃 중…' : '로그아웃'}
           </button>
+          {error && <p className="mg-error" role="alert">{error}</p>}
         </div>
       )}
     </div>

@@ -93,6 +93,57 @@ async fn requests(app: &TestApp) -> Vec<(String, String, bool, Option<i16>)> {
 }
 
 #[tokio::test]
+async fn authenticated_model_delivery_preserves_ranges_head_and_conditional_headers() {
+    let upstream = Router::new().fallback(|request: Request| async move {
+        assert_eq!(request.headers()[header::RANGE], "bytes=0-3");
+        assert_eq!(request.headers()[header::IF_RANGE], "\"model-v1\"");
+        if request.headers().contains_key(header::IF_NONE_MATCH) {
+            assert_eq!(request.headers()[header::IF_NONE_MATCH], "\"model-v1\"");
+            return (StatusCode::NOT_MODIFIED, [(header::ETAG, "\"model-v1\"")]).into_response();
+        }
+        (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, "model/gltf-binary"),
+                (header::CONTENT_LENGTH, "4"),
+                (header::CONTENT_RANGE, "bytes 0-3/8"),
+                (header::ACCEPT_RANGES, "bytes"),
+                (header::ETAG, "\"model-v1\""),
+                (header::LAST_MODIFIED, "Thu, 01 Oct 2026 00:00:00 GMT"),
+            ],
+            "glTF",
+        )
+            .into_response()
+    });
+    let app = TestApp::new(Some(settings(serve(upstream).await, FactoryAccess::Read, 0))).await;
+    let cookie = admin(&app, "delivery_admin").await;
+    for (method, conditional) in [("GET", false), ("HEAD", false), ("GET", true)] {
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri("/api/avatar-factory/jobs/j1/native-parts/v1/model.glb")
+            .header(header::ORIGIN, common::ORIGIN)
+            .header(header::COOKIE, &cookie)
+            .header(header::RANGE, "bytes=0-3")
+            .header(header::IF_RANGE, "\"model-v1\"");
+        if conditional {
+            request = request.header(header::IF_NONE_MATCH, "\"model-v1\"");
+        }
+        let reply = app.send(request.body(Body::empty()).unwrap()).await;
+        assert_eq!(reply.headers[header::ETAG], "\"model-v1\"");
+        if conditional {
+            assert_eq!(reply.status, StatusCode::NOT_MODIFIED);
+        } else {
+            assert_eq!(reply.status, StatusCode::PARTIAL_CONTENT);
+            assert_eq!(reply.headers[header::CONTENT_LENGTH], "4");
+            assert_eq!(reply.headers[header::CONTENT_RANGE], "bytes 0-3/8");
+            assert_eq!(reply.headers[header::ACCEPT_RANGES], "bytes");
+            assert_eq!(reply.bytes, if method == "HEAD" { b"".as_slice() } else { b"glTF".as_slice() });
+        }
+    }
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn 경로를_인코딩해_돌려_써도_회원은_옷장_밖으로_나가지_못한다() {
     let (app, seen) = gateway(FactoryAccess::Paid, 10).await;
     let member = app.register("member_t", "회원").await;

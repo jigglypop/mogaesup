@@ -131,3 +131,50 @@ def test_decode_claims_validates_token_properties(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         auth._decode_claims(_token(**configured, token_type="refresh"))
     assert exc.value.status_code == 401
+
+
+@pytest.mark.parametrize('token_type', ['', None, 'refresh'])
+def test_a_missing_or_wrong_access_token_type_is_rejected(monkeypatch, token_type):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    with pytest.raises(HTTPException) as exc:
+        auth._decode_claims(_token(token_type=token_type))
+    assert exc.value.status_code == 401
+
+
+def test_config_cannot_lower_the_secret_minimum(monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'short-secret-value')
+    monkeypatch.setenv('JWT_MIN_SECRET_LENGTH', '1')
+    with pytest.raises(RuntimeError, match='32'):
+        auth._resolve_secret()
+
+
+@pytest.mark.parametrize('roles', [[], ['MEMBER'], ['ROOT']])
+def test_a_signed_non_operator_token_cannot_use_the_studio(monkeypatch, roles):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    with pytest.raises(HTTPException) as exc:
+        auth.get_current_user(_request_with_auth('Bearer ' + _token(roles=roles)))
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize('forwarded', ['forwarded', 'x-forwarded-for', 'x-real-ip'])
+def test_a_forwarded_loopback_peer_cannot_supply_local_operator_identity(forwarded):
+    request = Request({'type': 'http', 'headers': [(b'x-user-id', b'1'), (forwarded.encode(), b'127.0.0.1')],
+                       'client': ('127.0.0.1', 8000)})
+    assert auth.trusted_loopback(request) is False and auth._local_dev_user(request) is None
+
+
+@pytest.mark.parametrize('peer', ['203.0.113.5', 'localhost', 'testclient'])
+def test_local_operator_identity_requires_the_actual_loopback_socket(peer):
+    request = Request({'type': 'http', 'headers': [(b'x-user-id', b'1')], 'client': (peer, 8000)})
+    assert auth._local_dev_user(request) is None
+
+
+@pytest.mark.parametrize('value', ['0', '-1', 'true', '1.0'])
+def test_local_identity_requires_a_positive_integer(value):
+    request = Request({'type': 'http', 'headers': [(b'x-user-id', value.encode())], 'client': ('127.0.0.1', 8000)})
+    assert auth._local_dev_user(request) is None
+
+
+def test_a_local_operator_is_accepted():
+    request = Request({'type': 'http', 'headers': [(b'x-user-id', b'1')], 'client': ('127.0.0.1', 8000)})
+    assert auth._local_dev_user(request).level == 2

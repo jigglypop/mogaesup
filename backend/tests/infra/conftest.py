@@ -10,7 +10,8 @@ def _usable(candidate):
     """A bash that runs here and can start this interpreter (the WSL launcher on Windows can do neither)."""
     try:
         done = subprocess.run([candidate, '-c', '"$PYTHON_EXE" -c "print(1)"; echo ok'], capture_output=True, text=True,
-                              timeout=60, env={**os.environ, 'PYTHON_EXE': sys.executable})
+                              encoding='utf-8', errors='replace', timeout=10,
+                              env={**os.environ, 'PYTHON_EXE': sys.executable})
     except (OSError, subprocess.SubprocessError):
         return False
     return done.returncode == 0 and done.stdout.split() == ['1', 'ok']

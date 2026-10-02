@@ -1,6 +1,7 @@
 """Uploaded three-view hair batches with durable, independently resumable jobs."""
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+from src.services.runtime_activity import ContextThreadPoolExecutor as ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 import io

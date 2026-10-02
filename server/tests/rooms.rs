@@ -13,6 +13,115 @@ use tokio_tungstenite::{
 
 type Stream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+#[tokio::test]
+async fn 명시적_섬권한과_그룹권한을_회수하면_기존_소켓도_닫힌다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("rev_host", "host").await;
+    let guest = app.register("rev_guest", "guest").await;
+    app.make_admin("rev_host").await;
+    app.call("PATCH", "/api/homes/me", Some(json!({"visibility": "private"})), Some(&host)).await;
+    let object = format!("home:{}", app.user_id("rev_host").await);
+    let base = serve(&app).await;
+    let direct = json!({"object": object, "relation": "viewer", "subject": "user:rev_guest", "reason": "access"});
+    assert_eq!(
+        app.call("POST", "/api/admin/permissions/grant", Some(direct.clone()), Some(&host)).await.status,
+        StatusCode::CREATED
+    );
+    let mut socket = connect(&base, "rev_host", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    send(&mut socket, json!({"type": "Join", "room_id": "rev_host", "color": "#fff"})).await;
+    next(&mut socket, "Welcome").await.unwrap();
+    app.call("POST", "/api/admin/permissions/revoke", Some(direct), Some(&host)).await;
+    assert_eq!(closed(&mut socket).await, Some(4403));
+    app.grant("rev_guest", "group:visitors", "member").await;
+    let group = json!({"object": object, "relation": "viewer", "subject": "group:visitors#member", "reason": "group"});
+    assert_eq!(
+        app.call("POST", "/api/admin/permissions/grant", Some(group), Some(&host)).await.status,
+        StatusCode::CREATED
+    );
+    let mut socket = connect(&base, "rev_host", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    send(&mut socket, json!({"type": "Join", "room_id": "rev_host", "color": "#fff"})).await;
+    next(&mut socket, "Welcome").await.unwrap();
+    let membership =
+        json!({"object": "group:visitors", "relation": "member", "subject": "user:rev_guest", "reason": "removed"});
+    app.call("POST", "/api/admin/permissions/revoke", Some(membership), Some(&host)).await;
+    assert_eq!(closed(&mut socket).await, Some(4403));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 로그아웃은_기존_소켓과_미사용_티켓을_끝낸다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("session_host", "host").await;
+    let base = serve(&app).await;
+    let unused = ticket(&app, &host).await;
+    let mut socket = connect(&base, "session_host", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    send(&mut socket, json!({"type": "Join", "room_id": "session_host", "color": "#fff"})).await;
+    next(&mut socket, "Welcome").await.unwrap();
+    assert_eq!(app.call("POST", "/api/auth/logout", None, Some(&host)).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(closed(&mut socket).await, Some(4401));
+    assert!(connect(&base, "session_host", &unused, ORIGIN).await.is_err());
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 세션_상한으로_제거된_연결만_닫고_동시_로그인도_상한을_지킨다() {
+    let app = TestApp::new(None).await;
+    let first = app.register("session_cap", "host").await;
+    let base = serve(&app).await;
+    let mut oldest = connect(&base, "session_cap", &ticket(&app, &first).await, ORIGIN).await.unwrap();
+    send(&mut oldest, json!({"type": "Join", "room_id": "session_cap", "color": "#fff"})).await;
+    next(&mut oldest, "Welcome").await.unwrap();
+    let login = || {
+        app.call(
+            "POST",
+            "/api/auth/login",
+            Some(json!({"username": "session_cap", "password": "correct horse battery"})),
+            None,
+        )
+    };
+    let second = login().await.cookie.unwrap();
+    let mut retained = connect(&base, "session_cap", &ticket(&app, &second).await, ORIGIN).await.unwrap();
+    send(&mut retained, json!({"type": "Join", "room_id": "session_cap", "color": "#fff"})).await;
+    next(&mut retained, "Welcome").await.unwrap();
+    for _ in 0..7 {
+        assert_eq!(login().await.status, StatusCode::OK);
+    }
+    assert_eq!(closed(&mut oldest).await, Some(4401));
+    send(&mut retained, json!({"type": "Ping", "ts": 17})).await;
+    assert_eq!(next(&mut retained, "Pong").await.unwrap()["ts"], 17);
+    let replies = futures_util::future::join_all((0..10).map(|_| login())).await;
+    assert!(replies.iter().all(|reply| reply.status == StatusCode::OK));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions").fetch_one(&app.state.db).await.unwrap(),
+        8
+    );
+    assert_eq!(closed(&mut retained).await, Some(4401));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 데이터베이스에서_만료된_세션은_연결_중에도_끝난다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("expired_socket", "host").await;
+    let base = serve(&app).await;
+    let mut socket = connect(&base, "expired_socket", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    send(&mut socket, json!({"type": "Join", "room_id": "expired_socket", "color": "#fff"})).await;
+    next(&mut socket, "Welcome").await.unwrap();
+    sqlx::query("UPDATE sessions SET expires_at = now() - interval '1 second'").execute(&app.state.db).await.unwrap();
+    let code = tokio::time::timeout(Duration::from_secs(18), async {
+        while let Some(Ok(message)) = socket.next().await {
+            if let Message::Close(frame) = message {
+                return frame.map(|frame| u16::from(frame.code));
+            }
+        }
+        None
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, Some(4401));
+    app.cleanup().await;
+}
+
 async fn serve(app: &TestApp) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -85,6 +194,17 @@ async fn 방에_들어가면_서로_보이고_가까운_사람에게만_말이_�
     assert_eq!(update["client_id"], guest_id.as_str());
     assert_eq!(update["state"]["animation"], "walk");
     assert!(update["state"].get("name").is_none());
+
+    // A peer's finite but non-unit quaternion must never reach the others' renderer or physics unchanged.
+    for magnitude in [100_000.0, 1e-300] {
+        send(&mut guest_socket, json!({"type": "Update", "state": {"rotation": [0.0, magnitude, magnitude, 0.0]}}))
+            .await;
+        let update = next(&mut host_socket, "PlayerUpdate").await.unwrap();
+        let rotation = update["state"]["rotation"].as_array().unwrap();
+        let length_squared = rotation.iter().map(|value| value.as_f64().unwrap().powi(2)).sum::<f64>();
+        assert!((length_squared - 1.0).abs() < 1e-12);
+        assert!((rotation[1].as_f64().unwrap() - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+    }
 
     let mut far_socket = connect(&base, "host_r", &ticket(&app, &far).await, ORIGIN).await.unwrap();
     send(&mut far_socket, json!({"type": "Join", "room_id": "host_r", "name": "x", "color": "#000000"})).await;
@@ -187,6 +307,10 @@ async fn 다른_곳의_모델_주소와_스타일로_번질_색은_받지_않는
         }
         send(&mut guest_socket, join).await;
     }
+    // Confirm all rejected joins were processed before starting the no-broadcast window. Otherwise parallel DB
+    // checks can delay their processing, and the following invalid updates accidentally exceed the spam budget.
+    send(&mut guest_socket, json!({"type": "Ping", "ts": 19})).await;
+    assert_eq!(next(&mut guest_socket, "Pong").await.unwrap()["ts"], 19);
     assert!(next(&mut host_socket, "PlayerJoined").await.is_none());
 
     let model = "http://test.local/gltf/man.glb";

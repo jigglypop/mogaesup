@@ -119,6 +119,30 @@ describe('둘러보기 화면', () => {
     await unmount();
   });
 
+  it('새 검색의 첫 페이지를 기다리는 동안 이전 검색의 cursor를 제출하지 않는다', async () => {
+    list.mockResolvedValueOnce({ homes: page(EXPLORE_PAGE) });
+    const { container, unmount } = await open(); await flush();
+    let answer!: (value: { homes: HomeSummary[] }) => void;
+    list.mockImplementationOnce(() => new Promise(resolve => { answer = resolve; }));
+    await type(container.querySelector<HTMLInputElement>('input[type=search]')!, '새');
+    expect(more(container)?.disabled).toBe(true);
+    await act(async () => more(container)?.click());
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(names(container)).toEqual([]); expect(more(container)).toBeUndefined();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list.mock.calls[1]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '새' });
+    answer({ homes: [home(900)] }); await flush();
+    expect(names(container)).toEqual(['섬900']); await unmount();
+  });
+
+  it('같은 렌더 안의 연속 클릭도 더 보기 요청을 한 번만 보낸다', async () => {
+    list.mockResolvedValueOnce({ homes: page(EXPLORE_PAGE) });
+    const { container, unmount } = await open(); await flush();
+    list.mockResolvedValueOnce({ homes: [home(900)] });
+    await act(async () => { const button = more(container)!; button.click(); button.click(); });
+    await flush(); expect(list).toHaveBeenCalledTimes(2); await unmount();
+  });
+
   it('불러오지 못하면 알리고, 검색이 바뀐 뒤라면 이전 검색의 목록을 남겨 두지 않는다', async () => {
     list.mockResolvedValueOnce({ homes: page(2) });
     const { container, unmount } = await open();

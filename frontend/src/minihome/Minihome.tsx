@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RapierRigidBody } from '@react-three/rapier';
 
 import { useNavigate } from 'react-router-dom';
-import { DefaultLoadingManager } from 'three';
+import { DefaultLoadingManager, type Group } from 'three';
 
 import {
   GaesupWorld,
@@ -17,7 +17,9 @@ import {
   useWeatherStore,
 } from 'gaesup-world';
 
+import { ApiRequestError, problemText } from '../api/client';
 import { homeApi, lookApi } from '../api/endpoints';
+import { followSessionOwner, sessionBelongsTo } from '../auth/sessionWork';
 import type { CatalogItem, HomeView, Look, ProfileChanges, User } from '../api/types';
 import { Brand, initialOf, Rail, toneOf, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
@@ -166,9 +168,15 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const { profile, isOwner } = view;
   const navigate = useNavigate();
   const [saved, setSaved] = useState(false);
+  const [profileError, setProfileError] = useState('');
+  const profileWrites = useRef<Promise<void>>(Promise.resolve());
+  const latestLook = useRef(viewerLook);
+  latestLook.current = viewerLook;
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   // The island's runtime and, around it, its saving, undo history and (for the owner) decorating session.
   const [world] = useState(() => {
-    const adapter = createHomeSaveAdapter({ username: profile.username, worldId: MINIHOME_WORLD_ID, writable: isOwner });
+    const adapter = createHomeSaveAdapter({ username: profile.username, ownerId: profile.ownerId, worldId: MINIHOME_WORLD_ID, writable: isOwner });
     const residents = createResidentStore();
     const greetings = createGreetingStore();
     const runtime = createMinihomeRuntime(adapter, residents, (error, context) => console.error(`[island ${context.source}]`, error));
@@ -176,7 +184,16 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const history = createEditHistory(runtime.buildingStore);
     const labels = new Map(studioItems.map((item) => [item.id, item.label]));
     const session = isOwner ? createEditSession(runtime, history, labels) : null;
-    return { runtime, saver, history, session, residents, greetings };
+    let released = false;
+    let stopSession = () => {};
+    const release = () => {
+      if (released) return;
+      released = true;
+      stopSession(); adapter.dispose();
+      void runtime.dispose().catch((error: unknown) => console.error(error));
+    };
+    if (isOwner) stopSession = followSessionOwner(profile.ownerId, () => { adapter.dispose(); saver.dispose(); });
+    return { runtime, saver, history, session, residents, greetings, release };
   });
   const { runtime, saver, session, residents, greetings } = world;
   const { failed: startFailed, retry: retryStart } = useIslandStart({ runtime, saver, history: world.history });
@@ -194,7 +211,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
       unwatch();
       unwatchResidents();
       window.clearInterval(poll);
-      const release = () => void runtime.dispose().catch((error: unknown) => console.error(error));
+      const { release } = world;
       // Leaving the page in the app (another island, 둘러보기, Back) must not drop unsaved edits: they are saved first, and
       // while they cannot be, the island stays in the background, retrying, until they are.
       if (isOwner) leaveIsland(saver, release, discarding.current);
@@ -224,23 +241,40 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const characterUrl = playerModelUrl(viewerLook, viewerMinime, minimes);
   const urls = useMemo(() => ({ characterUrl }), [characterUrl]);
   const playerRef = useRef<RapierRigidBody>(null!);
+  const visualRotationRef = useRef<Group>(null!);
   const changeSettings = useCallback(
     (next: Partial<SceneSettings>) => setSettings((current) => ({ ...current, ...next })),
     [setSettings],
   );
   const updateProfile = useCallback(
     (changes: ProfileChanges) => {
-      homeApi.update(changes).then((updated) => {
+      const write = profileWrites.current.catch(() => undefined).then(async () => {
+        if (!sessionBelongsTo(profile.ownerId)) throw new ApiRequestError(409, 'owner_changed', '계정이 바뀌어 저장을 중단했어요.');
+        const updated = await homeApi.update({ ...changes, expectedOwnerId: profile.ownerId });
+        if (!active.current || !sessionBelongsTo(profile.ownerId)) return;
         onView(updated);
-        // Picking a 미니미 takes the look off (the server does the same).
-        if (changes.minime && viewerLook?.worn) onLook({ ...viewerLook, worn: false });
-      }, (error: unknown) => console.error(error));
+        if (changes.minime && latestLook.current?.worn) {
+          latestLook.current = { ...latestLook.current, worn: false };
+          onLook(latestLook.current);
+        }
+        setProfileError('');
+      });
+      profileWrites.current = write;
+      void write.catch((error: unknown) => { if (active.current) setProfileError(problemText(error)); });
+      return write;
     },
-    [onView, onLook, viewerLook],
+    [onView, onLook, profile.ownerId],
   );
   const wearLook = useCallback(() => {
-    lookApi.wear(true).then(({ look }) => onLook(look), (error: unknown) => console.error(error));
-  }, [onLook]);
+    const write = profileWrites.current.catch(() => undefined).then(async () => {
+      if (!sessionBelongsTo(profile.ownerId)) throw new ApiRequestError(409, 'owner_changed', '계정이 바뀌어 저장을 중단했어요.');
+      const { look } = await lookApi.wear(true);
+      if (active.current && sessionBelongsTo(profile.ownerId)) { latestLook.current = look; onLook(look); setProfileError(''); }
+    });
+    profileWrites.current = write;
+    void write.catch((error: unknown) => { if (active.current) setProfileError(problemText(error)); });
+    return write;
+  }, [onLook, profile.ownerId]);
   const home = `/@${profile.username}`;
   const save = useCallback(
     () =>
@@ -322,7 +356,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     <GaesupWorld runtime={runtime} urls={urls} cameraOption={CAMERA}>
       <Bgm enabled={bgm} />
       <CameraOcclusion fade={settings.cameraFade ?? true} />
-      <LiveRoom username={profile.username} viewer={viewer} characterUrl={characterUrl} playerRef={playerRef}>
+      <LiveRoom username={profile.username} viewer={viewer} characterUrl={characterUrl} playerRef={playerRef} visualRotationRef={visualRotationRef}>
         <div className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`}>
           <div className="mg-world-canvas">
             {/* The canvas reads the decorating session for its in-world tools (R3F bridges the context). */}
@@ -330,6 +364,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
               <Scene
                 {...settings}
                 playerRef={playerRef}
+                visualRotationRef={visualRotationRef}
                 visitors={<LiveAvatars playerRef={playerRef} />}
                 residents={<ResidentsWorld runtime={runtime} residents={residents} items={npcItems} greetings={greetings} />}
               />
@@ -416,6 +451,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
             </p>
           )}
           {startFailed && <StartBanner onRetry={retryStart} />}
+          {profileError && <p className="mg-toast mg-glass mg-error" role="alert">{profileError}</p>}
           <SaveBanners saver={saver} editing={decorating} onReloaded={reloaded} />
           <ToastHost position="top-center" />
         </div>

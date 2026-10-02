@@ -5,7 +5,7 @@ import './pages/pages.css';
 import { lazy, Suspense } from 'react';
 
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 
 import { AuthProvider } from './auth/AuthProvider';
 import { AuthPage } from './pages/AuthPage';
@@ -14,6 +14,7 @@ import { Loading } from './pages/Loading';
 import { MinihomePage } from './pages/MinihomePage';
 import { AppErrorBoundary } from './ui/ErrorBoundary';
 import { initTheme } from './ui/theme';
+import { routeOf } from './studio/screens';
 
 initTheme();
 
@@ -27,7 +28,9 @@ const PermissionsPage = lazy(() => import('./pages/permissions/PermissionsPage')
 /** Old studio addresses: the wardrobe is `/character` now, the factory screens live under `/admin/studio`. */
 function StudioRedirect() {
   const { '*': rest = '' } = useParams();
-  return <Navigate to={rest ? `/admin/studio/${rest}` : '/character'} replace />;
+  const { search, hash } = useLocation();
+  const target = rest ? `/admin/studio/${rest}${search}` : routeOf(`/${search}`) ?? `/character${search}`;
+  return <Navigate to={`${target}${hash}`} replace />;
 }
 
 /** `/@username` is an island and `/@username/edit` its decorating mode; any other single segment is not a page. */

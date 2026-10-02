@@ -10,6 +10,7 @@ import {
 } from 'react';
 
 import type { RapierRigidBody } from '@react-three/rapier';
+import type { Group } from 'three';
 
 import { Link } from 'react-router-dom';
 
@@ -39,7 +40,13 @@ const CONFIG: MultiplayerConfig = {
   ...defaultMultiplayerConfig,
   logToConsole: false,
   websocket: { ...defaultMultiplayerConfig.websocket, url: '', reconnectAttempts: 0 },
-  rendering: { ...defaultMultiplayerConfig.rendering, characterScale: MINIME_SCALE, nameTagHeight: 1.7 * MINIME_SCALE + 0.4 },
+  rendering: {
+    ...defaultMultiplayerConfig.rendering,
+    characterScale: MINIME_SCALE,
+    nameTagHeight: 1.7 * MINIME_SCALE + 0.4,
+    materialPolicy: 'figure',
+    tintCharacter: false,
+  },
 };
 
 const roomUrl = (username: string, ticket: string) =>
@@ -57,12 +64,14 @@ function useLiveRoom(options: {
   viewer: User | null;
   characterUrl: string;
   playerRef: RefObject<RapierRigidBody>;
+  visualRotationRef: RefObject<Group>;
 }): Multiplayer {
-  const { username, viewer, characterUrl, playerRef } = options;
+  const { username, viewer, characterUrl, playerRef, visualRotationRef } = options;
   const live = useMultiplayer({
     config: CONFIG,
     characterUrl: new URL(characterUrl, location.origin).href,
     rigidBodyRef: playerRef,
+    visualRotationRef,
   });
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -84,8 +93,8 @@ function useLiveRoom(options: {
       if (stopped || busy || !down || now < nextAt || now - triedAt < SETTLE_MS) return;
       busy = true;
       try {
-        const { ticket } = await authApi.realtimeTicket();
-        if (stopped) return;
+        const { ticket, user } = await authApi.realtimeTicket();
+        if (stopped || user.id !== viewerId) return;
         liveRef.current.updateConfig({ websocket: { ...CONFIG.websocket, url: roomUrl(username, ticket) } });
         liveRef.current.connect({ roomId: username, playerName: viewerName, playerColor: colorOf(viewerId) });
         triedAt = Date.now();

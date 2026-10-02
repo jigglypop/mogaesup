@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { request } from '../api';
+import { studioHref } from '../../studio/screens';
 import { meshyBudgetFor, sharedMeshyScope, type MeshyOptions } from './meshy-options';
 import './meshy-options.css';
 
@@ -49,7 +50,7 @@ export function MeshyOptionsEditor({ value, scope, disabled, onChange, onUploadi
       <div className="meshy-option-grid"><label>해상도<select disabled={!value.should_texture} value={value.texture_resolution} onChange={event => update({ texture_resolution: event.target.value as MeshyOptions['texture_resolution'] })}>{['2k','4k','8k'].map(item => <option key={item} value={item}>{item.toUpperCase()}</option>)}</select></label>
       <label>텍스처 기준<select disabled={!value.should_texture} value={value.texture_mode} onChange={event => update({ texture_mode: event.target.value as MeshyOptions['texture_mode'], texture_image_assets: event.target.value === 'image' ? value.texture_image_assets.slice(0,1) : value.texture_image_assets })}><option value="source">파츠 원화</option><option value="prompt">프롬프트 관리 문장</option><option value="image">참조 이미지 1장</option><option value="images">참조 이미지 1~4장</option></select></label></div>
       {check('enable_pbr', 'PBR 맵', !value.should_texture)}{check('remove_lighting', '텍스처 명암 제거', !value.should_texture)}
-      {value.should_texture && value.texture_mode === 'prompt' && <a href="/?tab=prompts&promptGroup=meshy_texture" target="_blank" rel="noreferrer">3D 텍스처 프롬프트 관리</a>}
+      {value.should_texture && value.texture_mode === 'prompt' && <a href={studioHref({ tab: 'prompts', promptGroup: 'meshy_texture' })} target="_blank" rel="noreferrer">3D 텍스처 프롬프트 관리</a>}
       {value.should_texture && ['image','images'].includes(value.texture_mode) && <div className="meshy-texture-inputs">
         <label>{uploading ? '이미지 등록 중' : 'PNG/JPEG 참조'}<input type="file" accept="image/png,image/jpeg" multiple={value.texture_mode === 'images'} onChange={event => { void upload([...event.target.files || []]); event.target.value = ''; }} /></label>
         {value.texture_image_assets.map((asset,index) => <div key={`${asset}:${index}`}><img src={`/api/avatar-blueprints/assets/${asset}`} alt={`텍스처 참조 ${index+1}`} /><span>{index === 0 ? '1 · 정면' : index+1}</span><button type="button" onClick={() => update({ texture_image_assets: value.texture_image_assets.filter((_,i) => i!==index) })}>제거</button></div>)}

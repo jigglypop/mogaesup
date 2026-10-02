@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 
+import { problemText } from '../api/client';
 import type { CatalogItem, HomeView, HomeVisibility, Look, ProfileChanges } from '../api/types';
 import { Icon } from '../ui/icons';
 import { wearsLook } from './character';
@@ -29,34 +30,92 @@ function Autosaved({
   onSave,
   multiline = false,
   allowEmpty = false,
+  storageKey,
   ...props
 }: {
   value: string;
-  onSave: (value: string) => void;
+  onSave: (value: string) => void | Promise<void>;
+  storageKey: string;
   multiline?: boolean;
   allowEmpty?: boolean;
   maxLength: number;
   placeholder: string;
   'aria-label': string;
 }) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
+  const [draft, setDraft] = useState(() => {
+    try { return localStorage.getItem(storageKey) ?? value; } catch { return value; }
+  });
+  const [error, setError] = useState('');
+  const current = useRef({ draft, value, allowEmpty, onSave, storageKey });
+  const saved = useRef(value);
+  const mounted = useRef(true);
+  const inflight = useRef<Promise<void> | null>(null);
   useEffect(() => {
-    if (!wantsSave(draft, value, allowEmpty)) return undefined;
-    const timer = setTimeout(() => onSave(draft), SAVE_DELAY_MS);
+    if (!wantsSave(current.current.draft, saved.current, allowEmpty)) setDraft(value);
+    saved.current = value;
+  }, [value, allowEmpty]);
+  current.current = { draft, value, allowEmpty, onSave, storageKey };
+  const flush = useCallback((): Promise<void> => {
+    if (inflight.current) return inflight.current;
+    const { draft, allowEmpty, onSave, storageKey } = current.current;
+    const next = draft.trim();
+    if (!wantsSave(next, saved.current, allowEmpty)) return Promise.resolve();
+    const run = Promise.resolve().then(() => onSave(next)).then(() => {
+      saved.current = next;
+      if (current.current.draft.trim() === next) {
+        try { localStorage.removeItem(storageKey); } catch { /* Storage may be unavailable. */ }
+      }
+      if (mounted.current) setError('');
+    }, (problem: unknown) => {
+      if (mounted.current) setError(problemText(problem));
+      throw problem;
+    }).finally(() => { inflight.current = null; });
+    inflight.current = run;
+    return run;
+  }, []);
+  const savePending = useCallback(() => {
+    void flush().then(() => {
+      if (wantsSave(current.current.draft, saved.current, current.current.allowEmpty)) savePending();
+    }).catch(() => undefined);
+  }, [flush]);
+  useEffect(() => {
+    try {
+      if (draft.trim() === saved.current && !inflight.current) localStorage.removeItem(storageKey);
+      else localStorage.setItem(storageKey, draft);
+    } catch { /* Saving to the server still works. */ }
+    if (!wantsSave(draft, saved.current, allowEmpty)) return undefined;
+    const timer = setTimeout(savePending, SAVE_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [draft, value, allowEmpty, onSave]);
+  }, [draft, value, allowEmpty, storageKey, savePending]);
+  useEffect(() => {
+    mounted.current = true;
+    const hidden = () => { if (document.visibilityState === 'hidden') savePending(); };
+    document.addEventListener('visibilitychange', hidden);
+    window.addEventListener('pagehide', savePending);
+    return () => {
+      mounted.current = false;
+      document.removeEventListener('visibilitychange', hidden);
+      window.removeEventListener('pagehide', savePending);
+      savePending();
+    };
+  }, [savePending]);
   const common = {
     ...props,
     className: 'mg-field',
     value: draft,
+    onBlur: savePending,
     onKeyDown: (event: KeyboardEvent) => event.stopPropagation(),
   };
-  return multiline ? (
-    <textarea {...common} rows={2} onChange={(event) => setDraft(event.target.value)} />
-  ) : (
-    <input {...common} onChange={(event) => setDraft(event.target.value)} />
-  );
+  const edit = (next: string) => {
+    current.current.draft = next;
+    try { localStorage.setItem(storageKey, next); } catch { /* Keep the live draft even without storage. */ }
+    setDraft(next);
+  };
+  return <>
+    {multiline ? <textarea {...common} rows={2} onChange={(event) => edit(event.target.value)} />
+      : <input {...common} onChange={(event) => edit(event.target.value)} />}
+    {error && <span className="mg-error" role="alert">{error} <button className="mg-link" type="button" onClick={savePending}>다시 저장</button></span>}
+  </>;
 }
 
 export function minimeOf(view: HomeView, minimes: CatalogItem[]) {
@@ -120,13 +179,14 @@ export function About({
   view: HomeView;
   minimes: CatalogItem[];
   look: Look | null;
-  onUpdate: (changes: ProfileChanges) => void;
-  onWearLook: () => void;
+  onUpdate: (changes: ProfileChanges) => void | Promise<void>;
+  onWearLook: () => void | Promise<void>;
 }) {
   const { profile, isOwner } = view;
   const ownLook = wearsLook(look);
   const saveTitle = useCallback((title: string) => onUpdate({ title }), [onUpdate]);
   const saveStatus = useCallback((statusMessage: string) => onUpdate({ statusMessage }), [onUpdate]);
+  const update = (changes: ProfileChanges) => { void Promise.resolve(onUpdate(changes)).catch(() => undefined); };
 
   return (
     <div className="mg-about">
@@ -134,17 +194,17 @@ export function About({
         <section className="mg-form">
           <label className="mg-label">
             섬 이름
-            <Autosaved value={profile.title} onSave={saveTitle} maxLength={30} placeholder="섬 이름" aria-label="섬 이름" />
+            <Autosaved key={`${profile.ownerId}:title`} storageKey={`mogaesup:profile:${profile.ownerId}:title`} value={profile.title} onSave={saveTitle} maxLength={30} placeholder="섬 이름" aria-label="섬 이름" />
           </label>
           <label className="mg-label">
             상태 메시지
-            <Autosaved value={profile.statusMessage} onSave={saveStatus} maxLength={60} placeholder="오늘은 어떤 날인가요" aria-label="상태 메시지" multiline allowEmpty />
+            <Autosaved key={`${profile.ownerId}:status`} storageKey={`mogaesup:profile:${profile.ownerId}:status`} value={profile.statusMessage} onSave={saveStatus} maxLength={60} placeholder="오늘은 어떤 날인가요" aria-label="상태 메시지" multiline allowEmpty />
           </label>
           <div className="mg-label">
             오늘 기분
             <div className="mg-tabs" role="radiogroup" aria-label="오늘 기분">
               {MOODS.map((option, index) => (
-                <button key={option.label} role="radio" aria-checked={profile.mood === index} onClick={() => onUpdate({ mood: index })}>
+                <button key={option.label} role="radio" aria-checked={profile.mood === index} onClick={() => update({ mood: index })}>
                   {option.emoji} {option.label}
                 </button>
               ))}
@@ -154,7 +214,7 @@ export function About({
             누가 놀러 올 수 있나요
             <div className="mg-tabs" role="radiogroup" aria-label="공개 범위">
               {VISIBILITY.map((option) => (
-                <button key={option.value} role="radio" aria-checked={profile.visibility === option.value} onClick={() => onUpdate({ visibility: option.value })}>
+                <button key={option.value} role="radio" aria-checked={profile.visibility === option.value} onClick={() => update({ visibility: option.value })}>
                   {option.label}
                 </button>
               ))}
@@ -172,7 +232,7 @@ export function About({
                 </button>
               )}
               {minimes.map((item) => (
-                <button key={item.id} aria-pressed={!ownLook && item.id === profile.minime} onClick={() => onUpdate({ minime: item.id, emoji: item.emoji })}>
+                <button key={item.id} aria-pressed={!ownLook && item.id === profile.minime} onClick={() => update({ minime: item.id, emoji: item.emoji })}>
                   {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" loading="lazy" /> : <span aria-hidden="true">{item.emoji}</span>}
                   <small>{item.label}</small>
                 </button>

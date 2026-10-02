@@ -19,6 +19,7 @@ back to their S3 keys and removes the marker, so the server can run without CHAR
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -26,6 +27,7 @@ import os
 import sys
 
 from src.paths import BACKEND_ROOT, load_environment
+from src.services.runtime_activity import running_task
 
 NAMESPACES = ('avatar-factory', 'avatar-blueprints', 'characters')
 MIGRATIONS = BACKEND_ROOT / 'migrations'
@@ -308,8 +310,14 @@ def main(argv=None):
     if not record_store.configured():
         raise SystemExit('CHARACTER_DATABASE_URL is not set')
     prefixes = [value.strip('/') for value in (getattr(args, 'prefix', None) or [])]
-    if getattr(args, 'create_database', False):
-        create_database(os.environ['CHARACTER_DATABASE_URL'].strip())
+    with running_task() if args.command != 'status' else nullcontext():
+        if getattr(args, 'create_database', False):
+            create_database(os.environ['CHARACTER_DATABASE_URL'].strip())
+        _execute(args, prefixes, record_store)
+    record_store.reset()
+
+
+def _execute(args, prefixes, record_store):
     with record_store.connect(options='-c statement_timeout=0') as conn:
         if args.command == 'migrate':
             migrate(conn)
@@ -334,7 +342,6 @@ def main(argv=None):
                         print(line)
                 else:
                     export_prefix(conn, s3, bucket, prefix, dry_run=args.dry_run)
-    record_store.reset()
 
 
 if __name__ == '__main__':

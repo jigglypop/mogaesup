@@ -6,6 +6,7 @@ import pytest
 ENTRYPOINT = Path(__file__).resolve().parents[2] / 'infra' / 'entrypoint.py'
 KEY = 'Kq3VzX9mTt7RbN2wLp4HyC8sDf6JgA1uEoWi5xMhY0cB'
 PROXY = ['  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id 1;', '  proxy_set_header Host $host;',
+         '  proxy_set_header Forwarded "";', '  proxy_set_header X-Forwarded-For "";', '  proxy_set_header X-Real-IP "";',
          '  proxy_read_timeout 65s;', '  proxy_buffering off;']
 # What the container wrote to /etc/nginx/studio-public.conf before the gateway key existed.
 OPEN = ['location /api/ {', *PROXY, '}',
@@ -24,9 +25,10 @@ def entrypoint():
     return module
 
 
-def test_the_public_api_is_unchanged_without_a_key(entrypoint):
-    assert entrypoint.public_rules(True) == OPEN
-    assert entrypoint.public_rules(True, '') == OPEN
+def test_an_open_studio_without_a_gateway_key_is_refused(entrypoint):
+    for key in (None, ''):
+        with pytest.raises(SystemExit, match='STUDIO_GATEWAY_KEY'):
+            entrypoint.public_rules(True, key)
 
 
 def test_a_gateway_key_gates_both_api_locations_and_nothing_else(entrypoint):
@@ -85,12 +87,12 @@ def test_the_key_is_an_allowed_secret(entrypoint):
     assert 'STUDIO_GATEWAY_KEY' in entrypoint.allowed
 
 
-def test_the_rules_file_is_written_and_a_missing_key_is_warned_about_once(entrypoint, tmp_path, capsys):
+def test_a_missing_gateway_key_writes_no_open_rules(entrypoint, tmp_path, capsys):
     target = tmp_path / 'studio-public.conf'
-    entrypoint.write_public_rules(target, True, '')
-    assert target.read_text(encoding='utf-8') == '\n'.join(OPEN) + '\n'
-    warning = capsys.readouterr().err
-    assert warning.startswith('warning: STUDIO_GATEWAY_KEY is not set') and len(warning.splitlines()) == 1
+    with pytest.raises(SystemExit, match='STUDIO_GATEWAY_KEY'):
+        entrypoint.write_public_rules(target, True, '')
+    assert not target.exists()
+    assert capsys.readouterr().err == ''
 
 
 def test_a_given_key_is_written_but_never_printed(entrypoint, tmp_path, capsys):

@@ -1,4 +1,4 @@
-const HEX_COLOR = /^#[0-9a-fA-F]{3,8}$/;
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 /** What someone is drawn in when the room's colour for them is not a colour. */
 export const NEUTRAL_PEER = '#7a7592';
 

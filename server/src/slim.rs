@@ -17,6 +17,8 @@ const COLOR_EDGE: u32 = 1024;
 /// Normal, metallic-roughness and occlusion maps.
 const DETAIL_EDGE: u32 = 512;
 const JPEG_QUALITY: u8 = 88;
+/// Repacking overlapping source views must never grow an accepted download without a fixed bound.
+const MAX_PACKED_BYTES: usize = 64 * 1024 * 1024;
 
 /// The longest edge each image may keep, by what the materials sample it for; images no material uses keep theirs.
 fn edges(json: &Value) -> Vec<Option<u32>> {
@@ -62,7 +64,7 @@ fn reencode(bytes: &[u8], mime: &str, edge: u32) -> Option<(Vec<u8>, &'static st
         "image/jpeg" => ImageFormat::Jpeg,
         _ => return None,
     };
-    let image = decode(bytes, format, 8192, 512 * 1024 * 1024)?;
+    let image = decode(bytes, format, 4096, 64 * 1024 * 1024)?;
     let shrunk = image.width().max(image.height()) > edge;
     let image = if shrunk { image.resize(edge, edge, FilterType::Triangle) } else { image };
     let opaque = !image.color().has_alpha() || image.to_rgba8().pixels().all(|pixel| pixel[3] == u8::MAX);
@@ -80,6 +82,9 @@ fn reencode(bytes: &[u8], mime: &str, edge: u32) -> Option<(Vec<u8>, &'static st
 
 /// The model with web-sized textures, or None when nothing changed or the file is not a single-buffer GLB.
 pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() > MAX_PACKED_BYTES {
+        return None;
+    }
     let (mut json, bin) = split(bytes)?;
     let views = json["bufferViews"].as_array()?.clone();
     if json["buffers"].as_array().map_or(0, Vec::len) != 1
@@ -87,37 +92,86 @@ pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
     {
         return None;
     }
+    let ranges: Vec<(usize, usize)> = views
+        .iter()
+        .map(|view| {
+            let range = view_range(view)?;
+            bin.get(range.clone())?;
+            Some((range.start, range.end))
+        })
+        .collect::<Option<_>>()?;
     let edges = edges(&json);
-    let mut replaced: HashMap<usize, (Vec<u8>, &'static str, usize)> = HashMap::new();
+    // Image entries and even distinct buffer views may share the same source bytes. Choose the largest requested
+    // size before decoding, so a normal map cannot accidentally shrink a colour map which aliases it.
+    let mut uses: HashMap<(usize, usize), (u32, &str)> = HashMap::new();
     for (at, image) in json["images"].as_array()?.iter().enumerate() {
         let (Some(edge), Some(view)) = (edges[at], index(&image["bufferView"])) else { continue };
-        if replaced.contains_key(&view) {
-            continue;
+        let range = *ranges.get(view)?;
+        let mime = image["mimeType"].as_str().unwrap_or_default();
+        let (kept, prior_mime) = uses.entry(range).or_insert((edge, mime));
+        if *prior_mime != mime {
+            return None;
         }
-        let original = bin.get(view_range(views.get(view)?)?)?;
-        if let Some((smaller, kind)) = reencode(original, image["mimeType"].as_str().unwrap_or_default(), edge) {
-            replaced.insert(view, (smaller, kind, at));
+        *kept = (*kept).max(edge);
+    }
+    let mut replaced: HashMap<(usize, usize), (Vec<u8>, &'static str)> = HashMap::new();
+    let mut replacement_bytes = 0usize;
+    for (&(start, end), &(edge, mime)) in &uses {
+        if let Some((smaller, kind)) = reencode(&bin[start..end], mime, edge) {
+            replacement_bytes = replacement_bytes.checked_add(smaller.len())?;
+            if replacement_bytes > MAX_PACKED_BYTES {
+                return None;
+            }
+            replaced.insert((start, end), (smaller, kind));
         }
     }
     if replaced.is_empty() {
         return None;
     }
-    // Every view restarts on a four-byte boundary, which keeps each accessor aligned to its component size.
-    let mut packed = Vec::with_capacity(bin.len());
-    for (index, view) in views.iter().enumerate() {
-        pad(&mut packed);
-        let data = match replaced.get(&index) {
-            Some((bytes, _, _)) => bytes.as_slice(),
-            None => bin.get(view_range(view)?)?,
-        };
-        json["bufferViews"][index]["byteOffset"] = packed.len().into();
-        json["bufferViews"][index]["byteLength"] = data.len().into();
-        packed.extend_from_slice(data);
+    // Plan the complete allocation before copying. Exact source aliases share an output offset; partially
+    // overlapping views stay independent but their aggregate size has to fit the same download budget.
+    let mut offsets = HashMap::new();
+    let mut length = 0usize;
+    for &(start, end) in &ranges {
+        if offsets.contains_key(&(start, end)) {
+            continue;
+        }
+        let offset = length.checked_add(3)? & !3;
+        let data_length = replaced.get(&(start, end)).map_or(end - start, |(data, _)| data.len());
+        length = offset.checked_add(data_length)?;
+        if length > MAX_PACKED_BYTES {
+            return None;
+        }
+        offsets.insert((start, end), offset);
     }
-    for (_, kind, image) in replaced.values() {
-        json["images"][*image]["mimeType"] = (*kind).into();
+    let mut packed = Vec::with_capacity(length);
+    for (index, &(start, end)) in ranges.iter().enumerate() {
+        let offset = offsets[&(start, end)];
+        let data = match replaced.get(&(start, end)) {
+            Some((bytes, _)) => bytes.as_slice(),
+            None => &bin[start..end],
+        };
+        if offset >= packed.len() {
+            pad(&mut packed);
+            packed.extend_from_slice(data);
+        }
+        json["bufferViews"][index]["byteOffset"] = offset.into();
+        json["bufferViews"][index]["byteLength"] = data.len().into();
+    }
+    for image in json["images"].as_array_mut()? {
+        if let Some((_, kind)) =
+            index(&image["bufferView"]).and_then(|view| ranges.get(view)).and_then(|range| replaced.get(range))
+        {
+            image["mimeType"] = (*kind).into();
+        }
     }
     json["buffers"][0]["byteLength"] = packed.len().into();
+    // Include JSON, chunk headers and padding in the final file limit as well.
+    let json_bytes = serde_json::to_vec(&json).ok()?.len().checked_add(3)? & !3;
+    let bin_bytes = packed.len().checked_add(3)? & !3;
+    if 28usize.checked_add(json_bytes)?.checked_add(bin_bytes)? > MAX_PACKED_BYTES {
+        return None;
+    }
     Some(join(&json, &packed))
 }
 
@@ -186,6 +240,74 @@ mod tests {
         let size = |index: usize| image::load_from_memory(view(&json, bin, index)).unwrap().width();
         assert_eq!((size(1), size(2), size(3)), (1024, 600, 512));
         assert!(slim(&slimmed).is_none_or(|again| again.len() <= slimmed.len()));
+    }
+
+    #[test]
+    fn shared_images_keep_the_largest_use_and_all_mime_types_follow_the_bytes() {
+        let bin = picture(1200, false);
+        let range = json!({"buffer": 0, "byteLength": bin.len()});
+        let json = json!({
+            "asset": {"version": "2.0"}, "buffers": [{"byteLength": bin.len()}],
+            "bufferViews": [range.clone(), range],
+            "images": [{"bufferView": 0, "mimeType": "image/png"},
+                {"bufferView": 0, "mimeType": "image/png"}, {"bufferView": 1, "mimeType": "image/png"}],
+            "textures": [{"source": 0}, {"source": 1}],
+            "materials": [{"normalTexture": {"index": 0},
+                "pbrMetallicRoughness": {"baseColorTexture": {"index": 1}}}],
+        });
+        let slimmed = slim(&join(&json, &bin)).unwrap();
+        let (json, bin) = split(&slimmed).unwrap();
+        assert_eq!(json["bufferViews"][0]["byteOffset"], json["bufferViews"][1]["byteOffset"]);
+        for image in json["images"].as_array().unwrap() {
+            assert_eq!(image["mimeType"], "image/jpeg");
+            let bytes = view(&json, bin, index(&image["bufferView"]).unwrap());
+            assert_eq!(image::guess_format(bytes).unwrap(), ImageFormat::Jpeg);
+            assert_eq!(image::load_from_memory(bytes).unwrap().width(), 1024);
+        }
+        assert_eq!(bin.len(), view(&json, bin, 0).len().next_multiple_of(4));
+    }
+
+    #[test]
+    fn duplicate_source_ranges_are_stored_once_instead_of_expanding_the_model() {
+        let geometry = vec![0xa5; 1024 * 1024];
+        let picture = picture(64, false);
+        let mut bin = geometry.clone();
+        bin.extend_from_slice(&picture);
+        let mut views = vec![json!({"buffer": 0, "byteLength": geometry.len()}); 100];
+        views.push(json!({"buffer": 0, "byteOffset": geometry.len(), "byteLength": picture.len()}));
+        let json = json!({
+            "asset": {"version": "2.0"}, "buffers": [{"byteLength": bin.len()}], "bufferViews": views,
+            "images": [{"bufferView": 100, "mimeType": "image/png"}], "textures": [{"source": 0}],
+            "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        });
+        let original = join(&json, &bin);
+        let slimmed = slim(&original).unwrap();
+        assert!(slimmed.len() < original.len());
+        let (json, bin) = split(&slimmed).unwrap();
+        for at in 0..100 {
+            assert_eq!(json["bufferViews"][at]["byteOffset"], 0);
+            assert_eq!(view(&json, bin, at), geometry.as_slice());
+        }
+    }
+
+    #[test]
+    fn partially_overlapping_views_cannot_expand_beyond_the_download_budget() {
+        let geometry_bytes = 8 * 1024 * 1024;
+        let picture = picture(64, false);
+        let mut bin = vec![0; geometry_bytes];
+        bin.extend_from_slice(&picture);
+        let mut views: Vec<_> = (0..16)
+            .map(|at| json!({"buffer": 0, "byteOffset": at * 4, "byteLength": geometry_bytes - at * 4}))
+            .collect();
+        views.push(json!({"buffer": 0, "byteOffset": geometry_bytes, "byteLength": picture.len()}));
+        let json = json!({
+            "asset": {"version": "2.0"}, "buffers": [{"byteLength": bin.len()}], "bufferViews": views,
+            "images": [{"bufferView": 16, "mimeType": "image/png"}], "textures": [{"source": 0}],
+            "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        });
+        let original = join(&json, &bin);
+        assert!(original.len() < MAX_PACKED_BYTES);
+        assert!(slim(&original).is_none(), "leave the bounded original intact before allocating an expanded BIN");
     }
 
     #[test]

@@ -53,7 +53,7 @@ def _resolve_secret() -> bytes:
         raise RuntimeError("JWT_SECRET 환경변수가 설정되어 있지 않습니다.")
     if _is_placeholder_secret(raw):
         raise RuntimeError("JWT_SECRET 이 예시 값입니다. 임의의 비밀 값으로 설정하세요.")
-    min_len = int(os.getenv("JWT_MIN_SECRET_LENGTH", "32") or "32")
+    min_len = max(32, int(os.getenv("JWT_MIN_SECRET_LENGTH", "32") or "32"))
     raw_bytes = raw.encode("utf-8")
     try:
         decoded = base64.b64decode(raw, validate=False)
@@ -95,18 +95,24 @@ def is_public_path(path: str) -> bool:
     return False
 
 
+def trusted_loopback(request: Request) -> bool:
+    """The real socket peer only; a proxy-supplied loopback address is not an operator identity."""
+    client_host = (request.client.host if request.client else "") or ""
+    return (client_host in {"127.0.0.1", "::1"}
+            and not any(name in request.headers for name in ('forwarded', 'x-forwarded-for', 'x-real-ip')))
+
+
 def _local_dev_user(request: Request) -> Optional[UserContext]:
     raw_user_id = (request.headers.get("x-user-id") or "").strip()
     if not raw_user_id:
         return None
-    client_host = (request.client.host if request.client else "") or ""
-    if client_host not in {"127.0.0.1", "::1", "localhost"}:
+    if not trusted_loopback(request):
         return None
     try:
         user_id = int(raw_user_id)
     except ValueError:
         return None
-    return UserContext(user_id=user_id, username=f"dev:{user_id}", roles=["ADMIN"])
+    return UserContext(user_id=user_id, username=f"dev:{user_id}", roles=["ADMIN"]) if user_id > 0 else None
 
 
 def _decode_claims(token: str) -> dict:
@@ -131,11 +137,11 @@ def _decode_claims(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid JWT issuer")
     except pyjwt.InvalidAudienceError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid JWT audience")
-    except pyjwt.InvalidTokenError as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid JWT: {e}")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid JWT") from None
 
     token_type = (claims.get("token_type") or "").strip()
-    if token_type and token_type != "access":
+    if token_type != "access":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not an access token")
     return claims
 
@@ -146,12 +152,17 @@ def _extract_user_id(claims: dict) -> int:
         if raw is None:
             continue
         try:
-            return int(str(raw))
+            value = int(str(raw))
+            if value > 0:
+                return value
         except Exception:
             continue
     sub = claims.get("sub") or ""
     try:
-        return int(str(sub))
+        value = int(str(sub))
+        if value > 0:
+            return value
+        raise ValueError('invalid user id')
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="JWT 에 user id 가 없습니다")
 
@@ -176,4 +187,7 @@ def get_current_user(request: Request) -> UserContext:
     claims = _decode_claims(token)
     user_id = _extract_user_id(claims)
     username = str(claims.get("sub") or "")
-    return UserContext(user_id=user_id, username=username, roles=_extract_roles(claims))
+    user = UserContext(user_id=user_id, username=username, roles=_extract_roles(claims))
+    if user.level != _ADMIN_LEVEL:
+        raise HTTPException(status_code=403, detail="Studio operator access required")
+    return user

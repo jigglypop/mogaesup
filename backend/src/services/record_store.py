@@ -187,7 +187,12 @@ def ping() -> dict:
         return {'configured': False, 'ok': False}
     try:
         with connection() as conn:
-            conn.execute('SELECT 1').fetchone()
+            prefix = os.getenv('ASSET_S3_PREFIX', 'assets').strip('/')
+            found = conn.execute(f'SELECT 1 FROM {SCHEMA}.namespaces WHERE prefix = %s', (prefix,)).fetchone()
+            if not found:
+                raise _not_imported(prefix)
+            # Check the exact schema and read permission used by records, not just the PostgreSQL connection.
+            conn.execute(f'SELECT {_META}, content FROM {SCHEMA}.records WHERE prefix = %s LIMIT 0', (prefix,))
         return {'configured': True, 'ok': True}
     except Exception as exc:
         return {'configured': True, 'ok': False, 'error': str(exc)}

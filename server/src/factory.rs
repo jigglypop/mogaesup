@@ -38,23 +38,28 @@ const LISTING_ATTEMPTS: u32 = 3;
 const LISTING_RETRY: Duration = Duration::from_secs(2);
 pub const MAX_MODEL_BYTES: usize = 64 * 1024 * 1024;
 const MIN_SECRET_BYTES: usize = 32;
-/// The advisory lock that serializes counting and recording paid requests; the only one this server takes.
+/// The advisory lock that serializes counting and recording paid requests.
 const PAID_LOCK: i64 = 7_309_001;
 /// Headers a studio request needs; cookies and the browser's own credentials never reach the character server.
-const FORWARDED_REQUEST_HEADERS: [HeaderName; 5] = [
+const FORWARDED_REQUEST_HEADERS: [HeaderName; 7] = [
     header::CONTENT_TYPE,
     header::ACCEPT,
     header::IF_MATCH,
     header::IF_NONE_MATCH,
+    header::RANGE,
+    header::IF_RANGE,
     HeaderName::from_static("idempotency-key"),
 ];
-const FORWARDED_RESPONSE_HEADERS: [HeaderName; 6] = [
+const FORWARDED_RESPONSE_HEADERS: [HeaderName; 9] = [
     header::CONTENT_TYPE,
     header::CONTENT_DISPOSITION,
     header::ETAG,
     header::LOCATION,
     header::CACHE_CONTROL,
     header::LAST_MODIFIED,
+    header::CONTENT_LENGTH,
+    header::ACCEPT_RANGES,
+    header::CONTENT_RANGE,
 ];
 
 const UNAVAILABLE: ApiError =
@@ -521,12 +526,31 @@ pub struct Received {
     pub total: AtomicUsize,
 }
 
-/// Whether a redirect from the character server may be followed: to https, or to the character server itself (local
-/// runs serve their files from it), and never to an address with credentials in it. Anything else would let the answer
-/// of whatever sits behind `FACTORY_URL` aim this server's requests at its own network.
+/// Only the configured origin and AWS-owned S3 endpoints can serve a redirected file. Arbitrary HTTPS destinations
+/// could target the internal network. S3 hostnames cannot be registered or repointed by the upstream operator.
 fn follows(location: &reqwest::Url, factory: &str) -> bool {
+    let region = |name: &str| {
+        let parts: Vec<_> = name.split('-').collect();
+        (3..=4).contains(&parts.len())
+            && matches!(parts[0], "ap" | "us" | "eu" | "sa" | "ca" | "me" | "af" | "il" | "mx")
+            && parts[1..parts.len() - 1].iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase()))
+            && parts.last().is_some_and(|p| p.parse::<u8>().is_ok_and(|n| n > 0))
+    };
     let own = reqwest::Url::parse(factory).is_ok_and(|own| own.origin() == location.origin());
-    (location.scheme() == "https" || own) && location.username().is_empty() && location.password().is_none()
+    let s3 = location.host_str().is_some_and(|host| {
+        let Some(prefix) = host.strip_suffix(".amazonaws.com") else { return false };
+        let labels: Vec<_> = prefix.split('.').collect();
+        let at = labels.iter().position(|label| *label == "s3" || label.starts_with("s3-"));
+        at.is_some_and(|at| {
+            let endpoint = &labels[at..];
+            ((endpoint.len() == 1 && (endpoint[0] == "s3" || endpoint[0].strip_prefix("s3-").is_some_and(region)))
+                || (endpoint.len() == 2 && endpoint[0] == "s3" && region(endpoint[1])))
+                && at <= 1
+        })
+    });
+    (own || (location.scheme() == "https" && location.port().is_none() && s3))
+        && location.username().is_empty()
+        && location.password().is_none()
 }
 
 /// A file under the character server's `/api/`, at most `limit` bytes, counting what has arrived into `received` as it
@@ -572,10 +596,11 @@ pub async fn fetch_file(
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        bytes.extend_from_slice(&chunk.map_err(unavailable)?);
-        if bytes.len() > limit {
+        let chunk = chunk.map_err(unavailable)?;
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
             return Err(TOO_LARGE);
         }
+        bytes.extend_from_slice(&chunk);
         if let Some(received) = received {
             received.bytes.store(bytes.len(), Ordering::Relaxed);
         }
@@ -591,11 +616,12 @@ async fn read_json(response: reqwest::Response) -> ApiResult<Value> {
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        bytes.extend_from_slice(&chunk.map_err(unavailable)?);
-        if bytes.len() > MAX_JSON_BYTES {
+        let chunk = chunk.map_err(unavailable)?;
+        if chunk.len() > MAX_JSON_BYTES.saturating_sub(bytes.len()) {
             tracing::warn!("Character server sent more JSON than is read");
             return Err(UNAVAILABLE);
         }
+        bytes.extend_from_slice(&chunk);
     }
     tokio::task::spawn_blocking(move || serde_json::from_slice(&bytes))
         .await
@@ -782,10 +808,21 @@ mod tests {
     }
 
     #[test]
-    fn a_redirect_is_followed_to_https_or_home_and_never_with_credentials() {
+    fn a_redirect_is_followed_only_to_s3_or_the_configured_origin() {
         let follow = |location: &str| follows(&reqwest::Url::parse(location).unwrap(), "http://127.0.0.1:8000");
         assert!(follow("https://bucket.s3.ap-northeast-2.amazonaws.com/key?X-Amz-Signature=1"));
         assert!(follow("http://127.0.0.1:8000/signed/a.glb"));
+        for blocked in [
+            "https://127.0.0.1/key",
+            "https://169.254.169.254/key",
+            "https://internal.local/key",
+            "https://example.com/key",
+            "https://bucket.s3.amazonaws.com.evil.test/key",
+            "https://s3.evil.amazonaws.com/key",
+            "https://bucket.s3.amazonaws.com:8443/key",
+        ] {
+            assert!(!follow(blocked), "{blocked}");
+        }
         assert!(!follow("http://169.254.169.254/latest/meta-data/"));
         assert!(!follow("http://127.0.0.1:9000/signed/a.glb"));
         assert!(!follow("http://bucket.s3.amazonaws.com/key"));

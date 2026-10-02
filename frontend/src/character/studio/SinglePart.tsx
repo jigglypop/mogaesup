@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { factoryApi, type FactoryCapabilities, type FactoryJob, type NativePartsState, type PartMethod } from '../factory/api';
+import { studioHref } from '../../studio/screens';
 import { NativeAssembly } from '../factory/NativeAssembly';
 import { PartProgress } from '../factory/PartProgress';
 import { ProductionProgress } from '../factory/ProductionProgress';
@@ -155,7 +156,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
         <option value="">직접 입력</option>{styles.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label>}
       {!batchMode && <label>이름<input value={pending?.input.part_name ?? partName} maxLength={100} disabled={inputLocked} onChange={event => setPartName(event.target.value)} /></label>}
       {!batchMode && <label>디자인<textarea value={pending?.input.description ?? brief} maxLength={2000} rows={5} disabled={inputLocked} onChange={event => setBrief(event.target.value)} /></label>}
-      {!batchMode && <a className="prompt-management-link" href="/?tab=prompts&promptGroup=parts" target="_blank" rel="noreferrer">프롬프트 관리</a>}
+      {!batchMode && <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'parts' })} target="_blank" rel="noreferrer">프롬프트 관리</a>}
       {!batchMode && partMethod !== 'body_shell' && (pending?.input.model_provider || provider) === 'meshy' && outputSettings}
       {batchMode && <HairBatch baseId={base?.id} version={native?.version} disabled={inputLocked} setup={baseSelector} onJob={result => { onBaseChange(result.base_job_id || result.id); onJob(result); setInputMode('generate'); }} />}
       {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}

@@ -3,13 +3,19 @@ import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError, ApiTimeoutError } from '../../api/client';
-import type { User } from '../../api/types';
+import type { Credentials, Registration, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
 import { AuthProvider, useAuth } from '../AuthProvider';
 import { followSession, SESSION_RETRY_MS } from '../session';
+import { followSessionOwner, setSessionOwner } from '../sessionWork';
 
-const { me } = vi.hoisted(() => ({ me: vi.fn<() => Promise<{ user: User | null }>>() }));
-vi.mock('../../api/endpoints', () => ({ authApi: { me } }));
+const { me, login, register, logout } = vi.hoisted(() => ({
+  me: vi.fn<() => Promise<{ user: User | null }>>(),
+  login: vi.fn<(body: Credentials) => Promise<{ user: User }>>(),
+  register: vi.fn<(body: Registration) => Promise<{ user: User }>>(),
+  logout: vi.fn<() => Promise<void>>(),
+}));
+vi.mock('../../api/endpoints', () => ({ authApi: { me, login, register, logout } }));
 
 const mogae: User = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user' };
 const flush = () => vi.advanceTimersByTimeAsync(0);
@@ -106,12 +112,15 @@ describe('로그인 상태 제공자', () => {
   afterEach(() => {
     vi.useRealTimers();
     me.mockReset();
+    login.mockReset(); register.mockReset(); logout.mockReset(); setSessionOwner(null);
   });
   const Probe = () => {
     const { status, user } = useAuth();
     return <p>{`${status}:${user?.username ?? '-'}`}</p>;
   };
   const shown = (container: HTMLElement) => container.querySelector('p')?.textContent;
+  let auth!: ReturnType<typeof useAuth>;
+  const Actions = () => { auth = useAuth(); return <Probe />; };
 
   it('서버가 응답하지 않는 동안은 로그아웃(anonymous)이 아니라 불러오는 중으로 두고, 응답하면 로그인 상태가 된다', async () => {
     me.mockRejectedValueOnce(new TypeError('Failed to fetch'))
@@ -159,5 +168,37 @@ describe('로그인 상태 제공자', () => {
     const asked = me.mock.calls.length;
     await vi.advanceTimersByTimeAsync(600_000);
     expect(me).toHaveBeenCalledTimes(asked);
+  });
+
+  it('최초 me의 늦은 응답은 새 로그인 계정을 덮지 않는다', async () => {
+    let answer!: (value: { user: User | null }) => void;
+    me.mockImplementationOnce(() => new Promise(resolve => { answer = resolve; }));
+    const other = { ...mogae, id: 'u2', username: 'other' };
+    login.mockResolvedValueOnce({ user: other });
+    const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+    await act(async () => { await auth.login({ username: 'other', password: 'password' }); });
+    answer({ user: mogae });
+    await act(flush);
+    expect(shown(container)).toBe('signedIn:other');
+    await unmount();
+  });
+
+  it('로그아웃에 실패하면 로그인 상태와 이전 세션 작업을 유지하고 오류를 반환한다', async () => {
+    me.mockResolvedValueOnce({ user: mogae });
+    logout.mockRejectedValueOnce(new TypeError('offline'));
+    const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+    const stop = vi.fn(); const unwatch = followSessionOwner(mogae.id, stop);
+    await act(async () => { await expect(auth.logout()).rejects.toThrow('offline'); });
+    expect(shown(container)).toBe('signedIn:mogae'); expect(stop).not.toHaveBeenCalled();
+    unwatch(); await unmount();
+  });
+
+  it('로그아웃 성공 시 이전 계정의 백그라운드 작업을 로그인 화면보다 먼저 취소한다', async () => {
+    me.mockResolvedValueOnce({ user: mogae }); logout.mockResolvedValueOnce(undefined);
+    const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+    const stop = vi.fn(); followSessionOwner(mogae.id, stop);
+    await act(async () => { await auth.logout(); });
+    expect(stop).toHaveBeenCalledTimes(1); expect(shown(container)).toBe('anonymous:-');
+    await unmount();
   });
 });

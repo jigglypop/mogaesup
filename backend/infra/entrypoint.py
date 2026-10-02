@@ -19,10 +19,11 @@ def public_rules(public, gateway_key=''):
     the API answers 403 to a request that does not send it as x-gateway-key."""
     if not public:
         return ['location /api/ { return 404; }', 'location = /health { return 404; }']
-    if gateway_key and not GATEWAY_KEY.fullmatch(gateway_key):
+    if not gateway_key or not GATEWAY_KEY.fullmatch(gateway_key):
         raise SystemExit('STUDIO_GATEWAY_KEY must be at least 16 characters of A-Z a-z 0-9 . _ ~ -')
-    gate = [f'  if ($http_x_gateway_key != "{gateway_key}") {{ return 403; }}'] if gateway_key else []
+    gate = [f'  if ($http_x_gateway_key != "{gateway_key}") {{ return 403; }}']
     proxy = ['  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id 1;', '  proxy_set_header Host $host;',
+             '  proxy_set_header Forwarded "";', '  proxy_set_header X-Forwarded-For "";', '  proxy_set_header X-Real-IP "";',
              '  proxy_read_timeout 65s;', '  proxy_buffering off;']
     return [
         'location /api/ {', *gate, *proxy, '}',
@@ -35,9 +36,6 @@ def public_rules(public, gateway_key=''):
 
 def write_public_rules(path, public, gateway_key):
     # nginx injects X-User-Id 1, so without the key whatever reaches port 80 acts as the studio owner.
-    if public and not gateway_key:
-        print('warning: STUDIO_GATEWAY_KEY is not set; /api on port 80 answers every request that reaches it',
-              file=sys.stderr, flush=True)
     path.write_text('\n'.join(public_rules(public, gateway_key)) + '\n', encoding='utf-8')
     path.chmod(0o600)
 

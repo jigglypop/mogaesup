@@ -14,8 +14,9 @@ use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use sqlx::{PgPool, Row, postgres::PgRow};
-use std::{collections::BTreeMap, panic::AssertUnwindSafe};
+use sqlx::{PgExecutor, PgPool, Row, postgres::PgRow};
+use std::{collections::BTreeMap, io::Cursor, panic::AssertUnwindSafe};
+use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
 use crate::{
@@ -37,9 +38,10 @@ const MAX_PARTS: usize = 12;
 const SAVES_PER_WINDOW: u32 = 30;
 /// A bake still marked running after this long was cut short by a restart.
 const STALE: chrono::Duration = chrono::Duration::minutes(10);
-/// Looks being assembled at once, over every member, before a save is turned away. Each holds its part files in memory
-/// until it has a slot for the heavy work.
-const MAX_BAKING: i64 = 16;
+/// Includes requests checking the wardrobe, queued tasks and active bakes.
+pub const MAX_BAKING: usize = 16;
+const BAKING_LOCK: i64 = 7_309_003;
+const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MASK_BYTES: usize = 16 * 1024 * 1024;
 /// What an assembled look may weigh, as stored: it loads on every visitor's island.
 const MAX_LOOK_BYTES: usize = 16 * 1024 * 1024;
@@ -175,7 +177,8 @@ pub fn listed(bodies: &Value, listing: &Value, look: &Value) -> ApiResult<String
     Ok(sha.to_owned())
 }
 
-const LOOK_SELECT: &str = "SELECT request, status, worn, model_url, error_code, error_message, report, updated_at
+const LOOK_SELECT: &str =
+    "SELECT revision, request, status, worn, model_url, error_code, error_message, report, updated_at
     FROM user_looks WHERE user_id = $1";
 
 fn look_json(row: &PgRow) -> Value {
@@ -188,6 +191,7 @@ fn look_json(row: &PgRow) -> Value {
     }
     json!({
         "request": row.get::<Value, _>("request"),
+        "revision": row.get::<i64, _>("revision"),
         "status": status,
         "worn": row.get::<bool, _>("worn"),
         "modelUrl": row.get::<Option<String>, _>("model_url"),
@@ -208,7 +212,7 @@ async fn mine(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Js
 }
 
 /// Looks being assembled now: `baking`, and not yet as old as [`STALE`].
-async fn baking_now(db: &PgPool) -> Result<i64, sqlx::Error> {
+async fn baking_now(db: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT count(*) FROM user_looks WHERE status = 'baking' AND updated_at > now() - make_interval(mins => $1)",
     )
@@ -223,15 +227,18 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     rate_limit(&state, format!("look:{}", user.id), SAVES_PER_WINDOW)?;
     let look = request(body)?;
     factory::configured(&state)?;
-    if baking_now(&state.db).await? > MAX_BAKING {
-        return Err(BUSY);
-    }
+    let admission = state.looks.clone().try_acquire_owned().map_err(|_| BUSY)?;
     let body_job = text(&look["body"], "jobId").to_owned();
     let bodies =
         factory::fetch_json(&state, &user.username, "avatar-factory/wardrobe/bodies").await?.unwrap_or_default();
     let parts_path = format!("avatar-factory/wardrobe/bodies/{body_job}/parts");
     let listing = factory::fetch_json(&state, &user.username, &parts_path).await?.ok_or(BODY_CHANGED)?;
     let body_sha = listed(&bodies, &listing, &look)?;
+    let mut transaction = state.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(BAKING_LOCK).execute(&mut *transaction).await?;
+    if baking_now(&mut *transaction).await? >= MAX_BAKING as i64 {
+        return Err(BUSY);
+    }
     // One bake at a time per member; one cut short long ago no longer holds the next.
     let revision: Option<i64> = sqlx::query_scalar(
         "INSERT INTO user_looks (user_id, request) VALUES ($1, $2)
@@ -243,10 +250,13 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     .bind(user.id)
     .bind(&look)
     .bind(STALE.num_minutes() as i32)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *transaction)
     .await?;
     let revision = revision.ok_or(BAKING)?;
-    tokio::spawn(Bake { state: state.clone(), user: user.clone(), revision, look, body_sha }.run());
+    transaction.commit().await?;
+    tokio::spawn(
+        Bake { state: state.clone(), user: user.clone(), revision, look, body_sha, _admission: admission }.run(),
+    );
     let saved = look_of(&state, user.id).await?.ok_or(NO_LOOK)?;
     Ok((StatusCode::ACCEPTED, Json(json!({"look": saved}))).into_response())
 }
@@ -323,6 +333,29 @@ fn no_colors(slot: &str) -> Failure {
     )
 }
 
+/// Aggregate retained input, including decoded masks and coverage, for one bake.
+struct InputBudget {
+    remaining: usize,
+}
+
+impl Default for InputBudget {
+    fn default() -> Self {
+        Self { remaining: MAX_INPUT_BYTES }
+    }
+}
+
+impl InputBudget {
+    fn take(&mut self, bytes: usize) -> Result<(), Failure> {
+        self.remaining = self.remaining.checked_sub(bytes).ok_or_else(|| {
+            Failure(
+                "look_input_too_large",
+                "파츠와 색상 마스크의 합이 너무 커요(64 MB까지). 파츠를 줄여 주세요.".into(),
+            )
+        })?;
+        Ok(())
+    }
+}
+
 /// One saved look being assembled.
 struct Bake {
     state: AppState,
@@ -330,6 +363,7 @@ struct Bake {
     revision: i64,
     look: Value,
     body_sha: String,
+    _admission: OwnedSemaphorePermit,
 }
 
 impl Bake {
@@ -384,13 +418,20 @@ impl Bake {
         .bind(self.revision)
         .fetch_one(&self.state.db)
         .await;
-        // A database that cannot answer cannot take the result either, which the end of the bake reports.
-        found.unwrap_or(true)
+        found.unwrap_or(false)
     }
 
     /// A file under the character server's `/api/`, checked against the SHA-256 the wardrobe listed for it.
-    async fn file(&self, path: &str, sha: &str, changed: ApiError) -> Result<Vec<u8>, Failure> {
-        let bytes = factory::fetch_file(&self.state, &self.user.username, path, MAX_MODEL_BYTES, None).await?;
+    async fn file(
+        &self,
+        path: &str,
+        sha: &str,
+        changed: ApiError,
+        budget: &mut InputBudget,
+    ) -> Result<Vec<u8>, Failure> {
+        let limit = MAX_MODEL_BYTES.min(budget.remaining);
+        let bytes = factory::fetch_file(&self.state, &self.user.username, path, limit, None).await?;
+        budget.take(bytes.len())?;
         let (bytes, found) = models::sha256(bytes).await?;
         if found != sha {
             return Err(changed.into());
@@ -404,7 +445,7 @@ impl Bake {
 
     /// A garment's colour regions and their mask, with the colours the look chose; None when it chose none. Colours the
     /// part cannot take fail the look instead of being left off the model unseen.
-    async fn palette(&self, slot: &str, part: &Value) -> Result<Option<Palette>, Failure> {
+    async fn palette(&self, slot: &str, part: &Value, budget: &mut InputBudget) -> Result<Option<Palette>, Failure> {
         let Some(chosen) = self.look["colors"][slot].as_object() else { return Ok(None) };
         let (job, version) = (text(part, "jobId"), text(part, "version"));
         let regions_path = format!("avatar-factory/wardrobe/colors/{job}/{slot}?version={version}");
@@ -413,11 +454,23 @@ impl Bake {
             return Err(no_colors(slot));
         };
         let mask_path = format!("avatar-factory/wardrobe/colors/{job}/{slot}/mask?version={version}");
-        let mask = factory::fetch_file(&self.state, &self.user.username, &mask_path, MAX_MASK_BYTES, None)
-            .await
-            .map_err(|error| if error.status == StatusCode::NOT_FOUND { no_colors(slot) } else { error.into() })?;
+        let mask = factory::fetch_file(
+            &self.state,
+            &self.user.username,
+            &mask_path,
+            MAX_MASK_BYTES.min(budget.remaining),
+            None,
+        )
+        .await
+        .map_err(|error| if error.status == StatusCode::NOT_FOUND { no_colors(slot) } else { error.into() })?;
+        budget.take(mask.len())?;
+        let (width, height) = image::ImageReader::with_format(Cursor::new(&mask), image::ImageFormat::Png)
+            .into_dimensions()
+            .map_err(|_| no_colors(slot))?;
+        let pixels = u64::from(width) * u64::from(height) * 4;
+        budget.take(usize::try_from(pixels).map_err(|_| no_colors(slot))?)?;
         let mask = tokio::task::spawn_blocking(move || {
-            slim::decode(&mask, image::ImageFormat::Png, 4096, 256 * 1024 * 1024).map(|picture| picture.to_rgba8())
+            slim::decode(&mask, image::ImageFormat::Png, 4096, MAX_INPUT_BYTES as u64).map(|picture| picture.to_rgba8())
         })
         .await
         .map_err(|error| Failure::from(internal(error)))?;
@@ -436,10 +489,16 @@ impl Bake {
 
     /// The model's site path and the bake's report; None when a newer save took over while this one waited for a slot.
     async fn make(&self) -> Result<Option<(String, Value)>, Failure> {
+        // Waiting bakes hold no model files. Imports and bakes share the same two memory-heavy slots.
+        let slot = self.state.imports.clone().acquire_owned().await.map_err(|error| Failure::from(internal(error)))?;
+        if !self.current().await {
+            return Ok(None);
+        }
+        let mut budget = InputBudget::default();
         let body_ref = &self.look["body"];
         let (body_job, body_version) = (text(body_ref, "jobId"), text(body_ref, "version"));
         let body_path = format!("avatar-factory/jobs/{body_job}/native-parts/{body_version}/body.glb");
-        let body = self.file(&body_path, &self.body_sha, BODY_CHANGED).await?;
+        let body = self.file(&body_path, &self.body_sha, BODY_CHANGED, &mut budget).await?;
         let mut files = Vec::new();
         for (slot, part) in self.look["parts"].as_object().into_iter().flatten() {
             let (job, version) = (text(part, "jobId"), text(part, "version"));
@@ -448,33 +507,34 @@ impl Bake {
                     &format!("avatar-factory/jobs/{job}/native-parts/{version}/{slot}.glb"),
                     text(part, "sha256"),
                     PART_CHANGED,
+                    &mut budget,
                 )
                 .await?;
             let coverage = if COVERED_SLOTS.contains(&slot.as_str()) {
                 let path = format!("avatar-factory/wardrobe/bodies/{body_job}/coverage/{job}/{slot}?version={version}");
                 let record = self.json(&path).await?;
+                // Encoded and decoded coverage coexist briefly; account for both before decoding.
+                budget.take(record.as_ref().map_or(0, |r| r.to_string().len()).saturating_mul(2))?;
                 Some(record.as_ref().and_then(Coverage::parse).ok_or_else(|| no_coverage(slot))?)
             } else {
                 None
             };
-            let palette = self.palette(slot, part).await?;
+            let palette = self.palette(slot, part, &mut budget).await?;
             files.push((slot.clone(), bytes, coverage, palette));
         }
         let hair = self.look["hairColor"].as_str().and_then(look_bake::linear_color);
-        // Only the heavy work takes a slot (shared with the imports); the downloads above wait for nobody.
-        let slot = self.state.imports.clone().acquire_owned().await.map_err(|error| Failure::from(internal(error)))?;
         if !self.current().await {
             return Ok(None);
         }
         let (web, details, report) = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             let parts: Vec<Part> = files
-                .iter()
+                .iter_mut()
                 .map(|(slot, bytes, coverage, palette)| Part {
                     slot: slot.clone(),
                     glb: bytes,
-                    coverage: coverage.clone(),
-                    palette: palette.clone(),
+                    coverage: coverage.take(),
+                    palette: palette.take(),
                 })
                 .collect();
             let baked = look_bake::bake(&body, parts, hair).map_err(|error| Failure(error.code, error.message))?;

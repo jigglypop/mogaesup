@@ -37,6 +37,7 @@ class BlueprintInput(BaseModel):
     layers: list[Layer] = Field(min_length=8, max_length=13)
 
 @router.get('/assets/{asset_id}')
+@router.head('/assets/{asset_id}', include_in_schema=False)
 def asset(asset_id: str, user: UserContext = Depends(get_current_user), service=Depends(get_blueprints)):
     return FileResponse(service.asset(user.user_id, asset_id), media_type='image/png')
 

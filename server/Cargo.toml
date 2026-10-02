@@ -19,6 +19,7 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures-util = "0.3"
+gltf-json = { version = "1.4.1", features = ["names", "extras", "extensions", "KHR_materials_unlit"] }
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 object_store = { version = "0.12.5", default-features = false, features = ["aws", "fs"] }

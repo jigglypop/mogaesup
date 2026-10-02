@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { Link } from 'react-router-dom';
 
@@ -24,30 +24,62 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
   const [text, setText] = useState('');
   const [secret, setSecret] = useState(false);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [posting, setPosting] = useState(false);
+  const context = useRef<{ controller: AbortController; reads: number; paging: boolean; mutating: boolean } | null>(null);
 
   const load = useCallback(
     async (before?: string) => {
-      const page = await socialApi.guestbook(username, before);
-      setEntries((current) => (before ? [...current, ...page.entries] : page.entries));
-      setTotal(page.total);
-      setNextBefore(page.nextBefore);
+      const scope = context.current;
+      if (!scope || scope.controller.signal.aborted || (before && scope.paging)) return;
+      const mine = ++scope.reads;
+      scope.paging = true;
+      setLoading(true);
+      try {
+        const page = await socialApi.guestbook(username, before, scope.controller.signal);
+        if (scope.controller.signal.aborted || mine !== scope.reads) return;
+        setEntries((current) => before ? [...new Map([...current, ...page.entries].map(entry => [entry.id, entry])).values()] : page.entries);
+        setTotal(page.total);
+        setNextBefore(page.nextBefore);
+      } finally {
+        if (!scope.controller.signal.aborted && mine === scope.reads) { scope.paging = false; setLoading(false); }
+      }
     },
     [username],
   );
 
   const run = (action: () => Promise<unknown>) => {
+    const scope = context.current;
     setError('');
-    action().catch((problem: unknown) => setError(problemText(problem)));
+    action().catch((problem: unknown) => { if (scope && !scope.controller.signal.aborted) setError(problemText(problem)); });
   };
 
-  useEffect(() => run(() => load()), [load]);
+  useEffect(() => {
+    const scope = { controller: new AbortController(), reads: 0, paging: false, mutating: false };
+    context.current = scope;
+    setEntries([]); setTotal(0); setNextBefore(null); setText(''); setSecret(false); setPosting(false); setError('');
+    void load().catch((problem: unknown) => { if (!scope.controller.signal.aborted) setError(problemText(problem)); });
+    return () => { scope.controller.abort(); };
+  }, [load, viewer?.id]);
+
+  const mutate = (action: (scope: NonNullable<typeof context.current>) => Promise<void>) => {
+    const scope = context.current;
+    if (!scope || scope.controller.signal.aborted || scope.mutating) return;
+    scope.mutating = true;
+    setPosting(true);
+    run(() => action(scope).finally(() => {
+      scope.mutating = false;
+      if (!scope.controller.signal.aborted) setPosting(false);
+    }));
+  };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const body = text.trim();
     if (!body) return;
-    run(async () => {
+    mutate(async (scope) => {
       await socialApi.write(username, { body, secret });
+      if (scope.controller.signal.aborted) return;
       setText('');
       setSecret(false);
       await load();
@@ -64,6 +96,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
           <textarea
             id="guestbook-text"
             value={text}
+            disabled={posting}
             maxLength={300}
             rows={2}
             placeholder="따뜻한 한마디"
@@ -72,11 +105,11 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
           />
           <div className="mg-compose-foot">
             <label className="mg-check">
-              <input type="checkbox" checked={secret} onChange={(event) => setSecret(event.target.checked)} />
+              <input type="checkbox" disabled={posting} checked={secret} onChange={(event) => setSecret(event.target.checked)} />
               비밀글
             </label>
-            <button className="mg-btn is-primary is-small" type="submit" disabled={!text.trim()}>
-              남기기
+            <button className="mg-btn is-primary is-small" type="submit" disabled={posting || !text.trim()}>
+              {posting ? '저장 중…' : '남기기'}
             </button>
           </div>
         </form>
@@ -93,7 +126,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
       <p className="mg-list-count">
         방명록 <b>{total}</b>
       </p>
-      {entries.length === 0 && <p className="mg-empty">첫 번째로 한마디를 남겨 보세요</p>}
+      {entries.length === 0 && <p className="mg-empty" role="status">{loading ? '불러오는 중…' : '첫 번째로 한마디를 남겨 보세요'}</p>}
       <ul className="mg-entries">
         {entries.map((entry) => (
           <li key={entry.id}>
@@ -108,9 +141,11 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
                 {entry.canDelete && (
                   <button
                     className="mg-link"
+                    disabled={posting}
                     onClick={() =>
-                      run(async () => {
+                      mutate(async (scope) => {
                         await socialApi.remove(entry.id);
+                        if (scope.controller.signal.aborted) return;
                         await load();
                       })
                     }
@@ -125,7 +160,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
         ))}
       </ul>
       {nextBefore && (
-        <button className="mg-btn is-quiet is-wide" onClick={() => run(() => load(nextBefore))}>
+        <button className="mg-btn is-quiet is-wide" disabled={loading || posting} onClick={() => run(() => load(nextBefore))}>
           더 보기
         </button>
       )}

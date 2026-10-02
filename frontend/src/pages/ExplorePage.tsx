@@ -77,14 +77,22 @@ export function ExplorePage() {
   const [error, setError] = useState('');
   // Another search drops whatever is still on its way for the one before it.
   const asking = useRef<AbortController | null>(null);
+  const firstReady = useRef(false);
+  const paging = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
     asking.current = controller;
+    firstReady.current = false;
+    paging.current = false;
+    setHomes(null);
+    setBefore(null);
+    setError('');
     setLoadingMore(false);
     homeApi.list({ limit: EXPLORE_PAGE, q: search }, controller.signal).then(
       (result) => {
         if (controller.signal.aborted) return;
+        firstReady.current = true;
         setHomes(result.homes);
         setBefore(nextBefore(result.homes));
         setError('');
@@ -102,7 +110,8 @@ export function ExplorePage() {
 
   const loadMore = () => {
     const controller = asking.current;
-    if (!before || !controller || loadingMore) return;
+    if (!before || !controller || !firstReady.current || paging.current || searchOf(query) !== search) return;
+    paging.current = true;
     setLoadingMore(true);
     setError('');
     homeApi.list({ limit: EXPLORE_PAGE, q: search, before }, controller.signal).then(
@@ -111,11 +120,13 @@ export function ExplorePage() {
         setHomes((current) => appendHomes(current ?? [], result.homes));
         setBefore(nextBefore(result.homes));
         setLoadingMore(false);
+        paging.current = false;
       },
       () => {
         if (controller.signal.aborted) return;
         setError('목록을 불러오지 못했어요');
         setLoadingMore(false);
+        paging.current = false;
       },
     );
   };
@@ -136,6 +147,7 @@ export function ExplorePage() {
           <ExploreSearch query={query} onQuery={(text) => setParams(text ? { q: text } : {}, { replace: true })} />
         </div>
         {error && <p className="mg-error">{error}</p>}
+        {!homes && !error && <p className="mg-empty" role="status">불러오는 중…</p>}
         {homes?.length === 0 && <p className="mg-empty">{search ? '찾는 섬이 없어요' : '아직 공개된 섬이 없어요'}</p>}
         <ul className="mg-islands">
           {homes?.map((home) => {
@@ -163,7 +175,7 @@ export function ExplorePage() {
           })}
         </ul>
         {before && (
-          <button className="mg-btn is-quiet is-wide" disabled={loadingMore} onClick={loadMore}>
+          <button className="mg-btn is-quiet is-wide" disabled={loadingMore || searchOf(query) !== search} onClick={loadMore}>
             더 보기
           </button>
         )}

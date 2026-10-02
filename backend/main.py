@@ -22,6 +22,8 @@ def run_api() -> None:
         port=int(os.getenv("API_PORT", "8000")),
         timeout_keep_alive=30,
         timeout_graceful_shutdown=10,
+        proxy_headers=False,
+        workers=1,
     )
 
 

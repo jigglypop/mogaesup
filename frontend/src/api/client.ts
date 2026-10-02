@@ -20,6 +20,7 @@ type RequestOptions = {
   method?: string;
   body?: unknown;
   signal?: AbortSignal;
+  keepalive?: boolean;
   /** How long the whole exchange may take before it is given up as unanswered; 30 seconds by default. */
   timeoutMs?: number;
 };
@@ -68,6 +69,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
       credentials: 'same-origin',
       ...(write ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(options.body ?? {}) } : {}),
       signal: wait.signal,
+      ...(options.keepalive ? { keepalive: true } : {}),
     });
     if (response.status === 204) return undefined as T;
     // Not JSON (a proxy's error page) reads as no body, but a read the clock cut short is a failure of its own.

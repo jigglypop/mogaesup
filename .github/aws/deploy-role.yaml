@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Role the GitHub Actions pipeline of mogaesup assumes through OIDC. It uploads and installs releases (web files, the server binary, the studio archive) and cannot change infrastructure or IAM.
+
+Parameters:
+  Repository:
+    Type: String
+    Default: jigglypop/mogaesup
+    Description: GitHub repository allowed to assume the role
+  Branch:
+    Type: String
+    Default: main
+    Description: Only runs on this branch may assume the role
+  WebBucket:
+    Type: String
+    Default: mogaesup-web-960243570517-apne2
+  WebDistributionId:
+    Type: String
+    Default: E6S32PYOEGG1P
+  ServerRuntimeBucket:
+    Type: String
+    Default: mogaesup-runtime-960243570517-ap-northeast-2
+  ServerInstanceId:
+    Type: String
+    Default: i-0bc178f1e70898d6f
+  StudioBucket:
+    Type: String
+    Default: gaesup-character-assets-960243570517-apne2
+  StudioInstanceId:
+    Type: String
+    Default: i-00381416eff810818
+
+Resources:
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: mogaesup-github-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+                'token.actions.githubusercontent.com:sub': !Sub 'repo:${Repository}:ref:refs/heads/${Branch}'
+      Policies:
+        - PolicyName: ReleaseOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadStacks
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/mogaesup-web/*'
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/mogaesup-server/*'
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/gaesup-asset-studio/*'
+              - Sid: ValidateTemplates
+                Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: '*'
+              - Sid: WebFiles
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub 'arn:aws:s3:::${WebBucket}/*'
+              - Sid: WebList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:aws:s3:::${WebBucket}'
+              - Sid: WebInvalidation
+                Effect: Allow
+                Action: [cloudfront:CreateInvalidation, cloudfront:GetInvalidation]
+                Resource: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${WebDistributionId}'
+              - Sid: ServerReleases
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub 'arn:aws:s3:::${ServerRuntimeBucket}/release-*'
+              - Sid: StudioReleases
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub 'arn:aws:s3:::${StudioBucket}/releases/studio/*'
+              - Sid: StudioBucketChecks
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetEncryptionConfiguration
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketOwnershipControls
+                Resource: !Sub 'arn:aws:s3:::${StudioBucket}'
+              - Sid: RunReleaseScripts
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ServerInstanceId}'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${StudioInstanceId}'
+              - Sid: ReadCommandResults
+                Effect: Allow
+                Action: [ssm:GetCommandInvocation, ssm:DescribeInstanceInformation, ec2:DescribeInstances]
+                Resource: '*'
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt DeployRole.Arn

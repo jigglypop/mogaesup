@@ -16,6 +16,7 @@ Python 코드는 `src/`, 테스트는 `tests/`, DB migration은 `migrations/`에
 - 중복 요청과 CLI/API 동시 실행을 같은 잠금·상태 검사로 막는다. 유료 POST 전 의도 저장, task ID 복구, idempotency 세부사항은 공유 계약을 따른다.
 - 경로 기준은 명시적으로 정한 데이터 루트다. 실행 디렉터리에 따라 다른 manifest·이미지·`.env`를 읽지 않도록 이전 시 확인한다.
 - 제어 서버는 단일 worker로 실행한다. 현재 파일 잠금과 작업 executor는 다중 worker 큐가 아니다. 중단된 Blender 작업은 `runner.json`, 로그, 완료 파일과 해당 프로세스를 확인한다. `running` 기록만으로 재실행하거나 잠금을 지우지 않는다.
+- API·CLI·Blender는 데이터 루트 `.runtime`의 동일한 admission 잠금과 커널 work lease를 쓴다. 새로운 mutation은 drain 중 503이고 이미 수락한 작업만 다음 단계를 계속한다. 병렬 실행은 `ContextThreadPoolExecutor`로 수락 context를 이어받고 Blender는 고정 `runtime_blender_bootstrap.py`를 recipe 전에 실행한다. 부모 PID 종료만으로 Blender가 끝났다고 보지 않는다. 내부 drain은 실제 loopback socket과 점검 token으로만 열고 reverse proxy로 전달하지 않는다.
 - 재질 분리와 원본 면 선택 분리를 구분한다. 면 선택은 GLB 원본 attribute·skin을 보존하며 index만 나누고, 독립 Blender에서 작업 파일과 렌더를 만든다. 브라우저 입력을 실행 코드로 바꾸거나 기존 MCP 작업 장면을 초기화하지 않는다.
 
 ## 에셋과 검증

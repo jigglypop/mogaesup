@@ -63,9 +63,14 @@ class FakeProcess:
 
     def __init__(self, exit_code=1):
         self.exit_code, self.stopped = exit_code, []
+        self.completed = False
 
     def wait(self, timeout=None):
+        self.completed = True
         return self.exit_code
+
+    def poll(self):
+        return self.exit_code if self.completed else None
 
     def terminate(self):
         self.stopped.append('terminate')

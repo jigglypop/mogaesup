@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
+import { studioHref } from '../../studio/screens';
 import { generationsApi, type Generation, type VectorColors } from './generations-api';
 import { EmoticonRig } from './EmoticonRig';
 import './generations.css';
@@ -87,7 +88,7 @@ export default function Emoticons() {
           onChange={event => setDraft(value => ({ ...value, useReference: event.target.value === 'selected' }))}>
           <option value="new">새 원화</option>{base && <option value="selected">{base.name}</option>}
         </select></label>
-        <a className="prompt-management-link" href="/?tab=prompts&promptGroup=illustration" target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
+        <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'illustration' })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
         <label className="generation-prompt">프롬프트<textarea required maxLength={8000} value={pending?.input.prompt ?? draft.prompt} disabled={inputLocked}
           onChange={event => setDraft(value => ({ ...value, prompt: event.target.value, edited: true }))} /></label>
         <div className="generation-form-actions">

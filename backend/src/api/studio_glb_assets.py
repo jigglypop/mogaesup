@@ -58,6 +58,7 @@ def glb_asset(asset_id: str, user: UserContext = Depends(get_current_user), fact
 
 
 @router.get('/{asset_id}/source.glb')
+@router.head('/{asset_id}/source.glb', include_in_schema=False)
 def glb_asset_source(asset_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return artifact_response(StudioGlbAssets(factory, user.user_id).source(asset_id),
                              media_type='model/gltf-binary', filename='source.glb')

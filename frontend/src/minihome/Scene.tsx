@@ -2,6 +2,7 @@ import { Suspense, type ReactNode, type RefObject } from 'react';
 
 import { Canvas } from '@react-three/fiber';
 import type { RapierRigidBody } from '@react-three/rapier';
+import type { Group } from 'three';
 
 import {
   CascadedSun,
@@ -63,6 +64,8 @@ export type SceneSettings = {
 type SceneProps = SceneSettings & {
   /** The player's body, which the live room samples to publish where we are. */
   playerRef: RefObject<RapierRigidBody>;
+  /** The engine turns this group while the character's physics body stays upright. */
+  visualRotationRef: RefObject<Group>;
   /** Other people in the live room. */
   visitors?: ReactNode;
   /** The island's residents. */
@@ -70,7 +73,7 @@ type SceneProps = SceneSettings & {
 };
 
 /** The island canvas: the player, the village, visitors, residents and the rule engine's trigger areas. */
-export function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visitors, residents }: SceneProps) {
+export function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visualRotationRef, visitors, residents }: SceneProps) {
   // A lost GPU device remounts the canvas with a fresh renderer; the island's state lives outside it.
   const canvasKey = useRendererRecovery();
   const worldGi = postProcessing && !!cinematic;
@@ -86,7 +89,7 @@ export function Scene({ quality, postProcessing, cinematic, idleThrottle, player
           {worldGi && <WorldGi environment={GI_SKY} />}
           {idleThrottle && <IdleFrameRate />}
           <WorldPhysics>
-            <GaesupController rigidBodyRef={playerRef} position={SPAWN} scale={MINIME_SCALE} materialPolicy="figure" clickToMove />
+            <GaesupController rigidBodyRef={playerRef} innerGroupRef={visualRotationRef} position={SPAWN} scale={MINIME_SCALE} materialPolicy="figure" modelHierarchy clickToMove />
             <BuildingController />
             <Shore />
             {visitors}

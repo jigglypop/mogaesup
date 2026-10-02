@@ -19,6 +19,7 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
     };
   }
   if (error instanceof ApiRequestError) {
+    if (error.code === 'owner_changed') return { kind: 'auth', message: error.message };
     if (error.status === 409) return 'conflict';
     if (error.status === 422) {
       return { kind: 'invalid', message: '섬에 저장할 수 없는 내용이 섞여 있어요. 최근에 놓은 물건을 치우고 다시 저장해 주세요.' };
@@ -86,6 +87,7 @@ export type SaverState = {
 };
 
 export type IslandSaver = {
+  readonly disposed: boolean;
   getState: () => SaverState;
   subscribe: (listener: () => void) => () => void;
   /** Reads the stored island into the world; call once the runtime is set up. */
@@ -191,6 +193,7 @@ export function createIslandSaver({
     // The runtime serializes synchronously inside save(), so `captured` names exactly what this write holds.
     return system.save().then(
       () => {
+        if (disposed) return false;
         saved = captured;
         failed = null;
         retries = 0;
@@ -199,6 +202,7 @@ export function createIslandSaver({
         return true;
       },
       (error: unknown) => {
+        if (disposed) return false;
         // The wait for the next autosave starts from the next edit, not from the one this attempt was for.
         firstDirtyAt = null;
         const problem = describeSaveError(error, adapter.lastBytes);
@@ -224,7 +228,7 @@ export function createIslandSaver({
   };
 
   const save = (): Promise<boolean> => {
-    if (!writable || state.phase !== 'ready' || state.conflict) return Promise.resolve(false);
+    if (disposed || !writable || state.phase !== 'ready' || state.conflict) return Promise.resolve(false);
     if (inflight) {
       again = true;
       return inflight;
@@ -243,7 +247,7 @@ export function createIslandSaver({
   };
 
   const flush = (): Promise<boolean> => {
-    if (state.phase !== 'ready' || !saved) return Promise.resolve(false);
+    if (disposed || state.phase !== 'ready' || !saved) return Promise.resolve(false);
     const dirty = isDirty();
     if (dirty !== state.dirty) set({ dirty });
     if (!dirty) return Promise.resolve(true);
@@ -252,6 +256,7 @@ export function createIslandSaver({
   };
 
   const load = async (): Promise<boolean> => {
+    if (disposed) return false;
     const mine = ++loads;
     stopTimer();
     stopRetry();
@@ -261,10 +266,10 @@ export function createIslandSaver({
     try {
       applied = await system.load();
     } catch (error) {
-      if (mine === loads) set({ phase: 'loadFailed', problem: describeLoadError(error) });
+      if (!disposed && mine === loads) set({ phase: 'loadFailed', problem: describeLoadError(error) });
       return false;
     }
-    if (mine !== loads) return false;
+    if (disposed || mine !== loads) return false;
     // Nothing applied means either nothing is stored yet (the first save creates it), or the restore was cancelled while
     // an island is stored. This island is then the village the runtime starts with, and saving it would replace theirs.
     if (!applied && adapter.revision > 0) {
@@ -280,6 +285,7 @@ export function createIslandSaver({
   };
 
   return {
+    get disposed() { return disposed; },
     getState: () => state,
     subscribe(listener) {
       listeners.add(listener);
@@ -289,7 +295,7 @@ export function createIslandSaver({
     save,
     flush,
     async overwrite() {
-      if (!writable) return false;
+      if (disposed || !writable) return false;
       try {
         await adapter.refreshRevision();
       } catch (error) {
@@ -314,9 +320,14 @@ export function createIslandSaver({
       } else if (!state.saving) schedule();
     },
     dispose() {
+      if (disposed) return;
       disposed = true;
+      loads++;
+      again = false;
       stopTimer();
       stopRetry();
+      set({ saving: false });
+      listeners.clear();
     },
   };
 }

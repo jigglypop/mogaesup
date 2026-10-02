@@ -11,8 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from src.services.character_parts import blender_executable
-from src.services.worker_env import worker_environment
+from src.services.character_parts import blender_executable, blender_process
+from src.services.asset_editor import _write_json
 
 
 def measure(directory, *, images=None, canvas=None):
@@ -25,12 +25,17 @@ def measure(directory, *, images=None, canvas=None):
         payload = {'directory': str(Path(directory).resolve()), 'output': str(scratch/'metrics.json'),
                    'images': images or {}, 'canvas': canvas}
         (scratch/'input.json').write_text(json.dumps(payload), encoding='utf8')
-        process = subprocess.run([executable, '--background', '--factory-startup', '--disable-autoexec',
-                                  '--python-exit-code', '1', '--python', str(worker), '--', str(scratch/'input.json')],
-                                 capture_output=True, text=True, encoding='utf8', errors='replace',
-                                 env=worker_environment())
-        if process.returncode:
-            raise SystemExit(f'Quality worker failed for {directory}:\n{process.stdout[-2000:]}{process.stderr[-2000:]}')
+        command = [executable, '--background', '--factory-startup', '--disable-autoexec',
+                   '--python-exit-code', '1', '--python', str(worker), '--', str(scratch/'input.json')]
+        with blender_process(command, scratch/'worker.log', scratch/'runner.json',
+                             write_json=_write_json, checkpoint=False) as process:
+            try:
+                code = process.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                raise SystemExit(f'Quality worker timed out for {directory}') from None
+        if code:
+            log = (scratch/'worker.log').read_text(encoding='utf8', errors='replace')
+            raise SystemExit(f'Quality worker failed for {directory}:\n{log[-4000:]}')
         return json.loads((scratch/'metrics.json').read_text(encoding='utf8'))
 
 

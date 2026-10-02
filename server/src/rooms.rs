@@ -13,6 +13,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures_util::StreamExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,13 +23,12 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::User,
-    config::Config,
+    auth::{self, User},
     error::{ApiError, ApiResult, conflict},
     homes::visible_home,
     security::{FOREIGN_ORIGIN, constant_time_eq, epoch_seconds, hmac_sha256, same_origin},
@@ -64,6 +64,7 @@ const REST_ROTATION: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 #[derive(Debug, Deserialize, Serialize)]
 struct TicketClaims {
     sub: Uuid,
+    session: String,
     username: String,
     name: String,
     exp: u64,
@@ -71,12 +72,13 @@ struct TicketClaims {
 }
 
 /// A single-use, one-minute ticket: a browser cannot put a cookie or header on a WebSocket, so it carries this instead.
-pub fn issue_ticket(secret: &[u8], user: &User) -> (String, u64) {
+pub fn issue_ticket(secret: &[u8], user: &User, session: &str) -> (String, u64) {
     let exp = epoch_seconds() + TICKET_TTL_SECONDS;
     let mut nonce = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let claims = TicketClaims {
         sub: user.id,
+        session: session.to_owned(),
         username: user.username.clone(),
         name: user.display_name.clone(),
         exp,
@@ -168,6 +170,14 @@ fn coordinate(value: f64) -> bool {
     value.is_finite() && value.abs() <= MAX_COORDINATE
 }
 
+/// Wire quaternions are w/x/y/z. Scale first so even a tiny valid quaternion does not underflow.
+fn normalize_rotation(rotation: [f64; 4]) -> [f64; 4] {
+    let maximum = rotation.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let scaled = rotation.map(|value| value / maximum);
+    let length = scaled.iter().map(|value| value * value).sum::<f64>().sqrt();
+    scaled.map(|value| value / length)
+}
+
 fn label(value: &str) -> bool {
     value.chars().count() <= MAX_LABEL
 }
@@ -204,6 +214,8 @@ impl PartialState {
 
 struct Peer {
     tx: mpsc::Sender<Message>,
+    close: watch::Sender<Option<(u16, &'static str)>>,
+    session: String,
     user: User,
     name: String,
     state: Option<PlayerState>,
@@ -285,7 +297,14 @@ impl Rooms {
         used.insert(receipt, claims.exp).is_none().then_some(claims)
     }
 
-    fn register(&self, room: &str, user: User, name: String, tx: mpsc::Sender<Message>) -> ApiResult<Registration> {
+    fn register(
+        &self,
+        room: &str,
+        user: User,
+        name: String,
+        session: String,
+        tx: mpsc::Sender<Message>,
+    ) -> ApiResult<Registration> {
         let mut hub = self.hub();
         if hub.connections >= SERVER_CAPACITY {
             return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "room", "실시간 서버가 가득 찼습니다."));
@@ -303,10 +322,13 @@ impl Rooms {
         }
         let id = Uuid::new_v4().to_string();
         let account = user.id;
+        let (close, cancelled) = watch::channel(None);
         peers.insert(
             id.clone(),
             Peer {
                 tx,
+                close,
+                session: session.clone(),
                 user,
                 name,
                 state: None,
@@ -319,7 +341,7 @@ impl Rooms {
         );
         hub.connections += 1;
         *hub.accounts.entry(account).or_default() += 1;
-        Ok(Registration { rooms: self.clone(), room: room.to_owned(), id })
+        Ok(Registration { rooms: self.clone(), room: room.to_owned(), id, user: account, session, cancelled })
     }
 
     fn remove(&self, room_key: &str, id: &str) {
@@ -349,10 +371,29 @@ impl Rooms {
 
     /// Closes one peer's socket, which takes it out of its room.
     fn evict(&self, room: &str, id: &str) {
+        self.close_peer(room, id, 4403, "no access");
+    }
+
+    fn close_peer(&self, room: &str, id: &str, code: u16, reason: &'static str) {
         if let Some(peer) = self.hub().rooms.get(room).and_then(|room| room.get(id)) {
-            let _ = peer.tx.try_send(Message::Close(Some(CloseFrame { code: 4403, reason: "no access".into() })));
+            // This signal is independent of the bounded outbound queue, so a full queue cannot delay revocation.
+            peer.close.send_replace(Some((code, reason)));
         }
         self.remove(room, id);
+    }
+
+    pub fn end_session(&self, session: &str) {
+        let peers: Vec<(String, String)> = self
+            .hub()
+            .rooms
+            .iter()
+            .flat_map(|(room, peers)| {
+                peers.iter().filter(|(_, peer)| peer.session == session).map(|(id, _)| (room.clone(), id.clone()))
+            })
+            .collect();
+        for (room, id) in peers {
+            self.close_peer(&room, &id, 4401, "session ended");
+        }
     }
 
     fn receive(&self, room_key: &str, id: &str, raw: &str, origins: &[String]) -> Flow {
@@ -397,7 +438,7 @@ impl Rooms {
                     broadcast(room, id, &json!({"type": "PlayerJoined", "client_id": id, "state": state}));
                 }
             }
-            ClientMessage::Update { state: changes } => {
+            ClientMessage::Update { state: mut changes } => {
                 let Some(state) = peer.state.as_mut() else { return Flow::Continue };
                 if !changes.valid(origins) {
                     return malformed(&mut peer.invalid, now);
@@ -405,6 +446,7 @@ impl Rooms {
                 if !peer.updates.allow(now, UPDATES_PER_SECOND) {
                     return Flow::Continue;
                 }
+                changes.rotation = changes.rotation.map(normalize_rotation);
                 if let Some(value) = changes.color.clone() {
                     state.color = value;
                 }
@@ -474,6 +516,9 @@ struct Registration {
     rooms: Rooms,
     room: String,
     id: String,
+    user: Uuid,
+    session: String,
+    cancelled: watch::Receiver<Option<(u16, &'static str)>>,
 }
 
 impl Drop for Registration {
@@ -505,16 +550,28 @@ async fn upgrade(
         return Err(FOREIGN_ORIGIN);
     }
     let claims = state.rooms.verify(&state.config.ticket_secret, &query.ticket).ok_or(BAD_TICKET)?;
+    if !auth::active_session(&state, &claims.session, claims.sub).await? {
+        return Err(BAD_TICKET);
+    }
     let visitor = User { id: claims.sub, username: claims.username, display_name: claims.name, role: "user".into() };
     let (home, _) = visible_home(&state, &name, Some(&visitor)).await?;
     let (tx, rx) = mpsc::channel(OUTBOUND_CAPACITY);
     let display = if visitor.display_name.is_empty() { visitor.username.clone() } else { visitor.display_name.clone() };
-    let registration = state.rooms.register(&home.username, visitor, display, tx)?;
-    let config = state.config.clone();
+    let registration = state.rooms.register(&home.username, visitor, display, claims.session, tx)?;
     Ok(ws
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| connection(socket, registration, rx, config)))
+        .on_upgrade(move |socket| connection(socket, registration, rx, state)))
+}
+
+/// Group membership can grant access to many homes. Re-check every occupied room after any explicit revocation.
+pub async fn revalidate_all(state: &AppState) {
+    let owners: Vec<String> = state.rooms.hub().rooms.keys().cloned().collect();
+    futures_util::stream::iter(owners)
+        .for_each_concurrent(8, |owner| async move {
+            revalidate(state, &owner).await;
+        })
+        .await;
 }
 
 /// Closes the sockets of whoever may no longer view `owner`'s island, after something narrowed who may: its visibility,
@@ -543,9 +600,9 @@ async fn send(socket: &mut WebSocket, message: Message) -> bool {
 
 async fn connection(
     mut socket: WebSocket,
-    registration: Registration,
+    mut registration: Registration,
     mut outbound: mpsc::Receiver<Message>,
-    config: Arc<Config>,
+    state: AppState,
 ) {
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -553,12 +610,19 @@ async fn connection(
     // Whether a close frame has gone to the peer.
     let mut closed = false;
     let closing = loop {
+        if let Some(closing) = *registration.cancelled.borrow() {
+            break Some(closing);
+        }
         tokio::select! {
+            _ = registration.cancelled.changed() => {
+                let reason = *registration.cancelled.borrow();
+                break reason.or(Some((4403, "no access")));
+            }
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(raw))) => {
                     last_seen = Instant::now();
                     if let Flow::Close(code, reason) =
-                        registration.rooms.receive(&registration.room, &registration.id, raw.as_str(), &config.origins)
+                        registration.rooms.receive(&registration.room, &registration.id, raw.as_str(), &state.config.origins)
                     {
                         break Some((code, reason));
                     }
@@ -576,14 +640,27 @@ async fn connection(
                         break None;
                     }
                 }
-                None => break None,
+                None => break *registration.cancelled.borrow(),
             },
             _ = heartbeat.tick() => {
+                // The first tick also closes the handshake/logout race; subsequent ticks enforce DB-side expiry,
+                // revocations by another server, and visibility changes concurrent with the handshake.
+                if !auth::active_session(&state, &registration.session, registration.user).await.unwrap_or(false) {
+                    break Some((4401, "session ended"));
+                }
+                let user = registration.rooms.occupants(&registration.room).into_iter()
+                    .find(|(id, _)| id == &registration.id).map(|(_, user)| user);
+                if let Some(user) = user {
+                    if visible_home(&state, &registration.room, Some(&user)).await.is_err() { break Some((4403, "no access")); }
+                } else { break Some((4403, "no access")); }
                 if last_seen.elapsed() >= HEARTBEAT_TIMEOUT { break Some((4000, "heartbeat timeout")); }
                 if !send(&mut socket, Message::Ping(Vec::new().into())).await { break None; }
             }
         }
     };
+    // Revocation can race an incoming frame or the outbound channel closing after the peer was removed.
+    // Preserve its reason whichever select branch completed first.
+    let closing = (*registration.cancelled.borrow()).or(closing);
     if let Some((code, reason)) = closing {
         closed = send(&mut socket, Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
     }
@@ -607,7 +684,7 @@ mod tests {
     fn tickets_verify_once_and_only_with_their_secret() {
         let rooms = Rooms::default();
         let secret = b"a-realtime-ticket-secret-of-32-bytes!";
-        let (ticket, _) = issue_ticket(secret, &user());
+        let (ticket, _) = issue_ticket(secret, &user(), "test-session");
         assert!(rooms.verify(b"another-secret-of-at-least-32-bytes!!", &ticket).is_none());
         assert_eq!(rooms.verify(secret, &ticket).map(|claims| claims.name), Some("모개".into()));
         assert!(rooms.verify(secret, &ticket).is_none());
@@ -684,7 +761,7 @@ mod tests {
     }
 
     fn peer(user: &User, room: &str, rooms: &Rooms) -> ApiResult<Registration> {
-        rooms.register(room, user.clone(), user.display_name.clone(), mpsc::channel(4).0)
+        rooms.register(room, user.clone(), user.display_name.clone(), "test-session".into(), mpsc::channel(4).0)
     }
 
     #[test]

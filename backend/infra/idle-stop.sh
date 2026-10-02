@@ -75,10 +75,29 @@ boot=$(( now - uptime_seconds ))
 
 # A deployment replaces the container; its locks are held while it runs.
 for lock in /var/lock/asset-studio-deploy.lock /var/lock/asset-studio-prepare.lock; do
-  if [[ -e "$lock" ]] && ! flock -n "$lock" true; then
+  exec {lock_fd}>"$lock"
+  if ! flock -n "$lock_fd"; then
     keep "a deployment is running"
   fi
 done
+
+read_activity() {
+  python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)
+    activity, admission = value["activity"], value["admission"]
+    counts = [activity[name] for name in ("paid_requests", "running_tasks")]
+    if (any(type(count) is not int or count < 0 for count in counts)
+            or type(admission["version"]) is not int or admission["version"] != 1
+            or admission["verified"] is not True or type(admission["draining"]) is not bool
+            or (sys.argv[1] == "drained" and admission["draining"] is not True)):
+        raise ValueError("unverified work")
+    print(*counts)
+except (KeyError, TypeError, ValueError, AttributeError):
+    sys.exit(1)
+' "${1:-observe}"
+}
 
 install -d -m 700 "$state_dir"
 last=$boot
@@ -88,15 +107,14 @@ running=$(docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null || 
 if [[ "$running" == true ]]; then
   started=$(date -d "$(docker inspect -f '{{.State.StartedAt}}' "$service_name")" +%s 2>/dev/null || echo 0)
   latest "$started"
-  busy=$(curl --silent --fail --max-time 10 http://127.0.0.1:8080/api/health | python3 -c '
-import json, sys
-activity = json.load(sys.stdin)["activity"]
-print(int(activity["paid_requests"]), int(activity["running_tasks"]))' 2>/dev/null) || keep "the API health (paid requests, running tasks) could not be read"
+  busy=$(curl --silent --fail --max-time 10 http://127.0.0.1:8080/api/health | read_activity) || keep "the API health (paid requests, running tasks) could not be read"
   read -r paid tasks <<< "$busy"
   if (( paid + tasks > 0 )); then
     touch "$state_dir/last-busy"
     keep "$paid paid requests and $tasks tasks running"
   fi
+else
+  keep 'runtime admission cannot be closed while the API is unavailable'
 fi
 [[ -f "$state_dir/last-busy" ]] && latest "$(stat -c %Y "$state_dir/last-busy")"
 
@@ -123,5 +141,36 @@ idle=$(( now - last ))
 if (( idle < idle_limit )); then
   keep "idle $(( idle / 60 )) of $(( idle_limit / 60 )) min"
 fi
+# Close admission before the final observation; a request accepted before drain is visible here.
+# The deploy/prepare locks stay held through the poweroff request.
+drain_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+drain_payload="{\"token\":\"$drain_token\"}"
+drain_acquired=true
+control_admission() {
+  curl --silent --show-error --fail --max-time 5 -X "$1" -H 'Content-Type: application/json' \
+    --data "$drain_payload" http://127.0.0.1:8000/internal/drain
+}
+release_admission() {
+  if [[ "$drain_acquired" == true ]]; then
+    control_admission DELETE >/dev/null || echo 'could not reopen runtime admission; local operator resume is required' >&2
+  fi
+}
+trap release_admission EXIT
+trap 'exit 1' INT TERM
+busy=$(control_admission POST | read_activity drained) || keep 'runtime admission drain could not be verified'
+read -r paid tasks <<< "$busy"
+if (( paid + tasks > 0 )); then
+  touch "$state_dir/last-busy"
+  keep "$paid paid requests and $tasks tasks admitted before drain"
+fi
+# A request could have completed between the first idle check and admission closing.
+[[ -f "$activity_log" ]] && latest "$(stat -c %Y "$activity_log")"
+idle=$(( $(date +%s) - last ))
+(( idle >= idle_limit )) || keep 'a request arrived before runtime admission closed'
 echo "powering off: idle $(( idle / 60 )) min with no paid requests or tasks"
-systemctl poweroff
+if systemctl poweroff; then
+  # Keep admission closed until the next API start proves it owns the server lease.
+  drain_acquired=false
+else
+  exit 1
+fi

@@ -20,7 +20,7 @@ use crate::{
     AppState,
     error::{ApiError, ApiResult, LOGIN_REQUIRED, bad, conflict, forbidden, internal},
     rebac::{self, Actor, Checker, PERMISSIONS, Permission, ROLE_COLUMN, Subject, Tuple},
-    security::{client_address, rate_exceeded, rate_limit, rate_record},
+    security::{client_address, rate_limit, rate_reserve},
 };
 
 const SESSION_COOKIE: &str = "mogaesup_session";
@@ -49,7 +49,7 @@ impl User {
 }
 
 /// The session token's hash, from a well-formed session cookie.
-fn token_hash(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn token_hash(headers: &HeaderMap) -> Option<String> {
     let prefix = format!("{SESSION_COOKIE}=");
     let token = headers
         .get_all(header::COOKIE)
@@ -77,6 +77,16 @@ pub async fn optional_user(state: &AppState, headers: &HeaderMap) -> ApiResult<O
 
 pub async fn current_user(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
     optional_user(state, headers).await?.ok_or(LOGIN_REQUIRED)
+}
+
+pub(crate) async fn active_session(state: &AppState, hash: &str, user: Uuid) -> ApiResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = $1 AND user_id = $2 AND expires_at > now())",
+    )
+    .bind(hash)
+    .bind(user)
+    .fetch_one(&state.db)
+    .await?)
 }
 
 /// The signed-in user, when they hold `permission`; 403 with the permission's own code otherwise.
@@ -170,8 +180,20 @@ async fn verify_password(state: &AppState, hash: Option<String>, password: Strin
 }
 
 /// The account and its minihome in one transaction; false when the username is taken. It holds no permission yet.
-async fn create_account(db: &PgPool, user: &User, password_hash: &str) -> Result<bool, sqlx::Error> {
+async fn create_account(db: &PgPool, user: &User, password_hash: &str, bootstrap: bool) -> Result<bool, sqlx::Error> {
     let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7309003))")
+        .bind(&user.username)
+        .execute(&mut *tx)
+        .await?;
+    if !bootstrap
+        && sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM auth_reserved_usernames WHERE username = $1)")
+            .bind(&user.username)
+            .fetch_one(&mut *tx)
+            .await?
+    {
+        return Ok(false);
+    }
     let inserted = sqlx::query(
         "INSERT INTO users (id, username, display_name, password_hash) VALUES ($1, $2, $3, $4)
          ON CONFLICT (username) DO NOTHING",
@@ -199,20 +221,27 @@ async fn session(state: &AppState, user: User, status: StatusCode) -> ApiResult<
     let mut random = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let token = hex::encode(random);
-    sqlx::query("INSERT INTO sessions (token_hash, user_id) VALUES ($1, $2)")
+    let mut tx = state.db.begin().await?;
+    // Serialize admission and pruning for an account, including concurrent successful logins.
+    sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE").bind(user.id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, clock_timestamp() + interval '30 days')")
         .bind(hex::encode(Sha256::digest(token.as_bytes())))
         .bind(user.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     // Bound stolen or forgotten sessions per account; every token gets the same TTL, so expiry is insertion order.
-    sqlx::query(
+    let expired: Vec<String> = sqlx::query_scalar(
         "DELETE FROM sessions WHERE token_hash IN
-         (SELECT token_hash FROM sessions WHERE user_id = $1 ORDER BY expires_at DESC OFFSET $2)",
+         (SELECT token_hash FROM sessions WHERE user_id = $1 ORDER BY expires_at DESC, token_hash DESC OFFSET $2) RETURNING token_hash",
     )
     .bind(user.id)
     .bind(SESSIONS_PER_USER)
-    .execute(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
+    for hash in expired {
+        state.rooms.end_session(&hash);
+    }
     let cookie = session_cookie(state, &token, SESSION_MAX_AGE_SECONDS);
     let user = with_permissions(state, &user).await?;
     Ok((status, [(header::SET_COOKIE, cookie)], Json(json!({"user": user}))).into_response())
@@ -230,13 +259,13 @@ pub async fn register(
     // close sign-up for everyone.
     rate_limit(&state, format!("register-address:{}", client_address(&headers)), 20)?;
     rate_limit(&state, format!("register:{name}"), 5)?;
-    rate_exceeded(&state, "register-created", 600)?;
+    let created = rate_reserve(&state, &[("register-created".into(), 600)])?;
     let hash = hash_password(&state, body.password).await?;
     let user = User { id: Uuid::new_v4(), username: name, display_name: display, role: "user".into() };
-    if !create_account(&state.db, &user, &hash).await? {
+    if !create_account(&state.db, &user, &hash, false).await? {
         return Err(conflict("username_taken", "이미 사용 중인 아이디입니다."));
     }
-    rate_record(&state, "register-created".into());
+    created.keep();
     session(&state, user, StatusCode::CREATED).await
 }
 
@@ -253,8 +282,7 @@ pub async fn login(
     // all players out.
     let address_key = format!("login-failed-address:{}", client_address(&headers));
     let user_key = format!("login-failed:{name}");
-    rate_exceeded(&state, &address_key, 30)?;
-    rate_exceeded(&state, &user_key, 50)?;
+    let attempt = rate_reserve(&state, &[(address_key, 30), (user_key, 50)])?;
     let row = sqlx::query(&format!(
         "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, u.password_hash FROM users u WHERE u.username = $1"
     ))
@@ -263,8 +291,7 @@ pub async fn login(
     .await?;
     let hash = row.as_ref().map(|r| r.get::<String, _>("password_hash"));
     if !verify_password(&state, hash, body.password).await? {
-        rate_record(&state, address_key);
-        rate_record(&state, user_key);
+        attempt.keep();
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_credentials",
@@ -277,7 +304,8 @@ pub async fn login(
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
     if let Some(hash) = token_hash(&headers) {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = $1").bind(hash).execute(&state.db).await?;
+        sqlx::query("DELETE FROM sessions WHERE token_hash = $1").bind(&hash).execute(&state.db).await?;
+        state.rooms.end_session(&hash);
     }
     Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, session_cookie(&state, "", 0))]).into_response())
 }
@@ -295,30 +323,46 @@ pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) 
     // A page asks for one when its room connects and again each time the connection drops (checked every second, with
     // waits that double up to 30 seconds), so several tabs or a reconnect loop still fit.
     rate_limit(&state, format!("realtime-ticket:{}", user.id), 90)?;
-    let (ticket, expires_at) = crate::rooms::issue_ticket(&state.config.ticket_secret, &user);
+    let hash = token_hash(&headers).ok_or(LOGIN_REQUIRED)?;
+    let (ticket, expires_at) = crate::rooms::issue_ticket(&state.config.ticket_secret, &user, &hash);
     Ok(Json(json!({"ticket": ticket, "expiresAt": expires_at, "user": user})))
 }
 
-async fn user_id(db: &PgPool, name: &str) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT id FROM users WHERE username = $1").bind(name).fetch_optional(db).await
-}
-
-/// Creates the configured operator, or takes the existing account of that name (keeping its password), and grants it
-/// `system:mogaesup#admin`, so a fresh deployment has an admin.
+/// Creates the configured operator, or verifies ownership of the existing account before granting it admin.
 pub async fn bootstrap_admin(state: &AppState, username_raw: &str, password: &str) -> anyhow::Result<()> {
     let name = username(username_raw)?;
-    let id = match user_id(&state.db, &name).await? {
-        Some(id) => id,
+    new_password(password)?;
+    sqlx::query("INSERT INTO auth_reserved_usernames (username) VALUES ($1) ON CONFLICT DO NOTHING")
+        .bind(&name)
+        .execute(&state.db)
+        .await?;
+    let existing = sqlx::query("SELECT id, password_hash FROM users WHERE username = $1")
+        .bind(&name)
+        .fetch_optional(&state.db)
+        .await?;
+    let id = match existing {
+        Some(row) => {
+            if !verify_password(state, Some(row.get("password_hash")), password.to_owned()).await? {
+                anyhow::bail!("bootstrap administrator password does not match the existing account");
+            }
+            row.get("id")
+        }
         None => {
-            new_password(password)?;
             let hash = hash_password(state, password.to_owned()).await?;
             let user =
                 User { id: Uuid::new_v4(), username: name.clone(), display_name: name.clone(), role: "user".into() };
-            if create_account(&state.db, &user, &hash).await? {
+            if create_account(&state.db, &user, &hash, true).await? {
                 user.id
             } else {
-                // Someone signed up with that name in the meantime.
-                user_id(&state.db, &name).await?.ok_or_else(|| anyhow::anyhow!("bootstrap admin account vanished"))?
+                // A concurrent bootstrap may have created it. Ownership is still verified before any grant.
+                let row = sqlx::query("SELECT id, password_hash FROM users WHERE username = $1")
+                    .bind(&name)
+                    .fetch_one(&state.db)
+                    .await?;
+                if !verify_password(state, Some(row.get("password_hash")), password.to_owned()).await? {
+                    anyhow::bail!("bootstrap administrator password does not match the existing account");
+                }
+                row.get("id")
             }
         }
     };
@@ -327,6 +371,49 @@ pub async fn bootstrap_admin(state: &AppState, username_raw: &str, password: &st
     if granted {
         tracing::warn!(username = %name, "Bootstrap admin granted");
     }
+    Ok(())
+}
+
+/// The historic migration promoted `ydh2244` by name. Before that migration runs on an existing database, require
+/// proof that a normal account of that name belongs to the configured operator. Already migrated admins stay intact.
+pub async fn verify_legacy_admin_before_migration(db: &PgPool, bootstrap: Option<(&str, &str)>) -> anyhow::Result<()> {
+    let has_users: bool = sqlx::query_scalar("SELECT to_regclass('users') IS NOT NULL").fetch_one(db).await?;
+    if !has_users {
+        return Ok(());
+    }
+    let has_migrations: bool =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL").fetch_one(db).await?;
+    if has_migrations
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 20260930120000 AND success)",
+        )
+        .fetch_one(db)
+        .await?
+    {
+        return Ok(());
+    }
+    let Some(hash) = sqlx::query_scalar::<_, String>(
+        "SELECT password_hash FROM users WHERE username = 'ydh2244' AND role <> 'admin'",
+    )
+    .fetch_optional(db)
+    .await?
+    else {
+        return Ok(());
+    };
+    let password = bootstrap
+        .filter(|(name, _)| name.trim().eq_ignore_ascii_case("ydh2244"))
+        .map(|(_, password)| password.to_owned())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "existing legacy administrator name requires verified BOOTSTRAP_ADMIN credentials before migration"
+            )
+        })?;
+    let valid = tokio::task::spawn_blocking(move || {
+        PasswordHash::new(&hash)
+            .is_ok_and(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+    })
+    .await?;
+    anyhow::ensure!(valid, "legacy administrator password does not match the existing account");
     Ok(())
 }
 

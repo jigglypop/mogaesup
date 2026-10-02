@@ -156,6 +156,24 @@ describe('나갈 때 저장하지 않은 변경', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(release).toHaveBeenCalledTimes(1);
   });
+
+  it('세션이 끝난 saver는 백그라운드 재시도와 페이지 종료 경고를 즉시 해제한다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    world.failing.with = offline(); world.edit(); saver.changed();
+    const release = vi.fn();
+    leaveIsland(saver, release);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(closePage()).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    saver.dispose();
+    const sent = world.system.save.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(600_000);
+    await saver.save(); await saver.flush(); await saver.overwrite();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(world.system.save).toHaveBeenCalledTimes(sent);
+    expect(closePage()).toBe(false);
+  });
 });
 
 describe('저장하지 않은 것', () => {

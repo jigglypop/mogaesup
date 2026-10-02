@@ -5,7 +5,8 @@ import uuid
 import httpx
 import time
 from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+from src.services.runtime_activity import ContextThreadPoolExecutor as ThreadPoolExecutor
 from threading import Lock
 
 from src.services.asset_editor import _write_json

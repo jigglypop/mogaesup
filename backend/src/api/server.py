@@ -10,7 +10,8 @@ import os
 import threading
 import time
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -36,8 +37,9 @@ from src.api.avatar_blueprints import router as blueprint_router
 from src.api.studio import router as studio_router
 from src.api.studio_glb_assets import router as studio_glb_assets_router
 from src.services.character_pipeline import PipelineError
-from src.services.runtime_activity import ActivityMiddleware, snapshot as activity_snapshot
-from src.auth import is_public_path
+from src.services.runtime_activity import (ActivityMiddleware, state as activity_state, server_lease,
+                                          begin_drain, resume, RuntimeDraining, RuntimeUncertain)
+from src.auth import is_public_path, trusted_loopback
 from src.runtime_identity import runtime_identity
 from src.services import record_store
 from src.services.object_storage import assert_records_mode
@@ -49,13 +51,13 @@ _RUNTIME = runtime_identity()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # A server that lost CHARACTER_DATABASE_URL must not go on with the S3 records the record database replaced.
-    await asyncio.to_thread(assert_records_mode)
-    # Continue factory stages stopped with the previous server process.
-    from src.api.avatar_factory import get_factory
-    from src.services.avatar_auto_resume import start as start_auto_resume
-    start_auto_resume(get_factory())
-    yield
+    with server_lease():
+        # A server that lost CHARACTER_DATABASE_URL must not read the records the database replaced.
+        await asyncio.to_thread(assert_records_mode)
+        from src.api.avatar_factory import get_factory
+        from src.services.avatar_auto_resume import start as start_auto_resume
+        start_auto_resume(get_factory())
+        yield
 
 
 app = FastAPI(
@@ -77,7 +79,8 @@ def _api_key_matches(candidate: str) -> bool:
 
 async def auth_middleware(request: Request, call_next):
     request_id = ensure_request_id(request)
-    if not _API_KEY or is_public_path(request.url.path) or request.method == "OPTIONS":
+    if (not _API_KEY or is_public_path(request.url.path) or request.method == "OPTIONS"
+            or (request.url.path.startswith('/internal/') and trusted_loopback(request))):
         return await call_next(request)
     key = (request.headers.get("x-api-key") or "").strip()
     if _api_key_matches(key):
@@ -134,10 +137,36 @@ def _database_status() -> dict:
 def health() -> dict:
     database = _database_status()
     status = "healthy"
-    if database.get("configured") and database.get("ok") is False:
+    activity = activity_state()
+    if ((database.get("configured") and database.get("ok") is not True)
+            or not activity['admission']['verified']):
         status = "degraded"
     return {"status": status, "connections": {"database": database}, "runtime": _RUNTIME,
-            "activity": activity_snapshot()}
+            **activity}
+
+
+class DrainInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    token: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
+def _control(request, callback, token):
+    if not trusted_loopback(request):
+        raise HTTPException(status_code=403, detail='Local runtime control only')
+    try:
+        return callback(token)
+    except (RuntimeDraining, RuntimeUncertain):
+        raise HTTPException(status_code=409, detail='Runtime admission state cannot be changed') from None
+
+
+@app.post('/internal/drain', include_in_schema=False)
+async def drain_runtime(request: Request, body: DrainInput):
+    return _control(request, begin_drain, body.token)
+
+
+@app.delete('/internal/drain', include_in_schema=False)
+async def resume_runtime(request: Request, body: DrainInput):
+    return _control(request, resume, body.token)
 
 
 # async: health only reads in-memory state, so it never waits for a worker thread the long background tasks hold.

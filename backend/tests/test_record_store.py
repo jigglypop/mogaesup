@@ -444,6 +444,36 @@ def test_health_pings_the_record_database(cloud):
     assert record_store.ping() == {'configured': True, 'ok': True}
 
 
+def test_health_refuses_a_namespace_that_was_not_imported(cloud, monkeypatch):
+    monkeypatch.setenv('ASSET_S3_PREFIX', 'never-imported')
+    result = record_store.ping()
+    assert result['configured'] is True and result['ok'] is False
+    assert 'never-imported' in result['error']
+
+
+def test_health_refuses_a_database_without_the_record_schema(database, monkeypatch):
+    monkeypatch.setenv('CHARACTER_DATABASE_URL', database)
+    with psycopg.connect(database, autocommit=True) as conn:
+        conn.execute('ALTER SCHEMA character_records RENAME TO hidden_records')
+    try:
+        result = record_store.ping()
+        assert result['configured'] is True and result['ok'] is False
+    finally:
+        with psycopg.connect(database, autocommit=True) as conn:
+            conn.execute('ALTER SCHEMA hidden_records RENAME TO character_records')
+
+
+def test_health_checks_record_columns_and_permissions(cloud, database, monkeypatch):
+    with psycopg.connect(database, autocommit=True) as conn:
+        conn.execute('ALTER TABLE character_records.records RENAME COLUMN content TO broken_content')
+    try:
+        result = record_store.ping()
+        assert result['configured'] is True and result['ok'] is False
+    finally:
+        with psycopg.connect(database, autocommit=True) as conn:
+            conn.execute('ALTER TABLE character_records.records RENAME COLUMN broken_content TO content')
+
+
 def test_artifact_response_serves_records_from_the_database(cloud):
     root, _ = cloud
     path = StoredPath(root) / 'avatar-factory' / '1' / ('k' * 24) / 'output' / 'catalog.json'
@@ -452,6 +482,39 @@ def test_artifact_response_serves_records_from_the_database(cloud):
     assert response.body == b'{"assets": []}'
     assert response.media_type == 'application/json'
     assert response.headers['cache-control'] == 'private, no-store'
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+async def test_s3_models_stream_through_the_authenticated_origin_without_cors_or_redirect(cloud, s3, monkeypatch):
+    from fastapi import FastAPI
+    import httpx
+    root, _ = cloud
+    path = StoredPath(root) / 'avatar-factory' / '1' / ('k' * 24) / 'output' / 'model.glb'
+    content = b'glTF' + b'x' * (600 * 1024)
+    path.write_bytes(content)
+    original = s3.get_object
+    opened = []
+
+    def get_object(**kwargs):
+        value = original(**kwargs)
+        opened.append(value['Body'])
+        return {**value, 'ContentLength': len(content)}
+
+    monkeypatch.setattr(s3, 'get_object', get_object)
+    monkeypatch.setattr(s3, 'generate_presigned_url', lambda *args, **kwargs: pytest.fail('browser artifacts must stay same-origin'))
+    response = object_storage.artifact_response(path, filename='모델.glb')
+    assert response.status_code == 200 and 'location' not in response.headers
+    assert response.headers['content-type'] == 'model/gltf-binary'
+    assert response.headers['content-length'] == str(len(content))
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert response.headers['content-disposition'].startswith("attachment; filename*=UTF-8''")
+    app = FastAPI()
+    app.add_api_route('/model.glb', lambda: response, methods=['GET'])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        received = await client.get('/model.glb')
+    assert received.content == content
+    assert opened[0].closed
 
 
 # --- import and export ------------------------------------------------------------------------
@@ -718,26 +781,23 @@ def test_nothing_is_asked_of_s3_unless_records_could_have_moved(without_database
 
 
 @pytest.mark.parametrize('failure', [ClientError({'Error': {'Code': 'AccessDenied'}}, 'ListObjectsV2'), OSError('no route to S3')])
-def test_a_check_that_cannot_answer_does_not_stop_the_server(without_database, monkeypatch, caplog, failure):
+def test_a_check_that_cannot_answer_stops_the_server(without_database, monkeypatch, failure):
     def unavailable(**kwargs):
         raise failure
 
     monkeypatch.setattr(without_database, 'list_objects_v2', unavailable)
-    with caplog.at_level('WARNING', logger='src.services.object_storage'):
+    with pytest.raises(RuntimeError, match='Could not verify the records storage mode'):
         object_storage.assert_records_mode()
-    assert "Could not check whether the records of storage prefix 'assets'" in caplog.text
-    assert type(failure).__name__ in caplog.text
 
 
-def test_a_check_that_takes_too_long_does_not_stop_the_server(without_database, monkeypatch, caplog):
+def test_a_check_that_takes_too_long_stops_the_server_with_a_bounded_wait(without_database, monkeypatch):
     hang = threading.Event()
     monkeypatch.setattr(without_database, 'list_objects_v2', lambda **kwargs: hang.wait(10))
     try:
-        with caplog.at_level('WARNING', logger='src.services.object_storage'):
+        with pytest.raises(RuntimeError, match='Could not verify the records storage mode'):
             started = datetime.now()
             object_storage.assert_records_mode(timeout=.05)
         assert (datetime.now() - started).total_seconds() < 5
-        assert 'TimeoutError: no answer within 0.05 s' in caplog.text
     finally:
         hang.set()
 

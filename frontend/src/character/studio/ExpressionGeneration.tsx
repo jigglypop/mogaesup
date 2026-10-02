@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
+import { studioHref } from '../../studio/screens';
 import { expressionNames, type ExpressionName } from '../texture-expressions';
 import {
   expressionGenerationApi,
@@ -93,7 +94,7 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
       <label>표정<select value={pending?.input.name || name} disabled={!ready || inputLocked} onChange={event => setName(event.target.value as ExpressionName)}>
         {Object.entries(expressionNames).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
       </select></label>
-      <a className="prompt-management-link" href="/?tab=prompts&promptGroup=expression" target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
+      <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'expression' })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
       <div className="meshy-buttons">
         <button type="button" disabled={!canSubmit} onClick={() => void perform(async () => {
           const input = pending?.input || { name, prompt: defaultPrompt.trim(), reference_assets: referenceIds };

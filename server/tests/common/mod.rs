@@ -81,13 +81,25 @@ impl TestApp {
         let _ = std::fs::remove_dir_all(&self.model_dir);
     }
 
-    pub async fn call(&self, method: &str, path: &str, body: Option<Value>, cookie: Option<&str>) -> Reply {
+    pub async fn call(&self, method: &str, path: &str, mut body: Option<Value>, cookie: Option<&str>) -> Reply {
         let mut request = Request::builder().method(method).uri(path).header(header::ORIGIN, ORIGIN);
         if method != "GET" {
             request = request.header(header::CONTENT_TYPE, "application/json");
         }
         if let Some(cookie) = cookie {
             request = request.header(header::COOKIE, cookie);
+        }
+        // App callers bind edits to the account whose page they loaded. Explicit owners are left untouched so
+        // regression tests can exercise stale-account requests; raw `send` exercises the required-field contract.
+        if ((method == "PUT" && path == "/api/homes/me/world") || (method == "PATCH" && path == "/api/homes/me"))
+            && let (Some(value), Some(cookie)) = (body.as_mut(), cookie)
+            && value.get("expectedOwnerId").is_none()
+        {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(header::COOKIE, cookie.parse().unwrap());
+            if let Some(user) = mogaesup_server::auth::optional_user(&self.state, &headers).await.unwrap() {
+                value["expectedOwnerId"] = json!(user.id);
+            }
         }
         let body = match (method, body) {
             ("GET", _) => Body::empty(),

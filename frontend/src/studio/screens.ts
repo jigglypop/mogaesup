@@ -21,6 +21,25 @@ const MANAGE: Screen[] = [
 ];
 const WORKSPACE_SCREENS = [...MAKE, ...MANAGE];
 
+/** Builds an app address before it is rendered, including links copied or opened from a context menu. */
+export function studioHref(values: Record<string, string> | URLSearchParams, pathname = location.pathname): string {
+  const query = new URLSearchParams(values);
+  const tab = query.get('tab');
+  const mode = query.get('mode');
+  const screen = tab
+    ? WORKSPACE_SCREENS.find((item) => item.tab === tab && (!item.mode || item.mode === (mode || 'photo')))
+    : WORKSPACE_SCREENS.find((item) => item.path === pathname);
+  if (!screen) throw new Error('스튜디오 화면 주소를 찾을 수 없습니다.');
+  query.delete('tab'); query.delete('mode');
+  const search = query.toString();
+  return search ? `${screen.path}?${search}` : screen.path;
+}
+
+/** Updating a selection retains the router's history entry and the current studio surface. */
+export function rememberStudioQuery(query: URLSearchParams): void {
+  history.replaceState(history.state, '', `${studioHref(query)}${location.hash}`);
+}
+
 /** What the studio's menu offers: paid screens only to paid operators, and no heading without a screen under it. */
 export function studioSections(paid: boolean): Section[] {
   return [
@@ -34,15 +53,8 @@ export function studioSections(paid: boolean): Section[] {
 /** The studio links to its own screens as `/?tab=…`; these are the app's routes for them. */
 export function routeOf(href: string): string | null {
   if (!href.startsWith('/?')) return null;
-  const query = new URLSearchParams(href.slice(2));
-  const tab = query.get('tab');
-  const mode = query.get('mode');
-  const screen = WORKSPACE_SCREENS.find((item) => item.tab === tab && (!item.mode || !mode || item.mode === mode));
-  if (!screen) return null;
-  query.delete('tab');
-  query.delete('mode');
-  const rest = query.toString();
-  return rest ? `${screen.path}?${rest}` : screen.path;
+  try { return studioHref(new URLSearchParams(href.slice(2))); }
+  catch { return null; }
 }
 
 /**

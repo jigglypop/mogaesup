@@ -1,0 +1,307 @@
+name: 점검과 배포
+
+# Pull requests and pushes to main run the checks of the parts they changed. A push to main that passes them deploys
+# what changed since the last successful run: server, then web, then studio. Infrastructure (CloudFormation) is never
+# applied here; the deploy role cannot do it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 배포할 곳
+        type: choice
+        options: [all, server, web, studio]
+        default: all
+
+permissions:
+  contents: read
+
+# Deploys wait for each other and are never cancelled midway. A deploy that is still waiting when a newer push arrives is
+# replaced by it; the newer run compares with the last successful run, so nothing it skipped is lost.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('check-{0}', github.ref) || 'production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION: ap-northeast-2
+  AWS_ROLE_ARN: arn:aws:iam::960243570517:role/mogaesup-github-deploy
+  # Checks and the release binary use this one compiler. A newer clippy (1.98 flags chunks_exact and Some(..).filter in
+  # server/src/look_bake.rs and looks.rs) must be fixed in the code before this is raised.
+  RUST_VERSION: 1.95.0
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      server_check: ${{ steps.diff.outputs.server_check }}
+      backend_check: ${{ steps.diff.outputs.backend_check }}
+      frontend_check: ${{ steps.diff.outputs.frontend_check }}
+      infra_check: ${{ steps.diff.outputs.infra_check }}
+      deploy_server: ${{ steps.diff.outputs.deploy_server }}
+      deploy_web: ${{ steps.diff.outputs.deploy_web }}
+      deploy_studio: ${{ steps.diff.outputs.deploy_studio }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: 마지막으로 성공한 실행
+        id: previous
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/${{ github.repository }}/actions/workflows/pipeline.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // empty')
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: 바뀐 곳
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || steps.previous.outputs.sha }}
+          TARGET: ${{ inputs.target }}
+        run: bash .github/scripts/changes.sh
+
+  server-check:
+    needs: changes
+    if: needs.changes.outputs.server_check == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-dev
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # factory_contract.rs runs the character server's auth.py through uv and skips itself without it.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy --component rustfmt
+          echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: server
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  # 3.11 is what .python-version and the local machines use; the studio image (backend/infra/Dockerfile) runs 3.12.
+  backend-check:
+    needs: changes
+    if: needs.changes.outputs.backend_check == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12']
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-dev
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run --no-sync python -m compileall -q backend/src
+      - run: uv run --no-sync pytest -q
+
+  frontend-check:
+    needs: changes
+    if: needs.changes.outputs.frontend_check == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  infra-check:
+    needs: changes
+    if: needs.changes.outputs.infra_check == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: 워크플로 문법과 변경 감지
+        run: |
+          curl --fail --silent --show-error --location https://github.com/rhysd/actionlint/releases/download/v1.7.11/actionlint_1.7.11_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "900919a84f2229bac68ca9cd4103ea297abc35e9689ebb842c6e34a3d1b01b0a  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/pipeline.yml
+          python3 .github/scripts/test_changes.py
+      - name: CloudFormation 템플릿
+        run: >-
+          uvx --from cfn-lint==1.57.1 cfn-lint --ignore-checks W1030 --
+          frontend/infra/aws-static.yaml server/infra/aws-server.yaml backend/infra/ec2.yaml .github/aws/deploy-role.yaml
+      - name: 스크립트 문법
+        run: |
+          python3 -m compileall -q server/scripts scripts/props backend/infra
+          for file in $(git ls-files '*.sh'); do bash -n "$file"; done
+      - name: PowerShell 문법
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in (git ls-files '*.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).ProviderPath, [ref]$tokens, [ref]$errors) | Out-Null
+            foreach ($problem in $errors) { Write-Host "::error file=$file,line=$($problem.Extent.StartLineNumber)::$($problem.Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+  gate:
+    needs: [changes, server-check, backend-check, frontend-check, infra-check]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: ${{ needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "::error::점검이 실패해 배포하지 않습니다"
+          exit 1
+
+  deploy-server:
+    needs: [changes, gate]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.deploy_server == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 리눅스 릴리스 바이너리
+        working-directory: server
+        run: >-
+          docker run --rm
+          -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/src/target
+          -v "$PWD":/src -w /src "rust:${RUST_VERSION}-alpine"
+          sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      # --skip-provision: the stack is not touched; the server keeps the FACTORY_* settings it has.
+      - name: 서버 릴리스
+        working-directory: server
+        run: python3 scripts/deploy-rust-server.py --skip-provision
+      - name: 운영 주소 확인
+        run: curl --fail --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors https://mogaesup.com/api/health
+      - name: 설치 실패 기록
+        if: failure()
+        working-directory: server
+        run: |
+          for file in artifacts/*/ssm-result.json; do
+            [ -f "$file" ] || continue
+            python3 -c "import json, sys; d = json.load(open(sys.argv[1])); print(d.get('Status')); print(d.get('StandardErrorContent', '')[-4000:])" "$file"
+          done
+
+  deploy-web:
+    needs: [changes, gate, deploy-server]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && needs.changes.outputs.deploy_web == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      # Uploads dist/, invalidates CloudFront, then checks the published index.html and /api/health.
+      - name: 웹 릴리스
+        shell: pwsh
+        run: ./frontend/scripts/deploy-aws.ps1 -SkipBuild -SkipProvision
+      # aws s3 cp guesses the type of the hashed assets from the runner's mime table; the browser needs JavaScript and CSS.
+      - name: 운영 파일 형식
+        run: |
+          check() {
+            type=$(curl --fail --silent --show-error --head "https://mogaesup.com$1" | tr -d '\r' | awk -F': ' 'tolower($1) == "content-type" { print tolower($2) }')
+            case "$type" in *"$2"*) echo "$1 $type" ;; *) echo "::error::$1 의 content-type이 $type 입니다"; exit 1 ;; esac
+          }
+          check "$(grep -oE '/assets/[^"]+\.js' frontend/dist/index.html | head -1)" javascript
+          check "$(grep -oE '/assets/[^"]+\.css' frontend/dist/index.html | head -1)" text/css
+
+  deploy-studio:
+    needs: [changes, gate, deploy-server, deploy-web]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-web.result) && needs.changes.outputs.deploy_studio == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      # The instance stays off only when someone stopped it on purpose; this job does not start it.
+      - name: 스튜디오 인스턴스
+        id: instance
+        run: |
+          id=$(aws cloudformation describe-stacks --stack-name gaesup-asset-studio --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+          state=$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].State.Name' --output text)
+          ping=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$id" --query 'InstanceInformationList[0].PingStatus' --output text)
+          if [ "$state" != running ] || [ "$ping" != Online ]; then
+            echo "::error::스튜디오 인스턴스 $id 가 꺼져 있거나 SSM에 닿지 않습니다 (상태 $state, SSM $ping). 켠 뒤 이 워크플로를 target=studio로 다시 실행하세요"
+            exit 1
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: 릴리스 묶음
+        shell: pwsh
+        run: ./backend/infra/prepare-aws.ps1 -Upload
+      # deploy-on-instance.sh waits for running paid work to finish and stops with 4 or 5 when it cannot (backend/README.md).
+      - name: 인스턴스에 배포
+        shell: pwsh
+        env:
+          STUDIO_INSTANCE_ID: ${{ steps.instance.outputs.id }}
+        run: |
+          $receipt = Get-Content backend/dist/aws/receipt.json -Raw | ConvertFrom-Json
+          ./backend/infra/deploy-aws.ps1 -InstanceId $env:STUDIO_INSTANCE_ID -Bucket $receipt.bucket -ReleaseKey $receipt.release_key

@@ -3,3 +3,5 @@
 *.woff2 binary
 *.png binary
 *.jpg binary
+# Unified patch context lines intentionally contain a space; retain the exact engine source patch and its digest.
+frontend/vendor/*.patch whitespace=-blank-at-eol,-blank-at-eof

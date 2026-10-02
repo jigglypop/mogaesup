@@ -63,6 +63,9 @@ class Blender:
     def wait(self, timeout=None):
         return 1
 
+    def poll(self):
+        return 1
+
 
 def key(name):
     return f'assets/avatar-factory/1/{JOB}/native-parts/{VERSION}/{name}'

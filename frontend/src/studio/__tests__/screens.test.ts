@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { retargetStudioLink, routeOf, studioSections } from '../screens';
+import { rememberStudioQuery, retargetStudioLink, routeOf, studioHref, studioSections } from '../screens';
 
 describe('캐릭터 공장 메뉴', () => {
   it('유료 작업자에게는 모든 화면을 보여 준다', () => {
@@ -27,6 +27,41 @@ describe('캐릭터 공장 메뉴', () => {
 });
 
 describe('스튜디오 화면 주소', () => {
+  it('클릭하기 전부터 앱 경로를 만들고 선택한 작업과 파츠를 보존한다', () => {
+    expect(studioHref({ tab: 'prompts', promptGroup: 'expression' })).toBe('/admin/studio/prompts?promptGroup=expression');
+    const body = new URL(studioHref({ tab: 'character', mode: 'body', partsJob: 'saved version' }), location.origin);
+    expect(body.pathname).toBe('/admin/studio/make/body');
+    expect(body.searchParams.get('partsJob')).toBe('saved version');
+    const part = new URL(studioHref({ tab: 'character', mode: 'parts', base: 'job&base', partsJob: 'saved-v2', part: 'top' }), location.origin);
+    expect(part.pathname).toBe('/admin/studio/make/parts');
+    expect(part.searchParams.get('base')).toBe('job&base');
+    expect(part.searchParams.get('partsJob')).toBe('saved-v2');
+    expect(part.searchParams.get('part')).toBe('top');
+    const photo = new URL(studioHref({ tab: 'character', mode: 'photo', photoJob: 'model-v3', photoCharacter: 'character1' }), location.origin);
+    expect(photo.pathname).toBe('/admin/studio/make/photo');
+    expect(photo.searchParams.get('photoJob')).toBe('model-v3');
+    expect(photo.searchParams.get('photoCharacter')).toBe('character1');
+  });
+
+  it('선택 쿼리만 갱신하면 현재 화면의 pathname을 사용한다', () => {
+    expect(studioHref({ photoJob: 'v2' }, '/admin/studio/make/photo')).toBe('/admin/studio/make/photo?photoJob=v2');
+    expect(studioHref({ asset: 'v2', slot: 'hair' }, '/admin/studio/library')).toBe('/admin/studio/library?asset=v2&slot=hair');
+    expect(() => studioHref({ tab: 'nothing' })).toThrow();
+  });
+
+  it('주소에 선택을 기억할 때 라우터 상태와 hash를 보존한다', () => {
+    const previous = `${location.pathname}${location.search}${location.hash}`;
+    const state = history.state;
+    try {
+      history.replaceState({ key: 'router-key', idx: 3 }, '', '/admin/studio/make/photo#selected');
+      rememberStudioQuery(new URLSearchParams({ tab: 'character', mode: 'photo', photoJob: 'generated-v2' }));
+      expect(location.pathname).toBe('/admin/studio/make/photo');
+      expect(new URLSearchParams(location.search).get('photoJob')).toBe('generated-v2');
+      expect(location.hash).toBe('#selected');
+      expect(history.state).toEqual({ key: 'router-key', idx: 3 });
+    } finally { history.replaceState(state, '', previous); }
+  });
+
   it('스튜디오가 쓰는 /?tab 주소를 앱의 경로로 바꾼다', () => {
     expect(routeOf('/?tab=prompts&promptGroup=parts')).toBe('/admin/studio/prompts?promptGroup=parts');
     expect(routeOf('/?tab=character&mode=parts&base=job1&part=top')).toBe('/admin/studio/make/parts?base=job1&part=top');

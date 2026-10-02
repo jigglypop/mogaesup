@@ -6,7 +6,7 @@ const ModelPreview = lazy(() => import('./ModelPreview'));
 
 export type PreviewTarget = { title: string; url: string; note?: string };
 
-/** Keeps a renderer that cannot start (no WebGL) from taking the admin page down with it. */
+/** Keeps a renderer that cannot start from taking the admin page down with it. */
 class PreviewBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   override state = { failed: false };
   static getDerivedStateFromError() {

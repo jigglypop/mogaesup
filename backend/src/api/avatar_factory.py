@@ -439,6 +439,7 @@ def wardrobe_colors(job_id: str, slot: str, version: str, user: UserContext = De
 
 
 @router.get('/wardrobe/colors/{job_id}/{slot}/mask')
+@router.head('/wardrobe/colors/{job_id}/{slot}/mask', include_in_schema=False)
 def wardrobe_color_mask(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
                         factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
@@ -446,6 +447,7 @@ def wardrobe_color_mask(job_id: str, slot: str, version: str, user: UserContext 
 
 
 @router.get('/wardrobe/previews/{job_id}/{slot}')
+@router.head('/wardrobe/previews/{job_id}/{slot}', include_in_schema=False)
 def wardrobe_preview(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
                      factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
@@ -564,6 +566,7 @@ def fit_native_parts(job_id: str, background: BackgroundTasks, canonical_pose: b
 
 
 @router.get('/jobs/{job_id}/native-parts/{version}/{name}')
+@router.head('/jobs/{job_id}/native-parts/{version}/{name}', include_in_schema=False)
 def native_parts_artifact(job_id: str, version: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return FileResponse(AvatarNativeParts(factory).artifact(user.user_id, job_id, version, name))
 
@@ -603,11 +606,13 @@ def meshy_action(job_id: str, body: MeshyMotionInput, background: BackgroundTask
 
 
 @router.get('/jobs/{job_id}/meshy/artifacts/{version}/{name}')
+@router.head('/jobs/{job_id}/meshy/artifacts/{version}/{name}', include_in_schema=False)
 def meshy_artifact(job_id: str, version: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return FileResponse(AvatarMeshy(factory).artifact(user.user_id, job_id, version, name))
 
 
 @router.get('/jobs/{job_id}/meshy/provider/{name}')
+@router.head('/jobs/{job_id}/meshy/provider/{name}', include_in_schema=False)
 def meshy_provider_artifact(job_id: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return FileResponse(AvatarMeshy(factory).provider_artifact(user.user_id, job_id, name))
 
@@ -744,6 +749,7 @@ def job(job_id: str, user: UserContext = Depends(get_current_user), factory=Depe
 
 
 @router.get('/jobs/{job_id}/artifacts/{filename}')
+@router.head('/jobs/{job_id}/artifacts/{filename}', include_in_schema=False)
 def artifact(job_id: str, filename: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return FileResponse(factory.artifact(user.user_id, job_id, filename))
 

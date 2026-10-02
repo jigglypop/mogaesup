@@ -47,11 +47,11 @@ export function leaveIsland(saver: IslandSaver, release: () => void, discard = f
     return;
   }
   void saver.flush().then(() => {
-    if (finished(saver.getState())) return letGo();
+    if (saver.disposed || finished(saver.getState())) return letGo();
     holding.add(saver);
     askBeforeClosing();
     stopWatching = saver.subscribe(() => {
-      if (finished(saver.getState())) letGo();
+      if (saver.disposed || finished(saver.getState())) letGo();
     });
   });
 }

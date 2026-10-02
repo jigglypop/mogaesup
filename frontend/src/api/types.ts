@@ -71,6 +71,7 @@ export type HomeWorld = {
 };
 
 export type SaveHomeWorld = {
+  expectedOwnerId: string;
   worldId: string;
   baseRevision: number;
   data: Record<string, unknown>;

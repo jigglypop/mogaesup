@@ -723,7 +723,7 @@ mod tests {
         for expected in [("checksum", Level::Error), ("skin", Level::Error), ("clips", Level::Error)] {
             assert!(found.contains(&expected), "{found:?}");
         }
-        assert!(report.checks.iter().any(|check| check.code == "clips" && check.message.ends_with("walk")));
+        assert!(report.checks.iter().any(|check| check.code == "clips" && check.message.contains("walk")));
         assert!(report.checks.iter().any(|check| check.code == "unused_clips" && check.message.contains("Sit")));
         assert_eq!(report.model.as_ref().unwrap().animations, ["Idle", "Sit"]);
 
@@ -734,11 +734,8 @@ mod tests {
         let mut report = Report::default();
         let error = verify("npc", &statue, None, &mut report).unwrap_err();
         assert_eq!((error.code, error.message), ("not_playable", NOT_RESIDENT.message));
-        assert!(report.checks.iter().any(|check| check.code == "clips" && check.level == Level::Ok));
-        let standing = glb::join(
-            &json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}], "animations": [{"name": "Idle"}]}),
-            &[],
-        );
+        assert!(report.checks.iter().any(|check| check.code == "clips" && check.level == Level::Error));
+        let standing = crate::test_glb::character(&["Idle"]);
         let mut report = Report::default();
         assert!(verify("npc", &standing, None, &mut report).is_ok());
         assert_eq!(verify("minime", &standing, None, &mut Report::default()).unwrap_err().code, "not_playable");

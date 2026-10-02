@@ -44,7 +44,7 @@ describe('섬 목록 주소', () => {
               init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError'))),
             ),
         );
-        const result = homeApi.saveWorld({ worldId: 'w', baseRevision: 1, data: {} }).catch((problem: unknown) => problem);
+        const result = homeApi.saveWorld({ expectedOwnerId: 'owner', worldId: 'w', baseRevision: 1, data: {} }).catch((problem: unknown) => problem);
         await vi.advanceTimersByTimeAsync(59_999);
         expect(vi.getTimerCount()).toBe(1);
         await vi.advanceTimersByTimeAsync(1);

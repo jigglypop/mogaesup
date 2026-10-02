@@ -33,11 +33,16 @@ class FakeProcess:
         self.command, self.kwargs, self.exit_code, self.hangs = command, kwargs, exit_code, hangs
         self.pid = os.getpid()
         self.calls = []
+        self.completed = False
 
     def wait(self, timeout=None):
         if self.hangs and not self.calls:
             raise subprocess.TimeoutExpired(self.command, timeout)
+        self.completed = True
         return self.exit_code
+
+    def poll(self):
+        return self.exit_code if self.completed else None
 
     def terminate(self):
         self.calls.append('terminate')

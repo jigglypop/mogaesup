@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod factory;
 pub mod glb;
+mod glb_validation;
 mod gltf;
 pub mod homes;
 pub mod imports;
@@ -14,11 +15,16 @@ pub mod permissions;
 pub mod rebac;
 pub mod residents;
 pub mod rooms;
+pub mod runtime;
 pub mod security;
 pub mod slim;
 pub mod social;
 pub mod studio;
 pub mod studio_power;
+#[cfg(test)]
+#[path = "../tests/fixtures/character.rs"]
+mod test_glb;
+pub mod war;
 
 use axum::{
     Json, Router,
@@ -46,6 +52,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// Catalog imports copying at once; the rest wait their turn as `queued`.
     pub imports: Arc<Semaphore>,
+    /// Admission for queued and active wardrobe bakes, acquired before any upstream work.
+    pub looks: Arc<Semaphore>,
     /// The character server's instance, started again when it has powered itself off.
     pub power: studio_power::StudioPower,
 }
@@ -62,6 +70,7 @@ impl AppState {
             rooms: rooms::Rooms::default(),
             http: factory::client(),
             imports: Arc::new(Semaphore::new(imports::SLOTS)),
+            looks: Arc::new(Semaphore::new(looks::MAX_BAKING)),
             power,
         }
     }

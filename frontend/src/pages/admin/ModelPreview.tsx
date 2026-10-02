@@ -1,24 +1,19 @@
 // The admin page's 3D preview. It loads on first use, so /admin itself stays light.
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo, useState } from 'react';
+import { createRenderer, normalizeImportedMaterials, useRendererRecovery } from 'gaesup-world';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import { disposeObjectResources } from '../../character/assets/gpu-resources';
 
-type Loaded = { gltf: GLTF; center: THREE.Vector3; size: THREE.Vector3; triangles: number };
+type Loaded = { gltf: GLTF; center: THREE.Vector3; size: THREE.Vector3; triangles: number; restoreMaterials(): void };
+type Backend = 'webgpu' | 'webgl-fallback';
 
-function release(scene: THREE.Object3D) {
-  scene.traverse((node) => {
-    if (!(node instanceof THREE.Mesh)) return;
-    node.geometry.dispose();
-    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
-      for (const value of Object.values(material as unknown as Record<string, unknown>)) {
-        if (value instanceof THREE.Texture) value.dispose();
-      }
-      material.dispose();
-    }
-  });
+function release(loaded: Loaded) {
+  loaded.restoreMaterials();
+  disposeObjectResources(loaded.gltf.scenes);
 }
 
 function measure(gltf: GLTF): Loaded {
@@ -36,12 +31,13 @@ function measure(gltf: GLTF): Loaded {
     center: empty ? new THREE.Vector3() : box.getCenter(new THREE.Vector3()),
     size: empty ? new THREE.Vector3(1, 1, 1) : box.getSize(new THREE.Vector3()),
     triangles,
+    restoreMaterials: normalizeImportedMaterials(gltf.scene, 'figure'),
   };
 }
 
 /** Idle first, as the island shows a standing 미니미. */
 const firstClip = (clips: THREE.AnimationClip[]) => {
-  const idle = clips.findIndex((clip) => /idle/i.test(clip.name));
+  const idle = clips.findIndex((clip) => /idle|standing/i.test(clip.name));
   return idle >= 0 ? idle : clips.length ? 0 : -1;
 };
 
@@ -63,7 +59,7 @@ function Figure({ loaded, clip }: { loaded: Loaded; clip: number }) {
     [mixer, loaded],
   );
   useFrame((_, delta) => mixer.update(Math.min(delta, 0.1)));
-  return <primitive object={loaded.gltf.scene} />;
+  return <primitive object={loaded.gltf.scene} dispose={null} />;
 }
 
 /** Drag to turn and pinch or scroll to zoom around the figure; it turns slowly on its own when `spin` is on. */
@@ -94,6 +90,9 @@ export default function ModelPreview({ url }: { url: string }) {
   const [problem, setProblem] = useState('');
   const [clip, setClip] = useState(-1);
   const [spin, setSpin] = useState(true);
+  const [renderer, setRenderer] = useState<{ key: number; backend: Backend } | null>(null);
+  const canvasKey = useRendererRecovery();
+  const backend = renderer?.key === canvasKey ? renderer.backend : null;
 
   useEffect(() => {
     let alive = true;
@@ -105,7 +104,7 @@ export default function ModelPreview({ url }: { url: string }) {
       .loadAsync(url)
       .then(
         (gltf) => {
-          if (!alive) return release(gltf.scene);
+          if (!alive) return disposeObjectResources(gltf.scenes);
           held = measure(gltf);
           setLoaded(held);
           setClip(firstClip(gltf.animations));
@@ -114,14 +113,14 @@ export default function ModelPreview({ url }: { url: string }) {
       );
     return () => {
       alive = false;
-      if (held) release(held.gltf.scene);
+      if (held) release(held);
     };
   }, [url]);
 
   if (problem) {
     return (
       <p className="mg-error" role="alert">
-        미리보기를 불러오지 못했어요. 파일이 없거나 캐릭터 서버에 닿지 않아요. ({problem})
+        미리보기를 불러오지 못했어요. ({problem})
       </p>
     );
   }
@@ -132,20 +131,31 @@ export default function ModelPreview({ url }: { url: string }) {
   const distance = (reach / 2 / Math.tan(THREE.MathUtils.degToRad(35 / 2))) * 1.35;
   const animations = loaded.gltf.animations;
   return (
-    <div className="mg-admin-preview">
+    <div className="mg-admin-preview" data-renderer={backend ?? 'initializing'}>
       <div className="mg-admin-stage">
         <Canvas
+          key={canvasKey}
+          gl={createRenderer}
           dpr={[1, 1.5]}
           camera={{ fov: 35, near: distance / 100, far: distance * 20, position: [center.x, center.y + reach * 0.08, center.z + distance] }}
+          onCreated={({ gl }) => {
+            gl.outputColorSpace = THREE.SRGBColorSpace;
+            gl.toneMapping = THREE.NeutralToneMapping;
+            gl.setClearColor(0x000000, 0);
+            const device = (gl as unknown as { backend?: { isWebGPUBackend?: boolean } }).backend;
+            setRenderer({ key: canvasKey, backend: device?.isWebGPUBackend ? 'webgpu' : 'webgl-fallback' });
+          }}
         >
-          <ambientLight intensity={0.8} />
-          <hemisphereLight args={[0xfffaf2, 0xd9d2c5, 1.5]} />
-          <directionalLight position={[3, 5, 4]} intensity={1.8} />
-          <directionalLight position={[-3, 2, -4]} intensity={0.6} />
+          <ambientLight intensity={0.65} />
+          <hemisphereLight args={[0xfffaf2, 0xe0d3c1, 2.4]} />
+          <directionalLight position={[2, 4, 6]} intensity={1.9} />
+          <directionalLight position={[-4, 2, 4]} intensity={0.85} />
+          <directionalLight position={[0, 3, -5]} intensity={0.9} />
           <Figure loaded={loaded} clip={clip} />
           <Orbit target={center} distance={distance} spin={spin} />
         </Canvas>
       </div>
+      {backend && backend !== 'webgpu' && <span className="mg-chip is-soft">WebGL 호환 모드</span>}
       <p className="mg-admin-fineprint">
         삼각형 {loaded.triangles.toLocaleString('ko-KR')} · 높이 {size.y.toFixed(2)} m · 애니메이션 {animations.length}개
       </p>

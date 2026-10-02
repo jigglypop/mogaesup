@@ -192,7 +192,7 @@ class FittingManagement:
                 'body_profile': record.get('result', {}).get('body_profile')}
 
     def versions(self, job):
-        from concurrent.futures import ThreadPoolExecutor
+        from src.services.runtime_activity import ContextThreadPoolExecutor as ThreadPoolExecutor
         from src.services.avatar_native_parts import AvatarNativeParts
         root = AvatarNativeParts(self.factory).root(self.owner, job)
         paths = list(root.glob('*/record.json'))

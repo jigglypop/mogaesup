@@ -157,6 +157,7 @@ def motion_asset(job_id: str, body: MotionInput, user: UserContext = Depends(get
 
 
 @router.get('/generations/{job_id}/artifacts/{name}')
+@router.head('/generations/{job_id}/artifacts/{name}', include_in_schema=False)
 def generation_artifact(job_id: str, name: str, download: bool = False, user: UserContext = Depends(get_current_user),
                         factory=Depends(get_factory)):
     service = StudioGenerations(factory, user.user_id)
@@ -237,6 +238,7 @@ def expressions(job_id: str, version: str, user: UserContext = Depends(get_curre
 
 
 @router.get('/bodies/{job_id}/{version}/expression-heads/{name}')
+@router.head('/bodies/{job_id}/{version}/expression-heads/{name}', include_in_schema=False)
 def expression_base_head_artifact(job_id: str, version: str, name: Literal['body-without-head.glb', 'base-head.glb'],
                                   user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_expression_heads import AvatarExpressionHeads
@@ -244,6 +246,7 @@ def expression_base_head_artifact(job_id: str, version: str, name: Literal['body
 
 
 @router.get('/bodies/{job_id}/{version}/expression-heads/{expression_id}/head.glb')
+@router.head('/bodies/{job_id}/{version}/expression-heads/{expression_id}/head.glb', include_in_schema=False)
 def expression_head_artifact(job_id: str, version: str, expression_id: str,
                              user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_expression_heads import AvatarExpressionHeads
@@ -330,6 +333,7 @@ def resume_expression_generation(job_id: str, version: str, generation_id: str, 
 
 
 @router.get('/bodies/{job_id}/{version}/expression-generations/{generation_id}/artifacts/{name}')
+@router.head('/bodies/{job_id}/{version}/expression-generations/{generation_id}/artifacts/{name}', include_in_schema=False)
 def expression_generation_artifact(job_id: str, version: str, generation_id: str, name: str,
                                    user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarExpressionGeneration(factory, user.user_id, job_id, version)
@@ -348,6 +352,7 @@ def bake_expression_generation(job_id: str, version: str, generation_id: str,
 
 
 @router.get('/bodies/{job_id}/{version}/expressions/{expression_id}/{name}')
+@router.head('/bodies/{job_id}/{version}/expressions/{expression_id}/{name}', include_in_schema=False)
 def expression_artifact(job_id: str, version: str, expression_id: str, name: str,
                         user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return artifact_response(AvatarExpressions(factory, user.user_id, job_id, version).artifact(expression_id, name))
@@ -387,6 +392,7 @@ def generate_texture(body: TextureInput, user: UserContext = Depends(get_current
 
 
 @router.get('/textures/{texture_id}/{name}')
+@router.head('/textures/{texture_id}/{name}', include_in_schema=False)
 def texture_artifact(texture_id: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return artifact_response(StudioLibrary(factory, user.user_id).artifact(texture_id, name))
 
@@ -441,5 +447,6 @@ def regenerate_animal(animal_id: str, body: AnimalRegenerateInput, background: B
 
 
 @router.get('/animals/{animal_id}/{name}')
+@router.head('/animals/{animal_id}/{name}', include_in_schema=False)
 def animal_artifact(animal_id: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     return artifact_response(AnimalLibrary(factory, user.user_id).artifact(animal_id, name))

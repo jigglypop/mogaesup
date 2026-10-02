@@ -1,8 +1,9 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { authApi } from '../api/endpoints';
 import type { Credentials, Registration, User } from '../api/types';
 import { followSession } from './session';
+import { setSessionOwner } from './sessionWork';
 
 type AuthValue = {
   status: 'loading' | 'anonymous' | 'signedIn';
@@ -21,33 +22,58 @@ const AuthContext = createContext<AuthValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
+  const generation = useRef(0);
+  const stopChecking = useRef<(() => void) | undefined>(undefined);
+  const mounted = useRef(false);
+  const changing = useRef(false);
 
-  useEffect(
-    () =>
-      followSession(authApi.me, (who) => {
-        setUser(who);
-        setReady(true);
-      }),
-    [],
-  );
+  const accept = (who: User | null) => {
+    setSessionOwner(who?.id ?? null);
+    setUser(who);
+    setReady(true);
+  };
+  const check = () => {
+    const mine = generation.current;
+    stopChecking.current = followSession(authApi.me, (who) => {
+      if (mounted.current && mine === generation.current) accept(who);
+    });
+  };
+
+  useEffect(() => {
+    mounted.current = true;
+    check();
+    return () => { mounted.current = false; generation.current++; stopChecking.current?.(); };
+  }, []);
+
+  async function change<T>(action: () => Promise<T>, who: (result: T) => User | null): Promise<T> {
+    if (changing.current) throw new Error('세션 요청이 진행 중이에요');
+    changing.current = true;
+    generation.current++;
+    stopChecking.current?.();
+    try {
+      const result = await action();
+      if (mounted.current) accept(who(result));
+      return result;
+    } catch (error) {
+      if (!ready && mounted.current) check();
+      throw error;
+    } finally { changing.current = false; }
+  }
 
   const value = useMemo<AuthValue>(
     () => ({
       status: !ready ? 'loading' : user ? 'signedIn' : 'anonymous',
       user,
       login: async (body) => {
-        const result = await authApi.login(body);
-        setUser(result.user);
+        const result = await change(() => authApi.login(body), (result) => result.user);
         return result.user;
       },
       register: async (body) => {
-        const result = await authApi.register(body);
-        setUser(result.user);
+        const result = await change(() => authApi.register(body), (result) => result.user);
         return result.user;
       },
       logout: async () => {
-        await authApi.logout().catch(() => undefined);
-        setUser(null);
+        await change(authApi.logout, () => null);
       },
     }),
     [ready, user],

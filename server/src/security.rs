@@ -7,6 +7,7 @@ use axum::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -94,10 +95,57 @@ impl RateTable {
         entry.1 = entry.1.saturating_add(1);
         entry.1
     }
+
+    fn refund(&mut self, key: &str, started: Instant) {
+        if let Some((window, count)) = self.windows.get_mut(key)
+            && *window == started
+        {
+            *count = count.saturating_sub(1);
+        }
+    }
 }
 
 const TOO_MANY: ApiError =
     ApiError::new(StatusCode::TOO_MANY_REQUESTS, "too_many", "시도가 너무 많습니다. 10분 후 다시 시도해 주세요.");
+
+/// Reserves the budget before asynchronous work starts. Successful checks and abandoned requests refund it;
+/// failures keep it. Checking and reserving every key happen under one lock.
+pub struct RateReservation {
+    table: Arc<Mutex<RateTable>>,
+    keys: Vec<(String, Instant)>,
+    keep: bool,
+}
+
+impl RateReservation {
+    pub fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for RateReservation {
+    fn drop(&mut self) {
+        if !self.keep
+            && let Ok(mut table) = self.table.lock()
+        {
+            for (key, started) in &self.keys {
+                table.refund(key, *started);
+            }
+        }
+    }
+}
+
+pub fn rate_reserve(state: &AppState, limits: &[(String, u32)]) -> ApiResult<RateReservation> {
+    let mut table = state.attempts.lock().map_err(internal)?;
+    if limits.iter().any(|(key, max)| table.count(key) >= *max) {
+        return Err(TOO_MANY);
+    }
+    let mut keys = Vec::with_capacity(limits.len());
+    for (key, _) in limits {
+        table.record(key.clone());
+        keys.push((key.clone(), table.windows[key].0));
+    }
+    Ok(RateReservation { table: state.attempts.clone(), keys, keep: false })
+}
 
 /// Records one event and refuses once more than `max` were recorded in the window.
 pub fn rate_limit(state: &AppState, key: String, max: u32) -> ApiResult<()> {

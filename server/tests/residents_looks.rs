@@ -155,10 +155,12 @@ fn heavy_glb() -> Vec<u8> {
 
 /// A studio character that stands but never walks.
 fn standing_glb() -> Vec<u8> {
-    glb::join(
-        &json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}], "animations": [{"name": "Idle"}, {"name": "Wave"}]}),
-        &[],
-    )
+    let bytes = body_glb();
+    let (mut json, bin) = glb::split(&bytes).unwrap();
+    let mut wave = json["animations"][0].clone();
+    wave["name"] = "Wave".into();
+    json["animations"] = json!([json["animations"][0].clone(), wave]);
+    glb::join(&json, bin)
 }
 
 /// What the fake character server knows: two finished characters, and a wardrobe with one body and parts that each go
@@ -649,11 +651,9 @@ async fn 새로_저장하면_앞선_입히기는_일을_하지_않고_물러난�
         .unwrap();
     let second = app.call("PUT", "/api/looks/me", Some(recolored("hats", "#0000ff")), Some(&member)).await;
     assert_eq!(second.status, StatusCode::ACCEPTED, "{:?}", second.body);
-    until("both bakes to fetch their files", || async {
-        let masks = studio.seen.lock().unwrap().iter().filter(|path| path.ends_with("/hat/mask")).count();
-        (masks == 2).then_some(json!(masks))
-    })
-    .await;
+    // Neither queued bake may download a body or mask before obtaining a memory-heavy slot.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!studio.seen.lock().unwrap().iter().any(|path| path.ends_with(".glb") || path.ends_with("/mask")));
     drop(slots);
 
     let ready = settled(&app, &member).await;
@@ -669,7 +669,7 @@ async fn 새로_저장하면_앞선_입히기는_일을_하지_않고_물러난�
 #[tokio::test]
 async fn 모습을_입히는_사람이_너무_많으면_저장을_거절하고_열여섯까지는_받는다() {
     let (app, _studio, _admin, member) = resident_app().await;
-    for at in 0..17 {
+    for at in 0..16 {
         let id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO users (id, username, display_name, password_hash) VALUES ($1, $2, $2, 'x')")
             .bind(id)
@@ -690,7 +690,7 @@ async fn 모습을_입히는_사람이_너무_많으면_저장을_거절하고_�
     );
     assert_eq!(app.call("GET", "/api/looks/me", None, Some(&member)).await.body, json!({"look": null}));
 
-    // One of them was cut short long ago and no longer counts: sixteen are not more than sixteen.
+    // Fifteen remain active; concurrent reservations must accept exactly one sixteenth bake.
     sqlx::query(
         "UPDATE user_looks SET updated_at = now() - interval '11 minutes'
          WHERE user_id = (SELECT id FROM users WHERE username = 'baker0')",
@@ -698,8 +698,20 @@ async fn 모습을_입히는_사람이_너무_많으면_저장을_거절하고_�
     .execute(&app.state.db)
     .await
     .unwrap();
-    let accepted = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
-    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+    let another = app.register("another_baker", "입히기").await;
+    let slots = busy_slots(&app).await;
+    let (a, b) = tokio::join!(
+        app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)),
+        app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&another))
+    );
+    let mut statuses = [a.status.as_u16(), b.status.as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [202, 429], "{:?} {:?}", a.body, b.body);
+    drop(slots);
+    assert_eq!(
+        settled(&app, if a.status == StatusCode::ACCEPTED { &member } else { &another }).await["status"],
+        "ready"
+    );
     app.cleanup().await;
 }
 

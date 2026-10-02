@@ -17,7 +17,7 @@ use crate::{
     error::{ApiError, ApiResult, bad, conflict, forbidden, internal, not_found},
     permissions::like_escape,
     rebac::{Checker, Object, Subject},
-    security::{client_address, rate_limit},
+    security::{client_address, hmac_sha256, rate_limit},
 };
 
 const MAX_WORLD_BYTES: usize = 2 * 1024 * 1024;
@@ -29,6 +29,8 @@ const MAX_WORLDS: i64 = 8;
 const MAX_DOMAINS: usize = 64;
 const VISIBILITIES: [&str; 3] = ["public", "ilchon", "private"];
 const MOODS: i16 = 4;
+const MAX_DAILY_VISITORS: i64 = 10_000;
+const OWNER_CHANGED: ApiError = conflict("owner_changed", "계정이 바뀌어 저장을 중단했어요.");
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -205,6 +207,7 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProfileChanges {
+    expected_owner_id: Uuid,
     title: Option<String>,
     status_message: Option<String>,
     mood: Option<i16>,
@@ -228,6 +231,9 @@ async fn update(
     Json(changes): Json<ProfileChanges>,
 ) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    if changes.expected_owner_id != user.id {
+        return Err(OWNER_CHANGED);
+    }
     my_home(&state, &user).await?;
     let title = trimmed(changes.title, 1, 30, "invalid_title")?;
     let status = trimmed(changes.status_message, 0, 60, "invalid_status")?;
@@ -286,7 +292,9 @@ async fn update(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VisitBody {
-    visitor_id: Option<Uuid>,
+    // Kept readable for old clients, but an anonymous client cannot choose its counting identity.
+    #[serde(rename = "visitorId")]
+    _visitor_id: Option<Uuid>,
 }
 
 /// Counts one visit per visitor per Seoul day; the owner's own visits do not count.
@@ -294,17 +302,25 @@ async fn visit(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
-    Json(body): Json<VisitBody>,
+    Json(_body): Json<VisitBody>,
 ) -> ApiResult<Json<Value>> {
+    let address = client_address(&headers);
+    rate_limit(&state, format!("visits-address:{address}"), 120)?;
     let viewer = optional_user(&state, &headers).await?;
     let (home, is_owner) = visible_home(&state, &name, viewer.as_ref()).await?;
     if !is_owner {
-        let visitor = match (&viewer, body.visitor_id) {
-            (Some(user), _) => format!("u:{}", user.id),
-            (None, Some(id)) => format!("a:{id}"),
-            (None, None) => format!("ip:{}", client_address(&headers)),
+        let visitor = match &viewer {
+            Some(user) => format!("u:{}", user.id),
+            None => format!("ip:{}", hex::encode(hmac_sha256(&state.config.ticket_secret, address.as_bytes()))),
         };
         let mut tx = state.db.begin().await?;
+        sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(home.owner_id).execute(&mut *tx).await?;
+        let full: bool = sqlx::query_scalar("SELECT count(*) >= $2 FROM home_visits WHERE owner_id = $1 AND day = (now() AT TIME ZONE 'Asia/Seoul')::date")
+            .bind(home.owner_id).bind(MAX_DAILY_VISITORS).fetch_one(&mut *tx).await?;
+        if full {
+            tx.rollback().await?;
+            return Ok(Json(visits(&state, home.owner_id).await?));
+        }
         let fresh = sqlx::query(
             "INSERT INTO home_visits (owner_id, day, visitor) VALUES ($1, (now() AT TIME ZONE 'Asia/Seoul')::date, $2)
              ON CONFLICT DO NOTHING",
@@ -372,6 +388,7 @@ async fn world(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveWorld {
+    expected_owner_id: Uuid,
     world_id: String,
     base_revision: i64,
     data: Map<String, Value>,
@@ -475,6 +492,9 @@ async fn save_world(
     Json(body): Json<SaveWorld>,
 ) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    if body.expected_owner_id != user.id {
+        return Err(OWNER_CHANGED);
+    }
     rate_limit(&state, format!("world:{}", user.id), WORLD_SAVES_PER_WINDOW)?;
     my_home(&state, &user).await?;
     let world_id = world_id(&body.world_id)?.to_owned();

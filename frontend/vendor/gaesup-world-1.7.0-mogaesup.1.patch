@@ -1,0 +1,495 @@
+--- a/src/core/networks/__tests__/PlayerPositionTracker.test.ts
++++ b/src/core/networks/__tests__/PlayerPositionTracker.test.ts
+@@ -1,4 +1,5 @@
+ import type { RapierRigidBody } from '@react-three/rapier';
++import * as THREE from 'three';
+ 
+ import { PlayerPositionTracker } from '../core/PlayerPositionTracker';
+ 
+@@ -42,6 +43,27 @@
+   speed = 0;
+   expect(track()?.velocity).toEqual([0, 0, 0]);
+   expect(track()).toBeNull();
++});
++
++test('fallback faces canonical +Z along movement and retains its direction when stopped', () => {
++  let speed = 4;
++  const ref = { current: { translation: PLAYER_REF.current.translation, rotation: PLAYER_REF.current.rotation, linvel: () => ({ x: speed, y: 0, z: 0 }) } as unknown as RapierRigidBody };
++  const tracker = new PlayerPositionTracker({ updateRate: 30, velocityThreshold: 0.1, sendRateLimit: 0 });
++  const moving = [...tracker.trackPosition(ref, 'player', '#fff')!.rotation];
++  expect(moving).toEqual([0.7071, 0, 0.7071, 0]);
++  speed = 0;
++  expect(tracker.trackPosition(ref, 'player', '#fff')?.rotation).toEqual(moving);
++  tracker.reset();
++  expect(tracker.trackPosition(ref, 'player', '#fff')?.rotation).toEqual([1, 0, 0, 0]);
++});
++
++test('visual orientation wins over velocity and body pose including a turn while stopped', () => {
++  const ref = { current: { translation: PLAYER_REF.current.translation, rotation: PLAYER_REF.current.rotation, linvel: () => ({ x: 4, y: 0, z: 0 }) } as unknown as RapierRigidBody };
++  const tracker = new PlayerPositionTracker({ updateRate: 30, velocityThreshold: 0.1, sendRateLimit: 0 });
++  const facing = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -Math.PI / 2, 0));
++  expect(tracker.trackPosition(ref, 'player', '#fff', undefined, 'walk', facing)?.rotation).toEqual([0.7071, 0, -0.7071, 0]);
++  facing.setFromEuler(new THREE.Euler(0, Math.PI, 0));
++  expect(tracker.trackPosition(PLAYER_REF, 'player', '#fff', undefined, 'idle', facing)?.rotation).toEqual([0, 0, 1, 0]);
+ });
+ 
+ describe('send thresholds', () => {
+--- /dev/null
++++ b/src/core/networks/__tests__/remoteAnimation.test.ts
+@@ -0,0 +1,17 @@
++import * as THREE from 'three';
++
++import { resolveRemoteAnimation } from '../core/remoteAnimation';
++
++const action = (name: string) => new THREE.AnimationMixer(new THREE.Group()).clipAction(new THREE.AnimationClip(name, 1, []));
++
++test('authored canonical aliases do not pick an unrelated first clip', () => {
++  const wave = action('Wave_One_Hand');
++  const idle = action('Armature|Idle');
++  const walk = action('preset:biped:Walking');
++  const actions = { Wave_One_Hand: wave, 'Armature|Idle': idle, 'preset:biped:Walking': walk };
++  expect(resolveRemoteAnimation(actions, 'idle')).toBe(idle);
++  expect(resolveRemoteAnimation(actions, 'run')).toBe(walk);
++  expect(resolveRemoteAnimation(actions, 'wave')).toBe(wave);
++  expect(resolveRemoteAnimation(actions, 'Armature|Idle')).toBe(idle);
++  expect(resolveRemoteAnimation({ Wave_One_Hand: wave }, 'idle')).toBeNull();
++});
+--- a/src/core/networks/__tests__/remoteMotion.test.ts
++++ b/src/core/networks/__tests__/remoteMotion.test.ts
+@@ -33,3 +33,19 @@
+   expect(syncRemoteMotion(motion, state(0, 0.2, 'wave'), 0.5)).toBe(true);
+   expect(motion.appearance.animation).toBe('wave');
+ });
++
++
++test('normalizes peer quaternions before placing or interpolating the physics pose', () => {
++  const motion = createRemoteMotion();
++  syncRemoteMotion(motion, { ...state(0), rotation: [0, 100000, 100000, 0] }, 0.5);
++  expect(motion.targetRotation.length()).toBeCloseTo(1, 12);
++  expect(motion.rotation.x).toBeCloseTo(Math.SQRT1_2, 12);
++  expect(motion.rotation.y).toBeCloseTo(Math.SQRT1_2, 12);
++  syncRemoteMotion(motion, { ...state(0), rotation: [0, 1e-300, 1e-300, 0] }, 0.5);
++  expect(motion.targetRotation.x).toBeCloseTo(Math.SQRT1_2, 12);
++  expect(motion.targetRotation.y).toBeCloseTo(Math.SQRT1_2, 12);
++  syncRemoteMotion(motion, { ...state(0), rotation: [0.7071, 0, 0.7071, 0] }, 0.5);
++  expect(motion.targetRotation.length()).toBeCloseTo(1, 12);
++  syncRemoteMotion(motion, { ...state(0), rotation: [0, 0, 0, 0] }, 0.5);
++  expect(motion.targetRotation.toArray()).toEqual([0, 0, 0, 1]);
++});
+--- a/src/core/networks/components/RemotePlayer.tsx
++++ b/src/core/networks/components/RemotePlayer.tsx
+@@ -7,7 +7,9 @@
+ 
+ import { useSharedFrame, type SharedFrameChannel } from '@core/runtime/frame';
+ 
++import { normalizeImportedMaterials } from '../../assets/materialPolicy';
+ import { useGLTFAsset } from '../../assets/useGLTFAsset';
++import { resolveRemoteAnimation } from '../core/remoteAnimation';
+ import { GaesupErrorBoundary } from '../../error';
+ import { releaseObject } from '../../rendering/release';
+ import { useNameplate } from '../../ui/components/Nameplates';
+@@ -103,7 +105,13 @@
+   
+   // 모델 로드
+   const { scene, animations } = useGLTFAsset(modelUrl);
+-  const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
++  const materialPolicy = config?.rendering?.materialPolicy ?? 'keep';
++  const tintCharacter = config?.rendering?.tintCharacter ?? false;
++  const clone = useMemo(() => {
++    const owned = SkeletonUtils.clone(scene);
++    normalizeImportedMaterials(owned, materialPolicy);
++    return owned;
++  }, [scene, materialPolicy]);
+   useEffect(() => () => releaseObject(clone), [clone]);
+   const { actions } = useAnimations(animations, animationRootRef);
+   const currentAnimRef = useRef<string | null>(null);
+@@ -116,7 +124,7 @@
+ 
+   // Apply per-player tint (material cloning) once per model/color.
+   useEffect(() => {
+-    if (!playerColor) return;
++    if (!tintCharacter || !playerColor) return;
+     const originals = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
+     const tinted = new Map<THREE.Material, THREE.Material>();
+     const cleanup = () => {
+@@ -162,30 +170,7 @@
+       throw error;
+     }
+     return cleanup;
+-  }, [clone, playerColor]);
+-
+-  const pickAction = (desired: string): THREE.AnimationAction | null => {
+-    if (!actions) return null;
+-    const direct = actions[desired];
+-    if (direct) return direct;
+-
+-    const lower = desired.toLowerCase();
+-    const keys = Object.keys(actions);
+-    const byIncludes = keys.find((k) => k.toLowerCase().includes(lower));
+-    if (byIncludes) return actions[byIncludes] ?? null;
+-
+-    // Common fallback names
+-    if (lower === 'run') {
+-      const k = keys.find((x) => x.toLowerCase().includes('walk')) ?? keys[0];
+-      return k ? (actions[k] ?? null) : null;
+-    }
+-    if (lower === 'idle') {
+-      const k = keys.find((x) => x.toLowerCase().includes('idle')) ?? keys[0];
+-      return k ? (actions[k] ?? null) : null;
+-    }
+-
+-    return keys[0] ? (actions[keys[0]] ?? null) : null;
+-  };
++  }, [clone, playerColor, tintCharacter]);
+ 
+   // 애니메이션 업데이트 (stop-all 금지: 끊김/튐 원인)
+   useEffect(() => {
+@@ -195,7 +180,7 @@
+     const nextName = appearance.animation || 'idle';
+     if (currentAnimRef.current === nextName) return;
+ 
+-    const next = pickAction(nextName);
++    const next = resolveRemoteAnimation(actions, nextName);
+     if (!next) return;
+ 
+     const play = () => {
+--- a/src/core/networks/components/__tests__/RemotePlayer.test.tsx
++++ b/src/core/networks/components/__tests__/RemotePlayer.test.tsx
+@@ -6,6 +6,7 @@
+ import { useGLTFAsset } from '../../../assets/useGLTFAsset';
+ import { frameScheduler, getSharedFrameEntryCount } from '../../../runtime/frame';
+ import { useNameplate } from '../../../ui/components/Nameplates';
++import { defaultMultiplayerConfig } from '../../config/defaultConfig';
+ import type { PlayerState } from '../../types';
+ import { RemotePlayer } from '../RemotePlayer';
+ 
+@@ -297,7 +298,7 @@
+     mockedUseGLTF.mockReturnValue({ scene, animations: [] } as unknown as ReturnType<typeof useGLTFAsset>);
+     let renderer: ReactTestRenderer | undefined;
+     try {
+-      act(() => { renderer = create(<RemotePlayer playerId="tint" state={{ ...PLAYER_STATE, color: '#ff0000' }} characterUrl="/tint.glb" />); });
++      act(() => { renderer = create(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={{ ...PLAYER_STATE, color: '#ff0000' }} characterUrl="/tint.glb" />); });
+       const single = clonedScene.children[0] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+       const multiple = clonedScene.children[1] as THREE.Mesh<THREE.BufferGeometry, THREE.Material[]>;
+       const tinted = single.material;
+@@ -305,21 +306,21 @@
+       expect(tinted).not.toBe(source);
+       expect(tinted.color.getHexString()).toBe('ff0000');
+       expect(multiple.material).toEqual([tinted, tinted]);
+-      act(() => { renderer?.update(<RemotePlayer playerId="tint" state={{ ...PLAYER_STATE, color: '#00ff00' }} characterUrl="/tint.glb" />); });
++      act(() => { renderer?.update(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={{ ...PLAYER_STATE, color: '#00ff00' }} characterUrl="/tint.glb" />); });
+       const green = single.material;
+       const greenDispose = jest.spyOn(green, 'dispose');
+       expect(green).not.toBe(tinted);
+       expect(green.color.getHexString()).toBe('00ff00');
+       expect(multiple.material).toEqual([green, green]);
+       expect(tintedDispose).toHaveBeenCalledTimes(1);
+-      act(() => { renderer?.update(<RemotePlayer playerId="tint" state={PLAYER_STATE} characterUrl="/tint.glb" />); });
++      act(() => { renderer?.update(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={PLAYER_STATE} characterUrl="/tint.glb" />); });
+       expect(single.material).toBe(source);
+       expect(multiple.material).toBe(originalArray);
+       expect(greenDispose).toHaveBeenCalledTimes(1);
+       expect(tintedDispose).toHaveBeenCalledTimes(1);
+       expect(sourceDispose).not.toHaveBeenCalled();
+       expect(source.color.getHexString()).toBe('abcdef');
+-      act(() => { renderer?.update(<RemotePlayer playerId="tint" state={{ ...PLAYER_STATE, color: '#0000ff' }} characterUrl="/tint.glb" />); });
++      act(() => { renderer?.update(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={{ ...PLAYER_STATE, color: '#0000ff' }} characterUrl="/tint.glb" />); });
+       const blueDispose = jest.spyOn(single.material, 'dispose');
+       act(() => renderer?.unmount());
+       renderer = undefined;
+@@ -333,6 +334,40 @@
+       sourceDispose.mockRestore();
+       source.dispose();
+       geometry.dispose();
++    }
++  });
++
++  test('nameplate colours preserve authored model colours and figure matches the local material policy', () => {
++    const skin = new THREE.MeshStandardMaterial({ color: '#deab87', roughness: 0.2, metalness: 0.7 });
++    const cloth = new THREE.MeshStandardMaterial({ color: '#214d91', roughness: 0.3, metalness: 0.4 });
++    const geometry = new THREE.BufferGeometry();
++    const scene = new THREE.Group();
++    scene.add(new THREE.Mesh(geometry, skin), new THREE.Mesh(geometry, [skin, cloth]));
++    const cloned = scene.clone(true);
++    const originalLoader = mockedUseGLTF.getMockImplementation();
++    jest.mocked(SkeletonUtils.clone).mockReturnValueOnce(cloned);
++    mockedUseGLTF.mockReturnValue({ scene, animations: [] } as unknown as ReturnType<typeof useGLTFAsset>);
++    let renderer: ReactTestRenderer | undefined;
++    const config = { ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, materialPolicy: 'figure' as const } };
++    const view = (color: string) => <RemotePlayer playerId="figure" state={{ ...PLAYER_STATE, color }} characterUrl="/figure.glb" config={config} />;
++    try {
++      act(() => { renderer = create(view('#ff0000')); });
++      const figure = (cloned.children[0] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>).material;
++      const parts = (cloned.children[1] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial[]>).material;
++      expect(figure.color.getHexString()).toBe('deab87');
++      expect(figure.roughness).toBe(1);
++      expect(figure.metalness).toBe(0);
++      expect(parts[1]?.color.getHexString()).toBe('214d91');
++      expect(skin.roughness).toBe(0.2);
++      expect(skin.metalness).toBe(0.7);
++      act(() => { renderer?.update(view('#00ff00')); });
++      expect(figure.color.getHexString()).toBe('deab87');
++      expect(parts[1]?.color.getHexString()).toBe('214d91');
++      expect(jest.mocked(useNameplate)).toHaveBeenLastCalledWith(expect.anything(), PLAYER_STATE.name, defaultMultiplayerConfig.rendering.nameTagHeight);
++    } finally {
++      act(() => renderer?.unmount());
++      if (originalLoader) mockedUseGLTF.mockImplementation(originalLoader);
++      geometry.dispose(); skin.dispose(); cloth.dispose();
+     }
+   });
+ 
+--- a/src/core/networks/core/PlayerPositionTracker.ts
++++ b/src/core/networks/core/PlayerPositionTracker.ts
+@@ -48,7 +48,7 @@
+   private tempRot = new THREE.Quaternion();
+   private tempSendRot = new THREE.Quaternion();
+   private tempEuler = new THREE.Euler();
+-  private baseYaw: number | null = null;
++  private lastBodyRotation = new THREE.Quaternion();
+   private scratchUpdate: PlayerUpdateData = {
+     name: '', color: '',
+     position: [0, 0, 0], rotation: [1, 0, 0, 0],
+@@ -69,6 +69,7 @@
+     playerColor: string,
+     modelUrl?: string,
+     animationName?: string | null,
++    visualRotation?: Readonly<{ x: number; y: number; z: number; w: number }> | null,
+   ): PlayerUpdateData | null {
+     if (!playerRef.current) return null;
+ 
+@@ -104,23 +105,16 @@
+         : (speed > runThreshold ? 'run' : 'idle');
+     const currentAnimation = requested.length > 0 ? requested : fallback;
+ 
+-    // 캐릭터는 물리에서 rigidbody 회전이 고정되는 경우가 많아서,
+-    // 이동 방향(velocity) 기반으로 yaw를 만들어 전송해야 원격에서도 방향전환이 된다.
++    // Visual character groups can rotate independently from their rotation-locked physics bodies.
++    // Prefer the rendered world orientation; +Z movement is the fallback, without an implicit model correction.
+     this.tempSendRot.copy(this.tempRot);
+-    const vx = this.velocity.x;
+-    const vz = this.velocity.z;
+-    const horizontalSpeed = Math.hypot(vx, vz);
+-    if (horizontalSpeed > 0.05) {
+-      if (this.baseYaw === null) {
+-        // 첫 프레임의 "모델 기본 정면" 보정 (예: 초기 y = PI)
+-        this.tempEuler.setFromQuaternion(this.tempRot, 'YXZ');
+-        // Many character rigs face -Z; our yaw (atan2(vx, vz)) assumes +Z forward.
+-        // Add PI so remote faces the same direction as local.
+-        this.baseYaw = this.tempEuler.y + Math.PI;
+-      }
+-      const yaw = Math.atan2(vx, vz) + (this.baseYaw ?? 0);
+-      this.tempEuler.set(0, yaw, 0, 'YXZ');
++    if (visualRotation) {
++      this.tempSendRot.copy(visualRotation).normalize();
++    } else if (Math.hypot(this.velocity.x, this.velocity.z) > 0.05) {
++      this.tempEuler.set(0, Math.atan2(this.velocity.x, this.velocity.z), 0, 'YXZ');
+       this.tempSendRot.setFromEuler(this.tempEuler);
++    } else if (this.hasSentSnapshot && !rotationChanged(this.lastBodyRotation, this.tempRot)) {
++      this.tempSendRot.copy(this.lastRotation);
+     }
+ 
+     const updateData = this.scratchUpdate;
+@@ -153,6 +147,7 @@
+     // 상태 업데이트
+     this.lastPosition.copy(this.tempPos);
+     this.lastRotation.copy(this.tempSendRot);
++    this.lastBodyRotation.copy(this.tempRot);
+     this.lastVelocity.copy(this.velocity);
+     this.lastAnimation = currentAnimation;
+     this.lastUpdateTime = now;
+@@ -173,6 +168,6 @@
+     this.velocity.set(0, 0, 0);
+     this.lastUpdateTime = 0;
+     this.hasSentSnapshot = false;
+-    this.baseYaw = null;
++    this.lastBodyRotation.identity();
+   }
+ }
+--- /dev/null
++++ b/src/core/networks/core/remoteAnimation.ts
+@@ -0,0 +1,22 @@
++import type { AnimationAction } from 'three';
++
++import { figureClipName } from '../../assets/pipeline/modelInspection';
++
++/** Resolve authored names before canonical aliases; an unknown animation never picks an unrelated first clip. */
++export function resolveRemoteAnimation(
++  actions: Readonly<Record<string, AnimationAction | null | undefined>>,
++  requested: string,
++): AnimationAction | null {
++  const direct = actions[requested];
++  if (direct) return direct;
++  const keys = Object.keys(actions).filter((key) => actions[key]);
++  const lower = requested.trim().toLowerCase();
++  const exact = keys.find((key) => key.toLowerCase() === lower);
++  if (exact) return actions[exact] ?? null;
++  const canonical = figureClipName(requested) ?? lower;
++  const named = (name: string) => keys.find((key) => figureClipName(key) === name);
++  const key = named(canonical)
++    ?? (canonical === 'run' ? named('walk') : canonical === 'walk' ? named('run') : undefined)
++    ?? named('idle');
++  return key ? actions[key] ?? null : null;
++}
+--- a/src/core/networks/core/remoteMotion.ts
++++ b/src/core/networks/core/remoteMotion.ts
+@@ -78,7 +78,13 @@
+   motion.receivedAt = performance.now();
+   motion.target.set(state.position[0], state.position[1], state.position[2]);
+   const [w, x, y, z] = state.rotation;
+-  motion.targetRotation.set(x, y, z, w);
++  // Scale first so legacy or hostile very large/tiny finite quaternions retain their orientation.
++  const magnitude = Math.max(Math.abs(w), Math.abs(x), Math.abs(y), Math.abs(z));
++  if (magnitude > 0 && Number.isFinite(magnitude)) {
++    motion.targetRotation.set(x / magnitude, y / magnitude, z / magnitude, w / magnitude).normalize();
++  } else {
++    motion.targetRotation.identity();
++  }
+   if (state.velocity) motion.velocity.set(state.velocity[0], state.velocity[1], state.velocity[2]);
+   if (!placed) {
+     motion.position.copy(motion.target);
+--- a/src/core/networks/hooks/__tests__/useMultiplayer.test.tsx
++++ b/src/core/networks/hooks/__tests__/useMultiplayer.test.tsx
+@@ -2,11 +2,43 @@
+ 
+ import type { RapierRigidBody } from '@react-three/rapier';
+ import { act, renderHook } from '@testing-library/react';
++import * as THREE from 'three';
+ 
+ import { defaultMultiplayerConfig } from '../../config/defaultConfig';
+ import { PlayerNetworkManager } from '../../core/PlayerNetworkManager';
+ import type { PlayerNetworkManagerOptions } from '../../core/PlayerNetworkManager';
+ import { useMultiplayer } from '../useMultiplayer';
++
++const mockAnimationSnapshot = jest.fn(() => ({ currentAnimation: 'idle', isPlaying: false }));
++jest.mock('../../../animation/hooks/useAnimationBridge', () => ({
++  useScopedAnimationBridge: () => ({ snapshot: mockAnimationSnapshot }),
++}));
++
++test('tracking reads the playing bridge and the visible world rotation without a store animation subscription', () => {
++  jest.clearAllMocks();
++  jest.useFakeTimers();
++  mockAnimationSnapshot.mockReturnValue({ currentAnimation: 'walk', isPlaying: true });
++  const parent = new THREE.Group();
++  parent.rotation.y = Math.PI / 4;
++  const visual = new THREE.Group();
++  visual.rotation.y = Math.PI / 4;
++  parent.add(visual);
++  const ref = { current: { translation: () => ({ x: 0, y: 0, z: 0 }), rotation: () => ({ x: 0, y: 0, z: 0, w: 1 }), linvel: () => ({ x: 4, y: 0, z: 0 }) } } as unknown as RefObject<RapierRigidBody>;
++  const view = renderHook(() => useMultiplayer({ config: defaultMultiplayerConfig, rigidBodyRef: ref, visualRotationRef: { current: visual } }));
++  try {
++    act(() => view.result.current.connect({ roomId: 'room', playerName: 'player', playerColor: '#fff' }));
++    act(() => jest.advanceTimersByTime(50));
++    const manager = jest.mocked(PlayerNetworkManager).mock.results[0]!.value as PlayerNetworkManager;
++    expect(manager.updateLocalPlayer).toHaveBeenLastCalledWith(expect.objectContaining({ animation: 'walk', rotation: [0.7071, 0, 0.7071, 0] }));
++    mockAnimationSnapshot.mockReturnValue({ currentAnimation: 'wave', isPlaying: true });
++    act(() => jest.advanceTimersByTime(50));
++    expect(manager.updateLocalPlayer).toHaveBeenLastCalledWith(expect.objectContaining({ animation: 'wave' }));
++  } finally {
++    view.unmount();
++    mockAnimationSnapshot.mockReturnValue({ currentAnimation: 'idle', isPlaying: false });
++    jest.useRealTimers();
++  }
++});
+ 
+ jest.mock('@stores/gaesupStore', () => ({
+   useGaesupStore: (selector: (state: object) => unknown) => selector({}),
+--- a/src/core/networks/hooks/useMultiplayer.ts
++++ b/src/core/networks/hooks/useMultiplayer.ts
+@@ -1,6 +1,9 @@
+ import { useEffect, useRef, useState, useCallback, useMemo, type RefObject } from 'react';
+ 
+ import type { RapierRigidBody } from '@react-three/rapier';
++import { Quaternion, type Object3D } from 'three';
++
++import { useScopedAnimationBridge } from '../../animation/hooks/useAnimationBridge';
+ 
+ import { useGaesupStore } from '@stores/gaesupStore';
+ 
+@@ -21,6 +24,8 @@
+   config: MultiplayerConfig;
+   characterUrl?: string;
+   rigidBodyRef?: RefObject<RapierRigidBody>;
++  /** The visible character group, including its retained orientation while stopped. */
++  visualRotationRef?: RefObject<Object3D | null>;
+ }
+ 
+ interface UseMultiplayerResult extends MultiplayerState {
+@@ -39,7 +44,12 @@
+ export function useMultiplayer(options: UseMultiplayerOptions): UseMultiplayerResult {
+   const { config, characterUrl, rigidBodyRef } = options;
+   const modeType = useGaesupStore((s) => s.mode?.type ?? 'character');
+-  const animationState = useGaesupStore((s) => s.animationState);
++  const animationBridge = useScopedAnimationBridge();
++  const visualQuaternion = useMemo(() => new Quaternion(), []);
++  const visualRotationRef = useRef(options.visualRotationRef);
++  visualRotationRef.current = options.visualRotationRef;
++  const animationBridgeRef = useRef(animationBridge);
++  animationBridgeRef.current = animationBridge;
+   
+   const playersRef = useRef<LivePlayerMap>(new LivePlayerMap());
+   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+@@ -103,7 +113,6 @@
+   const [trackingUpdateRate, setTrackingUpdateRate] = useState(config.tracking.updateRate);
+   const stateRef = useRef<MultiplayerState & { players: LivePlayerMap }>(state);
+   const modeTypeRef = useRef(modeType);
+-  const animationStateRef = useRef(animationState);
+   const characterUrlRef = useRef(characterUrl);
+   characterUrlRef.current = characterUrl;
+ 
+@@ -115,9 +124,6 @@
+     modeTypeRef.current = modeType;
+   }, [modeType]);
+ 
+-  useEffect(() => {
+-    animationStateRef.current = animationState;
+-  }, [animationState]);
+ 
+   const [speechByPlayerId, setSpeechByPlayerId] = useState<Map<string, { text: string; expiresAt: number }>>(
+     () => new Map()
+@@ -366,13 +372,17 @@
+ 
+       const { playerName, playerColor, characterUrl: connectedUrl } = connectionInfoRef.current;
+       const type = modeTypeRef.current;
+-      const localAnimation = animationStateRef.current?.[type]?.current ?? 'idle';
++      const snapshot = animationBridgeRef.current?.snapshot(type);
++      const localAnimation = snapshot?.isPlaying ? snapshot.currentAnimation : undefined;
++      const visual = visualRotationRef.current?.current;
++      const visualRotation = visual ? visual.getWorldQuaternion(visualQuaternion) : undefined;
+       const updateData = positionTrackerRef.current.trackPosition(
+         trackingPlayerRef.current,
+         playerName,
+         playerColor,
+         connectedUrl || characterUrl,
+         localAnimation,
++        visualRotation,
+       );
+ 
+       if (updateData) {
+@@ -385,7 +395,7 @@
+     }, tickMs);
+ 
+     return () => window.clearInterval(id);
+-  }, [state.isConnected, characterUrl, trackingUpdateRate]);
++  }, [state.isConnected, characterUrl, trackingUpdateRate, visualQuaternion]);
+ 
+   // 정리
+   useEffect(() => {
+--- a/src/core/networks/types/index.ts
++++ b/src/core/networks/types/index.ts
+@@ -1,3 +1,5 @@
++import type { ImportedMaterialPolicy } from '../../assets/materialPolicy';
++
+ export type NetworkPayload = object | string | number | boolean | null | undefined;
+ 
+ // 플레이어 상태 정보
+@@ -48,6 +50,10 @@
+     nameTagHeight: number;
+     nameTagSize: number;
+     characterScale: number;
++    /** Imported glTF materials use the same policy as the local character. Defaults to keep. */
++    materialPolicy?: ImportedMaterialPolicy;
++    /** Explicitly tint model materials with playerColor; false preserves authored colours. */
++    tintCharacter?: boolean;
+   };
+ }
+ 

@@ -36,7 +36,7 @@ describe('상태 메시지 저장', () => {
 
   describe('화면에서', () => {
     const onUpdate = vi.fn();
-    beforeEach(() => vi.useFakeTimers());
+    beforeEach(() => { vi.useFakeTimers(); localStorage.clear(); });
     afterEach(() => {
       vi.useRealTimers();
       onUpdate.mockReset();
@@ -62,6 +62,47 @@ describe('상태 메시지 저장', () => {
       await wait(900);
       expect(onUpdate).not.toHaveBeenCalled();
       await unmount();
+    });
+
+    it('800ms 전에 소개 탭을 닫아도 마지막 입력을 저장한다', async () => {
+      const { container, unmount } = await open();
+      await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '내일은 비');
+      await unmount();
+      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '내일은 비' });
+    });
+
+    it('저장 실패를 표시하고 다시 열어도 실패한 입력을 남긴다', async () => {
+      onUpdate.mockRejectedValue(new TypeError('offline'));
+      const first = await open();
+      await type(first.container.querySelector<HTMLTextAreaElement>('textarea')!, '내일은 비'); await wait(900);
+      expect(first.container.querySelector('[role=alert]')?.textContent).toContain('잠시 후 다시 시도');
+      await first.unmount();
+      const next = await open(); expect(next.container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('내일은 비');
+      await next.unmount();
+    });
+
+    it('앞 저장 응답이 와도 그 뒤에 타이핑한 입력을 되돌리지 않는다', async () => {
+      let finish!: () => void;
+      onUpdate.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+      const { container, rerender, unmount } = await open();
+      await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '내일은 비'); await wait(900);
+      await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '모레는 맑음');
+      await rerender(<About view={view({ statusMessage: '내일은 비' })} minimes={[]} look={null} onUpdate={onUpdate} onWearLook={() => {}} />);
+      finish(); await wait(0);
+      expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('모레는 맑음');
+      expect(onUpdate).toHaveBeenLastCalledWith({ statusMessage: '모레는 맑음' });
+      await unmount();
+    });
+
+    it('저장이 진행 중일 때 원래 글로 되돌리고 닫으면 되돌린 글도 저장한다', async () => {
+      let finish!: () => void;
+      onUpdate.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+      const { container, unmount } = await open();
+      await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '내일은 비'); await wait(900);
+      await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '오늘도 맑음');
+      expect(localStorage.getItem('mogaesup:profile:owner:status')).toBe('오늘도 맑음');
+      await unmount(); finish(); await wait(0);
+      expect(onUpdate).toHaveBeenNthCalledWith(2, { statusMessage: '오늘도 맑음' });
     });
   });
 });

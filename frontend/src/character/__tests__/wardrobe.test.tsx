@@ -5,7 +5,7 @@ import { Texture, TextureLoader } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 import { lookApi } from '../../api/endpoints';
-import type { PermissionName, User } from '../../api/types';
+import type { Look, PermissionName, User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
 import { ApiError } from '../api';
 import { factoryApi, type WardrobeBody, type WardrobeOutfit, type WardrobePart, type WardrobeUnavailable } from '../factory/api';
@@ -110,6 +110,61 @@ describe('옷장', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('다시 열면 내 캐릭터의 저장된 파츠와 옷 색을 복원해서 같은 요청을 저장한다', async () => {
+    const saved: Look = {
+      request: { body: { jobId: body.job_id, version: body.version }, parts: { top: { jobId: 'top-job', version: 'v1', sha256: 'top-job-sha' } }, hairColor: null, colors: { top: { '0': '#abcdef' } } },
+      status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '2026-10-01T00:00:00Z',
+    };
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+    const save = vi.spyOn(lookApi, 'save').mockResolvedValue({ look: { ...saved, status: 'baking' } });
+    const { container, unmount } = await open(); await settle();
+    expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('후드');
+    expect(container.querySelector<HTMLInputElement>('.wardrobe-swatches input')?.value).toBe('#abcdef');
+    await click(button(container, '내 캐릭터로 입기')); await settle();
+    expect(save).toHaveBeenCalledExactlyOnceWith(saved.request);
+    await unmount();
+  });
+
+  it('내 캐릭터의 최초 읽기를 기다리는 동안 빈 조합으로 저장하지 못한다', async () => {
+    let answer!: (value: { look: Look | null }) => void;
+    vi.mocked(lookApi.mine).mockImplementationOnce(() => new Promise(resolve => { answer = resolve; }));
+    const { container, unmount } = await open(); await settle();
+    expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(true);
+    await act(async () => { answer({ look: null }); }); await settle();
+    expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(false);
+    await unmount();
+  });
+
+  it('다른 몸과 헤어 색으로 저장했던 캐릭터도 해당 몸의 파츠를 불러와 복원한다', async () => {
+    const other = { ...body, job_id: 'other-body', version: 'v2', name: '다른 몸', is_default: false };
+    const hair = part('hair-job', 'hair', '단발');
+    vi.mocked(factoryApi.wardrobeBodies).mockResolvedValue({ revision: '1', bodies: [body, other], default: { job_id: body.job_id, version: body.version } });
+    vi.mocked(factoryApi.wardrobeParts).mockImplementation(async job => ({ body: job === other.job_id ? other : body, parts: job === other.job_id ? [hair] : parts, unavailable: [] }));
+    const saved: Look = { request: { body: { jobId: other.job_id, version: other.version }, parts: { hair: { jobId: hair.job_id, version: hair.version, sha256: hair.sha256 } }, hairColor: '#123456', colors: {} }, status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '' };
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+    const save = vi.spyOn(lookApi, 'save').mockResolvedValue({ look: { ...saved, status: 'baking' } });
+    const { container, unmount } = await open(); await settle();
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="옷장 몸"]')?.value).toBe('other-body');
+    expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('단발');
+    expect(container.querySelector<HTMLInputElement>('.wardrobe-hair-color input')?.value).toBe('#123456');
+    await click(button(container, '내 캐릭터로 입기')); await settle();
+    expect(save).toHaveBeenCalledExactlyOnceWith(saved.request); await unmount();
+  });
+
+  it('느린 look polling은 중첩하지 않고 화면이 닫힌 뒤 요청을 취소한다', async () => {
+    const saved: Look = { request: { body: { jobId: body.job_id, version: body.version }, parts: {}, hairColor: null, colors: {} }, status: 'baking', worn: false, modelUrl: null, error: null, updatedAt: '' };
+    vi.mocked(lookApi.mine).mockResolvedValueOnce({ look: saved });
+    let answer!: (value: { look: Look | null }) => void;
+    vi.mocked(lookApi.mine).mockImplementationOnce(() => new Promise(resolve => { answer = resolve; }));
+    const { container, unmount } = await open(); await settle();
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(lookApi.mine).toHaveBeenCalledTimes(2);
+    const signal = vi.mocked(lookApi.mine).mock.calls[1]?.[0];
+    await unmount(); expect(signal?.aborted).toBe(true);
+    await act(async () => { answer({ look: null }); });
+    expect(container.querySelector('.wardrobe-look')).toBeNull();
   });
 
   describe('누가 무엇을 보는가', () => {

@@ -12,6 +12,7 @@ from src.services.asset_editor import _write_json
 from src.services.object_storage import publish_checkpoint, sha256 as _digest
 from src.services.process_identity import identity
 from src.services.worker_env import worker_environment
+from src.services.runtime_activity import running_task, worker_environment as admitted_environment
 
 
 def blender_executable() -> str | None:
@@ -48,8 +49,13 @@ def blender_process(command, log_path, runner_path, *, env=None, write_json, rec
     A worker whose receipt cannot be written is stopped: nothing would supervise it, and the next resume would start
     a second one. `write_json` is the caller's own writer; `receipt` returns extra receipt fields once the process exists.
     """
-    with log_path.open("wb") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=worker_environment() if env is None else env,
+    # The fixed preflight takes its own kernel lease before a recipe can run, including after the parent crashes.
+    command = list(command)
+    first_script = command.index('--python')
+    command[first_script:first_script] = ['--python', str(Path(__file__).with_name('runtime_blender_bootstrap.py'))]
+    with running_task(), log_path.open("wb") as log:
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                   env=admitted_environment(worker_environment() if env is None else env),
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         try:
             write_json(runner_path, {"process": identity(process.pid), **(receipt() if receipt else {})})
@@ -58,7 +64,11 @@ def blender_process(command, log_path, runner_path, *, env=None, write_json, rec
         except BaseException:
             stop_process(process)
             raise
-        yield process
+        try:
+            yield process
+        finally:
+            if process.poll() is None:
+                stop_process(process)
 
 
 def separate_materials(model: Path, output: Path, selections: list[dict] | None = None, source_sha256: str | None = None) -> dict:

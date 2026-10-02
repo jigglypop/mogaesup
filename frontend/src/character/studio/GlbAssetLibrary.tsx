@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { partLabels } from '../factory/parts';
 import { usePolling } from '../use-polling';
+import { studioHref } from '../../studio/screens';
 import { AssetModelPreview } from './AssetModelPreview';
 import { GlbUpload } from './GlbUpload';
 import { glbAssetsApi, glbAssetRecovery, glbPreparationRecovery, glbAssetSlots, type GlbAssetRecord, type GlbAssetSlot } from './glb-assets-api';
@@ -78,7 +79,7 @@ export function GlbAssetLibrary({ slot, bases, defaultBaseId, onJob }: Props) {
       {item.slot !== 'body' && item.slot !== 'prop' && <fieldset disabled={busy || !!preparing.pending || !!preparing.error}>
         <legend>기준몸에 맞추기</legend><label>기준 몸<select value={selectedBase?.id || ''} onChange={event => setBaseId(event.target.value)}><option value="">선택</option>{bases.map(value => <option key={value.id} value={value.id}>{value.character_name} · {value.id.slice(0, 8)}</option>)}</select></label>
         <button type="button" disabled={!fitReady} onClick={() => void prepare('fit')}>몸에 맞추기 · 기존 골격 연결</button>
-        {baseState?.origin === 'uploaded_glb' && <a href={`/?tab=character&mode=body&partsJob=${encodeURIComponent(selectedBase!.id)}`}>기준몸 리깅·피팅 준비</a>}
+        {baseState?.origin === 'uploaded_glb' && <a href={studioHref({ tab: 'character', mode: 'body', partsJob: selectedBase!.id })}>기준몸 리깅·피팅 준비</a>}
         {base.error && <p role="alert">{base.error}</p>}
       </fieldset>}
       {item.slot === 'body' && <fieldset disabled={busy || !!preparing.pending || !!preparing.error}><legend>추가 리깅</legend><label>몸 타입<select value={bodyType} onChange={event => setBodyType(event.target.value as 'male' | 'female')}><option value="female">여성형</option><option value="male">남성형</option></select></label><button type="button" onClick={() => void prepare('rig')}>새 리깅 · Meshy 1회</button></fieldset>}

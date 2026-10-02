@@ -1,4 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { rememberStudioQuery, studioHref } from '../../studio/screens';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { NativeAssembly } from '../factory/NativeAssembly';
 import { usePolling } from '../use-polling';
@@ -22,15 +24,16 @@ const Prompts = lazy(() => import('./Prompts'));
 const tabs = { admin: '관리자페이지', animals: '동물', character: '캐릭터', props: '기물', textures: '기본 바닥 타일', emoticons: '2D 이모티콘', prompts: '프롬프트 관리' };
 
 export function Workspace() {
+  const navigate = useNavigate();
   const initial = new URLSearchParams(location.search);
-  const [tab, setTab] = useState<keyof typeof tabs>((initial.get('tab') || '') in tabs ? initial.get('tab') as keyof typeof tabs : 'character');
-  const [characterMode, setCharacterMode] = useState<'body' | 'photo' | 'parts'>(
+  const [tab] = useState<keyof typeof tabs>((initial.get('tab') || '') in tabs ? initial.get('tab') as keyof typeof tabs : 'character');
+  const [characterMode] = useState<'body' | 'photo' | 'parts'>(
     (['body', 'parts'] as const).find(mode => mode === initial.get('mode')) || 'photo');
   const [partType, setPartType] = useState<(typeof variantSlots)[number]>(variantSlots.find(slot => slot === initial.get('part')) || 'top');
   const [baseId, setBaseId] = useState(initial.get('base') || '');
   const [jobId, setJobId] = useState(initial.get('partsJob') || '');
   const [adminAssetId, setAdminAssetId] = useState(initial.get('asset') || '');
-  const [adminSlot, setAdminSlot] = useState('');
+  const [adminSlot, setAdminSlot] = useState(initial.get('slot') || '');
   const [showUploads, setShowUploads] = useState(false);
   const [showMotion, setShowMotion] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
@@ -66,8 +69,9 @@ export function Workspace() {
     if (baseId) query.set('base', baseId); else query.delete('base');
     if (jobId) query.set('partsJob', jobId); else query.delete('partsJob');
     if (tab === 'admin' && adminAssetId) query.set('asset', adminAssetId); else query.delete('asset');
-    history.replaceState(null, '', `/?${query}`);
-  }, [tab, characterMode, partType, baseId, jobId, adminAssetId]);
+    if (tab === 'admin' && adminAssetId && adminSlot) query.set('slot', adminSlot); else query.delete('slot');
+    rememberStudioQuery(query);
+  }, [tab, characterMode, partType, baseId, jobId, adminAssetId, adminSlot]);
   const listJob = useCallback((result: FactoryJob) => {
     jobs.setValue(current => ({ jobs: [result, ...(current?.jobs || []).filter(item => item.id !== result.id)] }));
   }, [jobs.setValue]);
@@ -76,21 +80,18 @@ export function Workspace() {
     listJob(result);
   }, [listJob]);
   function openProduction(asset: FactoryJob, slot: string) {
-    setAdminAssetId(''); setTab('character');
-    if (asset.base_body) { setJobId(asset.id); setCharacterMode('body'); return; }
+    if (asset.base_body) { navigate(studioHref({ tab: 'character', mode: 'body', partsJob: asset.id })); return; }
     if (!asset.base_job_id || (asset.requested_slots?.length || 0) > 1) {
-      // A photo character (with or without a chosen base body) opens in the photo screen,
-      // which reads its selection from the address when it mounts.
-      const query = new URLSearchParams(location.search);
-      query.set('photoJob', asset.id); query.set('photoCharacter', asset.character_id);
-      history.replaceState(null, '', `${location.pathname}?${query}`);
-      setCharacterMode('photo'); return;
+      navigate(studioHref({ tab: 'character', mode: 'photo', photoJob: asset.id, photoCharacter: asset.character_id }));
+      return;
     }
-    setJobId(asset.id); setBaseId(asset.base_job_id); setCharacterMode('parts');
-    if (variantSlots.includes(slot as typeof partType)) setPartType(slot as typeof partType);
+    const part = variantSlots.includes(slot as typeof partType) ? slot : asset.requested_slots?.[0] || 'top';
+    navigate(studioHref({ tab: 'character', mode: 'parts', partsJob: asset.id, base: asset.base_job_id, part }));
   }
   function choosePart(slot: (typeof variantSlots)[number]) {
-    setCharacterMode('parts'); setPartType(slot);
+    if (tab !== 'character' || characterMode !== 'parts') {
+      navigate(studioHref({ tab: 'character', mode: 'parts', part: slot }));
+    } else setPartType(slot);
   }
   async function perform(action: () => Promise<void>) {
     if (locked.current) return;
@@ -107,7 +108,7 @@ export function Workspace() {
       jobs={jobs.value?.jobs || []} jobsLoading={jobs.loading && !jobs.value} jobsError={jobs.error}
       catalog={catalog.value} catalogError={catalog.error} bodyProfile={bodyProfile.value} bodyProfileError={bodyProfile.error}
       onJob={listJob} refreshJobs={jobs.refresh} /></Suspense> : <SinglePart slot={partType} onSlotChange={choosePart} bases={bases} base={base} native={nativeState} versions={versions} job={job} name={name} onBaseChange={id => { setBaseId(id); setJobId(''); }} onJobChange={setJobId} onJob={receiveJob} refreshJobs={jobs.refresh} />}</>}
-    {tab === 'admin' && <div className="workspace-content admin-library"><div className="workspace-heading"><h1>에셋 관리</h1><div className="admin-heading-actions"><button onClick={() => { setTab('character'); setCharacterMode('body'); }}>기본몸 추가</button><button onClick={() => { setTab('character'); choosePart('hair'); }}>헤어 생성</button><button aria-expanded={showUploads} onClick={() => setShowUploads(value => !value)}>GLB 등록</button></div></div>
+    {tab === 'admin' && <div className="workspace-content admin-library"><div className="workspace-heading"><h1>에셋 관리</h1><div className="admin-heading-actions"><button onClick={() => navigate(studioHref({ tab: 'character', mode: 'body' }))}>기본몸 추가</button><button onClick={() => choosePart('hair')}>헤어 생성</button><button aria-expanded={showUploads} onClick={() => setShowUploads(value => !value)}>GLB 등록</button></div></div>
         {deletedAsset && <div className="asset-delete-notice" role="status"><span>{deletedAsset.name} · 휴지통으로 이동했습니다.</span><button disabled={busy || !catalog.value} onClick={() => void perform(async () => { catalog.setValue(await studioApi.savePartMetadata(deletedAsset.id, deletedAsset.slot, { deleted: false }, catalog.value!.revision)); setDeletedAsset(undefined); })}>삭제 취소</button></div>}
         {showUploads && <GlbAssetLibrary bases={bases} defaultBaseId={base?.id} onJob={result => { setBaseId(result.base_job_id || result.id); setAdminAssetId(result.id); setAdminSlot(''); receiveJob(result); void jobs.refresh(); }} />}
         <AssetGallery jobs={candidates} loading={jobs.loading && !jobs.value} catalog={catalog.value} onCatalogChange={catalog.setValue} onRefresh={catalog.refresh} nativeJobId={managedAsset?.id} nativeState={managedNativeState} onOpen={(item, slot) => { setBaseId(item.base_job_id || item.id); setAdminAssetId(item.id); setAdminSlot(slot || ''); setJobId(item.id); setShowMotion(false); }} onCompose={item => setComposeId(item.id)} />

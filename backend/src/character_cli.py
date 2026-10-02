@@ -14,6 +14,7 @@ from src.services.model_providers import MESHY_BASE
 from src.services.object_storage import StoredPath as Path
 from src.services.provider_http import download_glb
 from src.services.run_lock import run_lock
+from src.services.runtime_activity import running_task
 
 
 def download(directory: Path, stage: str) -> dict:
@@ -48,7 +49,7 @@ def main():
     key = os.getenv("MESHY_API_KEY")
     if not key and args.command not in {"download", "local-rig"}:
         parser.error("MESHY_API_KEY is required")
-    with run_lock(args.run, getattr(args, "port", int(os.getenv("BLENDER_PORT", "9878"))), blender=args.command == "local-rig"):
+    with running_task(), run_lock(args.run, getattr(args, "port", int(os.getenv("BLENDER_PORT", "9878"))), blender=args.command == "local-rig"):
         if args.command == "local-rig":
             from src.services.blender_mcp import BlenderMCP
             from src.services.character_setup import setup_character

@@ -82,27 +82,37 @@ pub fn split(bytes: &[u8]) -> Option<(Value, &[u8])> {
     if word(bytes, 16)? != JSON_CHUNK {
         return None;
     }
-    let json = serde_json::from_slice(bytes.get(20..json_end)?).ok()?;
-    let bin = match (word(bytes, json_end), word(bytes, json_end + 4)) {
-        (Some(length), Some(BIN_CHUNK)) => {
-            (json_end + 8).checked_add(length as usize).and_then(|end| bytes.get(json_end + 8..end)).unwrap_or_default()
+    if json_end % 4 != 0 {
+        return None;
+    }
+    let json: Value = serde_json::from_slice(bytes.get(20..json_end)?).ok()?;
+    if json["asset"]["version"].as_str() != Some("2.0") {
+        return None;
+    }
+    let mut bin = &[][..];
+    let mut at = json_end;
+    while at < bytes.len() {
+        let length = word(bytes, at)? as usize;
+        let kind = word(bytes, at.checked_add(4)?)?;
+        let start = at.checked_add(8)?;
+        let end = start.checked_add(length)?;
+        if !length.is_multiple_of(4) || kind == JSON_CHUNK {
+            return None;
         }
-        _ => &[],
-    };
+        let data = bytes.get(start..end)?;
+        if kind == BIN_CHUNK {
+            if at != json_end || !bin.is_empty() {
+                return None;
+            }
+            bin = data;
+        }
+        at = end;
+    }
     Some((json, bin))
 }
 
-fn summarize(json: &Value) -> Summary {
-    let skinned = json["skins"].as_array().is_some_and(|skins| !skins.is_empty());
-    let mut clips: Vec<String> = json["animations"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|animation| engine_clip(animation["name"].as_str()?))
-        .map(str::to_owned)
-        .collect();
-    clips.sort();
-    clips.dedup();
+fn summarize(json: &Value, bin: &[u8]) -> Summary {
+    let (skinned, clips) = crate::glb_validation::character(json, bin);
     Summary { skinned, clips }
 }
 
@@ -159,17 +169,17 @@ fn accessor_count(json: &Value, accessor: &Value) -> u64 {
 
 /// Triangles and vertices of one mesh.
 fn mesh_counts(json: &Value, mesh: &Value) -> (u64, u64) {
-    let mut totals = (0, 0);
+    let mut totals = (0u64, 0u64);
     for primitive in mesh["primitives"].as_array().into_iter().flatten() {
         let vertices = accessor_count(json, &primitive["attributes"]["POSITION"]);
         let elements =
             if primitive["indices"].is_null() { vertices } else { accessor_count(json, &primitive["indices"]) };
-        totals.0 += match primitive["mode"].as_u64().unwrap_or(4) {
+        totals.0 = totals.0.saturating_add(match primitive["mode"].as_u64().unwrap_or(4) {
             4 => elements / 3,
             5 | 6 => elements.saturating_sub(2),
             _ => 0,
-        };
-        totals.1 += vertices;
+        });
+        totals.1 = totals.1.saturating_add(vertices);
     }
     totals
 }
@@ -186,13 +196,14 @@ fn transform(m: &Matrix, [x, y, z]: [f64; 3]) -> [f64; 3] {
 /// Skinned meshes are measured where their nodes place them, which for the character server's exports is the bind pose.
 /// A file without nodes counts each mesh once.
 fn placed(json: &Value) -> (u64, u64, Option<[f64; 3]>) {
-    let (mut triangles, mut vertices, mut meshes_placed) = (0, 0, 0);
+    let (mut triangles, mut vertices, mut meshes_placed) = (0u64, 0u64, 0u64);
     let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
     walk(json, |_, node, world| {
         let mesh = index(&node["mesh"]).and_then(|mesh| json["meshes"].get(mesh));
         if let Some(mesh) = mesh {
             let (t, v) = mesh_counts(json, mesh);
-            (triangles, vertices, meshes_placed) = (triangles + t, vertices + v, meshes_placed + 1);
+            (triangles, vertices, meshes_placed) =
+                (triangles.saturating_add(t), vertices.saturating_add(v), meshes_placed.saturating_add(1));
         }
         for primitive in mesh.and_then(|mesh| mesh["primitives"].as_array()).into_iter().flatten() {
             let Some(accessor) = index(&primitive["attributes"]["POSITION"]).and_then(|a| json["accessors"].get(a))
@@ -215,7 +226,7 @@ fn placed(json: &Value) -> (u64, u64, Option<[f64; 3]>) {
     if json["nodes"].as_array().is_none_or(Vec::is_empty) && meshes_placed == 0 {
         for mesh in json["meshes"].as_array().into_iter().flatten() {
             let (t, v) = mesh_counts(json, mesh);
-            (triangles, vertices) = (triangles + t, vertices + v);
+            (triangles, vertices) = (triangles.saturating_add(t), vertices.saturating_add(v));
         }
     }
     let size: [f64; 3] = std::array::from_fn(|axis| high[axis] - low[axis]);
@@ -255,7 +266,7 @@ fn textures(json: &Value, bin: &[u8]) -> Vec<Texture> {
 /// chunk is its JSON.
 pub fn details(bytes: &[u8]) -> Option<Details> {
     let (json, bin) = split(bytes)?;
-    let Summary { skinned, clips } = summarize(&json);
+    let Summary { skinned, clips } = summarize(&json, bin);
     let (triangles, vertices, size) = placed(&json);
     let count = |key: &str| json[key].as_array().map_or(0, Vec::len);
     Some(Details {
@@ -327,14 +338,13 @@ mod tests {
 
     #[test]
     fn a_rigged_model_with_idle_and_walk_is_playable() {
-        let rigged = summary(&json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}],
-            "animations": [{"name": "Idle"}, {"name": "Walking"}, {"name": "Running"}, {"name": "Walking"}]}));
+        let rigged =
+            details(&crate::test_glb::character(&["Idle", "Walking", "Running", "Walking"])).unwrap().summary();
         assert_eq!(rigged.clips, ["idle", "run", "walk"]);
         assert!(rigged.playable());
         let statue = json!({"asset": {"version": "2.0"}, "animations": [{"name": "idle"}, {"name": "walk"}]});
         assert!(!summary(&statue).playable());
-        let still = json!({"asset": {"version": "2.0"}, "skins": [{"joints": [0]}], "animations": [{"name": "Idle"}]});
-        let still = summary(&still);
+        let still = details(&crate::test_glb::character(&["Idle"])).unwrap().summary();
         assert!(!still.playable());
         assert_eq!(still.missing_clips(), ["walk"]);
     }
@@ -345,6 +355,45 @@ mod tests {
         assert!(details(&bytes).is_some());
         assert!(details(&bytes[..bytes.len() - 1]).is_none());
         assert!(details(b"not a model at all").is_none());
+        let mut bad = crate::test_glb::character(&["Idle", "Walking"]);
+        let json_end = 20 + word(&bad, 12).unwrap() as usize;
+        bad[json_end..json_end + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(details(&bad).is_none(), "a truncated BIN chunk must not become an empty buffer");
+    }
+
+    #[test]
+    fn labels_empty_rigs_broken_buffers_and_invalid_animation_targets_are_not_playable() {
+        let forged =
+            json!({"asset": {"version": "2.0"}, "skins": [{}], "animations": [{"name": "idle"}, {"name": "walk"}]});
+        assert!(!summary(&forged).playable());
+        let (valid, bin) = crate::test_glb::document(&["Idle", "Walking"]);
+        assert!(details(&join(&valid, &bin)).unwrap().summary().playable());
+        for case in 0..13 {
+            let mut invalid = valid.clone();
+            let mut data = bin.clone();
+            match case {
+                0 => invalid["skins"][0]["joints"] = json!([]),
+                1 => invalid["nodes"][2].as_object_mut().unwrap().remove("skin").map(|_| ()).unwrap(),
+                2 => invalid["bufferViews"][0]["byteOffset"] = u64::MAX.into(),
+                3 => invalid["accessors"][0]["count"] = u64::MAX.into(),
+                4 => invalid["animations"][1]["channels"] = json!([]),
+                5 => invalid["animations"][1]["channels"][0]["target"]["node"] = 900.into(),
+                6 => invalid["animations"][1]["samplers"][0]["output"] = 999.into(),
+                7 => data[36] = 1, // A vertex refers to joint 1, but this skin only has joint 0.
+                8 => data[48..52].copy_from_slice(&f32::NAN.to_le_bytes()),
+                9 => invalid["nodes"][1]["children"] = json!([0]), // Two-node cycle, even when the scene names a root.
+                10 => invalid["meshes"][0]["primitives"][0]["targets"] = json!([{"POSITION": 999}]),
+                11 => invalid["meshes"][0]["primitives"][0]["material"] = 999.into(),
+                12 => {
+                    let mut extra = invalid["animations"][0].clone();
+                    extra["name"] = "Dance".into();
+                    extra["samplers"][0]["output"] = 999.into();
+                    invalid["animations"].as_array_mut().unwrap().push(extra);
+                }
+                _ => unreachable!(),
+            }
+            assert!(!details(&join(&invalid, &data)).unwrap().summary().playable(), "case {case}");
+        }
     }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
@@ -381,11 +430,30 @@ mod tests {
         // The turned copy spans z 4.8..5.2 m (its 40 cm width now runs along z); unturned it would stop at 5.1.
         assert!((width - 0.4).abs() < 1e-6 && (depth - 5.3).abs() < 1e-6, "{width} {depth}");
         assert_eq!((details.joints, details.meshes, details.materials), (3, 2, 2));
-        assert_eq!(details.clips, ["idle"]);
+        // Labels without readable animation data are report metadata, never certified clips.
+        assert!(details.clips.is_empty());
         assert_eq!(details.animations, ["Armature|Idle", "Dance", "#2"]);
         assert_eq!(details.textures[0].edge(), Some(300));
         assert_eq!(details.textures[0].bytes, Some(picture.len()));
         assert_eq!(details.textures[1], Texture { image: 1, mime: None, width: None, height: None, bytes: None });
+    }
+
+    #[test]
+    fn invalid_huge_counts_are_reported_without_overflow_or_becoming_small() {
+        let primitive = json!({"attributes": {"POSITION": 0}, "mode": 5});
+        let mut json = json!({
+            "asset": {"version": "2.0"}, "accessors": [{"count": u64::MAX}],
+            "meshes": [{"primitives": [primitive.clone(), primitive]}],
+        });
+        for nodes in [None, Some(json!([{"mesh": 0}, {"mesh": 0}]))] {
+            if let Some(nodes) = nodes {
+                json["nodes"] = nodes;
+            }
+            let details = details(&join(&json, &[])).unwrap();
+            assert!(!details.summary().playable());
+            assert_eq!(details.vertices, u64::MAX);
+            assert_eq!(details.triangles, u64::MAX);
+        }
     }
 
     #[test]

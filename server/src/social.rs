@@ -8,7 +8,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgExecutor, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
@@ -17,7 +17,22 @@ use crate::{
     error::{ApiResult, bad, conflict, forbidden, not_found},
     homes::{Page, visible_home},
     rebac::{Checker, MODERATOR, Subject},
+    security::{client_address, rate_limit},
 };
+
+const MAX_GUESTBOOK_ENTRIES: i64 = 2_000;
+const MAX_PENDING_REQUESTS: i64 = 100;
+
+/// Every change of one relationship locks both accounts in UUID order. Opposite requests and accept/unlink cannot
+/// observe a stale pair, and concurrent requests involving one account cannot pass its pending-request cap.
+async fn pair_transaction(db: &PgPool, left: Uuid, right: Uuid) -> ApiResult<Transaction<'_, Postgres>> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT id FROM users WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+        .bind(vec![left, right])
+        .fetch_all(&mut *tx)
+        .await?;
+    Ok(tx)
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -107,12 +122,24 @@ async fn write(
     Json(entry): Json<NewEntry>,
 ) -> ApiResult<Response> {
     let author = current_user(&state, &headers).await?;
+    rate_limit(&state, format!("guestbook-user:{}", author.id), 30)?;
+    rate_limit(&state, format!("guestbook-address:{}", client_address(&headers)), 60)?;
     let (home, _) = visible_home(&state, &name, Some(&author)).await?;
     let body = entry.body.trim();
     if body.is_empty() || body.chars().count() > 300 {
         return Err(bad("invalid_body", "방명록은 1~300자로 남겨 주세요."));
     }
     let id = Uuid::new_v4();
+    let mut tx = state.db.begin().await?;
+    sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(home.owner_id).execute(&mut *tx).await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM guestbook_entries WHERE home_owner_id = $1 AND deleted_at IS NULL")
+            .bind(home.owner_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if count >= MAX_GUESTBOOK_ENTRIES {
+        return Err(conflict("guestbook_full", "방명록이 가득 찼어요. 글을 정리한 뒤 다시 남겨 주세요."));
+    }
     sqlx::query(
         "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body, secret) VALUES ($1, $2, $3, $4, $5)",
     )
@@ -121,8 +148,9 @@ async fn write(
     .bind(author.id)
     .bind(body)
     .bind(entry.secret)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(json!({"id": id}))).into_response())
 }
 
@@ -157,7 +185,7 @@ fn ilchon(row: &PgRow) -> Value {
     })
 }
 
-async fn find_ilchon(db: &PgPool, user: Uuid, friend: Uuid) -> Result<Option<Value>, sqlx::Error> {
+async fn find_ilchon<'e>(db: impl PgExecutor<'e>, user: Uuid, friend: Uuid) -> Result<Option<Value>, sqlx::Error> {
     let row = sqlx::query(&format!("{ILCHON_SELECT} WHERE mine.user_id = $1 AND mine.friend_id = $2"))
         .bind(user)
         .bind(friend)
@@ -222,7 +250,9 @@ async fn status(State(state): State<AppState>, headers: HeaderMap, Path(name): P
     if other == viewer.id {
         return Ok(relation("self", None, None));
     }
-    if let Some(ilchon) = find_ilchon(&state.db, viewer.id, other).await? {
+    let mut tx = pair_transaction(&state.db, viewer.id, other).await?;
+    if let Some(ilchon) = find_ilchon(&mut *tx, viewer.id, other).await? {
+        tx.commit().await?;
         return Ok(relation("ilchon", Some(ilchon), None));
     }
     let pending = sqlx::query(&format!(
@@ -230,8 +260,9 @@ async fn status(State(state): State<AppState>, headers: HeaderMap, Path(name): P
     ))
     .bind(viewer.id)
     .bind(other)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(match pending {
         None => relation("none", None, None),
         Some(row) => {
@@ -273,16 +304,43 @@ async fn request(
     if message.chars().count() > 100 {
         return Err(bad("invalid_message", "한마디는 100자 이하로 적어 주세요."));
     }
-    if find_ilchon(&state.db, viewer.id, other).await?.is_some() {
+    let my_name = ilchon_name(&ask.name)?;
+    let their_name = ilchon_name(&ask.their_name)?;
+    rate_limit(&state, format!("ilchon-request:{}", viewer.id), 30)?;
+    let mut tx = pair_transaction(&state.db, viewer.id, other).await?;
+    let linked: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM ilchons WHERE user_id = $1 AND friend_id = $2)")
+            .bind(viewer.id)
+            .bind(other)
+            .fetch_one(&mut *tx)
+            .await?;
+    if linked {
         return Err(conflict("already_ilchon", "이미 일촌입니다."));
     }
     let received = sqlx::query("SELECT 1 FROM ilchon_requests WHERE from_id = $1 AND to_id = $2")
         .bind(other)
         .bind(viewer.id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await?;
     if received.is_some() {
         return Err(conflict("request_received", "상대가 먼저 일촌을 신청했습니다."));
+    }
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ilchon_requests WHERE (from_id = $1 OR to_id = $1) AND NOT (from_id = $1 AND to_id = $2)",
+    )
+    .bind(viewer.id)
+    .bind(other)
+    .fetch_one(&mut *tx)
+    .await?;
+    let target_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ilchon_requests WHERE (from_id = $1 OR to_id = $1) AND NOT (from_id = $2 AND to_id = $1)",
+    )
+    .bind(other)
+    .bind(viewer.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if count >= MAX_PENDING_REQUESTS || target_count >= MAX_PENDING_REQUESTS {
+        return Err(conflict("requests_full", "대기 중인 일촌 신청을 정리해 주세요."));
     }
     sqlx::query(
         "INSERT INTO ilchon_requests (id, from_id, to_id, name, their_name, message) VALUES ($1, $2, $3, $4, $5, $6)
@@ -292,22 +350,30 @@ async fn request(
     .bind(Uuid::new_v4())
     .bind(viewer.id)
     .bind(other)
-    .bind(ilchon_name(&ask.name)?)
-    .bind(ilchon_name(&ask.their_name)?)
+    .bind(my_name)
+    .bind(their_name)
     .bind(message)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(json!({"relation": "requested"}))).into_response())
 }
 
 async fn unlink(State(state): State<AppState>, headers: HeaderMap, Path(name): Path<String>) -> ApiResult<StatusCode> {
     let viewer = current_user(&state, &headers).await?;
     let other = other(&state, &name).await?;
+    let mut tx = pair_transaction(&state.db, viewer.id, other).await?;
     sqlx::query("DELETE FROM ilchons WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)")
         .bind(viewer.id)
         .bind(other)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM ilchon_requests WHERE (from_id = $1 AND to_id = $2) OR (from_id = $2 AND to_id = $1)")
+        .bind(viewer.id)
+        .bind(other)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     // Each of them may have stood on the other's island as a 일촌; whoever may not now is let out.
     crate::rooms::revalidate(&state, &viewer.username).await;
     crate::rooms::revalidate(&state, &crate::auth::username(&name)?).await;
@@ -340,7 +406,13 @@ async fn accept(
     Json(body): Json<Accept>,
 ) -> ApiResult<Json<Value>> {
     let viewer = current_user(&state, &headers).await?;
-    let mut tx = state.db.begin().await?;
+    let from: Uuid = sqlx::query_scalar("SELECT from_id FROM ilchon_requests WHERE id = $1 AND to_id = $2")
+        .bind(id)
+        .bind(viewer.id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(not_found("request_not_found", "없는 일촌 신청입니다."))?;
+    let mut tx = pair_transaction(&state.db, from, viewer.id).await?;
     let row = sqlx::query("SELECT from_id, to_id, name, their_name FROM ilchon_requests WHERE id = $1 FOR UPDATE")
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -362,20 +434,34 @@ async fn accept(
     .bind(my_name)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM ilchon_requests WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM ilchon_requests WHERE (from_id = $1 AND to_id = $2) OR (from_id = $2 AND to_id = $1)")
+        .bind(from)
+        .bind(viewer.id)
+        .execute(&mut *tx)
+        .await?;
+    let ilchon = find_ilchon(&mut *tx, viewer.id, from).await?;
     tx.commit().await?;
-    Ok(relation("ilchon", find_ilchon(&state.db, viewer.id, from).await?, None))
+    Ok(relation("ilchon", ilchon, None))
 }
 
 async fn dismiss(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<Uuid>) -> ApiResult<StatusCode> {
     let viewer = current_user(&state, &headers).await?;
+    let pair: (Uuid, Uuid) =
+        sqlx::query_as("SELECT from_id, to_id FROM ilchon_requests WHERE id = $1 AND (from_id = $2 OR to_id = $2)")
+            .bind(id)
+            .bind(viewer.id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(not_found("request_not_found", "없는 일촌 신청입니다."))?;
+    let mut tx = pair_transaction(&state.db, pair.0, pair.1).await?;
     let deleted = sqlx::query("DELETE FROM ilchon_requests WHERE id = $1 AND (from_id = $2 OR to_id = $2)")
         .bind(id)
         .bind(viewer.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     if deleted.rows_affected() == 0 {
         return Err(not_found("request_not_found", "없는 일촌 신청입니다."));
     }
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -389,7 +389,17 @@ async fn 부트스트랩_관리자는_튜플로_관리자가_되고_기존_비�
     assert_eq!(login.body["user"]["role"], "admin");
 
     app.register("existing_b", "원래 회원").await;
-    auth::bootstrap_admin(&app.state, "existing_b", "some other password").await.unwrap();
+    assert!(auth::bootstrap_admin(&app.state, "existing_b", "some other password").await.is_err());
+    let denied = app
+        .call(
+            "POST",
+            "/api/auth/login",
+            Some(json!({"username": "existing_b", "password": "correct horse battery"})),
+            None,
+        )
+        .await;
+    assert_eq!(denied.body["user"]["role"], "user");
+    auth::bootstrap_admin(&app.state, "existing_b", "correct horse battery").await.unwrap();
     let login = app
         .call(
             "POST",
