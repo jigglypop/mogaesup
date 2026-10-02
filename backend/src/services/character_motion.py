@@ -13,7 +13,7 @@ from src.services.animation_glb import merge_character_clips
 from src.services.asset_editor import _write_json
 from src.services.asset_delivery import inspect_glb
 from src.services.provider_http import download_glb
-from src.services.wardrobe import get_with_retry
+from src.services.provider_http import get_with_retry
 from src.services.meshy_status import BLOCKED
 from src.services.runtime_activity import paid_request
 

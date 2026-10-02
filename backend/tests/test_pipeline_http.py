@@ -10,16 +10,17 @@ import httpx
 from PIL import Image
 import pytest
 
-from src.services import character_jobs, character_motion, meshy_outputs, runtime_activity, wardrobe
+from src.services import character_jobs, character_motion, meshy_outputs, provider_http, runtime_activity
 from src.services.character_pipeline import PipelineError
-from src.services.wardrobe import Wardrobe, _digest, download_glb, get_with_retry
+from src.services.provider_http import download_glb, get_with_retry
+from src.services.wardrobe import Wardrobe, _digest
 
 
 @pytest.fixture
 def waits(monkeypatch):
     """The seconds the retry helper would have slept; no test sleeps for real."""
     waited = []
-    monkeypatch.setattr(wardrobe, '_sleep', waited.append)
+    monkeypatch.setattr(provider_http, '_sleep', waited.append)
     return waited
 
 

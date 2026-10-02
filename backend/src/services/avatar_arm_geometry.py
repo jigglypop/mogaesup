@@ -1,6 +1,6 @@
 """Align saved sleeves and publish a shared T rest pose with rebased clips."""
 import bpy
-from mathutils import Matrix, Vector
+from mathutils import Vector
 
 from src.services.avatar_blender_common import bounds, blender_to_gltf
 

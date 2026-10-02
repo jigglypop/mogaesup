@@ -6,7 +6,7 @@ import pytest
 
 from services.test_character_preparation import animated_fixture
 from src.services import avatar_meshy as module
-from src.services import wardrobe
+from src.services import provider_http
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import AvatarFactory, digest
 from src.services.character_pipeline import PipelineError, read_json
@@ -388,7 +388,7 @@ def test_an_animation_of_another_rig_is_still_refused_after_the_lock_is_retaken(
 def test_a_busy_provider_while_waiting_for_the_rig_is_asked_again_without_a_new_request(setup, monkeypatch):
     service, jid, directory, calls, transport = setup
     waited = []
-    monkeypatch.setattr(wardrobe, '_sleep', waited.append)
+    monkeypatch.setattr(provider_http, '_sleep', waited.append)
     answers = iter([503, 502])
 
     def handler(request):
@@ -402,7 +402,7 @@ def test_a_busy_provider_while_waiting_for_the_rig_is_asked_again_without_a_new_
 
 def test_a_provider_that_stays_down_pauses_the_rig_worker_and_sends_nothing_more(setup, monkeypatch):
     service, jid, directory, calls, transport = setup
-    monkeypatch.setattr(wardrobe, '_sleep', lambda seconds: None)
+    monkeypatch.setattr(provider_http, '_sleep', lambda seconds: None)
     use_handler(monkeypatch, lambda request: httpx.Response(503) if request.method == 'GET' and '/rigging/' in request.url.path
                 else transport(request))
     service.start(1, jid); service.execute(1, jid, poll_seconds=0)

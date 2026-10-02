@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
+import time
 from src.services.object_storage import StoredPath as Path
 from src.services.object_storage import is_remote
 
@@ -50,3 +52,50 @@ def download_glb(client: httpx.Client, url: str, output: Path, *, preserve_detai
         temporary.write_bytes(data)
         temporary.replace(output)
     return quality
+
+
+# Reading a task or a download link again changes nothing at the provider, so a busy or unreachable provider is asked again.
+GET_RETRY_STATUSES = (429, 500, 502, 503, 504)
+GET_BACKOFF_SECONDS = (1, 2, 4)
+GET_RETRY_AFTER_LIMIT = 30
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def transient(exc: Exception) -> bool:
+    """A failed GET that another attempt may answer: no answer at all, or a provider that is busy or erroring."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in GET_RETRY_STATUSES
+    return isinstance(exc, httpx.TransportError)
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    delay = GET_BACKOFF_SECONDS[attempt]
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            hint = float(exc.response.headers.get("retry-after", ""))
+        except ValueError:
+            return delay
+        if math.isfinite(hint) and hint > 0:
+            return min(GET_RETRY_AFTER_LIMIT, max(delay, hint))
+    return delay
+
+
+def get_with_retry(client: httpx.Client, url: str, **kwargs) -> httpx.Response:
+    """GET and raise_for_status, asking again after a transient failure (4 attempts, waiting 1, 2 and 4 s).
+
+    For idempotent reads only. A POST that may have been billed is never sent again from here.
+    """
+    attempt = 0
+    while True:
+        try:
+            response = client.get(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            if attempt >= len(GET_BACKOFF_SECONDS) or not transient(exc):
+                raise
+            _sleep(_retry_delay(exc, attempt))
+            attempt += 1

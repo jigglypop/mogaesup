@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from src.services import avatar_image_pipeline as module
-from src.services import avatar_meshy, character_jobs, wardrobe
+from src.services import avatar_meshy, character_jobs, provider_http
 from src.services.asset_editor import _write_json
 from src.services.character_jobs import download as real_download
 from src.services.character_pipeline import PipelineError, read_json
@@ -24,7 +24,7 @@ def world(setup, monkeypatch):  # noqa: F811
     monkeypatch.setattr(avatar_meshy.AvatarMeshy, 'start', lambda self, owner, job: None)
     monkeypatch.setattr(avatar_meshy.AvatarMeshy, 'execute', lambda self, owner, job: None)
     waited = []
-    monkeypatch.setattr(wardrobe, '_sleep', waited.append)
+    monkeypatch.setattr(provider_http, '_sleep', waited.append)
 
     def use(handler):
         monkeypatch.setattr(module.httpx, 'Client',

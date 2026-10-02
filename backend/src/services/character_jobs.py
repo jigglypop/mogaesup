@@ -14,7 +14,7 @@ from PIL import Image
 from src.services.asset_editor import _write_json
 from src.services.runtime_activity import paid_request
 from src.services.provider_http import download_glb
-from src.services.wardrobe import get_with_retry
+from src.services.provider_http import get_with_retry
 
 LOGGER = logging.getLogger(__name__)
 # Meshy did not accept these requests, so a new submission cannot duplicate a task.

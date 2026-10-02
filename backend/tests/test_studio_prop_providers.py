@@ -55,7 +55,7 @@ def studio(tmp_path, monkeypatch, storage_configured):
     for name in ('OPENAI_API_KEY', 'MESHY_API_KEY', 'TRIPO_API_KEY'):
         monkeypatch.setenv(name, 'fixture-key')
     # Status polls retry a lost answer after 1, 2 and 4 seconds; the tests do not wait for them.
-    monkeypatch.setattr('src.services.wardrobe._sleep', lambda seconds: None)
+    monkeypatch.setattr('src.services.provider_http._sleep', lambda seconds: None)
     calls = {'images': 0, 'meshy': [], 'tripo': [], 'polls': 0, 'downloads': 0}
     # Each list is consumed in order; its last reply repeats.
     replies = {'tripo_submit': [ACCEPTED], 'tripo_task': [SUCCESS], 'meshy_submit': [httpx.Response(402, json={})],

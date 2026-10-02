@@ -11,7 +11,7 @@ import math
 import bmesh
 import bpy
 import numpy as np
-from mathutils import Matrix, Vector
+from mathutils import Vector
 
 from src.services.avatar_shell_garment import body_arrays, body_tree, classify_regions
 

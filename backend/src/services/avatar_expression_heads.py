@@ -38,17 +38,6 @@ class AvatarExpressionHeads:
             'recipe': record.get('recipe'), 'created_at': record.get('created_at'),
         }
 
-    def decorate(self, listing):
-        public = self.public()
-        if not public:
-            return listing
-        listing['body_without_head'] = public['body_without_head']
-        listing['base_head'] = public['base_head']
-        for item in listing.get('items', []):
-            if item['id'] in public['expressions']:
-                item['head'] = public['expressions'][item['id']]
-        return listing
-
     def artifact(self, expression_id, name):
         public = self.public()
         if not public:

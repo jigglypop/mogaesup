@@ -31,7 +31,7 @@ from src.services.character_parts import blender_executable
 from src.services.model_providers import base_url, failure_text, uncertain_text
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.process_identity import identity, state as process_state
-from src.services.wardrobe import transient
+from src.services.provider_http import transient
 from src.services.avatar_production_spec import (
     IMAGE_INTAKE_POLICY, production_spec, public_spec,
 )

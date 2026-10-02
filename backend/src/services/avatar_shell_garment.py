@@ -359,7 +359,6 @@ def smooth_boundary(positions, covered, regions, sides, axes, allowed, *, bins=3
             highs[b] = top if (open_t > top).any() else np.inf
             lows[b] = bottom if (open_t < bottom).any() else -np.inf
         def fill(values, default):
-            finite = np.isfinite(values)
             if not np.isnan(values).all():
                 known = ~np.isnan(values)
                 values = np.interp(np.arange(region_bins), np.flatnonzero(known), values[known], period=region_bins)

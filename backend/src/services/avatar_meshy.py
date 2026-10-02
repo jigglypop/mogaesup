@@ -20,7 +20,7 @@ from src.services.glb import parse_glb
 from src.services.model_providers import MESHY_BASE
 from src.services.process_identity import identity, state as process_state
 from src.services.provider_http import download_glb
-from src.services.wardrobe import get_with_retry
+from src.services.provider_http import get_with_retry
 from src.services.meshy_status import BLOCKED, saved_problem
 
 SLOTS = ('idle', 'walk', 'run', 'jump', 'fall', 'sit', 'armsUp', 'crouch')
