@@ -5,6 +5,17 @@
     <link rel="icon" href="/gaesupworld.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>모개숲</title>
+    <script>
+      // The same choice ui/theme.ts applies, set before the first paint so a dark theme does not flash light.
+      (function () {
+        var theme = 'light';
+        try {
+          var saved = localStorage.getItem('mogaesup.theme');
+          if (saved === 'dark' || (saved === 'system' && typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches)) theme = 'dark';
+        } catch (e) {}
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

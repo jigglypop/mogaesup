@@ -1,5 +1,6 @@
 import { request, savedRequest } from '../api';
 import type { FactoryJob, FitProfile } from '../factory/api';
+import { variantSlots } from '../factory/parts';
 import type { ExpressionName, FaceLayout } from '../texture-expressions';
 import type { MeshyOptions } from './meshy-options';
 
@@ -59,10 +60,9 @@ const createAnimal = (input: AnimalCreateInput) => animalCreation.send(input, pe
 export type HeadPartAsset = { name: string; sha256: string; url: string };
 export type Expression = { id: string; name: ExpressionName; layout: FaceLayout; materials: {material:number;file:string;base_file?:string}[]; artifacts:{name:string;url:string;sha256:string}[]; head?: HeadPartAsset };
 type ExpressionLibrary = { items: Expression[]; selected: string | null; revision: string };
-const singlePartSlots = ['hair', 'hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses'];
 const singleParts = savedRequest<SinglePartInput>('gaesup.studio.single-part.v1', ({ input }) =>
   typeof input.base_job_id === 'string' && typeof input.base_version === 'string'
-    && singlePartSlots.includes(input.slot)
+    && variantSlots.some(slot => slot === input.slot)
     && ['source', 'short', 'long'].includes(input.hair_length)
     && ['source', 'pants', 'skirt'].includes(input.bottom_kind)
     && (input.fit_profile == null || typeof input.fit_profile === 'object')

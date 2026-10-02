@@ -8,7 +8,7 @@ import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
 import { isDefinitiveRejection, isRevisionConflict } from '../api';
 import { factoryApi, wardrobeUrls, type WardrobeColors, type WardrobeCoverage, type WardrobeOutfit, type WardrobePart } from '../factory/api';
-import { partLabels as labels } from '../factory/parts';
+import { garmentSlots, partLabels as labels, variantSlots } from '../factory/parts';
 import '../factory/meshy-motion.css';
 import { usePolling } from '../use-polling';
 import { ModelViewer } from '../viewer';
@@ -18,13 +18,12 @@ import { reshapable, wearableParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
 import './wardrobe.css';
 
-const slotOrder = ['hair', 'hairFront', 'hairBack', 'hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses'];
+const hairSlots: readonly string[] = ['hair', 'hairFront', 'hairBack'];
+const slotOrder: readonly string[] = [...hairSlots, ...variantSlots.filter(slot => slot !== 'hair')];
 const methodLabels: Record<string, string> = { 'worn-extract-v1': '입힌 채', 'body-shell-v1': '몸 셸', 'uniform-slot-v1': '단독' };
 const keyOf = (part: { job_id: string; version: string }, slot: string) => `${part.job_id}:${part.version}:${slot}`;
-const garmentSlots = ['top', 'bottom', 'shoes'];
 // Slots with a coverage record: garments hide skin and layer; a hat and hair layer too.
-const coveredSlots = [...garmentSlots, 'hat', 'hair'];
-const hairSlots = ['hair', 'hairFront', 'hairBack'];
+const coveredSlots: readonly string[] = [...garmentSlots, 'hat', 'hair'];
 type Worn = Record<string, WardrobePart>;
 type Palette = { regions: WardrobeColors['regions']; material: number; mask: Texture };
 

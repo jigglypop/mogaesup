@@ -301,6 +301,10 @@ textarea.mg-field { height: auto; min-height: 76px; padding: 11px 14px; resize: 
 .mg-title { font-size: 28px; font-weight: 850; letter-spacing: -0.035em; line-height: 1.2; }
 .mg-heading { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
 
+/* Progress */
+.mg-progress { width: 200px; height: 6px; border-radius: 999px; overflow: hidden; background: var(--mg-tint); }
+.mg-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--mg-accent), var(--mg-primary)); transition: width 0.3s ease; }
+
 /* Touch screens: a pressed state in place of hover, and controls a fingertip can hit. */
 @media (hover: none) {
   .mg-btn:active:not(:disabled), .mg-icon-btn:active:not(:disabled) { transform: scale(0.96); }

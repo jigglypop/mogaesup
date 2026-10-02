@@ -83,24 +83,50 @@ export const socialApi = {
   dismiss: (id: string) => api<void>(`/ilchon-requests/${segment(id)}`, { method: 'DELETE' }),
 };
 
+/** The public lists change only when an admin publishes, so an island opened soon after another reuses them. */
+const CATALOG_REUSE_MS = 60_000;
+const catalogLists = new Map<string, { at: number; read: Promise<{ items: CatalogItem[] }> }>();
+
+/**
+ * Admin screens read and change what the public lists show. Whatever they ask, and however it ends (an answer lost on
+ * the way may still have been applied), the next public read goes to the server.
+ */
+const admin = <T>(call: Promise<T>) => call.finally(() => catalogLists.clear());
+
 export const catalogApi = {
-  items: (kind?: CatalogKind) => api<{ items: CatalogItem[] }>(`/catalog/items${kind ? `?kind=${kind}` : ''}`),
-  adminItems: () => api<{ items: AdminCatalogItem[] }>('/catalog/admin/items'),
+  /**
+   * Reuses a list read in the last minute, and a read still on its way; `fresh` always asks the server.
+   * A failed read is not kept.
+   */
+  items: (kind?: CatalogKind, { fresh = false }: { fresh?: boolean } = {}) => {
+    const key = kind ?? '';
+    const known = catalogLists.get(key);
+    if (!fresh && known && Date.now() - known.at < CATALOG_REUSE_MS) return known.read;
+    const read = api<{ items: CatalogItem[] }>(`/catalog/items${kind ? `?kind=${kind}` : ''}`);
+    const entry = { at: Date.now(), read };
+    catalogLists.set(key, entry);
+    entry.read.catch(() => {
+      if (catalogLists.get(key) === entry) catalogLists.delete(key);
+    });
+    return entry.read;
+  },
+  adminItems: () => admin(api<{ items: AdminCatalogItem[] }>('/catalog/admin/items')),
   patch: (id: string, body: CatalogChanges) =>
-    api<AdminCatalogItem>(`/catalog/admin/items/${segment(id)}`, { method: 'PATCH', body }),
+    admin(api<AdminCatalogItem>(`/catalog/admin/items/${segment(id)}`, { method: 'PATCH', body })),
   /** Queues a copy and answers at once; follow it with `imports`. */
-  importFactory: (body: FactoryImport) => api<CatalogImport>('/catalog/admin/import', { method: 'POST', body }),
+  importFactory: (body: FactoryImport) => admin(api<CatalogImport>('/catalog/admin/import', { method: 'POST', body })),
   factoryCharacters: () => api<{ characters: FactoryCharacter[] }>('/catalog/admin/factory-characters'),
   factoryUsage: () => api<FactoryUsage>('/catalog/admin/factory-usage'),
   studioPower: () => api<StudioPower>('/catalog/admin/studio-power'),
   /** Starts the studio's instance when it is stopped; answers its state after that. */
   startStudio: () => api<StudioPower>('/catalog/admin/studio-power', { method: 'POST' }),
-  imports: (limit = 30) => api<{ imports: CatalogImport[] }>(`/catalog/admin/imports?limit=${limit}`),
+  /** An import ends on its own time, so every look at the imports also drops the reused lists. */
+  imports: (limit = 30) => admin(api<{ imports: CatalogImport[] }>(`/catalog/admin/imports?limit=${limit}`)),
   versions: (id: string) => api<{ versions: CatalogVersion[] }>(`/catalog/admin/items/${segment(id)}/versions`),
   rollback: (id: string, versionId: number) =>
-    api<AdminCatalogItem>(`/catalog/admin/items/${segment(id)}/rollback`, { method: 'POST', body: { versionId } }),
+    admin(api<AdminCatalogItem>(`/catalog/admin/items/${segment(id)}/rollback`, { method: 'POST', body: { versionId } })),
   bulkStatus: (ids: string[], status: CatalogStatus) =>
-    api<{ items: AdminCatalogItem[] }>('/catalog/admin/bulk-status', { method: 'POST', body: { ids, status } }),
+    admin(api<{ items: AdminCatalogItem[] }>('/catalog/admin/bulk-status', { method: 'POST', body: { ids, status } })),
 };
 
 /** The caller's own character from the wardrobe; each member reaches only theirs. */

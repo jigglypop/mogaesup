@@ -8,13 +8,14 @@ import { NativeAssembly } from './NativeAssembly';
 import { ProductionProgress } from './ProductionProgress';
 import { StageRunner } from './StageRunner';
 import { PartProgress } from './PartProgress';
+import { characterSlots } from './parts';
 import { RigRecovery } from './RigRecovery';
 import { isCatalogJobDeleted, type Catalog } from '../studio/api';
 import './character-factory.css';
 import { MeshyOptionsEditor } from '../studio/MeshyOptionsEditor';
 import { useMeshyOptions, meshyOptionsError, sharedMeshyScope } from '../studio/meshy-options';
 
-const partSlots = ['body', 'hair', 'hat', 'top', 'bottom', 'shoes'] as const;
+const partSlots = ['body', ...characterSlots] as const;
 
 // The workspace owns the shared job list, catalog and common body; this screen only reads them.
 type CharacterFactoryProps = {

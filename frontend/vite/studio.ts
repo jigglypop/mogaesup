@@ -4,8 +4,8 @@ import type { AtRule, Plugin as PostcssPlugin } from 'postcss';
 
 const slash = (path: string) => path.replace(/\\/g, '/');
 
-/** The character studio's sources, written as a page of their own. */
-const STUDIO_SRC = slash(fileURLToPath(new URL('../src/character', import.meta.url)));
+/** The character studio's sources, written as a page of their own; the slash keeps a sibling like `character-x` out. */
+const STUDIO_SRC = `${slash(fileURLToPath(new URL('../src/character', import.meta.url)))}/`;
 
 /**
  * The studio's stylesheets are written for a page of their own: `:root` tokens, bare element rules. Under the app,

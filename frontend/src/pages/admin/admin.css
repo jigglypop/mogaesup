@@ -39,7 +39,6 @@
 .mg-admin-card > .mg-admin-progress,
 .mg-admin-card > .mg-admin-actions { justify-self: stretch; }
 .mg-admin-card.is-update { border-color: var(--mg-warn); }
-.mg-admin-card.is-row > .mg-admin-thumb-button .mg-admin-thumb { width: 44px; height: 44px; border-radius: 12px; font-size: 20px; }
 .mg-admin-card-main > div small { overflow-wrap: anywhere; }
 .mg-admin-thumb-button {
   flex: none;

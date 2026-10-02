@@ -1,8 +1,9 @@
 import { request, savedRequest, type Pending } from '../api';
 import type { FactoryJob } from '../factory/api';
+import { variantSlots } from '../factory/parts';
 import type { BodyGlbAsset } from './glb-bodies-api';
 
-export const glbAssetSlots = ['body', 'hair', 'hat', 'top', 'bottom', 'shoes', 'weapon', 'tool', 'glasses', 'prop'] as const;
+export const glbAssetSlots = ['body', ...variantSlots, 'prop'] as const;
 export type GlbAssetSlot = typeof glbAssetSlots[number];
 export type GlbAssetInput = { name: string; slot: GlbAssetSlot; model_asset: string };
 type GlbAssetPreparation = { action: 'fit' | 'rig'; base_job_id?: string; base_version?: string; body_type?: 'male' | 'female' };

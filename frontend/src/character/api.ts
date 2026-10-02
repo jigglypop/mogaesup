@@ -1,3 +1,4 @@
+import { deadline } from '../api/client';
 import { reportStudio } from '../api/studioSleep';
 
 type Part = { node_index: number; role: string; name?: string };
@@ -41,15 +42,10 @@ export const isRevisionConflict = (error: unknown) => error instanceof ApiError 
 
 export async function request<T>(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const { timeoutMs = 15000, signal, ...init } = options;
-  const controller = new AbortController();
-  let timedOut = false;
-  const cancel = () => controller.abort();
-  if (signal?.aborted) cancel();
-  signal?.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  const wait = deadline(timeoutMs, signal);
   try {
   let response: Response;
-  try { response = await fetch(url, { ...init, signal: controller.signal }); }
+  try { response = await fetch(url, { ...init, signal: wait.signal }); }
   catch { throw new ApiError('connection', '백엔드에 연결할 수 없습니다. 연결이 복구되면 다시 동기화합니다.', 0); }
   const body = await response.json().catch(() => {
     if (response.ok) throw new ApiError('incomplete_response', '서버 응답을 끝까지 받지 못했습니다. 기존 요청으로 결과를 복구해 주세요.', 0);
@@ -66,11 +62,11 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
   }
   return body as T;
   } catch (error) {
-    if (timedOut) throw new ApiError('timeout', '서버 응답이 늦어지고 있습니다. 저장된 작업을 유지하고 연결을 다시 확인합니다.', 0);
+    if (wait.timedOut) throw new ApiError('timeout', '서버 응답이 늦어지고 있습니다. 저장된 작업을 유지하고 연결을 다시 확인합니다.', 0);
     if (signal?.aborted) throw new ApiError('cancelled', '조회가 취소되었습니다.', 0);
     throw error;
   } finally {
-    clearTimeout(timer); signal?.removeEventListener('abort', cancel);
+    wait.clear();
   }
 }
 
