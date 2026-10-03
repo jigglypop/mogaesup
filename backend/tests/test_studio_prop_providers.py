@@ -18,6 +18,7 @@ from src.api.avatar_factory import get_factory
 from src.api.characters import pipeline_error_handler
 from src.auth import UserContext, get_current_user
 from src.services import studio_generations as module
+from src.services import model_providers
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import AvatarFactory
 from src.services.character_pipeline import PipelineError, read_json
@@ -139,6 +140,46 @@ def test_default_provider_comes_from_the_environment(studio, monkeypatch):
     with pytest.raises(PipelineError) as error:
         service.create('fixture-texture-1', body('meshy', kind='texture'))
     assert error.value.code == 'invalid_provider'
+
+
+def test_tripo_client_id_hides_capability_and_refuses_admission_before_http_client(studio, monkeypatch):
+    service, calls, _, _ = studio
+    credential = 'tcli_offline-client-id'
+    monkeypatch.setenv('TRIPO_API_KEY', ' '+credential+' ')
+    clients = []
+    def forbidden_client(**kwargs):
+        clients.append(kwargs)
+        raise AssertionError('A Client ID must never create an HTTP client')
+    monkeypatch.setattr(model_providers.httpx, 'Client', forbidden_client)
+    assert model_providers.configured() == {'meshy': True, 'tripo': False}
+    assert service.listing('prop')['capabilities']['providers'] == ['meshy']
+    with pytest.raises(PipelineError) as refused:
+        service.create('fixture-client-id', body('tripo'))
+    assert refused.value.code == 'provider_unavailable'
+    assert service.listing('prop')['items'] == []
+    with pytest.raises(PipelineError) as refused:
+        model_providers.client('tripo')
+    assert refused.value.code == 'provider_unavailable' and refused.value.status == 422
+    assert refused.value.message == 'Tripo Client ID 대신 API 키를 설정하세요.'
+    assert credential not in str(refused.value)
+    assert clients == [] and calls['images'] == 0 and not calls['meshy'] and not calls['tripo']
+
+
+@pytest.mark.parametrize('provider, key', [('tripo', 'fixture-key'), ('tripo', 'tsk_fixture-key'),
+                                         ('meshy', 'fixture-key'), ('meshy', 'tcli_fixture-key')])
+def test_only_tripo_client_ids_are_rejected_other_keys_keep_existing_client_contract(monkeypatch, provider, key):
+    setting = 'TRIPO_API_KEY' if provider == 'tripo' else 'MESHY_API_KEY'
+    monkeypatch.setenv(setting, key)
+    clients = []
+    sentinel = object()
+    def fake_client(**kwargs):
+        clients.append(kwargs)
+        return sentinel
+    monkeypatch.setattr(model_providers.httpx, 'Client', fake_client)
+    assert model_providers.configured()[provider]
+    assert model_providers.client(provider, timeout=17) is sentinel
+    assert clients == [{'base_url': model_providers.TRIPO_BASE if provider == 'tripo' else model_providers.MESHY_BASE,
+                        'headers': {'Authorization': 'Bearer '+key}, 'timeout': 17}]
 
 
 @pytest.mark.parametrize('refusal, code, text', [

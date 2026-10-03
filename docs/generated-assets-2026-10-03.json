@@ -1,18 +1,137 @@
 {
   "version": 1,
   "generatedAt": "2026-10-03",
-  "assets": [{
-    "id": "oatmeal-utility-blouson",
-    "kind": "garment-reference",
-    "slot": "top",
-    "path": "frontend/public/character/references/oatmeal-utility-blouson.png",
-    "sha256": "c12d4c3c2643d463e5ec941396db2faccfbe666f46cec4fc4fd194afd40ba623",
-    "bytes": 1214252,
-    "generator": "built-in imagegen",
-    "thirdPartyReferenceImages": [],
-    "prompt": "Use case: stylized-concept. Asset type: one mesh-ready reference image for the Mogaesup SD avatar clothing studio. Primary request: a single oatmeal utility blouson jacket with a short rounded silhouette, a dark chocolate stand collar and zipper, two broad rounded patch pockets, loose sleeves and a soft matte fabric. Contemporary understated autumn casual styling, original unbranded design. The jacket is shaped for a chibi game character with a large head and short torso, sleeves extended horizontally in a clean T pose, seen from a slightly elevated front three-quarter view. Render ONLY the empty jacket, no body, no head, no hands, no mannequin, no trousers. Make the hollow neck and sleeve openings legible, stable solid volumes, simplified details suitable for a low-poly game model. Soft even studio lighting, completely plain white background, full jacket comfortably inside the square frame. No floor, cast shadow, text, logo, watermark, diagram or multiple views.",
-    "inspection": "Original unbranded empty jacket, no person/text/logo. Arms angle downward slightly rather than a strict T pose; design/texture reference, not calibrated orthographic evidence.",
-    "consumer": "SinglePart style preview and existing Meshy texture-reference upload",
-    "threeDGeneration": "not_run_provider_credentials_absent_in_local_workspace"
-  }]
+  "assets": [
+    {
+      "id": "oatmeal-utility-blouson",
+      "kind": "garment-reference",
+      "slot": "top",
+      "path": "frontend/public/character/references/oatmeal-utility-blouson.png",
+      "sha256": "c12d4c3c2643d463e5ec941396db2faccfbe666f46cec4fc4fd194afd40ba623",
+      "bytes": 1214252,
+      "generator": "built-in imagegen",
+      "thirdPartyReferenceImages": [],
+      "prompt": "Use case: stylized-concept. Asset type: one mesh-ready reference image for the Mogaesup SD avatar clothing studio. Primary request: a single oatmeal utility blouson jacket with a short rounded silhouette, a dark chocolate stand collar and zipper, two broad rounded patch pockets, loose sleeves and a soft matte fabric. Contemporary understated autumn casual styling, original unbranded design. The jacket is shaped for a chibi game character with a large head and short torso, sleeves extended horizontally in a clean T pose, seen from a slightly elevated front three-quarter view. Render ONLY the empty jacket, no body, no head, no hands, no mannequin, no trousers. Make the hollow neck and sleeve openings legible, stable solid volumes, simplified details suitable for a low-poly game model. Soft even studio lighting, completely plain white background, full jacket comfortably inside the square frame. No floor, cast shadow, text, logo, watermark, diagram or multiple views.",
+      "inspection": "Original unbranded empty jacket, no person/text/logo. Arms angle downward slightly rather than a strict T pose; design/texture reference, not calibrated orthographic evidence.",
+      "consumer": "SinglePart style preview and existing Meshy texture-reference upload",
+      "threeDGeneration": "succeeded_reference_glb"
+    },
+    {
+      "id": "oatmeal-utility-blouson-model",
+      "kind": "garment-design-model",
+      "slot": "top",
+      "path": "frontend/public/character/references/oatmeal-utility-blouson.glb",
+      "sha256": "335b3aca28b93ea8d6a4801c13173a04e3790b5faa9b50a3df93135e7a218fc0",
+      "bytes": 9147684,
+      "generator": "Meshy 7.1 multi-image-to-3d",
+      "taskId": "01a101c8-84f2-7377-88d0-5aa549d044e5",
+      "status": "SUCCEEDED",
+      "consumedCredits": 30,
+      "sourceImageSha256": "c12d4c3c2643d463e5ec941396db2faccfbe666f46cec4fc4fd194afd40ba623",
+      "settings": {
+        "ai_model": "meshy-7.1",
+        "geometry_resolution": "standard",
+        "should_texture": true,
+        "enable_pbr": true,
+        "texture_resolution": "2k",
+        "should_remesh": true,
+        "topology": "triangle",
+        "target_polycount": 18000,
+        "save_pre_remeshed_model": false,
+        "pose_mode": "",
+        "image_enhancement": false,
+        "remove_lighting": true,
+        "moderation": false,
+        "target_formats": [
+          "glb"
+        ],
+        "auto_size": false,
+        "origin_at": "bottom",
+        "alpha_thumbnail": false,
+        "multi_view_thumbnails": false
+      },
+      "technicalInspection": {
+        "inspector_version": "1.0",
+        "sha256": "335b3aca28b93ea8d6a4801c13173a04e3790b5faa9b50a3df93135e7a218fc0",
+        "file_bytes": 9147684,
+        "status": "review_required",
+        "errors": [],
+        "metrics": {
+          "vertices": 19763,
+          "triangles": 18569,
+          "materials": 1,
+          "meshes": 1,
+          "skins": 0,
+          "animations": [],
+          "joints": [],
+          "texture_pixels": 12582912
+        },
+        "required_extensions": [],
+        "policy": {
+          "max_file_bytes": 268435456,
+          "max_vertices": 100000,
+          "max_triangles": 100000,
+          "max_materials": 16,
+          "max_texture_dimension": 4096,
+          "max_texture_pixels": 33554432,
+          "required_animations": [],
+          "required_joints": []
+        },
+        "manual_checks": [
+          "rights",
+          "body_fit_and_pose_intersections",
+          "materials_and_animation_playback",
+          "browser_gpu_budget_and_long_session_cleanup"
+        ],
+        "warnings": []
+      },
+      "browserInspection": {
+        "renderer": "webgpu",
+        "views": 4,
+        "wireframe": true,
+        "reloaded": true,
+        "errors": [],
+        "mutations": [],
+        "model": "/character/references/oatmeal-utility-blouson.glb"
+      },
+      "visualInspection": "Four directions and wireframe inspected in the real SinglePart viewer. Jacket only; oatmeal fabric, dark collar/zipper, broad pockets; hollow cuffs. Small zipper surface artifacts remain. Unrigged reference, not admitted to the wearable catalog. Body fit, skinning and animation not verified; 18,569 triangles exceed the 18,000 top-part target."
+    }
+  ],
+  "realApiChecks": {
+    "layoutInterpretation": {
+      "requestId": "release_layout_20261003_01",
+      "model": "gpt-5.4-nano",
+      "status": "completed",
+      "providerResponseId": "resp_0d42f7f017b2e044016ac0f7b12a6087d0ab74339d9d2f105c",
+      "description": "12m x 16m 모던 카페, 4석, 월넛 바닥",
+      "result": {
+        "kind": "cafe",
+        "widthCells": 3,
+        "depthCells": 4,
+        "seats": 4,
+        "floorPresetId": "walnut-planks",
+        "wallPresetId": "modern-concrete",
+        "interpretation": "ai",
+        "warnings": [
+          "요청 크기 12m x 16m는 4m 타일 기준으로 올림/제한되어 12m x 16m에 해당하는 3x4 셀로 설정됨(지원 범위 내)."
+        ]
+      },
+      "receiptScope": "local owner-scoped service; real OpenAI request"
+    },
+    "meshyBalance": {
+      "before": 932,
+      "after": 902,
+      "consumed": 30
+    },
+    "tripoConnection": {
+      "check": "read-only balance endpoints",
+      "v2HttpStatus": 401,
+      "v2Code": 1002,
+      "v3HttpStatus": 401,
+      "v3Code": 2,
+      "reason": "client_id_provided_instead_of_api_key",
+      "source": "https://docs.tripo3d.ai/other/support-faq.html",
+      "generationSubmitted": false
+    }
+  }
 }

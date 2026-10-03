@@ -14,6 +14,9 @@ import { HairBatch } from './HairBatch';
 import { GlbAssetLibrary } from './GlbAssetLibrary';
 import garmentStyles from './garment-styles.json';
 import { request } from '../api';
+import { AssetModelPreview } from './AssetModelPreview';
+
+type GarmentStyle = { slot: string; name: string; brief: string; bottom_kind?: string; reference?: string; model?: { url: string; sha256: string } };
 
 const methodOptions: Partial<Record<string, [PartMethod, string][]>> = {
   top: [['worn', '입힌 채 3D 생성'], ['body_shell', '몸에 맞춰 만들기'], ['isolated', '단독 3D 생성']],
@@ -61,8 +64,10 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   // Sleeve and ease only change the single-view method's prompt (see garment-fit); other methods ignore them.
   const askFit = fitsByPrompt(pending?.input.part_method || partMethod);
   // Designed garments for this slot: picking one fills its name, brief and lower-garment kind.
-  const styles = garmentStyles.garments.filter(item => item.slot === slot);
-  const styleReference = styles.find(item => item.name === partName)?.reference;
+  const styles = (garmentStyles.garments as GarmentStyle[]).filter(item => item.slot === slot);
+  const chosenStyle = styles.find(item => item.name === partName);
+  const styleReference = chosenStyle?.reference;
+  const styleModel = chosenStyle?.model;
   const chooseStyle = (styleName: string) => {
     const style = styles.find(item => item.name === styleName);
     setPartName(style?.name || '');
@@ -183,6 +188,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
       {!batchMode && styleReference && <div className="garment-style-reference"><img src={styleReference} alt={`${partName} 참조 그림`} />
         {partMethod !== 'body_shell' && (pending?.input.model_provider || provider) === 'meshy' && <button type="button" disabled={inputLocked} onClick={() => void useStyleReference()}>{meshyUploading ? '참조 등록 중' : referenceApplied === styleReference && meshy.options.texture_mode === 'image' ? '텍스처 참조 다시 적용' : '텍스처 참조로 사용'}</button>}
       </div>}
+      {!batchMode && styleModel && <div className="garment-style-model"><h2>3D 참조</h2><AssetModelPreview key={`${styleModel.url}:${styleModel.sha256}`} model={{ ...styleModel, label: '3D 참조' }} name={partName} emptyLabel="" detail /></div>}
       {!batchMode && <label>이름<input value={pending?.input.part_name ?? partName} maxLength={100} disabled={inputLocked} onChange={event => setPartName(event.target.value)} /></label>}
       {!batchMode && <label>디자인<textarea value={pending?.input.description ?? brief} maxLength={2000} rows={5} disabled={inputLocked} onChange={event => setBrief(event.target.value)} /></label>}
       {!batchMode && <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'parts' })} target="_blank" rel="noreferrer">프롬프트 관리</a>}

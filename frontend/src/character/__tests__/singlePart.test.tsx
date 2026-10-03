@@ -15,6 +15,11 @@ vi.mock('../factory/StageRunner', () => ({ StageRunner: () => null }));
 vi.mock('../studio/HairBatch', () => ({ HairBatch: () => null }));
 vi.mock('../studio/GlbAssetLibrary', () => ({ GlbAssetLibrary: () => null }));
 vi.mock('../studio/MeshyOptionsEditor', () => ({ MeshyOptionsEditor: () => null }));
+vi.mock('../studio/AssetModelPreview', () => ({ AssetModelPreview: ({ model }: { model?: { url: string; sha256: string; label: string } }) => <div data-reference-model={JSON.stringify(model)} /> }));
+vi.mock('../studio/garment-styles.json', async importOriginal => {
+  const original = await importOriginal<{ default: { style: string; garments: { name: string }[] } }>();
+  return { default: { ...original.default, garments: original.default.garments.map(item => item.name === '오트밀 유틸리티 블루종' ? { ...item, model: { url: '/character/references/oatmeal-utility-blouson.glb', sha256: 'a'.repeat(64) } } : item) } };
+});
 
 const base = { id: 'base-job', character_name: '모개', created_at: '2026-09-30T00:00:00Z', artifacts: [] } as unknown as FactoryJob;
 const native = { status: 'review_required', version: 'v1', artifacts: [], parts: [] } as unknown as NativePartsState;
@@ -159,6 +164,7 @@ describe('파츠 하나 만들기', () => {
     await settle();
     await choose(container, '스타일', '오트밀 유틸리티 블루종');
     expect(container.querySelector('img[alt="오트밀 유틸리티 블루종 참조 그림"]')?.getAttribute('src')).toBe(reference);
+    expect(JSON.parse(container.querySelector('[data-reference-model]')!.getAttribute('data-reference-model')!)).toEqual({ url: '/character/references/oatmeal-utility-blouson.glb', sha256: 'a'.repeat(64), label: '3D 참조' });
     await submit(container, '텍스처 참조로 사용');
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1]).toEqual(['/api/avatar-factory/meshy-options/texture-assets', expect.objectContaining({ method: 'POST', body: expect.any(Blob), headers: { 'Content-Type': 'image/png' } })]);

@@ -24,8 +24,9 @@ TRIPO_ORDER = ('front', 'side', 'back', 'opposite')  # Tripo: [front, left, back
 
 
 def configured():
+    tripo_key = os.getenv('TRIPO_API_KEY', '').strip()
     return {'meshy': bool(os.getenv('MESHY_API_KEY', '').strip()),
-            'tripo': bool(os.getenv('TRIPO_API_KEY', '').strip())}
+            'tripo': bool(tripo_key) and not tripo_key.startswith('tcli_')}
 
 
 def resolve_provider(requested=None):
@@ -45,6 +46,8 @@ def client(provider, state=None, *, timeout=120):
     key = os.getenv('TRIPO_API_KEY' if provider == 'tripo' else 'MESHY_API_KEY', '').strip()
     if not key:
         raise PipelineError('provider_unavailable', f'{LABELS.get(provider, provider)} API 설정이 필요합니다.', 422)
+    if provider == 'tripo' and key.startswith('tcli_'):
+        raise PipelineError('provider_unavailable', 'Tripo Client ID 대신 API 키를 설정하세요.', 422)
     return httpx.Client(base_url=base_url(provider, state), headers={'Authorization': 'Bearer '+key}, timeout=timeout)
 
 

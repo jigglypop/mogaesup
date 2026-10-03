@@ -5,7 +5,11 @@
       "slot": "top",
       "name": "오트밀 유틸리티 블루종",
       "brief": "Original unbranded oatmeal utility blouson for a chibi character in T pose. Dark chocolate stand collar and zipper, two broad rounded patch pockets, loose sleeves, soft matte fabric, clear collar and cuff openings. No text or logos.",
-      "reference": "/character/references/oatmeal-utility-blouson.png"
+      "reference": "/character/references/oatmeal-utility-blouson.png",
+      "model": {
+        "url": "/character/references/oatmeal-utility-blouson.glb",
+        "sha256": "335b3aca28b93ea8d6a4801c13173a04e3790b5faa9b50a3df93135e7a218fc0"
+      }
     },
     {
       "slot": "top",

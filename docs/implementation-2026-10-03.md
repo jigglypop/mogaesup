@@ -16,18 +16,19 @@
 
 `uv run --extra studio-mcp asset-studio-mcp`로 인증 API를 감싸는 stdio 서버를 실행한다. API origin과 세션은 로컬 환경으로 전달한다. 읽기 도구와 구조화된 검수 작업을 제공하며 쓰기는 `MOGA_STUDIO_MCP_WRITE=1`에서 활성화한다. [설정과 도구](studio-api-mcp-spec.md), [구현](../backend/src/studio_mcp.py)
 
-오트밀 유틸리티 블루종 참조 이미지를 built-in imagegen으로 실제 생성했다. 의상 스타일에서 확인하고 기존 Meshy 텍스처 참조 업로드를 사용할 수 있다. [이미지](../frontend/public/character/references/oatmeal-utility-blouson.png), [원문 프롬프트·SHA·생성 기록](generated-assets-2026-10-03.json)
+오트밀 유틸리티 블루종 참조 이미지를 built-in imagegen으로 실제 생성했다. 제공받은 Meshy 설정으로 해당 이미지 한 장을 기존 `character_jobs.generate_multiview_part` 서비스에 제출했고, Meshy 7.1·Standard·2K PBR·triangle 설정에서 **30크레딧**을 사용해 GLB를 받았다. 의상 스타일에서 기존 `AssetModelPreview`로 네 방향·와이어프레임을 볼 수 있고 PNG 텍스처 참조 업로드도 유지한다. [이미지](../frontend/public/character/references/oatmeal-utility-blouson.png), [실제 GLB](../frontend/public/character/references/oatmeal-utility-blouson.glb), [원문 프롬프트·SHA·작업 ID·검사 기록](generated-assets-2026-10-03.json)
 
-로컬 작업 환경에는 OpenAI·Meshy·Tripo 공급자 키와 AWS 자격 증명이 없었다. Meshy/Tripo 실제 3D 생성은 실행하지 않았다. 가짜 서버·단위 테스트 성공을 유료 3D 생성 성공으로 간주하지 않는다. 개인별 사진 제작 소유권 매핑과 몸 체형 변경은 기존 운영 스튜디오·공용 몸의 경계를 따른다.
+추가로 제공된 OpenAI·Meshy 설정은 Git에서 제외된 로컬 파일에만 저장했다. `gpt-5.4-nano`의 실제 AI 해석도 성공했다(12m × 16m 카페, 4석, 월넛). Tripo는 V2/V3 잔액 조회에서 401을 받았고 유료 생성을 제출하지 않았다. 전달된 `tcli_` 형식은 [공식 FAQ](https://docs.tripo3d.ai/other/support-faq.html)상 Client ID이며 인증 API 키는 `tsk_`다. 로컬에 Client ID로 분리해 보관한다. GLB는 **리깅 없는 디자인 참조**이며 18,569개 삼각형으로 top 목표 18,000개를 넘는다. 로컬 canonical body가 없어 착용·몸 맞춤·애니메이션 검수나 카탈로그 승인을 하지 않았다. 개인별 사진 제작 소유권 매핑과 몸 체형 변경은 기존 운영 스튜디오·공용 몸의 경계를 따른다.
 
 ## 검증
 
 - Rust 1.95: `cargo fmt`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` 통과. PostgreSQL 통합 테스트 포함 **180개**.
 - `npm run typecheck`, `npm test` **66파일 435개**, `npm run build` 통과.
-- `uv run --no-sync python -m compileall -q backend/src`, 전체 `pytest -q` **1179개** 통과. AI 제출 후 불확실 응답이나 결과 기록 실패는 504로 반환해 게이트웨이 월 예산에서 빠지지 않으며 해당 API 14개를 확인했다.
+- `uv run --no-sync python -m compileall -q backend/src`, 전체 `pytest -q` **1184개** 통과. AI 제출 후 불확실 응답이나 결과 기록 실패는 504로 반환해 게이트웨이 월 예산에서 빠지지 않으며 해당 API 14개를 확인했다. Tripo Client ID 설정은 capability에서 제외하고 생성 접수·HTTP 클라이언트 생성 전에 차단한다.
 - Chrome **WebGPU** 캐릭터 E2E 통과: 가져오기·공개·회원 권한·이동·주민·모자 색/크기/위치 편집·서버 저장/구움·재접속 복원·섬 착용·실시간 공유.
 - 매장 브라우저 검사: 실제 GLB와 3D 미리보기, 12m 카페 5기물/2석, 적용·저장 → 되돌리기·저장 → 다시 하기·저장, PUT 3회, 오류 0. [재현 스크립트](../frontend/src/minihome/__tests__/layout.browser.mjs)
+- 실제 의상 GLB: 9,147,684바이트, 구조 검사 오류·경고 없음. SinglePart의 실제 WebGPU 뷰어에서 네 방향·와이어프레임·닫기 후 재로드를 확인했다. 해당 화면 검사에서 API mutation은 0회이며 모델 생성은 앞서 저장한 실제 Meshy 작업 하나다.
 - CloudFormation `cfn-lint` 통과. macOS 오프라인 infra harness와 브라우저 테스트의 Windows 그래픽 옵션·redirect 대기를 수정했다.
 - GNU Bash 5.3에서 변경 감지 테스트 **15개**와 추적 중인 셸 스크립트 **3개** 문법 검사를 통과했다.
 
-화면 검사에는 임시 PostgreSQL과 가짜 캐릭터 서버를 사용하며 공급자 호출은 없다. 미리보기 출입구는 현재 엔진의 arch가 닫힌 문짝을 그리는 문제를 피하도록 벽 한 구간을 비워 실제 4m 통로를 만든다. 배포의 최종 판정은 해당 main 커밋의 자동 배포 실행 결과로 확인한다.
+캐릭터·매장 화면 검사에는 임시 PostgreSQL과 가짜 캐릭터 서버를 사용하며 공급자 호출은 없다. 실제 생성·AI 해석의 증거는 별도 작업 기록과 구분한다. 미리보기 출입구는 현재 엔진의 arch가 닫힌 문짝을 그리는 문제를 피하도록 벽 한 구간을 비워 실제 4m 통로를 만든다. 최초 구현 `8d60ec6`의 [자동 배포](https://github.com/jigglypop/mogaesup/actions/runs/37123177344)는 검사 및 서버·웹·스튜디오 10개 작업이 모두 성공했고, 운영 PNG의 SHA도 일치했다. 추가 GLB와 미리보기는 후속 main 커밋으로 배포한다.
