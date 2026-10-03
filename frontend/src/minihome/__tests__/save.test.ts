@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError, ApiTimeoutError } from '../../api/client';
-import { createIslandSaver, describeSaveError, describeStatus } from '../edit/save';
+import { createIslandSaver, describeSaveError, describeStatus, retryable, savesLater, type SaveProblem } from '../edit/save';
 import { IslandTooLargeError } from '../persistence';
 import { fakeWorld, ready } from './fakeWorld';
 
@@ -99,6 +99,61 @@ describe('island saver', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(world.system.save).toHaveBeenCalledTimes(2);
     expect(saver.getState().problem).toBeNull();
+  });
+
+  it('400·404처럼 같은 섬으로는 몇 번을 보내도 거절될 실패는 문제만 보이고 다시 보내지 않다가, 섬이 바뀌면 다시 저장해 본다', async () => {
+    for (const status of [400, 404]) {
+      const world = fakeWorld();
+      const saver = await ready(world, { idleMs: 1_000 });
+      world.answers.push(new ApiRequestError(status, 'http_error', `요청이 실패했어요 (${status})`));
+      world.edit();
+      await saver.save();
+      expect(saver.getState().problem).toMatchObject({ kind: 'invalid' });
+      expect(saver.getState().problem?.message).toContain(`(${status})`);
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(await saver.flush()).toBe(false);
+      expect(world.system.save).toHaveBeenCalledTimes(1);
+
+      world.edit();
+      saver.changed();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      expect(saver.getState().problem).toBeNull();
+    }
+  });
+
+  it('408·429·5xx는 서버 쪽 사정이라 잠시 뒤 다시 저장한다', async () => {
+    for (const status of [408, 429, 500, 502]) {
+      const world = fakeWorld();
+      const saver = await ready(world, { retryMs: [3_000] });
+      world.answers.push(new ApiRequestError(status, 'http_error', ''));
+      world.edit();
+      await saver.save();
+      expect(saver.getState().problem).toMatchObject({ kind: 'server' });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
+    }
+  });
+
+  it('로그인이 풀려 거절되면 자동 저장을 멈추고 편집을 둔 채 기다리다, 다시 로그인한 뒤 flush하면 저장한다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world, { idleMs: 1_000, retryMs: [3_000] });
+    world.answers.push(new ApiRequestError(401, 'login_required', '로그인이 필요합니다.'));
+    world.edit();
+    saver.changed();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(saver.getState().problem).toMatchObject({ kind: 'session' });
+    // Every save before the owner signs in again would be refused the same way, so none is sent.
+    world.edit();
+    saver.changed();
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+    expect(saver.getState()).toMatchObject({ dirty: true });
+
+    expect(await saver.flush()).toBe(true);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
   });
 
   it('연결이 끊겨 실패하면 잠시 뒤 다시 저장한다', async () => {
@@ -347,9 +402,27 @@ describe('save messages', () => {
     expect(large).toMatchObject({ kind: 'tooLarge' });
     expect(large !== 'conflict' && large.message).toContain('2MB');
     expect(describeSaveError(new ApiRequestError(422, 'invalid_world', ''))).toMatchObject({ kind: 'invalid' });
-    expect(describeSaveError(new ApiRequestError(401, 'login_required', ''))).toMatchObject({ kind: 'auth' });
+    expect(describeSaveError(new ApiRequestError(400, 'http_error', ''))).toMatchObject({ kind: 'invalid' });
+    expect(describeSaveError(new ApiRequestError(404, 'not_found', ''))).toMatchObject({ kind: 'invalid' });
+    expect(describeSaveError(new ApiRequestError(401, 'login_required', ''))).toMatchObject({ kind: 'session' });
+    expect(describeSaveError(new ApiRequestError(403, 'forbidden', ''))).toMatchObject({ kind: 'auth' });
+    expect(describeSaveError(new ApiRequestError(409, 'owner_changed', ''))).toMatchObject({ kind: 'auth' });
+    expect(describeSaveError(new ApiRequestError(408, 'http_error', ''))).toMatchObject({ kind: 'server' });
+    expect(describeSaveError(new ApiRequestError(429, 'rate_limited', ''))).toMatchObject({ kind: 'server' });
     expect(describeSaveError(new ApiRequestError(503, 'database', ''))).toMatchObject({ kind: 'server' });
     expect(describeSaveError(new TypeError('Failed to fetch'))).toMatchObject({ kind: 'network' });
+  });
+
+  it('다시 보내서 될 실패, 로그인 뒤에 저장될 실패, 섬을 바꿔야 할 실패를 가른다', () => {
+    const problem = (kind: SaveProblem['kind']): SaveProblem => ({ kind, message: '' });
+    expect(retryable(problem('network'))).toBe(true);
+    expect(retryable(problem('server'))).toBe(true);
+    expect(retryable(problem('session'))).toBe(false);
+    expect(savesLater(problem('session'))).toBe(true);
+    for (const kind of ['tooLarge', 'invalid', 'auth'] as const) {
+      expect(retryable(problem(kind))).toBe(false);
+      expect(savesLater(problem(kind))).toBe(false);
+    }
   });
 
   it('상태 한 줄: 저장됨 · 저장 중 · 저장 안 된 변경 · 저장 못 함', () => {

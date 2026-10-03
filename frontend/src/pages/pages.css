@@ -6,6 +6,7 @@
 .mg-loading-card small { min-height: 1.2em; color: var(--mg-muted); font-size: 13px; }
 .mg-loading-card .mg-brand-mark { width: 44px; height: 44px; border-radius: 14px; animation: mg-bob 2.4s ease-in-out infinite; }
 .mg-loading-card .mg-brand-mark svg { width: 24px; height: 24px; }
+.mg-loading-card .mg-brand-mark.is-still { animation: none; }
 @keyframes mg-bob { 50% { transform: translateY(-5px) rotate(-4deg); } }
 @keyframes mg-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(260%); } }
 
@@ -47,8 +48,12 @@
 @media (hover: none) {
   .mg-island-card:active { transform: scale(0.98); }
 }
-.mg-island-sky { position: relative; height: 150px; display: grid; place-items: center; }
-.mg-island-sky::after { content: ''; position: absolute; left: 12%; right: 12%; bottom: 18px; height: 34px; border-radius: 50%; background: rgba(90, 150, 70, 0.35); filter: blur(6px); }
+.mg-island-sky { position: relative; height: 150px; display: grid; place-items: center; background: var(--mg-sky-0); }
+.mg-island-sky[data-sky='1'] { background: var(--mg-sky-1); }
+.mg-island-sky[data-sky='2'] { background: var(--mg-sky-2); }
+.mg-island-sky[data-sky='3'] { background: var(--mg-sky-3); }
+.mg-island-sky[data-sky='4'] { background: var(--mg-sky-4); }
+.mg-island-sky::after { content: ''; position: absolute; left: 12%; right: 12%; bottom: 18px; height: 34px; border-radius: 50%; background: var(--mg-island-shade); filter: blur(6px); }
 .mg-island-sky span { position: relative; z-index: 1; font-size: 56px; line-height: 1; }
 .mg-island-info { display: grid; gap: 3px; padding: 14px 16px 16px; }
 .mg-island-info b { font-size: 15px; font-weight: 800; }

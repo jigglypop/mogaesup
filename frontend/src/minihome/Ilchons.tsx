@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import { problemText } from '../api/client';
 import { socialApi } from '../api/endpoints';
 import type { HomeView, Ilchon, IlchonRequest, IlchonStatus, User } from '../api/types';
+import { useSignInPath } from '../auth/signIn';
 import { initialOf, REQUESTS_CHANGED, toneOf } from '../shell/Shell';
 
 type Neighbors = {
@@ -71,6 +72,7 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
   const visitor = !!viewer && !view.isOwner;
   const { list, received, status, error, act } = neighbors;
   const [asking, setAsking] = useState(false);
+  const signIn = useSignInPath();
 
   const submitRequest = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -177,7 +179,7 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
       )}
       {!viewer && (
         <p className="mg-muted mg-center">
-          <Link to="/">로그인</Link>하면 이웃 신청을 할 수 있어요.
+          <Link to={signIn}>로그인</Link>하면 이웃 신청을 할 수 있어요.
         </p>
       )}
       {error && (

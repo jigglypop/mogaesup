@@ -46,9 +46,9 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
   try {
   let response: Response;
   try { response = await fetch(url, { ...init, signal: wait.signal }); }
-  catch { throw new ApiError('connection', '백엔드에 연결할 수 없습니다. 연결이 복구되면 다시 동기화합니다.', 0); }
+  catch { throw new ApiError('connection', '서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.', 0); }
   const body = await response.json().catch(() => {
-    if (response.ok) throw new ApiError('incomplete_response', '서버 응답을 끝까지 받지 못했습니다. 기존 요청으로 결과를 복구해 주세요.', 0);
+    if (response.ok) throw new ApiError('incomplete_response', '서버 응답을 끝까지 받지 못했습니다. 잠시 후 다시 시도해 주세요.', 0);
     return {};
   });
   // The app server's own refusals ({code, message}): its permission checks, and the studio sleeping (see studioSleep).
@@ -56,13 +56,14 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
   reportStudio(gateway?.code, gateway?.message);
   if (!response.ok) {
     const validation = Array.isArray(body.detail) ? body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join('.') || '입력'}: ${item.msg || '값 확인 필요'}`).join(' / ') : typeof body.detail === 'string' && body.detail !== 'Not Found' ? body.detail : '';
-    const fallback = response.status === 401 ? 'API 인증이 필요합니다. 로컬 서버 설정을 확인해 주세요.' : response.status === 404 ? 'API 또는 자료를 찾을 수 없습니다. 프론트와 백엔드 버전·연결 주소를 확인해 주세요.' : response.status >= 500 ? `서버 오류 (${response.status}). 저장된 작업은 다시 불러와 확인할 수 있습니다.` : `요청 오류 (${response.status}). 입력을 확인해 주세요.`;
+    // Only when the server sent no message of its own: what happened, in words for whoever is on the screen.
+    const fallback = response.status === 401 ? '로그인이 필요합니다. 다시 로그인해 주세요.' : response.status === 404 ? '요청한 자료를 찾을 수 없습니다.' : response.status >= 500 ? '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.' : '요청을 처리하지 못했습니다. 입력을 확인해 주세요.';
     const gatewayCode = gateway && gateway.code !== 'factory_unavailable' ? gateway.code : undefined;
     throw new ApiError(body.error?.code || gatewayCode || 'request_failed', body.error?.message || gateway?.message || validation || fallback, response.status);
   }
   return body as T;
   } catch (error) {
-    if (wait.timedOut) throw new ApiError('timeout', '서버 응답이 늦어지고 있습니다. 저장된 작업을 유지하고 연결을 다시 확인합니다.', 0);
+    if (wait.timedOut) throw new ApiError('timeout', '서버 응답이 늦어지고 있습니다. 잠시 후 다시 시도해 주세요.', 0);
     if (signal?.aborted) throw new ApiError('cancelled', '조회가 취소되었습니다.', 0);
     throw error;
   } finally {
@@ -71,6 +72,17 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
 }
 
 export type Pending<T> = { key: string; input: T };
+
+/** A saved request that is not the one being sent. It is neither sent in its place nor dropped: someone resumes it
+ * (sends `pending.input` again) or clears it (`settle(pending.key)`) before anything new goes out. */
+export class PendingRequestConflict<T = unknown> extends Error {
+  constructor(public pending: Pending<T>) { super('응답을 확인하지 못한 다른 요청이 남아 있습니다.'); }
+}
+
+/** JSON with object keys in a fixed order, so two inputs compare by what they hold, not how they were built. */
+const canonical = (value: unknown) => JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
+const sameInput = (a: unknown, b: unknown) => canonical(a) === canonical(b);
 
 // A request that must not run twice (paid work, a new record) is saved under `storage` with its
 // idempotency key before it is sent, so a lost answer replays the same key. A saved value that
@@ -92,12 +104,16 @@ export function savedRequest<T>(storage: string, valid: (pending: Pending<T>) =>
     try { if ((JSON.parse(localStorage.getItem(storage) || 'null') as Pending<T> | null)?.key === key) localStorage.removeItem(storage); }
     catch { /* Not JSON, so not the request sent under `key`. */ }
   };
-  // Sends the saved request, else `input` under `key` or a new one. It is forgotten once the server
-  // answers for it (`answered`, any answer by default) or rejects it for good.
+  // Sends `input`: again under the saved key when it is the saved request, else under `key` or a new
+  // one. Storage is read as it is sent, so a request saved since the screen last looked (another tab, a
+  // lost answer) is never sent in place of `input`: a different saved request refuses with
+  // PendingRequestConflict. It is forgotten once the server answers for it (`answered`, any answer by
+  // default) or rejects it for good.
   async function send<R>(input: T, post: (pending: Pending<T>) => Promise<R>,
     options: { key?: string; answered?: (result: R, key: string) => boolean } = {}): Promise<R> {
     const saved = read();
     if (saved.error) throw new Error(saved.error);
+    if (saved.pending && !sameInput(saved.pending.input, input)) throw new PendingRequestConflict(saved.pending);
     const pending = saved.pending || { key: options.key || crypto.randomUUID(), input };
     localStorage.setItem(storage, JSON.stringify(pending));
     try {

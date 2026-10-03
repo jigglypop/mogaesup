@@ -211,7 +211,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
       return list.filter((item) => matches(item.label)).map(pieceButton);
     }
     if (shelf === 'studio') {
-      if (studio.length === 0) return [<p key="empty" className="mg-empty">스튜디오에서 가져온 가구가 아직 없어요. 운영에서 가져오면 여기에 보여요.</p>];
+      if (studio.length === 0) return [<p key="empty" className="mg-empty">가져온 가구가 없어요</p>];
       return studio.filter((item) => matches(item.label)).map(pieceButton);
     }
     if (shelf === 'weather') {
@@ -331,20 +331,8 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
         <>
           <header>
             <b>선택</b>
-            <small>놓인 물건을 눌러 골라요. 고른 물건은 끌어서 옮기고, 돌리고, 복제하고, 지울 수 있어요.</small>
+            <small>고른 물건 없음</small>
           </header>
-          <ul className="mg-edit-tips">
-            <li>
-              빈 곳을 끌거나 <kbd>W</kbd>
-              <kbd>A</kbd>
-              <kbd>S</kbd>
-              <kbd>D</kbd>로 화면을 옮기고, <kbd>T</kbd>로 위에서 봐요
-            </li>
-            <li>아래에서 놓을 것을 고르면 놓기 도구로 바뀌어요</li>
-            <li>
-              <kbd>?</kbd>를 누르면 단축키를 모두 볼 수 있어요
-            </li>
-          </ul>
           {reset}
         </>
       );

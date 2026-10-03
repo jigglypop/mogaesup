@@ -29,25 +29,20 @@ export function NativePartRefit({ jobId, state, slot, disabled = false, onChange
     try { factoryApi.acknowledgeRefit(jobId, state.refit_request_key); }
     catch (reason) { setError((reason as Error).message); }
   }, [jobId, state?.refit_request_key]);
-  async function refit(selected: string, method?: 'isolated' | 'body_shell') {
-    const version = pending?.input.source_version || state?.version;
-    if (submitting.current || !version) return;
-    submitting.current = true; setBusy(true); setError('');
-    try {
-      const value = await factoryApi.refitPart(jobId, version, selected, undefined, method);
-      if (alive.current) onChange(value);
-    } catch (reason) { if (alive.current) setError((reason as Error).message); }
-    finally { submitting.current = false; if (alive.current) setBusy(false); }
-  }
-  async function resume() {
+  async function send(request: () => Promise<NativePartsState>) {
     if (submitting.current) return;
     submitting.current = true; setBusy(true); setError('');
     try {
-      const value = await factoryApi.assemble(jobId);
+      const value = await request();
       if (alive.current) onChange(value);
     } catch (reason) { if (alive.current) setError((reason as Error).message); }
     finally { submitting.current = false; if (alive.current) setBusy(false); }
   }
+  function refit(selected: string, method?: 'isolated' | 'body_shell') {
+    const version = state?.version;
+    if (version) void send(() => factoryApi.refitPart(jobId, version, selected, undefined, method));
+  }
+  const resume = () => send(() => factoryApi.assemble(jobId));
   const available = state?.status === 'review_required' && state.version && !state.preview && state.origin !== 'uploaded_glb';
   const working = !!state?.preview && (['accepted', 'running'].includes(state.status) || state.expression_pending);
   const resumable = !!state?.preview && !!state.refit_request_key && ['failed', 'recovery_required', 'qc_failed'].includes(state.status);
@@ -55,15 +50,15 @@ export function NativePartRefit({ jobId, state, slot, disabled = false, onChange
   if (!pending && !parts.length && !working && !resumable && !error && !recoveryError && !state?.error) return null;
   return <div className="native-part-refit">
     <div className="meshy-buttons">{parts.map(part => <span key={part.slot}>
-      {part.fit_method !== 'body-shell-v1' && <button disabled={busy || disabled || !!pending || !!recoveryError} onClick={() => void refit(part.slot)}>
+      {part.fit_method !== 'body-shell-v1' && <button disabled={busy || disabled || !!pending || !!recoveryError} onClick={() => refit(part.slot)}>
         {part.slot === 'hair' ? '헤어 후면 보완·최적화' : `${partLabels[part.slot] || part.slot} 다시 맞추기·최적화`}
       </button>}
-      {(part.slot === 'top' || part.slot === 'bottom') && <button disabled={busy || disabled || !!pending || !!recoveryError} onClick={() => void refit(part.slot, 'body_shell')}>
+      {(part.slot === 'top' || part.slot === 'bottom') && <button disabled={busy || disabled || !!pending || !!recoveryError} onClick={() => refit(part.slot, 'body_shell')}>
         {`${partLabels[part.slot]} 몸에 맞춰 다시 만들기`}
       </button>}
       <LimbFit slot={part.slot} check={part.limb_fit?.check} />
     </span>)}
-    {pending && <button disabled={busy || !!recoveryError} onClick={() => void refit(pending!.input.slot, pending!.input.part_method)}>같은 피팅 요청 복구</button>}</div>
+    {pending && <button disabled={busy || !!recoveryError} onClick={() => void send(() => factoryApi.resumeRefit(jobId))}>같은 피팅 요청 복구</button>}</div>
     {resumable && !pending && <button disabled={busy || disabled} onClick={() => void resume()}>피팅·최적화 이어가기</button>}
     {(busy || working) && <p role="status">{busy ? '처리 요청 중…' : '파츠 피팅·저장 중…'}</p>}
     {(error || recoveryError) && <p role="alert">{error || recoveryError}</p>}

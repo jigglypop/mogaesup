@@ -27,6 +27,26 @@
   --mg-warn-soft: rgba(184, 116, 26, 0.14);
   --mg-bad: #c23a33;
   --mg-bad-soft: rgba(210, 69, 61, 0.12);
+  /* A status dot or mark in the warning tone (text in that tone is --mg-warn). */
+  --mg-warn-dot: #d99a2b;
+
+  /* Someone's initial tile, one of four pastels (data-tone 0-3): fill and letter. */
+  --mg-tone-0: linear-gradient(160deg, #efe9ff, #dcd3fb);
+  --mg-tone-0-ink: #3b2a8c;
+  --mg-tone-1: linear-gradient(160deg, #ffe4dc, #ffd0c2);
+  --mg-tone-1-ink: #8a2d15;
+  --mg-tone-2: linear-gradient(160deg, #dff4ea, #c6ead8);
+  --mg-tone-2-ink: #0f5b3d;
+  --mg-tone-3: linear-gradient(160deg, #fff1d6, #fbe0ad);
+  --mg-tone-3-ink: #6b4608;
+
+  /* An island card's sky over its ground (data-sky 0-4), and the island's shade on it. */
+  --mg-sky-0: linear-gradient(180deg, #cfe8f7, #bfe3b4);
+  --mg-sky-1: linear-gradient(180deg, #fde3d3, #d6ecbf);
+  --mg-sky-2: linear-gradient(180deg, #e5defc, #c8e6c4);
+  --mg-sky-3: linear-gradient(180deg, #fff0c9, #c9e5b6);
+  --mg-sky-4: linear-gradient(180deg, #d7f0ea, #b9dcb0);
+  --mg-island-shade: rgba(90, 150, 70, 0.35);
 
   --mg-hair: rgba(29, 24, 48, 0.08);
   --mg-hair-strong: rgba(29, 24, 48, 0.14);
@@ -74,6 +94,23 @@
   --mg-warn-soft: rgba(230, 189, 142, 0.14);
   --mg-bad: #f3a8a1;
   --mg-bad-soft: rgba(243, 168, 161, 0.14);
+  --mg-warn-dot: #e3b366;
+
+  --mg-tone-0: linear-gradient(160deg, #3b3166, #2e2652);
+  --mg-tone-0-ink: #ddd3fd;
+  --mg-tone-1: linear-gradient(160deg, #5a342a, #46271f);
+  --mg-tone-1-ink: #ffd6c9;
+  --mg-tone-2: linear-gradient(160deg, #21483a, #19392d);
+  --mg-tone-2-ink: #c3ecd8;
+  --mg-tone-3: linear-gradient(160deg, #57431f, #443417);
+  --mg-tone-3-ink: #fbe3b3;
+
+  --mg-sky-0: linear-gradient(180deg, #2a4153, #2d4630);
+  --mg-sky-1: linear-gradient(180deg, #4d3a33, #33452c);
+  --mg-sky-2: linear-gradient(180deg, #3a3558, #2f452f);
+  --mg-sky-3: linear-gradient(180deg, #4d4430, #31452b);
+  --mg-sky-4: linear-gradient(180deg, #2b4744, #2c432b);
+  --mg-island-shade: rgba(20, 50, 20, 0.5);
 
   --mg-hair: rgba(255, 255, 255, 0.08);
   --mg-hair-strong: rgba(255, 255, 255, 0.16);

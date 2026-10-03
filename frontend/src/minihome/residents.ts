@@ -2,6 +2,7 @@ import type { NPCInstanceData, NPCTemplate, RuntimeDomainBinding } from 'gaesup-
 
 import type { CatalogItem } from '../api/types';
 import { MINIME_SCALE } from './character';
+import { randomId } from './stored';
 
 /**
  * 주민: studio characters the island's owner stands on the island, each with a name and a line it says to whoever talks
@@ -86,7 +87,7 @@ export type ResidentStore = {
   remove: (id: string) => void;
 };
 
-const newId = () => `r${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+const newId = () => `r${randomId().replace(/-/g, '').slice(0, 16)}`;
 
 /** One island's residents. Entries are replaced, never changed in place, so each one's identity marks a change. */
 export function createResidentStore(initial: readonly Resident[] = []): ResidentStore {

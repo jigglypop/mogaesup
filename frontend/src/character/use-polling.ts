@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState, type SetStateAction } from 'r
 
 // One bounded read at a time. A lost connection never clears the last good value.
 // The interval may depend on the last value (for example slower once a job has settled);
-// changing it takes effect on the next read without restarting the loop.
-export function usePolling<T>(read: (signal: AbortSignal) => Promise<T>, interval: number | ((value: T | undefined) => number) = 3000) {
+// changing it takes effect on the next read without restarting the loop. A null interval reads
+// again only when asked: refresh, a saved value that calls for it, the tab shown again or the
+// connection back.
+export function usePolling<T>(read: (signal: AbortSignal) => Promise<T>, interval: number | null | ((value: T | undefined) => number | null) = 3000) {
   const [value, update] = useState<T>();
   const [error, setError] = useState(''), [receivedAt, setReceivedAt] = useState<number>();
   const [loading, setLoading] = useState(true);
@@ -46,7 +48,8 @@ export function usePolling<T>(read: (signal: AbortSignal) => Promise<T>, interva
         if (active) {
           setLoading(false);
           const base = delay();
-          timer = setTimeout(() => void poll(), again ? 0 : Math.min(base * 2 ** failures, Math.max(base, 15000)));
+          if (again) timer = setTimeout(() => void poll(), 0);
+          else if (base !== null) timer = setTimeout(() => void poll(), Math.min(base * 2 ** failures, Math.max(base, 15000)));
           again = false;
         }
       }
@@ -54,7 +57,9 @@ export function usePolling<T>(read: (signal: AbortSignal) => Promise<T>, interva
     const reconnect = () => { if (!document.hidden) void poll(); };
     scheduleRef.current = () => {
       if (!active || controller) return;
-      clearTimeout(timer); timer = setTimeout(() => void poll(), delay());
+      clearTimeout(timer);
+      const base = delay();
+      if (base !== null) timer = setTimeout(() => void poll(), base);
     };
     refreshRef.current = poll; void poll();
     window.addEventListener('online', reconnect); document.addEventListener('visibilitychange', reconnect);

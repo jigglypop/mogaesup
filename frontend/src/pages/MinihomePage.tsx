@@ -6,6 +6,7 @@ import { ApiRequestError } from '../api/client';
 import { catalogApi, homeApi, lookApi } from '../api/endpoints';
 import type { CatalogItem, HomeView, Look } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
+import { useSignInPath } from '../auth/signIn';
 import { playerModelUrl } from '../minihome/character';
 import { FALLBACK_MINIME, prefetchModels } from '../minihome/figures';
 import { visitorId } from '../minihome/stored';
@@ -25,15 +26,22 @@ type Loaded = {
   viewerMinime: string;
   /** The signed-in viewer's own look from the wardrobe. */
   viewerLook: Look | null;
+  /** Who it was loaded for: the signed-in viewer's username, or null for a signed-out visit. */
+  as: string | null;
 };
 
 /** `/@username` and, for its owner, `/@username/edit`: loads the home, counts the visit and opens its island. */
 export function MinihomePage({ username, editing }: { username: string; editing: boolean }) {
-  const { status, user } = useAuth();
+  const { status, user, lapsed } = useAuth();
+  const signIn = useSignInPath();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [problem, setProblem] = useState<{ status: number; message: string } | null>(null);
-  // Only a different person should reload the home, not a new user object for the same one.
   const viewerName = user?.username ?? null;
+  const settled = status !== 'loading';
+  // Only a different person should reload the home, not a new user object for the same one. When the session of the
+  // member it was loaded for lapses, the island stays open with what they were doing (signing in again as them keeps
+  // it as it is); someone else signing in, or a sign-out, loads it afresh.
+  const viewerKey = !user && lapsed && loaded?.as === lapsed.username ? lapsed.username : viewerName;
 
   // The island's code downloads while the home's data is still on its way, not after it.
   useEffect(() => {
@@ -41,7 +49,7 @@ export function MinihomePage({ username, editing }: { username: string; editing:
   }, []);
 
   useEffect(() => {
-    if (status === 'loading') return undefined;
+    if (!settled) return undefined;
     const controller = new AbortController();
     setLoaded(null);
     setProblem(null);
@@ -68,6 +76,7 @@ export function MinihomePage({ username, editing }: { username: string; editing:
         npcs: npcs.items,
         viewerMinime,
         viewerLook,
+        as: viewerName,
       });
     })().catch((error: unknown) => {
       if (controller.signal.aborted) return;
@@ -78,7 +87,7 @@ export function MinihomePage({ username, editing }: { username: string; editing:
       );
     });
     return () => controller.abort();
-  }, [username, status, viewerName]);
+  }, [username, settled, viewerKey]);
 
   if (problem) {
     return (
@@ -93,7 +102,7 @@ export function MinihomePage({ username, editing }: { username: string; editing:
               다른 섬 둘러보기
             </Link>
             {!user && (
-              <Link className="mg-btn" to="/">
+              <Link className="mg-btn" to={signIn}>
                 로그인
               </Link>
             )}

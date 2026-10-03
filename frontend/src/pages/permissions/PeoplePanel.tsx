@@ -30,6 +30,8 @@ export function PeoplePanel({ apply, revision }: { apply: Apply; revision: numbe
   const [names, setNames] = useState<UserNames>({});
   const [problem, setProblem] = useState('');
   const [chosen, setChosen] = useState<string | null>(null);
+  /** Counts asks to search again after a failure. */
+  const [tries, setTries] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -50,7 +52,7 @@ export function PeoplePanel({ apply, revision }: { apply: Apply; revision: numbe
       live = false;
       window.clearTimeout(timer);
     };
-  }, [query, revision]);
+  }, [query, revision, tries]);
 
   return (
     <div className="mg-perm-people">
@@ -64,9 +66,16 @@ export function PeoplePanel({ apply, revision }: { apply: Apply; revision: numbe
           aria-label="아이디나 이름"
           onChange={(event) => setQuery(event.target.value)}
         />
-        {problem && <p className="mg-error">{problem}</p>}
+        {problem && (
+          <div className="mg-admin-message is-error" role="alert">
+            <span>{problem}</span>
+            <button type="button" className="mg-btn is-small" onClick={() => setTries((count) => count + 1)}>
+              다시 불러오기
+            </button>
+          </div>
+        )}
         {matches === null ? (
-          <p className="mg-empty">불러오는 중…</p>
+          !problem && <p className="mg-empty">불러오는 중…</p>
         ) : matches.length === 0 ? (
           <p className="mg-empty">{query.trim() ? '맞는 사람이 없어요' : '권한을 받은 사람이 없어요'}</p>
         ) : (

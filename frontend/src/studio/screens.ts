@@ -56,14 +56,3 @@ export function routeOf(href: string): string | null {
   try { return studioHref(new URLSearchParams(href.slice(2))); }
   catch { return null; }
 }
-
-/**
- * Points a studio link at the app's route for its screen as it is clicked, before the browser follows it. Dialogs put
- * their content on the page's body, in a `.studio-root` of their own, so this listens on the document.
- */
-export function retargetStudioLink(event: Pick<Event, 'target'>) {
-  const anchor = event.target instanceof Element ? event.target.closest('a[href^="/?"]') : null;
-  if (!anchor?.closest('.studio-root')) return;
-  const route = routeOf(anchor.getAttribute('href') ?? '');
-  if (route) anchor.setAttribute('href', route);
-}

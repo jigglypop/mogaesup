@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { ModelViewer } from '../viewer';
-import type { NativePartsState } from './api';
+import { nativeArtifact, type NativePartsState } from './api';
 
 export function ImportedGlbPreview({ state }: { state: NativePartsState }) {
-  const model = state.artifacts.find(item => item.name === 'model.glb');
+  const model = nativeArtifact(state, 'model');
+  const source = state.artifacts.find(item => item.name === 'model.glb');
   const mount = useRef<HTMLDivElement>(null), viewer = useRef<ModelViewer | null>(null);
   const [clips, setClips] = useState<{ name: string; index: number }[]>([]);
   const [ready, setReady] = useState(false), [error, setError] = useState('');
@@ -26,6 +27,6 @@ export function ImportedGlbPreview({ state }: { state: NativePartsState }) {
     {!ready && !error && <p role="status">GLB 불러오는 중…</p>}
     {error && <p role="alert">{error} <button onClick={() => setAttempt(value => value + 1)}>다시 불러오기</button></p>}
     <div className="meshy-clips"><button disabled={!ready} aria-pressed={motion === -1} onClick={() => { viewer.current?.play(-1); setMotion(-1); }}>기본 자세</button>{clips.map(clip => <button key={clip.index} disabled={!ready} aria-pressed={motion === clip.index} onClick={() => { viewer.current?.play(clip.index); setMotion(clip.index); }}>{clip.name}</button>)}</div>
-    {model && <a className="meshy-download" href={model.url} download>등록한 GLB 다운로드</a>}
+    {source && <a className="meshy-download" href={source.url} download>등록한 GLB 다운로드</a>}
   </section>;
 }

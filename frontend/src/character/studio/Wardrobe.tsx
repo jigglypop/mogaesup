@@ -6,14 +6,17 @@ import { lookApi } from '../../api/endpoints';
 import type { Look, LookRequest } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
+import { studioHref } from '../../studio/screens';
+import { useTabs } from '../../ui/tabs';
 import { isDefinitiveRejection, isRevisionConflict } from '../api';
-import { factoryApi, wardrobeUrls, type WardrobeColors, type WardrobeCoverage, type WardrobeOutfit, type WardrobePart } from '../factory/api';
+import { factoryApi, wardrobeUrls, wardrobePartSha, type WardrobeColors, type WardrobeCoverage, type WardrobeOutfit, type WardrobePart } from '../factory/api';
 import { compatiblePartSlots, garmentSlots, hasConflictingPartSlots, partLabels as labels, selectPartSlot, variantSlots } from '../factory/parts';
 import '../factory/meshy-motion.css';
 import { usePolling } from '../use-polling';
 import { ModelViewer } from '../viewer';
 import type { Tuck } from '../native-wardrobe';
 import { createHeldLoads } from './held-loads';
+import { PartPreview } from './PartPreview';
 import { fitReason, reshapable, unfittedParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
 import './wardrobe.css';
@@ -63,12 +66,6 @@ const outfitOfLook = (request: LookRequest): WardrobeOutfit => ({
   colors: request.colors,
 });
 
-function Preview({ part }: { part: WardrobePart }) {
-  const [missing, setMissing] = useState(false);
-  return missing ? <span className="wardrobe-card-empty">{labels[part.slot] || part.slot}</span>
-    : <img src={wardrobeUrls.preview(part)} alt={part.name} loading="lazy" onError={() => setMissing(true)} />;
-}
-
 export default function Wardrobe() {
   const { user } = useAuth();
   // Saved outfits are the studio's own records: only operators change them.
@@ -96,6 +93,7 @@ export default function Wardrobe() {
   const slots = slotOrder.filter(slot => parts.some(part => part.slot === slot));
   const [slot, setSlot] = useState('hair');
   const activeSlot = slots.includes(slot) ? slot : slots[0];
+  const tabs = useTabs(slots, activeSlot ?? '', setSlot);
 
   const mount = useRef<HTMLDivElement>(null);
   const [viewer, setViewer] = useState<ModelViewer | null>(null);
@@ -104,6 +102,9 @@ export default function Wardrobe() {
   const [worn, setWorn] = useState<Worn>({}), applied = useRef<Worn>({});
   const [appliedKey, setAppliedKey] = useState('');
   const [coverages, setCoverages] = useState<Record<string, WardrobeCoverage>>({});
+  // A part whose covered skin could not be read: shown with a retry, and it holds back no action (the server works out
+  // the same skin when it assembles the look).
+  const [coverageErrors, setCoverageErrors] = useState<Record<string, string>>({}), [coverageAttempt, setCoverageAttempt] = useState(0);
   // Colour regions and chosen colours, both keyed by part (a new part starts from its own colours).
   const [palettes, setPalettes] = useState<Record<string, Palette>>({});
   const [colors, setColors] = useState<Record<string, Record<string, string>>>({});
@@ -185,7 +186,7 @@ export default function Wardrobe() {
   useEffect(() => {
     if (!viewer) return;
     let active = true; setWearing(true);
-    const wearables = Object.values(worn).map(part => ({ id: keyOf(part, part.slot), slot: part.slot, url: wardrobeUrls.part(part), sha256: part.sha256 }));
+    const wearables = Object.values(worn).map(part => ({ id: keyOf(part, part.slot), slot: part.slot, url: wardrobeUrls.part(part), sha256: wardrobePartSha(part) }));
     void viewer.wear(wearables).then(done => { if (done && active) { applied.current = { ...worn }; setAppliedKey(wornKey); } })
       .catch(reason => { if (active) { setWearError((reason as Error).message); setWorn({ ...applied.current }); } })
       .finally(() => { if (active) setWearing(false); });
@@ -213,13 +214,18 @@ export default function Wardrobe() {
     if (!body) return;
     const controller = new AbortController();
     for (const part of Object.values(applied.current)) {
-      if (!coveredSlots.includes(part.slot) || coverages[coverageKey(part)]) continue;
+      const key = coverageKey(part);
+      if (!coveredSlots.includes(part.slot) || coverages[key]) continue;
       void factoryApi.wardrobeCoverage(body.job_id, part, controller.signal)
-        .then(value => { if (!controller.signal.aborted) setCoverages(current => ({ ...current, [coverageKey(part)]: value })); })
-        .catch(reason => { if (!controller.signal.aborted) setWearError(`${labels[part.slot] || part.slot} 가림 영역: ${(reason as Error).message}`); });
+        .then(value => {
+          if (controller.signal.aborted) return;
+          setCoverages(current => ({ ...current, [key]: value }));
+          setCoverageErrors(current => Object.fromEntries(Object.entries(current).filter(([item]) => item !== key)));
+        })
+        .catch(reason => { if (!controller.signal.aborted) setCoverageErrors(current => ({ ...current, [key]: `${labels[part.slot] || part.slot} 가림 영역: ${(reason as Error).message}` })); });
     }
     return () => controller.abort();
-  }, [appliedKey, body?.job_id, body?.version, body?.geometry_sha256]);
+  }, [appliedKey, body?.job_id, body?.version, body?.geometry_sha256, coverageAttempt]);
   useEffect(() => {
     if (!viewer) return;
     const top = applied.current.top;
@@ -291,18 +297,22 @@ export default function Wardrobe() {
       viewer.setPartColors(part.slot, palette.material, palette.mask, palette.regions.map(region => region.light), [0, 1, 2, 3].map(index => chosen[String(index)] || null));
     }
   }, [appliedKey, palettes, colors, viewer]);
-  // An outfit on another body is worn once that body and its parts have loaded.
+  // An outfit on another body is worn once that body and its parts have loaded. Restoring the saved look ends there, and
+  // also when the bodies, the body's model or its parts fail to load: the screen opens and shows the error, and the
+  // saved look still goes on once a retry brings what was missing.
   useEffect(() => {
     const outfit = pendingOutfit.current;
-    if (outfit && restoreLook.current && bodies.value && !registered.some(item => item.job_id === outfit.body.job_id && item.version === outfit.body.version)) {
-      pendingOutfit.current = null; restoreLook.current = false; setLookReady(true);
+    const restored = () => { if (restoreLook.current) { restoreLook.current = false; setLookReady(true); } };
+    if (outfit && bodies.value && !registered.some(item => item.job_id === outfit.body.job_id && item.version === outfit.body.version)) {
+      pendingOutfit.current = null; restored();
       setWearError('저장된 몸 버전을 옷장에서 찾을 수 없습니다.'); return;
     }
+    if (modelError || (!libraryMatchesBody && library.error) || (!bodies.value && bodies.error)) restored();
     if (!outfit || !viewer || !body || outfit.body.job_id !== body.job_id || outfit.body.version !== body.version || !libraryMatchesBody) return;
     pendingOutfit.current = null;
     applyOutfit(outfit, library.value!.parts);
-    if (restoreLook.current) { restoreLook.current = false; setLookReady(true); }
-  }, [viewer, library.value, libraryMatchesBody, body?.job_id, body?.version, bodies.value, look?.request]);
+    restored();
+  }, [viewer, library.value, libraryMatchesBody, body?.job_id, body?.version, bodies.value, look?.request, modelError, library.error, bodies.error]);
 
   function toggle(part: WardrobePart) {
     setWearError(''); setNotice('');
@@ -405,9 +415,11 @@ export default function Wardrobe() {
   const settled = !!viewer && libraryMatchesBody && !wearing && wornKey === appliedKey;
   const savedOutfits = Object.entries(outfits.value?.outfits || {}).sort(([, a], [, b]) => (b.saved_at || '').localeCompare(a.saved_at || ''));
   const shapes = reshapable(worn, paidOperator);
+  const coverageProblems = Object.values(applied.current).map(part => coverageErrors[coverageKey(part)]).filter((value): value is string => !!value);
   if (bodies.value && registered.length === 0) {
+    // Bodies are registered on the base body screen, which only paid operators open.
     return <div className="wardrobe workspace-content"><div className="workspace-heading"><h1>옷장</h1></div>
-      <p className="wardrobe-empty">등록된 옷장 몸이 없습니다. 기본몸 화면에서 등록하세요.</p></div>;
+      <p className="wardrobe-empty">등록된 옷장 몸이 없습니다.{paidOperator && <> <Link to={studioHref({ tab: 'character', mode: 'body' })}>기본몸 화면에서 등록</Link></>}</p></div>;
   }
   return <div className="wardrobe workspace-content">
     <div className="workspace-heading"><h1>옷장</h1>
@@ -422,23 +434,25 @@ export default function Wardrobe() {
           {clips.map(clip => <button key={clip.index} disabled={!viewer} aria-pressed={motion === clip.index} onClick={() => { viewer?.play(clip.index); setMotion(clip.index); }}>{clip.name}</button>)}</div>
         {worn.hair && <div className="wardrobe-hair-color"><label>헤어 색상<input type="color" value={hairColor || '#8a7998'} onChange={event => setHairColor(event.target.value)} /></label>
           <span>{hairColor || '원본 색상'}</span><button type="button" onClick={() => setHairColor(null)}>원본 색상</button></div>}
-        {(!viewer || wearing) && !modelError && <p role="status">{viewer ? '파츠를 입히는 중…' : '옷장 몸을 불러오는 중…'}</p>}
+        {(!viewer || wearing) && !modelError && !(bodies.error && !body) && <p role="status">{viewer ? '파츠를 입히는 중…' : '옷장 몸을 불러오는 중…'}</p>}
+        {bodies.error && <p role="alert">{bodies.error} <button type="button" onClick={() => void bodies.refresh()}>몸 목록 다시 불러오기</button></p>}
         {modelError && <p role="alert">{modelError} <button type="button" onClick={() => setAttempt(value => value + 1)}>다시 불러오기</button></p>}
         {wearError && <p role="alert">{wearError}</p>}
+        {coverageProblems.length > 0 && <p role="alert">{coverageProblems.join(' · ')} <button type="button" onClick={() => { setCoverageErrors({}); setCoverageAttempt(value => value + 1); }}>가림 영역 다시 불러오기</button></p>}
         {notice && <p role="status">{notice}</p>}
       </section>
       <section className="wardrobe-closet">
-        <div className="wardrobe-slots" role="tablist" aria-label="파츠 종류">{slots.map(slotName =>
-          <button key={slotName} role="tab" aria-selected={slotName === activeSlot} onClick={() => setSlot(slotName)}>
+        <div className="wardrobe-slots" {...tabs.list} aria-label="파츠 종류">{slots.map(slotName =>
+          <button key={slotName} type="button" {...tabs.tab(slotName)}>
             {labels[slotName] || slotName} <span>{parts.filter(part => part.slot === slotName).length}</span></button>)}</div>
         {body && !libraryMatchesBody && !library.error && <p role="status">파츠 목록을 불러오는 중…</p>}
         {library.value && !libraryMatchesBody && <p role="alert">몸과 파츠의 버전이 다릅니다. 새 몸의 파츠를 기다리는 중입니다.</p>}
         {library.error && <p role="alert">{library.error}</p>}
         {libraryMatchesBody && parts.length === 0 && <p className="wardrobe-empty">이 몸으로 만든 파츠가 없습니다.</p>}
-        <div className="wardrobe-cards">{parts.filter(part => part.slot === activeSlot).map(part => {
+        <div className="wardrobe-cards" {...(activeSlot ? tabs.panel(activeSlot) : {})}>{parts.filter(part => part.slot === activeSlot).map(part => {
           const wornPart = worn[part.slot], selected = !!wornPart && keyOf(wornPart, part.slot) === keyOf(part, part.slot);
           return <button key={keyOf(part, part.slot)} type="button" className="wardrobe-card" aria-pressed={selected} disabled={!viewer || !lookReady} onClick={() => toggle(part)}>
-            <Preview part={part} />
+            <PartPreview part={part} refreshed={library.receivedAt} />
             <strong>{part.name}</strong>
             {/* Where a part came from and how it was fitted matter to operators, not to someone dressing up. */}
             {admin && <small>{[part.character_name !== part.name ? part.character_name : '', methodLabels[part.fit_method || ''] || ''].filter(Boolean).join(' · ')}</small>}

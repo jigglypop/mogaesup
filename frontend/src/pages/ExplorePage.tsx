@@ -10,14 +10,9 @@ import { appendHomes, EXPLORE_PAGE, nextBefore, searchOf } from './explore';
 
 /** How long the typing rests before the list asks the server. */
 const SEARCH_REST_MS = 300;
-const SKIES = [
-  ['#cfe8f7', '#bfe3b4'],
-  ['#fde3d3', '#d6ecbf'],
-  ['#e5defc', '#c8e6c4'],
-  ['#fff0c9', '#c9e5b6'],
-  ['#d7f0ea', '#b9dcb0'],
-] as const;
-const skyOf = (username: string) => SKIES[[...username].reduce((sum, char) => sum + char.charCodeAt(0), 0) % SKIES.length]!;
+/** The card skies are the theme's `--mg-sky-0` to `--mg-sky-4`; each island keeps one. */
+const SKIES = 5;
+const skyOf = (username: string) => String([...username].reduce((sum, char) => sum + char.charCodeAt(0), 0) % SKIES);
 const since = (at: string) => {
   const days = Math.floor((Date.now() - Date.parse(at)) / 86_400_000);
   if (days < 1) return '오늘 바뀜';
@@ -150,29 +145,26 @@ export function ExplorePage() {
         {!homes && !error && <p className="mg-empty" role="status">불러오는 중…</p>}
         {homes?.length === 0 && <p className="mg-empty">{search ? '찾는 섬이 없어요' : '아직 공개된 섬이 없어요'}</p>}
         <ul className="mg-islands">
-          {homes?.map((home) => {
-            const [top, bottom] = skyOf(home.username);
-            return (
-              <li key={home.username}>
-                <Link className="mg-island-card mg-card" to={`/@${home.username}`}>
-                  <span className="mg-island-sky" style={{ background: `linear-gradient(180deg, ${top}, ${bottom})` }} aria-hidden="true">
-                    <span>{home.emoji}</span>
+          {homes?.map((home) => (
+            <li key={home.username}>
+              <Link className="mg-island-card mg-card" to={`/@${home.username}`}>
+                <span className="mg-island-sky" data-sky={skyOf(home.username)} aria-hidden="true">
+                  <span>{home.emoji}</span>
+                </span>
+                <span className="mg-island-info">
+                  <b>{home.title}</b>
+                  <small>
+                    {home.ownerName} · @{home.username}
+                  </small>
+                  {home.statusMessage && <span className="mg-island-status">{home.statusMessage}</span>}
+                  <span className="mg-island-meta">
+                    <span>{since(home.updatedAt)}</span>
+                    <span>방문 {home.total.toLocaleString()}</span>
                   </span>
-                  <span className="mg-island-info">
-                    <b>{home.title}</b>
-                    <small>
-                      {home.ownerName} · @{home.username}
-                    </small>
-                    {home.statusMessage && <span className="mg-island-status">{home.statusMessage}</span>}
-                    <span className="mg-island-meta">
-                      <span>{since(home.updatedAt)}</span>
-                      <span>방문 {home.total.toLocaleString()}</span>
-                    </span>
-                  </span>
-                </Link>
-              </li>
-            );
-          })}
+                </span>
+              </Link>
+            </li>
+          ))}
         </ul>
         {before && (
           <button className="mg-btn is-quiet is-wide" disabled={loadingMore || searchOf(query) !== search} onClick={loadMore}>

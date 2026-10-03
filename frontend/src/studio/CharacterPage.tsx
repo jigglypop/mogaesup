@@ -2,10 +2,9 @@ import './studio.css';
 
 import { lazy } from 'react';
 
-import { Navigate } from 'react-router-dom';
-
 import { useStudioSleep } from '../api/studioSleep';
 import { useAuth } from '../auth/AuthProvider';
+import { SignInRedirect } from '../auth/signIn';
 import { Loading } from '../pages/Loading';
 import { PageShell } from '../shell/Shell';
 import { StudioWaking } from './StudioPower';
@@ -18,7 +17,7 @@ export default function CharacterPage() {
   const { status, user } = useAuth();
   const sleep = useStudioSleep();
   if (status === 'loading') return <Loading />;
-  if (!user) return <Navigate to="/" replace />;
+  if (!user) return <SignInRedirect />;
   return (
     <PageShell title="내 캐릭터" wide>
       <Stage>{sleep ? <StudioWaking sleep={sleep} member /> : <Wardrobe />}</Stage>

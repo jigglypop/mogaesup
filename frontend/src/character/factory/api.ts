@@ -1,4 +1,4 @@
-import { isDefinitiveRejection, request, savedRequest } from '../api';
+import { isDefinitiveRejection, request, savedRequest, type Pending } from '../api';
 import type { MeshyOptions } from '../studio/meshy-options';
 
 export type ImageRetry = { slot: string; view: string; failure_id: string };
@@ -55,6 +55,19 @@ export type MeshyState = { provider: 'meshy'; status: string; rig_task_id?: stri
 /** Pre-rig ring measurement of sleeves / trouser legs against the body (worn parts). */
 export type LimbFitCheck = { status: 'pass' | 'fail' | 'unchecked' | 'not_applicable'; failures: { limb: string; message: string }[];
   limbs: Record<string, { rings?: number; min_margin_cm?: number; angle_deg?: number | null }> };
+export type NativeDelivery = Record<string, {
+  artifact: string; sha256: string; source_sha256: string; source_bytes: number; runtime_bytes: number; method: string;
+  geometry_preserved: boolean; uv_skin_animation_images_preserved: boolean;
+}>;
+export type NativeQuality = {
+  revision: string; status: string; visual_review: string; production_spec_sha256: string;
+  artifacts: Record<string, string>; delivery: NativeDelivery;
+  checks: { code: string; status: string; slot?: string; actual?: number; target?: number }[];
+  rear_coverage?: { rays: number; covered: number; ratio: number; geometric_ratio: number } | null;
+  parts: Record<string, { triangles?: number; penetration?: { vertices: number; inside: number; ratio: number } }>;
+  runtime: { file_bytes?: number; vertices?: number; triangles?: number; meshes?: number; materials?: number;
+    skins?: number; texture_pixels?: number | null; animations?: string[]; joints?: string[] };
+};
 export type NativePartsState = {
   origin?: string;
   rigged?: boolean;
@@ -64,11 +77,22 @@ export type NativePartsState = {
   incomplete_parts?: { slot: string; status: string; errors: { code: string; message: string }[] }[];
   parts: { slot: string; objects: string[]; available?: boolean; fit_method?: string; unavailable_reason?: string; runtime_budget?: {
     source_triangles?: number; runtime_triangles?: number; target_triangles?: number;
-    texture_max_edge?: number; resized_textures?: number; source_files_preserved?: boolean;
+    texture_max_edge?: number; resized_textures?: number; source_files_preserved?: boolean; budget_met?: boolean;
   }; limb_fit?: { check?: LimbFitCheck } }[];
   artifacts: { name: string; url: string; sha256: string }[];
+  quality?: NativeQuality;
+  delivery?: NativeDelivery;
   preview?: NativePartsState;
 };
+/** A lossless derivative belongs to the exact source version and artifact named by its receipt. */
+export function nativeArtifact(state: NativePartsState, slot: string) {
+  const source = state.artifacts.find(item => item.name === `${slot}.glb`);
+  const receipt = state.delivery?.[slot];
+  const runtime = receipt && state.artifacts.find(item => item.name === `${slot}.runtime.glb`);
+  return source && runtime && receipt.artifact === runtime.name && receipt.source_sha256 === source.sha256
+    && receipt.sha256 === runtime.sha256 && receipt.geometry_preserved && receipt.uv_skin_animation_images_preserved
+    ? runtime : source;
+}
 export type NativeOutfit = { version: string; body_sha256: string; revision: string; slots: string[]; hair_color?: string | null; saved_at?: string };
 export type BodyProfileState = { revision: string; body: null | { job_id: string; version: string; profile_id: string; body_sha256: string } };
 export type WardrobeBody = { job_id: string; version: string; profile_id: string; body_sha256: string; geometry_sha256: string; name: string; body_type?: 'male' | 'female' | null; registered_at: string; is_default: boolean; part_jobs: number | null };
@@ -77,6 +101,7 @@ type WardrobeBodiesState = { revision: string; bodies: WardrobeBody[]; default: 
 export type GarmentShape = { sleeve?: number; hem?: number; fit?: 'tight' | 'normal' | 'loose' };
 export type WardrobePart = { job_id: string; version: string; slot: string; name: string; character_name?: string | null; fit_method?: string | null;
   shape?: GarmentShape | null;
+  runtime_name?: string | null; runtime_sha256?: string | null;
   fit_check?: { status: 'pass' | 'fail'; failures: string[] } | null; sha256: string; created_at?: string | null };
 /** A part whose fitting did not produce a wearable file: `reason` is a code (needs_anchors, garment_fit_incomplete, fit_exception, ...). */
 export type WardrobeUnavailable = { job_id: string; version: string; slot: string; name: string; reason: string };
@@ -91,9 +116,12 @@ type WardrobeOutfits = { revision: string; outfits: Record<string, WardrobeOutfi
  * the head (covers_head) also has over: the head triangles hair tucks under (a hat's crown stands off the scalp). */
 export type WardrobeCoverage = { slot: string; hidden: Record<string, string>; triangles: Record<string, number>; covers_bottom: boolean; covers_head?: boolean; boot?: boolean; over?: Record<string, string>;
   anchors?: Record<string, string>; tucks?: Record<string, string>; anchor_keys?: string[]; under?: string[] };
+const wardrobeRuntime = (part: WardrobePart) => part.runtime_name === `${part.slot}.runtime.glb` && !!part.runtime_sha256;
+/** Download identity only; saved outfits, fitting and coverage remain bound to the source hash. */
+export const wardrobePartSha = (part: WardrobePart) => wardrobeRuntime(part) ? part.runtime_sha256! : part.sha256;
 export const wardrobeUrls = {
   body: (body: { job_id: string; version: string }) => `/api/avatar-factory/jobs/${body.job_id}/native-parts/${body.version}/body.glb`,
-  part: (part: WardrobePart) => `/api/avatar-factory/jobs/${part.job_id}/native-parts/${part.version}/${part.slot}.glb`,
+  part: (part: WardrobePart) => `/api/avatar-factory/jobs/${part.job_id}/native-parts/${part.version}/${wardrobeRuntime(part) ? part.runtime_name : `${part.slot}.glb`}`,
   preview: (part: WardrobePart) => `/api/avatar-factory/wardrobe/previews/${part.job_id}/${part.slot}?${new URLSearchParams({ version: part.version })}`,
   colorMask: (part: WardrobePart) => `/api/avatar-factory/wardrobe/colors/${part.job_id}/${part.slot}/mask?${new URLSearchParams({ version: part.version })}`,
 };
@@ -125,6 +153,12 @@ const imageRequests = (id: string) => savedRequest<ImageProductionInput>(imagePe
   '저장된 이미지 생성 요청을 읽을 수 없습니다. 기존 요청 기록을 확인해야 새 생성을 접수할 수 있습니다.');
 const nativePartsSelectionKey = (id: string) => `gaesup.native-parts-selection:${id}`;
 type PendingNativePartsSelection = { key: string; input: { version: string; expected_version: string } };
+type RefitInput = { source_version: string; slot: string; fit_profile?: FitProfile; part_method?: 'isolated' | 'body_shell'; shape?: GarmentShape };
+const refits = (id: string) => savedRequest<RefitInput>(`gaesup.part-refit:${id}`,
+  ({ input }) => typeof input.source_version === 'string' && typeof input.slot === 'string', '저장된 피팅 요청을 확인할 수 없습니다.');
+const postRefit = (id: string) => (pending: Pending<RefitInput>) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts/refit`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key }, body: JSON.stringify(pending.input),
+});
 export const factoryApi = {
   nativeParts: (id: string, signal?: AbortSignal) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts`, { signal }),
   assemble: (id: string, canonicalPose = false) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts?canonical_pose=${canonicalPose}`, { method: 'POST' }),
@@ -154,6 +188,16 @@ export const factoryApi = {
   }),
   wardrobeParts: (bodyJobId: string, signal?: AbortSignal) => request<WardrobeParts>(`/api/avatar-factory/wardrobe/bodies/${bodyJobId}/parts`, { signal }),
   wardrobeOutfits: (signal?: AbortSignal) => request<WardrobeOutfits>('/api/avatar-factory/wardrobe/outfits', { signal }),
+  /** Why a part's wardrobe picture (an image, so not read through `request`) did not load: the server has none of it
+   * (`missing`, 404 preview_missing), it loads now (`ok`), or the request failed. */
+  async wardrobePreviewAnswer(part: WardrobePart, signal?: AbortSignal): Promise<'missing' | 'ok' | 'failed'> {
+    try {
+      const response = await fetch(wardrobeUrls.preview(part), { signal });
+      if (response.ok) { void response.body?.cancel().catch(() => undefined); return 'ok'; }
+      const body = await response.json().catch(() => null) as { error?: { code?: unknown } } | null;
+      return response.status === 404 && body?.error?.code === 'preview_missing' ? 'missing' : 'failed';
+    } catch { return 'failed'; }
+  },
   wardrobeColors: (part: WardrobePart, signal?: AbortSignal) => request<WardrobeColors>(
     `/api/avatar-factory/wardrobe/colors/${part.job_id}/${part.slot}?${new URLSearchParams({ version: part.version })}`, { signal }),
   wardrobeCoverage: (bodyJobId: string, part: WardrobePart, signal?: AbortSignal) => request<WardrobeCoverage>(
@@ -188,31 +232,23 @@ export const factoryApi = {
       throw error;
     }
   },
-  pendingRefit: (id: string): { key: string; input: { source_version: string; slot: string; fit_profile?: FitProfile; part_method?: 'isolated' | 'body_shell'; shape?: GarmentShape } } | null => {
-    const raw = localStorage.getItem(`gaesup.part-refit:${id}`);
-    if (!raw) return null;
-    const value = JSON.parse(raw);
-    if (typeof value?.key !== 'string' || typeof value?.input?.source_version !== 'string' || typeof value?.input?.slot !== 'string') throw new Error('저장된 피팅 요청을 확인할 수 없습니다.');
-    return value;
+  /** The job's refit whose answer was lost, if any; throws when what is saved cannot be read. */
+  pendingRefit: (id: string): Pending<RefitInput> | null => {
+    const { pending, error } = refits(id).read();
+    if (error) throw new Error(error);
+    return pending;
   },
-  acknowledgeRefit: (id: string, key: string) => {
-    if (factoryApi.pendingRefit(id)?.key === key) localStorage.removeItem(`gaesup.part-refit:${id}`);
-  },
-  async refitPart(id: string, source_version: string, slot: string, fit_profile?: FitProfile, part_method?: 'isolated' | 'body_shell', shape?: GarmentShape) {
-    const storage = `gaesup.part-refit:${id}`;
-    const saved = factoryApi.pendingRefit(id);
-    if (saved && saved.input.slot !== slot) throw new Error(`저장된 ${saved.input.slot} 피팅 요청을 먼저 복구해야 합니다.`);
-    const pending = saved || { key: crypto.randomUUID(), input: { source_version, slot, ...(fit_profile ? { fit_profile } : {}), ...(part_method ? { part_method } : {}), ...(shape ? { shape } : {}) } };
-    localStorage.setItem(storage, JSON.stringify(pending));
-    try {
-      const result = await request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts/refit`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key }, body: JSON.stringify(pending.input),
-      });
-      localStorage.removeItem(storage); return result;
-    } catch (error) {
-      if (isDefinitiveRejection(error)) localStorage.removeItem(storage);
-      throw error;
-    }
+  /** Forgets the saved refit sent under `key` (the server has it, or someone cleared it). */
+  acknowledgeRefit: (id: string, key: string) => refits(id).settle(key),
+  /** Refits a part. A saved refit is replayed only as itself: with a different one saved (another part, another shape) this
+   * refuses with PendingRequestConflict rather than send the saved one in place of this one; see `resumeRefit`. */
+  refitPart: (id: string, source_version: string, slot: string, fit_profile?: FitProfile, part_method?: 'isolated' | 'body_shell', shape?: GarmentShape) =>
+    refits(id).send({ source_version, slot, ...(fit_profile ? { fit_profile } : {}), ...(part_method ? { part_method } : {}), ...(shape ? { shape } : {}) }, postRefit(id)),
+  /** Sends the saved refit again, its own input under its own key. */
+  resumeRefit(id: string) {
+    const pending = factoryApi.pendingRefit(id);
+    if (!pending) throw new Error('저장된 피팅 요청이 없습니다.');
+    return refits(id).send(pending.input, postRefit(id));
   },
   resumeStage: (id: string, stage: FactoryStage, key: string) => request<FactoryStages>(`/api/avatar-factory/jobs/${id}/stages/${stage}/resume`, {
     method: 'POST', headers: { 'Idempotency-Key': key },

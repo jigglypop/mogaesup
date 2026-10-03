@@ -166,7 +166,7 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
       {!!native?.incomplete_parts?.length && <ul className="part-fitting-incomplete">{native.incomplete_parts.map(item => <li key={`${item.slot}:${item.status}`}><strong>{item.slot}</strong> · {item.status}{item.errors.length ? ` · ${item.errors.map(problem => `${problem.code}: ${problem.message}`).join(', ')}` : ''}</li>)}</ul>}
       {foreignPending && <p className="generation-recovery">{foreignPending.input.slot === 'top' ? '상의' : '하의'} 피팅 요청을 먼저 복구해야 합니다. <button type="button" onClick={() => onPendingSlot(foreignPending!.input.slot as 'top' | 'bottom')}>요청한 파츠 열기</button></p>}
       <label>원본 버전<select value={sourceVersion} disabled={controlsLocked} onChange={event => void loadProfile(event.target.value)}>{versions?.items.map(item => <option key={item.version} value={item.version}>{item.version}{item.version === versions.current ? ' · 현재' : ''}</option>)}</select></label>
-      {!sourceIsCurrent && !ownPending && <p className="part-fitting-version-note">과거 버전은 바로 피팅할 수 없습니다. 아래에서 이 버전을 현재 버전으로 전환한 뒤 피팅하세요.</p>}
+      {!sourceIsCurrent && !ownPending && <p className="part-fitting-version-note">현재 버전이 아니어서 피팅할 수 없습니다.</p>}
       <div className="part-fitting-fields">
         {slot === 'top' && <label>소매<select value={profile.sleeve || 'source'} disabled={controlsLocked} onChange={event => setProfile(current => ({ ...current, sleeve: event.target.value as FitProfile['sleeve'] }))}><option value="source">원본대로</option><option value="none">민소매</option><option value="short">반팔</option><option value="long">긴팔</option></select></label>}
         {slot === 'bottom' && <label>종류<select value={profile.kind || 'source'} disabled={controlsLocked} onChange={event => setProfile(current => ({ ...current, kind: event.target.value as FitProfile['kind'] }))}><option value="source">원본대로</option><option value="pants">바지</option><option value="skirt">치마</option></select></label>}
@@ -186,7 +186,8 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
       <details className="part-fitting-advanced"><summary>고급 정보</summary><dl><div><dt>원본 SHA-256</dt><dd>{context?.source_sha256 || profile.source_sha256 || '-'}</dd></div><div><dt>규격</dt><dd>{profile.revision || 'garment-fit-v1'}</dd></div></dl></details>
       {ownPending && <small className="generation-recovery">응답이 확인되지 않은 {label} 피팅 요청입니다. 저장된 입력과 요청 키로 복구합니다.</small>}
       <div className="part-fitting-actions"><button type="button" disabled={busy || profileLoading || !anchorsValid || !!foreignPending || !!restorePending || (!canRecoverRefit && !sourceIsCurrent)} onClick={() => void perform(async () => {
-        const result = await factoryApi.refitPart(jobId, sourceVersion, slot, profile);
+        // The saved request goes again exactly as it was saved; the form only shows it.
+        const result = ownPending ? await factoryApi.resumeRefit(jobId) : await factoryApi.refitPart(jobId, sourceVersion, slot, profile);
         setNative(result); setNotice(completionMessage(result));
         const saved = await factoryApi.nativePartsVersions(jobId); setVersions(saved); setRestoreVersion(saved.current || result.version || '');
       })}>{busy ? '처리 중' : ownPending ? '같은 피팅 요청 복구' : '새 피팅 버전 저장'}</button></div>

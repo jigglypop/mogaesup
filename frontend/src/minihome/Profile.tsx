@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 're
 
 import { problemText } from '../api/client';
 import type { CatalogItem, HomeView, HomeVisibility, Look, ProfileChanges } from '../api/types';
+import { draftKey } from '../auth/drafts';
 import { Icon } from '../ui/icons';
 import { wearsLook } from './character';
 
@@ -24,6 +25,39 @@ export function wantsSave(draft: string, saved: string, allowEmpty: boolean): bo
   return next !== saved && (allowEmpty || next !== '');
 }
 
+/** Text typed but not saved yet, kept in this browser with the saved value it was typed over. */
+type Draft = { text: string; base: string };
+
+function readDraft(key: string): Draft | null {
+  try {
+    const raw = localStorage.getItem(key);
+    const draft: unknown = raw === null ? null : JSON.parse(raw);
+    if (typeof draft === 'object' && draft !== null && typeof (draft as Draft).text === 'string' && typeof (draft as Draft).base === 'string') {
+      return draft as Draft;
+    }
+  } catch {
+    // Storage may be unavailable, or hold something else under the key.
+  }
+  return null;
+}
+function keepDraft(key: string, draft: Draft) {
+  try { localStorage.setItem(key, JSON.stringify(draft)); } catch { /* Keep the live draft even without storage. */ }
+}
+function dropDraft(key: string) {
+  try { localStorage.removeItem(key); } catch { /* Storage may be unavailable. */ }
+}
+
+/**
+ * What a field opens with: a kept draft while the server still has the value it was typed over; once the server holds
+ * something newer (saved from another tab or device), that wins and the draft goes.
+ */
+export function openingText(storageKey: string, value: string): string {
+  const kept = readDraft(storageKey);
+  if (kept && kept.base === value) return kept.text;
+  if (kept) dropDraft(storageKey);
+  return value;
+}
+
 /** A text field that saves a moment after typing stops. */
 function Autosaved({
   value,
@@ -42,16 +76,17 @@ function Autosaved({
   placeholder: string;
   'aria-label': string;
 }) {
-  const [draft, setDraft] = useState(() => {
-    try { return localStorage.getItem(storageKey) ?? value; } catch { return value; }
-  });
+  const [draft, setDraft] = useState(() => openingText(storageKey, value));
   const [error, setError] = useState('');
   const current = useRef({ draft, value, allowEmpty, onSave, storageKey });
   const saved = useRef(value);
   const mounted = useRef(true);
   const inflight = useRef<Promise<void> | null>(null);
   useEffect(() => {
-    if (!wantsSave(current.current.draft, saved.current, allowEmpty)) setDraft(value);
+    const typed = current.current.draft;
+    // A newer saved value takes the field unless something typed still waits to be saved, or the field already says the
+    // same: the answer to a save must not take away the space being typed after a word.
+    if (!wantsSave(typed, saved.current, allowEmpty) && typed.trim() !== value) setDraft(value);
     saved.current = value;
   }, [value, allowEmpty]);
   current.current = { draft, value, allowEmpty, onSave, storageKey };
@@ -62,9 +97,10 @@ function Autosaved({
     if (!wantsSave(next, saved.current, allowEmpty)) return Promise.resolve();
     const run = Promise.resolve().then(() => onSave(next)).then(() => {
       saved.current = next;
-      if (current.current.draft.trim() === next) {
-        try { localStorage.removeItem(storageKey); } catch { /* Storage may be unavailable. */ }
-      }
+      // What was typed while it saved now builds on the saved text.
+      const typed = current.current.draft;
+      if (typed.trim() === next) dropDraft(storageKey);
+      else keepDraft(storageKey, { text: typed, base: next });
       if (mounted.current) setError('');
     }, (problem: unknown) => {
       if (mounted.current) setError(problemText(problem));
@@ -79,10 +115,8 @@ function Autosaved({
     }).catch(() => undefined);
   }, [flush]);
   useEffect(() => {
-    try {
-      if (draft.trim() === saved.current && !inflight.current) localStorage.removeItem(storageKey);
-      else localStorage.setItem(storageKey, draft);
-    } catch { /* Saving to the server still works. */ }
+    if (draft.trim() === saved.current && !inflight.current) dropDraft(storageKey);
+    else keepDraft(storageKey, { text: draft, base: saved.current });
     if (!wantsSave(draft, saved.current, allowEmpty)) return undefined;
     const timer = setTimeout(savePending, SAVE_DELAY_MS);
     return () => clearTimeout(timer);
@@ -108,7 +142,7 @@ function Autosaved({
   };
   const edit = (next: string) => {
     current.current.draft = next;
-    try { localStorage.setItem(storageKey, next); } catch { /* Keep the live draft even without storage. */ }
+    keepDraft(storageKey, { text: next, base: saved.current });
     setDraft(next);
   };
   return <>
@@ -145,7 +179,7 @@ export function ProfileHeader({
         </span>
         <div className="mg-profile-text">
           <h2>{profile.ownerName}</h2>
-          <p>{profile.statusMessage || (isOwner ? '상태 메시지를 적어 보세요' : ' ')}</p>
+          <p>{profile.statusMessage || (isOwner ? '상태 메시지 없음' : ' ')}</p>
         </div>
         {isOwner && (
           <button className="mg-btn is-small" onClick={onEdit}>
@@ -194,11 +228,11 @@ export function About({
         <section className="mg-form">
           <label className="mg-label">
             섬 이름
-            <Autosaved key={`${profile.ownerId}:title`} storageKey={`mogaesup:profile:${profile.ownerId}:title`} value={profile.title} onSave={saveTitle} maxLength={30} placeholder="섬 이름" aria-label="섬 이름" />
+            <Autosaved key={`${profile.ownerId}:title`} storageKey={draftKey(profile.ownerId, 'title')} value={profile.title} onSave={saveTitle} maxLength={30} placeholder="섬 이름" aria-label="섬 이름" />
           </label>
           <label className="mg-label">
             상태 메시지
-            <Autosaved key={`${profile.ownerId}:status`} storageKey={`mogaesup:profile:${profile.ownerId}:status`} value={profile.statusMessage} onSave={saveStatus} maxLength={60} placeholder="오늘은 어떤 날인가요" aria-label="상태 메시지" multiline allowEmpty />
+            <Autosaved key={`${profile.ownerId}:status`} storageKey={draftKey(profile.ownerId, 'status')} value={profile.statusMessage} onSave={saveStatus} maxLength={60} placeholder="오늘은 어떤 날인가요" aria-label="상태 메시지" multiline allowEmpty />
           </label>
           <div className="mg-label">
             오늘 기분

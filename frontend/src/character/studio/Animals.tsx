@@ -110,7 +110,8 @@ function CreateAnimal({ onCreated }: { onCreated(animal: Animal): void }) {
   return <section className="animal-create" aria-labelledby={`${id}-title`}>
     <h2 id={`${id}-title`}>동물 추가</h2>
     <div className="animal-create-row">
-      <div className="animal-create-drop" tabIndex={unavailable ? -1 : 0} data-dragging={dragging && !unavailable} data-disabled={unavailable}
+      {/* The file input inside is the one control: Tab reaches it, and a paste while it has focus or a drop selects too. */}
+      <div className="animal-create-drop" data-dragging={dragging && !unavailable} data-disabled={unavailable}
         onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); select(files); } }}
         onDragEnter={event => { event.preventDefault(); if (!unavailable) { dragDepth.current++; setDragging(true); } }}
         onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = unavailable ? 'none' : 'copy'; }}

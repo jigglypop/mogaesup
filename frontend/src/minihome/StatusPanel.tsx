@@ -80,10 +80,7 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
   return (
     <div className="mh-status mg-glass" role="dialog" aria-label="성능">
       <header className="mh-status-head">
-        <div>
-          <h3>성능</h3>
-          <p><i className="mh-live" />0.5초마다 갱신</p>
-        </div>
+        <h3>성능</h3>
         <div className="mh-badges">
           <span className="mh-badge is-accent">{render.backend ? BACKEND[render.backend] : '측정 중'}</span>
           <span className="mh-badge">품질 {TIER[report.tier]}</span>
@@ -157,8 +154,8 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
         )}
       </Section>
 
-      <Section title="CPU 단계" aside={phases && <span className="mh-muted">합계 {number(phaseTotal, 2)}ms</span>}>
-        {phases ? (
+      {phases && (
+        <Section title="CPU 단계" aside={<span className="mh-muted">합계 {number(phaseTotal, 2)}ms</span>}>
           <ul className="mh-phases">
             {FRAME_PHASES.map((phase) => (
               <li key={phase}>
@@ -168,10 +165,8 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="mh-muted">단계별 측정은 개발 빌드에서만 켜져요.</p>
-        )}
-      </Section>
+        </Section>
+      )}
 
       <Section title="월드">
         <div className="mh-metrics">

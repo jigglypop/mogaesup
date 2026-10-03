@@ -251,7 +251,7 @@
 /* Phones and touch screens: every control at least 40px, bulk actions within thumb reach. */
 @media (max-width: 720px), (pointer: coarse) {
   .mg-admin .mg-btn.is-small, .mg-admin-dialog .mg-btn.is-small, .mg-admin-bulk-tray .mg-btn.is-small { min-height: 40px; padding: 0 14px; }
-  .mg-admin-tabs > a, .mg-admin-seg > button { height: 40px; }
+  .mg-admin-seg > button { height: 40px; }
   .mg-admin-select { height: 40px; }
   .mg-admin-check { width: 40px; height: 40px; }
   .mg-admin-check input { width: 20px; height: 20px; }
@@ -264,8 +264,6 @@
 @media (max-width: 720px) {
   .mg-admin .mg-panel-head { gap: 10px; margin-bottom: 16px; }
   .mg-admin .mg-panel-head .mg-title { font-size: 24px; }
-  .mg-admin-tabs { order: 3; width: 100%; overflow-x: auto; scrollbar-width: none; }
-  .mg-admin-tabs::-webkit-scrollbar { display: none; }
   .mg-admin .mg-column { padding: 10px; min-height: 0; }
   .mg-admin-imports { padding: 10px; }
   .mg-admin-card .mg-admin-actions > .mg-btn { flex: 1 1 auto; }

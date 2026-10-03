@@ -1,0 +1,10 @@
+/* The 운영 tabs, on every page that shows them (운영, 권한, 캐릭터 공장). On a phone they take a row of their own and
+   scroll sideways instead of widening the page. */
+@media (max-width: 720px), (pointer: coarse) {
+  .mg-admin-tabs > a { height: 40px; }
+}
+
+@media (max-width: 720px) {
+  .mg-admin-tabs { order: 3; width: 100%; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .mg-admin-tabs::-webkit-scrollbar { display: none; }
+}

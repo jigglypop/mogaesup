@@ -56,6 +56,8 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   gap: 14px;
   padding: 20px;
 }
+/* Folded or under the decorating tools it stays in the page (keeping what was typed), out of sight. */
+.mg-side[hidden], .mg-side-body[hidden] { display: none; }
 .mg-side-close { position: absolute; top: 12px; right: 12px; }
 .mg-side-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 -20px -20px; padding: 2px 20px 20px; scrollbar-width: thin; }
 .mg-side-open {
@@ -343,7 +345,7 @@ p.mg-compose { display: block; font-size: 13px; }
   font-weight: 750;
 }
 .mg-piece:hover { border-color: var(--mg-hair-strong); }
-.mg-piece[aria-pressed='true'] { border: 2px solid var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft); }
+.mg-piece[aria-pressed='true'], .mg-piece[aria-checked='true'] { border: 2px solid var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft); }
 .mg-piece svg { width: 44px; height: 44px; color: var(--mg-ink); opacity: 0.85; }
 .mg-piece img { width: 56px; height: 56px; object-fit: contain; }
 .mg-piece span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -393,8 +395,6 @@ p.mg-compose { display: block; font-size: 13px; }
 .mg-world.has-panel .mh-status { right: calc(var(--mg-edge) * 2 + var(--mg-side)); }
 .mh-status-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .mh-status-head h3 { font-size: 15px; font-weight: 800; }
-.mh-status-head p { margin-top: 2px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mg-muted); }
-.mh-live { width: 7px; height: 7px; border-radius: 50%; background: var(--mg-good); }
 .mh-badges { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; }
 .mh-badge { padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; background: var(--mg-tint); color: var(--mg-muted); }
 .mh-badge.is-accent { background: var(--mg-primary-soft); color: var(--mg-primary); }
@@ -423,7 +423,7 @@ p.mg-compose { display: block; font-size: 13px; }
 .mh-metric-value small { margin-left: 2px; font-size: 11px; font-weight: 650; color: var(--mg-muted); }
 .mh-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--mg-muted); }
 .mh-dot.is-good { background: var(--mg-good); }
-.mh-dot.is-warn { background: #d99a2b; }
+.mh-dot.is-warn { background: var(--mg-warn-dot); }
 .mh-dot.is-bad { background: var(--mg-bad); }
 .mh-phases { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .mh-phases li { display: grid; grid-template-columns: 62px minmax(0, 1fr) 40px; align-items: center; gap: 8px; font-size: 11px; }

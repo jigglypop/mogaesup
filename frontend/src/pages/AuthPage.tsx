@@ -1,24 +1,30 @@
 import { useState, type FormEvent } from 'react';
 
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { problemText } from '../api/client';
 import { useAuth } from '../auth/AuthProvider';
+import { returnPath } from '../auth/signIn';
 import { Icon } from '../ui/icons';
 import { Loading } from './Loading';
 
 type Mode = 'login' | 'signup';
 
-/** `/`: sign in or sign up; a signed-in visitor goes straight to their own island. */
+/**
+ * `/`: sign in or sign up. Afterwards, and for a visitor already signed in, it goes back to `?next=` (a path on this
+ * site the sign-in link came from) or else to their own island.
+ */
 export function AuthPage() {
   const { status, user, login, register } = useAuth();
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const next = returnPath(params.get('next'));
   const [mode, setMode] = useState<Mode>('login');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   if (status === 'loading') return <Loading />;
-  if (user) return <Navigate to={`/@${user.username}`} replace />;
+  if (user) return <Navigate to={next ?? `/@${user.username}`} replace />;
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -35,7 +41,7 @@ export function AuthPage() {
               displayName: field('displayName').trim(),
               password: field('password'),
             });
-      navigate(`/@${signedIn.username}`);
+      navigate(next ?? `/@${signedIn.username}`, { replace: true });
     } catch (problem) {
       setError(problemText(problem));
     } finally {

@@ -20,8 +20,10 @@ function expressionMaps(record: Expression) {
   });
 }
 
-export function Expressions({ job, version, bodySha, viewer }: {
-  job: string; version: string; bodySha: string; viewer: ModelViewer | null;
+/** The body's saved expressions: picking and clearing one, and, when `paid`, making new ones (generation, a finished
+ * PNG applied as an overlay), which start paid studio work. */
+export function Expressions({ job, version, bodySha, viewer, paid = true }: {
+  job: string; version: string; bodySha: string; viewer: ModelViewer | null; paid?: boolean;
 }) {
   const ready = viewer !== null;
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [activeId, setActiveId] = useState<string | null>(null);
@@ -96,16 +98,16 @@ export function Expressions({ job, version, bodySha, viewer }: {
     return artifact ? [{ ...layer, artifact }] : [];
   }) : [];
   return <section className="expressions">
-    <ExpressionGenerationPanel job={job} version={version} ready={ready && !busy} onApply={async record => {
+    {paid && <ExpressionGenerationPanel job={job} version={version} ready={ready && !busy} onApply={async record => {
       const artifact = record.artifacts.find(a => a.name === 'face.png');
       if (!artifact || record.body_sha256 !== bodySha) throw new Error('현재 몸에 맞는 표정 텍스처가 아닙니다.');
       await perform(async token => {
         const result = await studioApi.bakeExpression(job, version, record.id);
         await applyRecord(result, true, token);
       });
-    }} />
+    }} />}
     <fieldset className="expression-controls" disabled={!ready || busy}><legend>표정 텍스처</legend>
-      <div className="expression-overlay-upload">
+      {paid && <div className="expression-overlay-upload">
         <label>표정<select value={overlayName} onChange={event => setOverlayName(event.target.value as ExpressionName)}>{Object.entries(expressionNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <label>완성 표정 PNG 적용<input type="file" accept="image/png" onChange={event => {
           const file = event.target.files?.[0]; event.target.value = '';
@@ -120,7 +122,7 @@ export function Expressions({ job, version, bodySha, viewer }: {
             await applyRecord(record, true, token);
           });
         }} /></label>
-      </div>
+      </div>}
       <button disabled={!activeId} onClick={() => void perform(async token => {
         const selection = await studioApi.selectExpression(job, version, null, saved.value?.revision || '0');
         if (!viewer || !alive.current || token !== operation.current) return;

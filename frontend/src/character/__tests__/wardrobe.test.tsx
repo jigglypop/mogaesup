@@ -16,9 +16,14 @@ vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: auth.user, s
 
 // The WebGPU viewer is not what is tested: it only has to take parts on and off and say what it was told.
 const viewers = vi.hoisted(() => [] as { wear: ReturnType<typeof vi.fn>; setPartColors: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }[]);
+/** How many of the next body loads fail. */
+const bodyLoads = vi.hoisted(() => ({ failing: 0 }));
 vi.mock('../viewer', () => ({
   ModelViewer: class {
-    load = vi.fn(async () => []);
+    load = vi.fn(async () => {
+      if (bodyLoads.failing > 0) { bodyLoads.failing--; throw new Error('모델 파일 불러오기 시간이 초과되었습니다.'); }
+      return [];
+    });
     play = vi.fn();
     wear = vi.fn(async () => true);
     setHairColor = vi.fn();
@@ -31,6 +36,9 @@ vi.mock('../viewer', () => ({
     }
   },
 }));
+// Drawing a part's model needs a GPU; here it only has to be asked for and hand back a picture.
+const thumbnails = vi.hoisted(() => ({ drawable: false, draw: vi.fn() }));
+vi.mock('../part-thumbnails', () => ({ canDrawThumbnails: () => thumbnails.drawable, partThumbnail: thumbnails.draw }));
 
 const body: WardrobeBody = {
   job_id: 'body-job',
@@ -106,10 +114,14 @@ describe('옷장', () => {
     vi.spyOn(lookApi, 'mine').mockResolvedValue({ look: null });
     loadMask.mockImplementation(async () => maskTexture());
     auth.user = user();
+    bodyLoads.failing = 0;
+    thumbnails.drawable = false;
+    thumbnails.draw.mockReset();
   });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it('다시 열면 내 캐릭터의 저장된 파츠와 옷 색을 복원해서 같은 요청을 저장한다', async () => {
@@ -435,6 +447,170 @@ describe('옷장', () => {
       await settle();
       expect(container.textContent).toContain('목록이 바뀌었습니다');
       expect(outfitList).toHaveBeenCalledTimes(2);
+      await unmount();
+    });
+  });
+
+  describe('파츠 종류 탭', () => {
+    it('방향키로 다음 종류로 옮기고, 고른 탭이 카드 목록 패널을 가리킨다', async () => {
+      parts = [part('top-job', 'top', '후드'), part('bottom-job', 'bottom', '청바지')];
+      const { container, unmount } = await open();
+      await settle();
+      const top = tab(container, '상의')!, bottom = tab(container, '하의')!;
+      expect(container.querySelector('[role=tablist]')?.getAttribute('aria-label')).toBe('파츠 종류');
+      expect([top.tabIndex, bottom.tabIndex]).toEqual([0, -1]);
+      await act(async () => { top.focus(); top.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); });
+      expect(bottom.getAttribute('aria-selected')).toBe('true');
+      expect(document.activeElement).toBe(bottom);
+      const panel = container.querySelector('[role=tabpanel]')!;
+      expect(panel.getAttribute('aria-labelledby')).toBe(bottom.id);
+      expect(bottom.getAttribute('aria-controls')).toBe(panel.id);
+      expect(cardNames(container)).toEqual(['청바지']);
+      await act(async () => { bottom.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })); });
+      expect(cardNames(container)).toEqual(['후드']);
+      await unmount();
+    });
+  });
+
+  describe('불러오지 못했을 때', () => {
+    it('몸 목록을 읽지 못하면 그 이유와 다시 불러오기를 보이고, 다시 읽으면 화면이 열린다', async () => {
+      vi.mocked(factoryApi.wardrobeBodies).mockRejectedValueOnce(new ApiError('request_failed', '몸 목록을 읽지 못했습니다.', 502));
+      const { container, unmount } = await open();
+      await settle();
+      expect(container.querySelector('[role=alert]')?.textContent).toContain('몸 목록을 읽지 못했습니다.');
+      expect(container.textContent).not.toContain('옷장 몸을 불러오는 중');
+      await click(button(container, '몸 목록 다시 불러오기'));
+      await settle();
+      expect(factoryApi.wardrobeBodies).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toContain('몸 목록을 읽지 못했습니다.');
+      expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
+      await unmount();
+    });
+
+    it('가림 영역 하나를 읽지 못해도 내 캐릭터 저장과 조합 저장은 막지 않고, 그것만 다시 읽는다', async () => {
+      auth.user = user('operator');
+      vi.mocked(factoryApi.wardrobeCoverage).mockRejectedValueOnce(new ApiError('request_failed', '가림 정보를 읽지 못했습니다.', 502));
+      const { container, unmount } = await open();
+      await settle();
+      await click(card(container, '후드'));
+      await settle();
+      expect(container.textContent).toContain('상의 가림 영역: 가림 정보를 읽지 못했습니다.');
+      expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(false);
+      await type(container.querySelector<HTMLInputElement>('.wardrobe-save input')!, '새 조합');
+      expect(button(container, '조합 저장')?.disabled).toBe(false);
+      await click(button(container, '가림 영역 다시 불러오기'));
+      await settle();
+      expect(factoryApi.wardrobeCoverage).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toContain('가림 정보를 읽지 못했습니다.');
+      await unmount();
+    });
+
+    const saved: Look = {
+      request: { body: { jobId: body.job_id, version: body.version }, parts: { top: { jobId: 'top-job', version: 'v1', sha256: 'top-job-sha' } }, hairColor: null, colors: {} },
+      status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '',
+    };
+
+    it('저장된 캐릭터를 복원하던 중 몸 모델을 받지 못해도 화면이 멈추지 않고, 다시 불러오면 그 캐릭터를 입힌다', async () => {
+      vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+      bodyLoads.failing = 1;
+      const { container, unmount } = await open();
+      await settle();
+      expect(container.textContent).toContain('모델 파일 불러오기 시간이 초과되었습니다.');
+      expect(container.textContent).not.toContain('내 캐릭터를 불러오는 중');
+      expect(container.querySelector<HTMLSelectElement>('select[aria-label="옷장 몸"]')?.disabled).toBe(false);
+      await click(button(container, '다시 불러오기'));
+      await settle();
+      expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('후드');
+      await unmount();
+    });
+
+    it('저장된 캐릭터를 복원하던 중 파츠 목록을 읽지 못해도 화면이 멈추지 않고, 목록이 오면 그 캐릭터를 입힌다', async () => {
+      vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+      vi.mocked(factoryApi.wardrobeParts).mockRejectedValueOnce(new ApiError('request_failed', '파츠 목록을 읽지 못했습니다.', 502));
+      const { container, unmount } = await open();
+      await settle();
+      expect(container.textContent).toContain('파츠 목록을 읽지 못했습니다.');
+      expect(container.textContent).not.toContain('내 캐릭터를 불러오는 중');
+      expect(container.querySelector<HTMLSelectElement>('select[aria-label="옷장 몸"]')?.disabled).toBe(false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+      await settle();
+      expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('후드');
+      await unmount();
+    });
+  });
+
+  describe('등록된 옷장 몸이 없을 때', () => {
+    beforeEach(() => {
+      vi.mocked(factoryApi.wardrobeBodies).mockResolvedValue({ revision: '1', bodies: [], default: null });
+    });
+
+    it.each([
+      ['회원', []],
+      ['유료가 아닌 운영자', ['operator']],
+    ] as const)('%s에게는 등록하라는 안내 없이 비어 있다고만 보인다', async (_who, permissions) => {
+      auth.user = user(...permissions);
+      const { container, unmount } = await open();
+      await settle();
+      expect(container.querySelector('.wardrobe-empty')?.textContent).toBe('등록된 옷장 몸이 없습니다.');
+      expect(container.querySelector('.wardrobe-empty a')).toBeNull();
+      await unmount();
+    });
+
+    it('기본몸 화면을 여는 유료 운영자에게는 그 화면으로 가는 링크를 보인다', async () => {
+      auth.user = user('operator', 'paid_operator');
+      const { container, unmount } = await open();
+      await settle();
+      const link = container.querySelector<HTMLAnchorElement>('.wardrobe-empty a');
+      expect(link?.textContent).toBe('기본몸 화면에서 등록');
+      expect(link?.getAttribute('href')).toBe('/admin/studio/make/body');
+      await unmount();
+    });
+  });
+
+  describe('카드 그림', () => {
+    const fail = (container: HTMLElement, name: string) =>
+      act(async () => { card(container, name)!.querySelector('img')!.dispatchEvent(new Event('error')); });
+    const answer = (status: number, body: unknown) => vi.fn(async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
+
+    it('정면 그림이 없는 파츠(올린 GLB)는 그 모델을 찍은 그림을 보인다', async () => {
+      thumbnails.drawable = true;
+      thumbnails.draw.mockResolvedValue({ src: 'data:image/webp;base64,AAAA', renderer: 'webgpu' });
+      vi.stubGlobal('fetch', answer(404, { error: { code: 'preview_missing', message: '이 파츠에는 정면 그림이 없습니다.' } }));
+      const { container, unmount } = await open();
+      await settle();
+      await fail(container, '후드');
+      await settle();
+      const picture = card(container, '후드')!.querySelector('img');
+      expect(picture?.getAttribute('src')).toBe('data:image/webp;base64,AAAA');
+      expect(picture?.dataset['renderer']).toBe('webgpu');
+      expect(thumbnails.draw).toHaveBeenCalledWith('/api/avatar-factory/jobs/top-job/native-parts/v1/top.glb', 'top-job-sha', expect.any(AbortSignal));
+      await unmount();
+    });
+
+    it('3D 그림을 그릴 수 없는 브라우저에서는 파츠 종류 이름을 보인다', async () => {
+      vi.stubGlobal('fetch', answer(404, { error: { code: 'preview_missing', message: '없음' } }));
+      const { container, unmount } = await open();
+      await settle();
+      await fail(container, '후드');
+      await settle();
+      expect(card(container, '후드')!.querySelector('.wardrobe-card-empty')?.textContent).toBe('상의');
+      expect(thumbnails.draw).not.toHaveBeenCalled();
+      await unmount();
+    });
+
+    it('잠깐 실패한 그림은 이름으로 두었다가 목록을 다시 읽으면 다시 받아 본다', async () => {
+      const probe = answer(502, {});
+      vi.stubGlobal('fetch', probe);
+      const { container, unmount } = await open();
+      await settle();
+      await fail(container, '후드');
+      await settle();
+      expect(probe).toHaveBeenCalledOnce();
+      expect(card(container, '후드')!.querySelector('img')).toBeNull();
+      expect(card(container, '후드')!.querySelector('.wardrobe-card-empty')?.textContent).toBe('상의');
+      await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+      await settle();
+      expect(card(container, '후드')!.querySelector('img')?.getAttribute('src')).toContain('attempt=1');
       await unmount();
     });
   });

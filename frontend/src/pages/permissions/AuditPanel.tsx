@@ -13,6 +13,8 @@ export function AuditPanel({ revision }: { revision: number }) {
   const [next, setNext] = useState<number | null>(null);
   const [problem, setProblem] = useState('');
   const [loading, setLoading] = useState(false);
+  /** Counts asks to read the first page again after it failed. */
+  const [tries, setTries] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -22,17 +24,19 @@ export function AuditPanel({ revision }: { revision: number }) {
         setEntries(page.entries);
         setUsers(page.users);
         setNext(page.nextBefore);
+        setProblem('');
       },
       (reason: unknown) => live && setProblem(problemText(reason)),
     );
     return () => {
       live = false;
     };
-  }, [revision]);
+  }, [revision, tries]);
 
   const more = async () => {
     if (next === null) return;
     setLoading(true);
+    setProblem('');
     try {
       const page = await permissionsApi.audit({ limit: PAGE, before: next });
       setEntries((previous) => [...(previous ?? []), ...page.entries]);
@@ -45,7 +49,16 @@ export function AuditPanel({ revision }: { revision: number }) {
     }
   };
 
-  if (problem && !entries) return <p className="mg-error">{problem}</p>;
+  if (problem && !entries) {
+    return (
+      <div className="mg-admin-message is-error" role="alert">
+        <span>{problem}</span>
+        <button type="button" className="mg-btn is-small" onClick={() => setTries((count) => count + 1)}>
+          다시 불러오기
+        </button>
+      </div>
+    );
+  }
   if (!entries) return <p className="mg-empty">불러오는 중…</p>;
   if (entries.length === 0) return <p className="mg-empty">기록이 없어요</p>;
   return (
@@ -61,7 +74,11 @@ export function AuditPanel({ revision }: { revision: number }) {
           </li>
         ))}
       </ul>
-      {problem && <p className="mg-error">{problem}</p>}
+      {problem && (
+        <p className="mg-error" role="alert">
+          {problem}
+        </p>
+      )}
       {next !== null && (
         <button type="button" className="mg-btn is-small" disabled={loading} onClick={() => void more()}>
           더 보기

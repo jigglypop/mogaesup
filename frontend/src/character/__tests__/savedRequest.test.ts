@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, savedRequest, type Pending } from '../api';
+import { ApiError, PendingRequestConflict, savedRequest, type Pending } from '../api';
 
-type Input = { name: string };
+type Input = { name: string; options?: { size: number; tone: string } };
 const STORAGE = 'test.saved-request';
 const saved = () => savedRequest<Input>(STORAGE, ({ input }) => typeof input.name === 'string', '읽을 수 없음');
 const stored = () => JSON.parse(localStorage.getItem(STORAGE) ?? 'null') as Pending<Input> | null;
@@ -20,13 +20,50 @@ describe('saved request', () => {
     expect(stored()).toBeNull();
   });
 
-  it('연결이 끊기면 남겨 두고, 다음 요청은 저장된 키와 입력을 다시 보낸다', async () => {
+  it('연결이 끊기면 남겨 두고, 같은 입력을 다시 보내면 저장된 키로 보낸다', async () => {
     const lost = new ApiError('connection', '끊김', 0);
     await expect(saved().send({ name: 'a' }, async () => Promise.reject(lost), { key: 'first-key' })).rejects.toBe(lost);
     expect(stored()).toEqual({ key: 'first-key', input: { name: 'a' } });
     const post = vi.fn(async (pending: Pending<Input>) => pending);
-    await expect(saved().send({ name: 'b' }, post)).resolves.toEqual({ key: 'first-key', input: { name: 'a' } });
+    await expect(saved().send({ name: 'a' }, post)).resolves.toEqual({ key: 'first-key', input: { name: 'a' } });
     expect(stored()).toBeNull();
+  });
+
+  it('필드 순서만 다른 같은 입력도 저장된 요청으로 다시 보낸다', async () => {
+    const lost = new ApiError('timeout', '늦음', 0);
+    await saved().send({ name: 'a', options: { size: 512, tone: 'warm' } }, async () => Promise.reject(lost), { key: 'kept' }).catch(() => undefined);
+    const post = vi.fn(async (pending: Pending<Input>) => pending.key);
+    await expect(saved().send({ options: { tone: 'warm', size: 512 }, name: 'a' }, post)).resolves.toBe('kept');
+    expect(post).toHaveBeenCalledOnce();
+  });
+
+  it('저장된 요청과 다른 입력은 그것으로 바꿔 보내지 않고 거절하며, 저장된 것은 그대로 둔다', async () => {
+    const lost = new ApiError('connection', '끊김', 0);
+    await saved().send({ name: 'a' }, async () => Promise.reject(lost), { key: 'first-key' }).catch(() => undefined);
+    const post = vi.fn(async (pending: Pending<Input>) => pending);
+    const refused = await saved().send({ name: 'b' }, post).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(PendingRequestConflict);
+    expect((refused as PendingRequestConflict<Input>).pending).toEqual({ key: 'first-key', input: { name: 'a' } });
+    expect(post).not.toHaveBeenCalled();
+    expect(stored()).toEqual({ key: 'first-key', input: { name: 'a' } });
+  });
+
+  it('다른 탭이 저장한 요청도 보내는 순간 다시 읽어 거절한다', async () => {
+    const request = saved();
+    expect(request.read()).toEqual({ pending: null, error: '' });
+    localStorage.setItem(STORAGE, JSON.stringify({ key: 'other-tab', input: { name: 'other' } }));
+    const post = vi.fn(async () => 'sent');
+    await expect(request.send({ name: 'mine' }, post)).rejects.toBeInstanceOf(PendingRequestConflict);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('저장된 요청을 지우면 새 입력을 새 키로 보낸다', async () => {
+    localStorage.setItem(STORAGE, JSON.stringify({ key: 'old-key', input: { name: 'old' } }));
+    saved().settle('old-key');
+    const post = vi.fn(async (pending: Pending<Input>) => pending);
+    const sent = await saved().send({ name: 'new' }, post);
+    expect(sent.input).toEqual({ name: 'new' });
+    expect(sent.key).not.toBe('old-key');
   });
 
   it('서버가 확실히 거절하면 지운다', async () => {

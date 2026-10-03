@@ -85,12 +85,8 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       viewer.current = instance;
       const canvas = element.querySelector('canvas');
       canvas?.setAttribute('aria-label', `${nameRef.current} 3D 모델. 드래그하여 회전하고 휠로 확대 또는 축소합니다.`);
-      let timeoutId: ReturnType<typeof setTimeout>;
-      const timeout = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error('3D 미리보기를 20초 안에 준비하지 못했습니다.')), 20_000);
-      });
-      return Promise.race([instance.load(modelUrl, { sha256: modelSha256 }), timeout])
-        .finally(() => clearTimeout(timeoutId));
+      // The viewer gives up when the server stops answering or the file stops arriving, never for a large file.
+      return instance.load(modelUrl, { sha256: modelSha256 });
     }).then(clips => {
       if (!active) return;
       if (animate && clips?.length) instance?.play(Math.max(0, clips.findIndex(item => item.name === clip)));

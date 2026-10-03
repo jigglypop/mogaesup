@@ -9,6 +9,7 @@ import { problemText } from '../../api/client';
 import { permissionsApi } from '../../api/permissions';
 import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
+import { SignInRedirect } from '../../auth/signIn';
 import { PageShell } from '../../shell/Shell';
 import { Icon } from '../../ui/icons';
 import { AdminTabs } from '../AdminTabs';
@@ -48,7 +49,7 @@ export default function PermissionsPage() {
   const [revision, setRevision] = useState(0);
 
   if (status === 'loading') return <Loading />;
-  if (!user) return <Navigate to="/" replace />;
+  if (!user) return <SignInRedirect />;
   if (!can(user, 'admin')) return <Navigate to={can(user, 'catalog_editor') ? '/admin' : `/@${user.username}`} replace />;
 
   const apply: Apply = async ({ action, done, ...tuple }) => {
@@ -61,6 +62,8 @@ export default function PermissionsPage() {
       const send = action === 'grant' ? permissionsApi.grant : permissionsApi.revoke;
       const result = await send({ ...tuple, reason: reason.trim() });
       setNotice({ tone: 'ok', text: result.changed ? done : '이미 그 상태예요' });
+      // A reason belongs to the change it was written for; the next change asks for its own.
+      setReason('');
       setRevision((value) => value + 1);
       return true;
     } catch (problem) {

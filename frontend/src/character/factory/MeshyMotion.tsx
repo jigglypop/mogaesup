@@ -100,13 +100,13 @@ export function MeshyMotion({ jobId, visibleSlots = allSlots, showRigRecovery = 
   const running = busy || state?.busy;
   const pending = state?.actions.find(a => a.action_id === actionId);
   return <section className="meshy-motion" data-meshy-job={jobId} data-meshy-ready={ready ? state?.version : ''}>
-    <header><h2>Meshy 리깅 · 실제 동작</h2><p>{state?.origin === 'transferred_meshy_rig' ? '기존 Meshy 골격과 저장된 동작을 새 몸에 이전했습니다.' : state?.rig_task_id ? `Meshy 작업 ${state.rig_task_id}` : '생성된 전신 모델에 Meshy 리깅을 연결합니다.'}</p>
+    <header><h2>Meshy 리깅 · 동작</h2>{(state?.origin === 'transferred_meshy_rig' || state?.rig_task_id) && <p>{state.origin === 'transferred_meshy_rig' ? '기존 Meshy 골격과 저장된 동작을 새 몸에 이전했습니다.' : `Meshy 작업 ${state.rig_task_id}`}</p>}
       <p>{state?.bone_count ? state.origin === 'transferred_meshy_rig' ? `저장된 Meshy 골격 ${state.bone_count}개 본 · 새 몸 외형 유지` : `Meshy 원본 골격 ${state.bone_count}개 본 · 원본 가중치 유지` : state?.busy ? `Meshy 처리 중 · ${state.progress}%` : 'Meshy 리깅 결과 대기'}</p>
       {!url && (state?.can_resume || state?.status === 'not_started') && <button disabled={running} onClick={() => void perform(() => factoryApi.meshyRig(jobId), 'Meshy 작업을 접수했습니다.')}>{state?.status === 'not_started' ? 'Meshy 리깅 가져오기 · 유료 최대 1회' : '기존 Meshy 작업 조회·이어가기'}</button>}
       {url && state?.error && state.can_resume && <button disabled={running} onClick={() => void perform(() => factoryApi.meshyRig(jobId), '기존 작업을 조회합니다.')}>기존 작업 이어가기</button>}
       {(error || state?.error) && <p role="alert">{error || state?.error}</p>}
     </header>
-    {showRigRecovery && <RigRecovery jobId={jobId} onComplete={onRigRecovery} />}
+    {showRigRecovery && <RigRecovery jobId={jobId} refreshKey={`${state?.status}:${state?.version ?? ''}`} onComplete={onRigRecovery} />}
     <div className="meshy-scene" ref={mount} />
     {previewError && <p role="alert">{previewError}</p>}
     {ready && <div className="meshy-clips"><button aria-pressed={motion === -1} onClick={() => { viewer.current?.play(-1); setMotion(-1); }}>기본 자세</button>{clips.map(c => <button key={c.index} aria-pressed={motion === c.index} onClick={() => { viewer.current?.play(c.index); setMotion(c.index); }}>{c.name}</button>)}</div>}
@@ -114,7 +114,7 @@ export function MeshyMotion({ jobId, visibleSlots = allSlots, showRigRecovery = 
     {state?.artifacts.map(a => <a className="meshy-download" key={a.name} href={a.url} download>{a.name === 'model.glb' ? 'Meshy 골격·동작 통합 GLB' : `Meshy 원본 ${a.name}`}</a>)}
     {(state?.status === 'submission_uncertain' || state?.actions.some(a => a.status === 'submission_uncertain')) && <form onSubmit={e => {e.preventDefault(); void perform(() => factoryApi.meshyRecover(jobId, recoveryId, state.actions.find(a => a.status === 'submission_uncertain')?.action_id), '작업 ID를 복구했습니다. 기존 작업 이어가기를 누르세요.');}}><label>Meshy에서 확인한 기존 작업 ID<input aria-label="Meshy 기존 작업 ID" value={recoveryId} onChange={e => setRecoveryId(e.target.value)} required pattern="[a-zA-Z0-9_-]+" /></label><button disabled={running}>기존 작업 ID 복구</button></form>}
     <fieldset disabled={busy || defaultsLoading} className="meshy-picker"><legend>Meshy 동작을 하나씩 공통 기본값으로 지정</legend>
-      <p>공식 목록 {library.length}개 · 공통 기본값 저장은 생성 요청을 보내지 않습니다. 선택한 동작만 이 캐릭터로 가져올 수 있습니다.</p>
+      <p>Meshy 동작 {library.length}개</p>
       {catalogError && <p role="alert">{catalogError}<button onClick={() => void loadLibrary()}>동작 목록 다시 연결</button></p>}
       {defaultsError && <p role="alert">{defaultsError}<button onClick={() => void loadDefaults()}>기본값 다시 불러오기</button></p>}
       <div className="meshy-filters"><label>동작 슬롯<select aria-label="기본 동작 슬롯" value={slot} onChange={e => { setSlot(e.target.value); setActionId(defaults[e.target.value]); setNotice(''); }}>{visibleSlots.map(key => <option key={key} value={key}>{motionLabels[key] || key} ({key})</option>)}</select></label>
@@ -122,7 +122,7 @@ export function MeshyMotion({ jobId, visibleSlots = allSlots, showRigRecovery = 
         <label>분류<select aria-label="Meshy 동작 분류" value={category} onChange={e => setCategory(e.target.value)}><option value="">전체</option>{Array.from(new Set(library.map(a => a.category))).map(value => <option key={value}>{value}</option>)}</select></label>
       </div>
       <div className="meshy-options"><label>실제 Meshy 동작<select size={8} aria-label="Meshy 동작 목록" value={actionId ?? ''} onChange={e => setActionId(Number(e.target.value))}>{!chosen && <option value="" disabled>동작을 선택하세요</option>}{chosen && !filtered.includes(chosen) && <option value={chosen.action_id}>{chosen.name} · #{chosen.action_id}</option>}{filtered.map(a => <option key={a.action_id} value={a.action_id}>{a.name} · #{a.action_id}</option>)}</select></label>
-        <div className="meshy-action-preview">{chosen ? <><strong>{chosen.name} · #{chosen.action_id}</strong>{chosen.preview_url && <img loading="lazy" decoding="async" src={chosen.preview_url} alt={`${chosen.name} Meshy 동작 미리보기`} />}<small>{chosen.category} / {chosen.sub_category}</small></> : <p>목록에서 고르면 Meshy 미리보기가 표시됩니다.</p>}</div>
+        <div className="meshy-action-preview">{chosen ? <><strong>{chosen.name} · #{chosen.action_id}</strong>{chosen.preview_url && <img loading="lazy" decoding="async" src={chosen.preview_url} alt={`${chosen.name} Meshy 동작 미리보기`} />}<small>{chosen.category} / {chosen.sub_category}</small></> : <p>선택한 동작 없음</p>}</div>
       </div>
       <div className="meshy-buttons"><button disabled={!chosen} onClick={() => void saveDefault()}>이 동작을 {motionLabels[slot]} 공통 기본값으로 저장</button>
         <button disabled={!chosen || !state?.can_request_action || running} onClick={() => void perform(() => factoryApi.meshyAction(jobId, slot, actionId!), '선택한 Meshy 동작을 가져오고 있습니다.')}>{pending ? '이 동작 조회·적용' : '이 캐릭터에 동작 가져오기 · 유료 최대 1회'}</button></div>

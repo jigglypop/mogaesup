@@ -7,7 +7,6 @@ import type { Group } from 'three';
 import {
   CascadedSun,
   ContactShadows,
-  createRenderer,
   GaesupController,
   GaesupWorldContent,
   GameplayArea,
@@ -25,6 +24,7 @@ import {
 } from 'gaesup-world';
 import { BuildingController } from 'gaesup-world/building';
 
+import { createWorldRenderer } from '../rendering/worldRenderer';
 import { MINIME_SCALE } from './character';
 import { EditCanvas } from './edit/EditCanvas';
 import { IdleFrameRate } from './IdleFrameRate';
@@ -70,15 +70,17 @@ type SceneProps = SceneSettings & {
   visitors?: ReactNode;
   /** The island's residents. */
   residents?: ReactNode;
+  /** Where the player starts (the crossroads unless given). */
+  spawn?: [number, number, number];
 };
 
 /** The island canvas: the player, the village, visitors, residents and the rule engine's trigger areas. */
-export function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visualRotationRef, visitors, residents }: SceneProps) {
+export function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visualRotationRef, visitors, residents, spawn = SPAWN }: SceneProps) {
   // A lost GPU device remounts the canvas with a fresh renderer; the island's state lives outside it.
   const canvasKey = useRendererRecovery();
   const worldGi = postProcessing && !!cinematic;
   return (
-    <Canvas key={canvasKey} shadows="percentage" gl={createRenderer} camera={{ position: [SPAWN[0], 14, SPAWN[2] + 12], fov: 38 }}>
+    <Canvas key={canvasKey} shadows="percentage" gl={createWorldRenderer} camera={{ position: [spawn[0], 14, spawn[2] + 12], fov: 38 }}>
       <color attach="background" args={['#8fd3ee']} />
       {/* Daylight: sky and bounced ground fill, a warm sun, and a small sky map for PBR reflections. */}
       <hemisphereLight args={[SKY.color, SKY.ground, worldGi ? 0 : SKY.intensity]} />
@@ -89,7 +91,7 @@ export function Scene({ quality, postProcessing, cinematic, idleThrottle, player
           {worldGi && <WorldGi environment={GI_SKY} />}
           {idleThrottle && <IdleFrameRate />}
           <WorldPhysics>
-            <GaesupController rigidBodyRef={playerRef} innerGroupRef={visualRotationRef} position={SPAWN} scale={MINIME_SCALE} materialPolicy="figure" modelHierarchy clickToMove />
+            <GaesupController rigidBodyRef={playerRef} innerGroupRef={visualRotationRef} position={spawn} scale={MINIME_SCALE} materialPolicy="figure" modelHierarchy clickToMove />
             <BuildingController />
             <Shore />
             {visitors}

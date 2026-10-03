@@ -1,12 +1,13 @@
 // The admin page's 3D preview. It loads on first use, so /admin itself stays light.
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { useEffect, useMemo, useState } from 'react';
-import { createRenderer, normalizeImportedMaterials, useRendererRecovery } from 'gaesup-world';
+import { normalizeImportedMaterials, useRendererRecovery } from 'gaesup-world';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { disposeObjectResources } from '../../character/assets/gpu-resources';
+import { createWorldRenderer } from '../../rendering/worldRenderer';
 
 type Loaded = { gltf: GLTF; center: THREE.Vector3; size: THREE.Vector3; triangles: number; restoreMaterials(): void };
 type Backend = 'webgpu' | 'webgl-fallback';
@@ -135,7 +136,7 @@ export default function ModelPreview({ url }: { url: string }) {
       <div className="mg-admin-stage">
         <Canvas
           key={canvasKey}
-          gl={createRenderer}
+          gl={createWorldRenderer}
           dpr={[1, 1.5]}
           camera={{ fov: 35, near: distance / 100, far: distance * 20, position: [center.x, center.y + reach * 0.08, center.z + distance] }}
           onCreated={({ gl }) => {

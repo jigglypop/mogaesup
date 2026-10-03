@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { rememberStudioQuery, retargetStudioLink, routeOf, studioHref, studioSections } from '../screens';
+import { rememberStudioQuery, routeOf, studioHref, studioSections } from '../screens';
 
 describe('캐릭터 공장 메뉴', () => {
   it('유료 작업자에게는 모든 화면을 보여 준다', () => {
@@ -73,59 +73,5 @@ describe('스튜디오 화면 주소', () => {
     expect(routeOf('/?tab=nothing')).toBeNull();
     expect(routeOf('/admin/studio/library')).toBeNull();
     expect(routeOf('https://example.com/?tab=prompts')).toBeNull();
-  });
-});
-
-describe('스튜디오 링크 눌림', () => {
-  beforeEach(() => {
-    document.addEventListener('click', retargetStudioLink, true);
-    // jsdom cannot navigate; the click only has to reach the end.
-    document.addEventListener('click', stop);
-  });
-  afterEach(() => {
-    document.removeEventListener('click', retargetStudioLink, true);
-    document.removeEventListener('click', stop);
-    document.body.replaceChildren();
-  });
-  const stop = (event: Event) => event.preventDefault();
-  const link = (href: string, parent: Element) => {
-    const anchor = document.createElement('a');
-    anchor.setAttribute('href', href);
-    anchor.textContent = '열기';
-    parent.append(anchor);
-    return anchor;
-  };
-  const press = (element: Element) => element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-
-  it('무대 안의 링크를 누르면 앱의 경로로 바뀐다', () => {
-    const stage = document.body.appendChild(document.createElement('div'));
-    stage.className = 'studio-root';
-    const anchor = link('/?tab=prompts&promptGroup=parts', stage);
-    press(anchor);
-    expect(anchor.getAttribute('href')).toBe('/admin/studio/prompts?promptGroup=parts');
-  });
-
-  it('body에 따로 올라간 대화상자 안의 링크도 바뀐다', () => {
-    const dialogRoot = document.body.appendChild(document.createElement('div'));
-    dialogRoot.className = 'studio-root';
-    const dialog = dialogRoot.appendChild(document.createElement('dialog'));
-    const anchor = link('/?tab=character&mode=parts&base=job1&part=top', dialog);
-    const inner = anchor.appendChild(document.createElement('b'));
-    press(inner);
-    expect(anchor.getAttribute('href')).toBe('/admin/studio/make/parts?base=job1&part=top');
-  });
-
-  it('스튜디오 밖의 링크와 모르는 링크는 건드리지 않는다', () => {
-    const outside = link('/?tab=prompts', document.body);
-    press(outside);
-    expect(outside.getAttribute('href')).toBe('/?tab=prompts');
-    const stage = document.body.appendChild(document.createElement('div'));
-    stage.className = 'studio-root';
-    const unknown = link('/?tab=nothing', stage);
-    const plain = link('/@mogae', stage);
-    press(unknown);
-    press(plain);
-    expect(unknown.getAttribute('href')).toBe('/?tab=nothing');
-    expect(plain.getAttribute('href')).toBe('/@mogae');
   });
 });

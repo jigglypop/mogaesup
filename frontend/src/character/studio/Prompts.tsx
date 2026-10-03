@@ -85,9 +85,8 @@ export default function Prompts() {
       <button disabled={busy || listing.loading} onClick={() => void listing.refresh()}>새로고침</button>
       <button className="prompt-save" disabled={busy || !catalog?.can_save || !dirty.length || !!conflicts.length || invalid} onClick={() => void save()}>변경 저장</button>
     </div></div>
-    <p className="prompt-scope">저장한 내용은 새 생성 작업의 기본값으로 사용됩니다. 생성 화면에서 직접 수정한 내용이 우선하며, 접수된 작업은 기존 프롬프트를 유지합니다.</p>
     {(error || listing.error) && <p className="workspace-error" role="alert">{error || listing.error}</p>}
-    {catalog && !catalog.can_save && <p className="workspace-error" role="alert">S3 저장소 연결 후 저장할 수 있습니다.</p>}
+    {catalog && !catalog.can_save && <p className="workspace-error" role="alert">저장소가 연결되지 않아 저장할 수 없습니다.</p>}
     {!!conflicts.length && <p className="workspace-error" role="alert">다른 화면에서 변경됨: {conflicts.map(item => item.title).join(', ')}. 해당 항목의 최신 저장값을 확인하고 편집을 다시 적용하세요.</p>}
     {!catalog ? <p>{listing.loading ? '프롬프트 불러오는 중' : '프롬프트를 불러오지 못했습니다.'}</p> : <>
       <nav className="prompt-groups" aria-label="프롬프트 분류">{groups.map(item => <button key={item.id} aria-pressed={group?.id === item.id} onClick={() => { setGroupId(item.id); setSelectedId(''); setQuery(''); }}>

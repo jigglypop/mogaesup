@@ -67,6 +67,8 @@ const hairBatches = savedRequest<HairBatchInput>('gaesup.hair-batch.pending.v1',
 
 export const hairBatchesApi = {
   recovery: hairBatches.read,
+  /** Forgets the saved batch request under `key`, so a new one can be sent. */
+  discard: hairBatches.settle,
   uploadSheet: (file: File) => request<{ id: string }>('/api/avatar-factory/meshy-options/texture-assets', {
     method: 'POST', body: file, timeoutMs: 60000,
   }),

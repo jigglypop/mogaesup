@@ -247,6 +247,9 @@ function ItemCard(props: RowProps) {
 
 type TableProps = {
   items: AdminCatalogItem[] | null;
+  /** Why the catalog did not load (the first time, or on the last refresh). */
+  problem: string;
+  onRetry: () => void;
   imports: CatalogImport[];
   busy: ReadonlySet<string>;
   onPatch: (item: AdminCatalogItem, changes: CatalogChanges) => Promise<boolean>;
@@ -257,7 +260,7 @@ type TableProps = {
 };
 
 /** `/admin/catalog`: every item, to find, sort, edit in place, move between draft, public and retired, one or many. */
-export function CatalogTable({ items, imports, busy, onPatch, onStatus, onBulk, onPreview, onVersions }: TableProps) {
+export function CatalogTable({ items, problem, onRetry, imports, busy, onPatch, onStatus, onBulk, onPreview, onVersions }: TableProps) {
   const narrow = useMediaQuery(NARROW);
   const [filter, setFilter] = useState<ItemFilter>({ query: '', kind: 'all', status: 'all', source: 'all' });
   const [sort, setSort] = useState<ItemSort>('order');
@@ -369,7 +372,15 @@ export function CatalogTable({ items, imports, busy, onPatch, onStatus, onBulk, 
           document.body,
         )}
 
-      {items === null && <p className="mg-empty">카탈로그를 불러오는 중…</p>}
+      {items === null && !problem && <p className="mg-empty">카탈로그를 불러오는 중…</p>}
+      {problem && (
+        <div className="mg-admin-message is-error" role="alert">
+          <span>{problem}</span>
+          <button type="button" className="mg-btn is-small" onClick={onRetry}>
+            <Icon name="rotate" /> 다시 불러오기
+          </button>
+        </div>
+      )}
       {items !== null && shown.length === 0 && <p className="mg-empty">조건에 맞는 항목이 없어요</p>}
       {narrow ? (
         <ul className="mg-admin-item-cards">

@@ -58,7 +58,6 @@ export function MeshyOptionsEditor({ value, scope, disabled, onChange, onUploadi
     </fieldset>
     <fieldset disabled={locked}><legend>입력·크기</legend>{check('image_enhancement', '입력 이미지 자동 보정')}{check('moderation', '입력 콘텐츠 검사')}{check('auto_size', 'AI 크기 추정')}
       <label>원점<select disabled={!value.auto_size} value={value.origin_at} onChange={event => update({ origin_at: event.target.value as MeshyOptions['origin_at'] })}><option value="bottom">바닥</option><option value="center">중심</option></select></label>
-      <small>생성 원본에 적용됩니다. 착용 파츠는 기준 몸에 맞춰 피팅합니다.</small>
     </fieldset>
     <fieldset disabled={locked}><legend>출력</legend><div className="meshy-option-formats">{(['glb','obj','fbx','stl','usdz','3mf'] as const).map(format => <label className="meshy-option-check" key={format}><input type="checkbox" disabled={format === 'glb'} checked={value.target_formats.includes(format)} onChange={event => update({ target_formats: event.target.checked ? [...value.target_formats,format] : value.target_formats.filter(item => item !== format) })} />{format.toUpperCase()}{format === 'glb' ? ' · 조립 필수' : ''}</label>)}</div>
       {check('alpha_thumbnail', '투명 배경 미리보기')}{check('multi_view_thumbnails', '앞·오른쪽·뒤·왼쪽 미리보기')}

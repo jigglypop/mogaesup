@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePaidWork } from '../../studio/usage';
 import { isDefinitiveRejection } from '../api';
 import { ModelViewer } from '../viewer';
-import { factoryApi, type FactoryJob, type NativeOutfit, type NativePartsState } from './api';
+import { factoryApi, nativeArtifact, type FactoryJob, type NativeOutfit, type NativePartsState } from './api';
 import { usePolling } from '../use-polling';
 import { MeshyMotion } from './MeshyMotion';
 import { RigRecovery } from './RigRecovery';
@@ -9,6 +10,7 @@ import './meshy-motion.css';
 import { Expressions } from '../studio/Expressions';
 import { ImportedGlbPreview } from './ImportedGlbPreview';
 import { NativePartRefit } from './NativePartRefit';
+import { PipelineQuality } from './PipelineQuality';
 import { compatiblePartSlots, hasConflictingPartSlots, partLabels as labels, selectPartSlot } from './parts';
 
 const views = [['front', '정면'], ['side', '왼쪽'], ['back', '후면'], ['opposite', '오른쪽']] as const;
@@ -20,6 +22,8 @@ function readPending(key: string): Pending | null {
 }
 
 export function NativeAssembly({ jobId, simple = false, flow }: { jobId: string; simple?: boolean; flow?: FactoryJob['character_flow'] }) {
+  // Refits, rigging and new expressions start paid work; wearing and saving a combination does not.
+  const paid = usePaidWork();
   const read = useCallback((signal: AbortSignal) => factoryApi.nativeParts(jobId, signal), [jobId]);
   const polling = usePolling(read, value => value && (['accepted', 'running'].includes(value.status) || value.expression_pending) ? 3000 : flow?.busy ? 5000 : 15000);
   const state = polling.value;
@@ -42,27 +46,29 @@ export function NativeAssembly({ jobId, simple = false, flow }: { jobId: string;
   const imported = displayed?.origin === 'uploaded_glb';
   return <section className="native-assembly" data-assembly-job={jobId}>
     {(error || polling.error) && <p role="alert">{error || polling.error}</p>}
-    {displayed && (imported ? <ImportedGlbPreview key={`${jobId}:${displayed.version}`} state={displayed} /> : <NativeCharacter key={`${jobId}:${preview ? 'preview:' : ''}${displayed.version}`} jobId={jobId} state={displayed} />)}
+    {displayed?.quality && <PipelineQuality state={displayed} />}
+    {displayed && (imported ? <ImportedGlbPreview key={`${jobId}:${displayed.version}`} state={displayed} /> : <NativeCharacter key={`${jobId}:${preview ? 'preview:' : ''}${displayed.version}`} jobId={jobId} state={displayed} paid={paid} />)}
     {!available && <>
       <div className="meshy-motion">
       <h2>{simple ? flow?.busy ? '캐릭터 제작 중' : state?.status === 'qc_failed' ? '조립 재개' : state?.status === 'failed' ? '조립 중단' : '캐릭터' : '파츠 조립'}</h2>
       {!simple && <p>리깅·동작과 파츠 수신 대기</p>}
-      {!simple && <button disabled={busy || !state || !!state.expression_pending || ['accepted', 'running'].includes(state.status)} onClick={() => void assemble()}>파츠 조립 · 로컬 처리</button>}
+      {!simple && paid && <button disabled={busy || !state || !!state.expression_pending || ['accepted', 'running'].includes(state.status)} onClick={() => void assemble()}>파츠 조립 · 로컬 처리</button>}
       {state && ['accepted', 'running'].includes(state.status) && <p role="status">파츠를 공통 골격에 연결하고 있습니다…</p>}
       {state?.expression_pending && <p role="status">새 조립에 저장된 표정을 적용하고 있습니다…</p>}
       {state?.error && <p role="alert">{state.error}</p>}
-      {!simple && <RigRecovery jobId={jobId} onComplete={() => void polling.refresh()} />}
+      {!simple && paid && <RigRecovery jobId={jobId} refreshKey={`${state?.status}:${state?.version}`} onComplete={() => void polling.refresh()} />}
       </div>
     </>}
-    <NativePartRefit key={jobId} jobId={jobId} state={state} disabled={busy || !!flow?.busy} onChange={polling.setValue} />
-    {!simple && available && !imported && <button className="assembly-tools" aria-expanded={rigControls} onClick={() => setRigControls(value => !value)}>몸 리깅·추가 동작 설정</button>}
-    {!simple && !imported && (!available || rigControls) && <MeshyMotion jobId={jobId} showRigRecovery={available} onRigRecovery={() => void polling.refresh()} />}
+    {paid && <NativePartRefit key={jobId} jobId={jobId} state={state} disabled={busy || !!flow?.busy} onChange={polling.setValue} />}
+    {!simple && paid && available && !imported && <button className="assembly-tools" aria-expanded={rigControls} onClick={() => setRigControls(value => !value)}>몸 리깅·추가 동작 설정</button>}
+    {!simple && paid && !imported && (!available || rigControls) && <MeshyMotion jobId={jobId} showRigRecovery={available} onRigRecovery={() => void polling.refresh()} />}
   </section>;
 }
 
-function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsState }) {
+function NativeCharacter({ jobId, state, paid }: { jobId: string; state: NativePartsState; paid: boolean }) {
   const version = state.version!, storage = `gaesup.native-outfit:${jobId}:${version}`;
   const body = state.artifacts.find(a => a.name === 'body.glb');
+  const bodyAsset = nativeArtifact(state, 'body');
   const parts = state.parts.filter(p => p.slot !== 'body' && p.available !== false
     && state.artifacts.some(asset => asset.name === `${p.slot}.glb`));
   const inputs = useRef(state); inputs.current = state;
@@ -102,17 +108,17 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
 
   useEffect(() => {
     setReadyViewer(null); setModelError(''); applied.current = [];
-    if (!body) { setModelError('조립 몸의 파일이 없습니다.'); return; }
+    if (!bodyAsset) { setModelError('조립 몸의 파일이 없습니다.'); return; }
     let active = true;
     const instance = new ModelViewer(mount.current!, mode); viewer.current = instance;
-    void instance.load(body.url, { sha256: body.sha256, wardrobe: true }).then(value => {
+    void instance.load(bodyAsset.url, { sha256: bodyAsset.sha256, wardrobe: true }).then(value => {
       if (!active) return;
       setClips(value);
       const start = -1;
       instance.play(start); setMotion(start); setReadyViewer(instance);
     }).catch(e => { if (active) setModelError(e.message); });
     return () => { active = false; instance.dispose(); viewer.current = null; };
-  }, [body?.url, body?.sha256, mode, attempt]);
+  }, [bodyAsset?.url, bodyAsset?.sha256, mode, attempt]);
 
   useEffect(() => {
     if (!ready || !restored || !viewer.current) return;
@@ -120,7 +126,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
     const instance = viewer.current;
     void (async () => {
       const wearables = selected.map(slot => {
-        const asset = inputs.current.artifacts.find(a => a.name === `${slot}.glb`);
+        const asset = nativeArtifact(inputs.current, slot);
         if (!asset) throw new Error(`${labels[slot] || slot} 파츠 파일이 없습니다.`);
         return { id: `${version}:${slot}`, slot, url: asset.url, sha256: asset.sha256 };
       });
@@ -178,7 +184,7 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
     </details>
     {mode === 'world' && <p>W·A·S·D 이동 · Shift 달리기</p>}
     {mode === 'studio' && <div className="meshy-clips"><button disabled={!ready} aria-pressed={motion === -1} onClick={() => { viewer.current?.play(-1); setMotion(-1); }}>기본 자세</button>{clips.map(c => <button disabled={!ready} key={c.index} aria-pressed={motion === c.index} onClick={() => { viewer.current?.play(c.index); setMotion(c.index); }}>{c.name}</button>)}</div>}
-    {body && <Expressions key={`${jobId}:${version}:${mode}`} job={jobId} version={version} bodySha={body.sha256} viewer={readyViewer} />}
+    {body && <Expressions key={`${jobId}:${version}:${mode}`} job={jobId} version={version} bodySha={body.sha256} viewer={readyViewer} paid={paid} />}
     <fieldset className="assembly-parts" disabled={!ready || !restored || busy || pending}><legend>착용 파츠</legend>
       <span>기본 몸 · 항상 포함</span>
       {parts.map(part => <label key={part.slot}><input type="checkbox" checked={selected.includes(part.slot)} onChange={e => { const checked = e.target.checked; setWearError(''); setSelectionNotice(''); setSelected(current => checked ? selectPartSlot(current, part.slot) : current.filter(slot => slot !== part.slot)); }} />{labels[part.slot] || part.slot}</label>)}
@@ -195,6 +201,6 @@ function NativeCharacter({ jobId, state }: { jobId: string; state: NativePartsSt
     {pending && <p role="status">저장 응답이 확인되지 않았습니다. 같은 요청으로 결과를 복구할 수 있습니다.</p>}
     <div className="meshy-buttons"><button disabled={busy || !appliedSelection || !!wearError || (!pending && equal(selected, saved) && hairColor === savedHairColor && revision !== '0')} onClick={() => void save()}>{pending ? '조합 저장 결과 복구' : '현재 조합 저장'}</button><button disabled={busy || pending} onClick={() => void restore()}>저장한 조합 다시 불러오기</button></div>
     {restored && !pending && revision !== '0' && equal(selected, saved) && hairColor === savedHairColor && <p role="status">저장된 조합입니다.</p>}
-    <div className="meshy-buttons">{state.artifacts.filter(a => ['model.glb', 'master.blend'].includes(a.name)).map(a => <a className="meshy-download" key={a.name} href={a.url} download>{a.name === 'model.glb' ? '전체 파츠 조립 GLB' : '조립 Blender 원본'}</a>)}</div>
+    <div className="meshy-buttons">{state.artifacts.filter(a => ['model.glb', 'model.runtime.glb', 'master.blend'].includes(a.name)).map(a => <a className="meshy-download" key={a.name} href={a.url} download>{a.name === 'model.glb' ? '전체 파츠 조립 GLB' : a.name === 'model.runtime.glb' ? '런타임 조립 GLB' : '조립 Blender 원본'}</a>)}</div>
   </section>;
 }

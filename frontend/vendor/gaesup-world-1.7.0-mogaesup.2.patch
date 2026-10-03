@@ -1,0 +1,1548 @@
+diff --git a/src/core/networks/__tests__/PlayerPositionTracker.test.ts b/src/core/networks/__tests__/PlayerPositionTracker.test.ts
+index a347bd05..4bf07a9d 100644
+--- a/src/core/networks/__tests__/PlayerPositionTracker.test.ts
++++ b/src/core/networks/__tests__/PlayerPositionTracker.test.ts
+@@ -1,4 +1,5 @@
+ import type { RapierRigidBody } from '@react-three/rapier';
++import * as THREE from 'three';
+ 
+ import { PlayerPositionTracker } from '../core/PlayerPositionTracker';
+ 
+@@ -44,6 +45,27 @@ test('sends velocity-only changes including a stop without repeating unchanged s
+   expect(track()).toBeNull();
+ });
+ 
++test('fallback faces canonical +Z along movement and retains its direction when stopped', () => {
++  let speed = 4;
++  const ref = { current: { translation: PLAYER_REF.current.translation, rotation: PLAYER_REF.current.rotation, linvel: () => ({ x: speed, y: 0, z: 0 }) } as unknown as RapierRigidBody };
++  const tracker = new PlayerPositionTracker({ updateRate: 30, velocityThreshold: 0.1, sendRateLimit: 0 });
++  const moving = [...tracker.trackPosition(ref, 'player', '#fff')!.rotation];
++  expect(moving).toEqual([0.7071, 0, 0.7071, 0]);
++  speed = 0;
++  expect(tracker.trackPosition(ref, 'player', '#fff')?.rotation).toEqual(moving);
++  tracker.reset();
++  expect(tracker.trackPosition(ref, 'player', '#fff')?.rotation).toEqual([1, 0, 0, 0]);
++});
++
++test('visual orientation wins over velocity and body pose including a turn while stopped', () => {
++  const ref = { current: { translation: PLAYER_REF.current.translation, rotation: PLAYER_REF.current.rotation, linvel: () => ({ x: 4, y: 0, z: 0 }) } as unknown as RapierRigidBody };
++  const tracker = new PlayerPositionTracker({ updateRate: 30, velocityThreshold: 0.1, sendRateLimit: 0 });
++  const facing = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, -Math.PI / 2, 0));
++  expect(tracker.trackPosition(ref, 'player', '#fff', undefined, 'walk', facing)?.rotation).toEqual([0.7071, 0, -0.7071, 0]);
++  facing.setFromEuler(new THREE.Euler(0, Math.PI, 0));
++  expect(tracker.trackPosition(PLAYER_REF, 'player', '#fff', undefined, 'idle', facing)?.rotation).toEqual([0, 0, 1, 0]);
++});
++
+ describe('send thresholds', () => {
+   beforeEach(() => jest.useFakeTimers({ now: 0 }));
+   afterEach(() => jest.useRealTimers());
+diff --git a/src/core/networks/__tests__/multiplayerWire.test.tsx b/src/core/networks/__tests__/multiplayerWire.test.tsx
+index 5f2eed3b..152c9012 100644
+--- a/src/core/networks/__tests__/multiplayerWire.test.tsx
++++ b/src/core/networks/__tests__/multiplayerWire.test.tsx
+@@ -16,13 +16,17 @@ test('a resting player with physics noise sends a 1 Hz keepalive instead of a 20
+   expect(updates).toHaveLength(10);
+ });
+ 
+-test('a moving player streams slim transforms; identity and animation ride only on the first Update', () => {
++test('a moving player streams slim transforms with their sample time; identity and animation ride only on the first Update', () => {
+   const updates = streamUpdates(body(walking));
+   expect(updates).toHaveLength(200);
+   const [first, ...rest] = updates.map((raw) => JSON.parse(raw).state as Record<string, unknown>);
+-  expect(first).toMatchObject({ name: 'player', color: '#ff8800', modelUrl: '/gltf/ally.glb', animation: 'idle' });
+-  for (const state of rest) expect(Object.keys(state).sort()).toEqual(['position', 'rotation', 'velocity']);
+-  expect(Math.max(...updates.slice(1).map((raw) => raw.length))).toBeLessThanOrEqual(120);
++  // No animation bridge plays here, so the clip is picked from the 2 m/s velocity.
++  expect(first).toMatchObject({ name: 'player', color: '#ff8800', modelUrl: '/gltf/ally.glb', animation: 'run' });
++  for (const state of rest) expect(Object.keys(state).sort()).toEqual(['position', 'rotation', 't', 'velocity']);
++  // The sample times rise with the stream; receivers interpolate on them.
++  const times = rest.map((state) => state['t'] as number);
++  for (let index = 1; index < times.length; index++) expect(times[index]).toBeGreaterThanOrEqual(times[index - 1]!);
++  expect(Math.max(...updates.slice(1).map((raw) => raw.length))).toBeLessThanOrEqual(140);
+ });
+ 
+ test('sendRateLimit is the only send cap: 20 Hz samples leave at 10 Hz when it is 100 ms', () => {
+diff --git a/src/core/networks/__tests__/remoteAnimation.test.ts b/src/core/networks/__tests__/remoteAnimation.test.ts
+new file mode 100644
+index 00000000..b7fa0338
+--- /dev/null
++++ b/src/core/networks/__tests__/remoteAnimation.test.ts
+@@ -0,0 +1,17 @@
++import * as THREE from 'three';
++
++import { resolveRemoteAnimation } from '../core/remoteAnimation';
++
++const action = (name: string) => new THREE.AnimationMixer(new THREE.Group()).clipAction(new THREE.AnimationClip(name, 1, []));
++
++test('authored canonical aliases do not pick an unrelated first clip', () => {
++  const wave = action('Wave_One_Hand');
++  const idle = action('Armature|Idle');
++  const walk = action('preset:biped:Walking');
++  const actions = { Wave_One_Hand: wave, 'Armature|Idle': idle, 'preset:biped:Walking': walk };
++  expect(resolveRemoteAnimation(actions, 'idle')).toBe(idle);
++  expect(resolveRemoteAnimation(actions, 'run')).toBe(walk);
++  expect(resolveRemoteAnimation(actions, 'wave')).toBe(wave);
++  expect(resolveRemoteAnimation(actions, 'Armature|Idle')).toBe(idle);
++  expect(resolveRemoteAnimation({ Wave_One_Hand: wave }, 'idle')).toBeNull();
++});
+diff --git a/src/core/networks/__tests__/remoteMotion.test.ts b/src/core/networks/__tests__/remoteMotion.test.ts
+index b05bdb1d..525ddc5d 100644
+--- a/src/core/networks/__tests__/remoteMotion.test.ts
++++ b/src/core/networks/__tests__/remoteMotion.test.ts
+@@ -1,15 +1,30 @@
+-import { createRemoteMotion, syncRemoteMotion } from '../core/remoteMotion';
++import * as THREE from 'three';
++
++import { chooseRemoteClip, createRemoteMotion, stepRemoteMotion, syncRemoteMotion, type RemoteMotion } from '../core/remoteMotion';
+ import type { PlayerState } from '../types';
+ 
+-const state = (x: number, speed = 0, animation?: string): PlayerState => ({
++const state = (x: number, speed = 0, animation?: string, t?: number): PlayerState => ({
+   name: 'peer',
+   color: '#fff',
+   position: [x, 0, 0],
+   rotation: [1, 0, 0, 0],
+   velocity: [speed, 0, 0],
+   ...(animation ? { animation } : {}),
++  ...(t !== undefined ? { t } : {}),
+ });
+ 
++const camera = new THREE.Vector3();
++
++/** Steps the motion from `from` to `to` (ms) at 60 fps and returns the drawn x of every frame. */
++function drawn(motion: RemoteMotion, from: number, to: number, frame = 1000 / 60): number[] {
++  const xs: number[] = [];
++  for (let now = from; now <= to; now += frame) {
++    stepRemoteMotion(motion, frame / 1000, camera, undefined, now);
++    xs.push(motion.position.x);
++  }
++  return xs;
++}
++
+ test('the first state places the avatar; later ones only move the targets', () => {
+   const motion = createRemoteMotion();
+   expect(syncRemoteMotion(motion, state(3), 0.5)).toBe(true);
+@@ -33,3 +48,134 @@ test('peers without an animation run or idle by speed, with hysteresis', () => {
+   expect(syncRemoteMotion(motion, state(0, 0.2, 'wave'), 0.5)).toBe(true);
+   expect(motion.appearance.animation).toBe('wave');
+ });
++
++
++test('normalizes peer quaternions before placing or interpolating the physics pose', () => {
++  const motion = createRemoteMotion();
++  syncRemoteMotion(motion, { ...state(0), rotation: [0, 100000, 100000, 0] }, 0.5);
++  expect(motion.targetRotation.length()).toBeCloseTo(1, 12);
++  expect(motion.rotation.x).toBeCloseTo(Math.SQRT1_2, 12);
++  expect(motion.rotation.y).toBeCloseTo(Math.SQRT1_2, 12);
++  syncRemoteMotion(motion, { ...state(0), rotation: [0, 1e-300, 1e-300, 0] }, 0.5);
++  expect(motion.targetRotation.x).toBeCloseTo(Math.SQRT1_2, 12);
++  expect(motion.targetRotation.y).toBeCloseTo(Math.SQRT1_2, 12);
++  syncRemoteMotion(motion, { ...state(0), rotation: [0.7071, 0, 0.7071, 0] }, 0.5);
++  expect(motion.targetRotation.length()).toBeCloseTo(1, 12);
++  syncRemoteMotion(motion, { ...state(0), rotation: [0, 0, 0, 0] }, 0.5);
++  expect(motion.targetRotation.toArray()).toEqual([0, 0, 0, 1]);
++});
++
++test('a walk sent every 50 ms is drawn at an even pace even when the network bunches it up', () => {
++  const motion = createRemoteMotion();
++  // 10 m/s for two seconds; arrivals wobble by up to 120 ms, and some come in threes.
++  const jitter = [0, 40, 10, 120, 115, 110, 5, 60, 0, 90, 20, 0, 75, 70, 65, 10];
++  const updates = Array.from({ length: 41 }, (_, index) => ({ t: 1000 + index * 50, x: index * 0.5, speed: index === 40 ? 0 : 10 }));
++  const arrivals = updates.map((update, index) => ({ ...update, at: update.t + 30 + jitter[index % jitter.length]! }));
++  const pending = [...arrivals].sort((a, b) => a.at - b.at);
++  const xs: number[] = [];
++  for (let now = 1000; now <= 3600; now += 1000 / 60) {
++    while (pending.length && pending[0]!.at <= now) {
++      const next = pending.shift()!;
++      syncRemoteMotion(motion, state(next.x, next.speed, next.speed ? 'walk' : 'idle', next.t), 0.5, next.at);
++    }
++    if (motion.source) {
++      stepRemoteMotion(motion, 1 / 60, camera, undefined, now);
++      xs.push(motion.position.x);
++    }
++  }
++  // While walking, the drawn avatar never stops for a frame nor jumps ahead: each frame moves about 10 m/s / 60.
++  const steps = xs.slice(1).map((x, index) => x - xs[index]!);
++  const walking = steps.filter((_, index) => xs[index]! > 1 && xs[index]! < 19);
++  expect(walking.length).toBeGreaterThan(60);
++  expect(Math.min(...walking)).toBeGreaterThan(0.05);
++  expect(Math.max(...walking)).toBeLessThan(0.3);
++  // It arrives where the peer stopped, without overshoot.
++  expect(xs.at(-1)).toBeCloseTo(20, 2);
++  expect(Math.max(...xs)).toBeLessThanOrEqual(20.01);
++});
++
++test('a stop is drawn as a stop: idle starts when the drawn avatar stands, not when the packet says so', () => {
++  const motion = createRemoteMotion();
++  let t = 0;
++  for (let index = 0; index <= 20; index++, t += 50) syncRemoteMotion(motion, state(index * 0.5, 10, 'walk', t), 0.5, t + 20);
++  // The peer stops and its very next packet already says idle.
++  syncRemoteMotion(motion, state(10, 0, 'idle', t), 0.5, t + 20);
++  const clips: string[] = [];
++  const xs: number[] = [];
++  for (let now = 20; now <= t + 600; now += 1000 / 60) {
++    stepRemoteMotion(motion, 1 / 60, camera, undefined, now);
++    const clip = chooseRemoteClip(motion);
++    motion.playing = clip;
++    clips.push(clip);
++    xs.push(motion.position.x);
++  }
++  const firstIdle = clips.indexOf('idle', clips.indexOf('walk'));
++  expect(clips.includes('walk')).toBe(true);
++  // When idle begins the avatar has (all but) arrived: no sliding across the island in the idle pose.
++  expect(10 - xs[firstIdle]!).toBeLessThan(0.3);
++  expect(clips.slice(firstIdle).every((clip) => clip === 'idle')).toBe(true);
++});
++
++test('a keepalive that repeats a position does not run on with its stale velocity', () => {
++  const motion = createRemoteMotion();
++  syncRemoteMotion(motion, state(0, 10, 'walk', 0), 0.5, 20);
++  syncRemoteMotion(motion, state(0.5, 10, 'walk', 50), 0.5, 70);
++  // A page hidden while walking keeps sending once a second: same position, the walking velocity it had.
++  syncRemoteMotion(motion, state(0.5, 10, 'walk', 1050), 0.5, 1070);
++  syncRemoteMotion(motion, state(0.5, 10, 'walk', 2050), 0.5, 2070);
++  const xs = drawn(motion, 1200, 2600);
++  expect(Math.max(...xs)).toBeLessThanOrEqual(0.5 + 1e-9);
++});
++
++test('a teleport snaps instead of sliding across the island', () => {
++  const motion = createRemoteMotion();
++  syncRemoteMotion(motion, state(0, 0, 'idle', 0), 0.5, 10);
++  drawn(motion, 10, 2000);
++  syncRemoteMotion(motion, state(0, 0, 'idle', 2000), 0.5, 2010);
++  syncRemoteMotion(motion, state(40, 0, 'idle', 2050), 0.5, 2060);
++  const xs = drawn(motion, 2060, 2600);
++  expect(xs.filter((x) => x > 0.5 && x < 39.5)).toHaveLength(0);
++  expect(xs.at(-1)).toBe(40);
++});
++
++test('a first position that arrives late does not slide the newcomer in from the origin', () => {
++  const motion = createRemoteMotion();
++  // A room announces the peer before its first Update: at the origin, then at the spawn 9 m away.
++  syncRemoteMotion(motion, state(0, 0, 'idle'), 0.5, 0);
++  syncRemoteMotion(motion, state(9, 0, 'idle', 5000), 0.5, 100);
++  const xs = drawn(motion, 100, 800);
++  expect(xs.filter((x) => x > 0.1 && x < 8.9)).toHaveLength(0);
++  expect(xs.at(-1)).toBe(9);
++});
++
++test('a snapshot without a send time after timed updates lands at the current moment, not in the past', () => {
++  const motion = createRemoteMotion();
++  for (let index = 0; index <= 10; index++) {
++    syncRemoteMotion(motion, state(index * 0.1, index === 10 ? 0 : 2, index === 10 ? 'idle' : 'walk', 10_000 + index * 50), 0.5, 500 + index * 50);
++  }
++  drawn(motion, 500, 1200);
++  const before = motion.position.x;
++  // A reconnect's Welcome repeats the last state with no time.
++  syncRemoteMotion(motion, state(1, 0, 'idle'), 0.5, 1210);
++  const xs = drawn(motion, 1210, 1700);
++  expect(Math.min(...xs)).toBeGreaterThanOrEqual(before - 1e-9);
++  expect(xs.at(-1)).toBeCloseTo(1, 6);
++});
++
++test('the receiver keeps the peer clip for anything but idle, walk and run', () => {
++  const motion = createRemoteMotion();
++  syncRemoteMotion(motion, state(0, 0, 'wave', 0), 0.5, 10);
++  expect(chooseRemoteClip(motion)).toBe('wave');
++  syncRemoteMotion(motion, state(0, 0, 'jump', 50), 0.5, 60);
++  expect(chooseRemoteClip(motion)).toBe('jump');
++  syncRemoteMotion(motion, state(0, 0, 'idle', 100), 0.5, 110);
++  expect(chooseRemoteClip(motion)).toBe('idle');
++});
++
++test('a peer whose stream stops mid-walk runs on briefly, then settles where it was last seen', () => {
++  const motion = createRemoteMotion();
++  for (let index = 0; index <= 10; index++) syncRemoteMotion(motion, state(index * 0.5, 10, 'walk', index * 50), 0.5, 20 + index * 50);
++  const xs = drawn(motion, 20, 2000);
++  expect(Math.max(...xs)).toBeLessThanOrEqual(5 + 10 * 0.12 + 1e-6);
++  expect(xs.at(-1)).toBeCloseTo(5, 6);
++});
+diff --git a/src/core/networks/components/RemotePlayer.tsx b/src/core/networks/components/RemotePlayer.tsx
+index d8cedf05..95ae0987 100644
+--- a/src/core/networks/components/RemotePlayer.tsx
++++ b/src/core/networks/components/RemotePlayer.tsx
+@@ -1,20 +1,24 @@
+-import React, { Suspense, useCallback, useRef, useEffect, useMemo, useState } from 'react';
++import React, { Suspense, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
+ 
+ import { useAnimations } from '@react-three/drei';
+ import { CapsuleCollider, RigidBody, type RapierRigidBody } from '@react-three/rapier';
+ import * as THREE from 'three';
+ import { SkeletonUtils } from 'three-stdlib';
+ 
+-import { useSharedFrame, type SharedFrameChannel } from '@core/runtime/frame';
++import { useCanvasFrameScheduler, useSharedFrame, type SharedFrameChannel } from '@core/runtime/frame';
+ 
++import { normalizeImportedMaterials } from '../../assets/materialPolicy';
+ import { useGLTFAsset } from '../../assets/useGLTFAsset';
+ import { GaesupErrorBoundary } from '../../error';
++import { useContactShadow } from '../../rendering/lighting/ContactShadows';
+ import { releaseObject } from '../../rendering/release';
+ import { useNameplate } from '../../ui/components/Nameplates';
+ import { SpeechBalloon } from '../../ui/components/SpeechBalloon';
+ import { logger } from '../../utils/logger';
++import { resolveRemoteAnimation } from '../core/remoteAnimation';
+ import { isTrustedRemoteModelUrl } from '../core/remoteInputLimits';
+ import {
++  chooseRemoteClip,
+   createRemoteMotion,
+   DEFAULT_REMOTE_VELOCITY_THRESHOLD,
+   stepRemoteMotion,
+@@ -51,6 +55,7 @@ type RemotePlayerContentProps = {
+ };
+ 
+ type ColorableMaterial = THREE.Material & { color: THREE.Color };
++type PlayingClip = { name: string; action: THREE.AnimationAction | null; at: number };
+ 
+ const REMOTE_MODEL_FALLBACK = <group name="remote-player-model-fallback" />;
+ /** Remote avatars never block the camera or other ray probes, matching the local player. */
+@@ -59,6 +64,9 @@ const INTANGIBLE = { intangible: true };
+ const REMOTE_PLAYER_FRAME: SharedFrameChannel = { phase: 'prePhysics', label: 'network:remote-player' };
+ const CAPSULE_ARGS: [number, number] = [0.5, 0.5];
+ const CAPSULE_OFFSET: [number, number, number] = [0, 1.5, 0];
++/** A clip plays at least this long before the receiver's choice may change it again. */
++const MIN_CLIP_MS = 150;
++const CLIP_FADE_S = 0.2;
+ 
+ function isColorableMaterial(material: THREE.Material): material is ColorableMaterial {
+   return 'color' in material && material.color instanceof THREE.Color;
+@@ -75,12 +83,6 @@ function normalizeHexColor(value: string | null | undefined): string | null {
+   return null;
+ }
+ 
+-/** Kinematic bodies are driven through the next-kinematic setters, never through props. */
+-function placeBody(body: RapierRigidBody, motion: RemoteMotion): void {
+-  body.setNextKinematicTranslation(motion.position);
+-  body.setNextKinematicRotation(motion.rotation);
+-}
+-
+ const RemotePlayerContent = React.memo(function RemotePlayerContent({
+   motion,
+   appearance,
+@@ -89,34 +91,49 @@ const RemotePlayerContent = React.memo(function RemotePlayerContent({
+   modelUrl,
+ }: RemotePlayerContentProps) {
+   const bodyRef = useRef<RapierRigidBody | null>(null);
+-  const meshRef = useRef<THREE.Group | null>(null);
++  // The drawn avatar lives beside its body, in world space, and is placed every frame: a child of the kinematic body
++  // would move only on physics steps and step visibly on screens faster than the physics rate.
++  const visualRef = useRef<THREE.Group | null>(null);
+   const animationRootRef = useRef<THREE.Group | null>(null);
+-  const [initialPosition] = useState((): [number, number, number] => [motion.position.x, motion.position.y, motion.position.z]);
++  const [initialPosition] = React.useState((): [number, number, number] => [motion.position.x, motion.position.y, motion.position.z]);
+   const playerColor = useMemo(() => normalizeHexColor(appearance.color), [appearance.color]);
+-  
+-  // 설정값 가져오기
+-  const interpolationSpeed = config?.tracking?.interpolationSpeed || 0.15;
++  const scheduler = useCanvasFrameScheduler();
++
+   const characterScale = config?.rendering?.characterScale || 1;
+   const nameTagHeight = config?.rendering?.nameTagHeight || 3.5;
+   // The name rides the scene's DOM <Nameplates /> layer, which both WebGPU and WebGL draw alike.
+-  useNameplate(meshRef, appearance.name, nameTagHeight);
+-  
+-  // 모델 로드
++  useNameplate(visualRef, appearance.name, nameTagHeight);
++  // The same soft foot shadow the local player and residents get where no shadow map reaches.
++  useContactShadow(visualRef, Math.max(0.35, 0.45 * characterScale));
++
+   const { scene, animations } = useGLTFAsset(modelUrl);
+-  const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
++  const materialPolicy = config?.rendering?.materialPolicy ?? 'keep';
++  const tintCharacter = config?.rendering?.tintCharacter ?? false;
++  const clone = useMemo(() => {
++    const owned = SkeletonUtils.clone(scene);
++    normalizeImportedMaterials(owned, materialPolicy);
++    return owned;
++  }, [scene, materialPolicy]);
++  // Casts and receives shadows like the local player's figure, so a visitor in the shade is shaded too.
++  useLayoutEffect(() => {
++    clone.traverse((node) => {
++      if (!(node instanceof THREE.Mesh)) return;
++      node.castShadow = true;
++      node.receiveShadow = true;
++      if (node instanceof THREE.SkinnedMesh) node.frustumCulled = false;
++    });
++  }, [clone]);
+   useEffect(() => () => releaseObject(clone), [clone]);
+   const { actions } = useAnimations(animations, animationRootRef);
+-  const currentAnimRef = useRef<string | null>(null);
+-  const currentActionRef = useRef<THREE.AnimationAction | null>(null);
+-  const lastAnimSwitchAt = useRef<number>(performance.now());
++  const playingRef = useRef<PlayingClip>({ name: '', action: null, at: 0 });
+   useEffect(() => {
+-    currentAnimRef.current = null;
+-    currentActionRef.current = null;
+-  }, [actions]);
++    playingRef.current = { name: '', action: null, at: 0 };
++    motion.playing = 'idle';
++  }, [actions, motion]);
+ 
+   // Apply per-player tint (material cloning) once per model/color.
+   useEffect(() => {
+-    if (!playerColor) return;
++    if (!tintCharacter || !playerColor) return;
+     const originals = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
+     const tinted = new Map<THREE.Material, THREE.Material>();
+     const cleanup = () => {
+@@ -162,99 +179,75 @@ const RemotePlayerContent = React.memo(function RemotePlayerContent({
+       throw error;
+     }
+     return cleanup;
+-  }, [clone, playerColor]);
+-
+-  const pickAction = (desired: string): THREE.AnimationAction | null => {
+-    if (!actions) return null;
+-    const direct = actions[desired];
+-    if (direct) return direct;
+-
+-    const lower = desired.toLowerCase();
+-    const keys = Object.keys(actions);
+-    const byIncludes = keys.find((k) => k.toLowerCase().includes(lower));
+-    if (byIncludes) return actions[byIncludes] ?? null;
+-
+-    // Common fallback names
+-    if (lower === 'run') {
+-      const k = keys.find((x) => x.toLowerCase().includes('walk')) ?? keys[0];
+-      return k ? (actions[k] ?? null) : null;
+-    }
+-    if (lower === 'idle') {
+-      const k = keys.find((x) => x.toLowerCase().includes('idle')) ?? keys[0];
+-      return k ? (actions[k] ?? null) : null;
+-    }
+-
+-    return keys[0] ? (actions[keys[0]] ?? null) : null;
+-  };
+-
+-  // 애니메이션 업데이트 (stop-all 금지: 끊김/튐 원인)
+-  useEffect(() => {
+-    if (!actions) return;
++  }, [clone, playerColor, tintCharacter]);
+ 
+-    const minSwitchMs = 180;
+-    const nextName = appearance.animation || 'idle';
+-    if (currentAnimRef.current === nextName) return;
+-
+-    const next = pickAction(nextName);
++  /** Starts `name` unless it already plays; the first clip starts at full weight instead of fading in from a T-pose. */
++  const play = useCallback((name: string, now: number) => {
++    const current = playingRef.current;
++    if (current.name === name) return;
++    if (current.action && now - current.at < MIN_CLIP_MS) return;
++    const next = resolveRemoteAnimation(actions, name);
+     if (!next) return;
+-
+-    const play = () => {
+-      const prev = currentActionRef.current;
+-      next.enabled = true;
+-      next.setEffectiveTimeScale(1);
+-      next.setEffectiveWeight(1);
+-      next.reset().play();
+-      if (prev && prev !== next) {
+-        next.crossFadeFrom(prev, 0.18, true);
+-      } else {
+-        next.fadeIn(0.18);
+-      }
+-      currentAnimRef.current = nextName;
+-      currentActionRef.current = next;
+-      lastAnimSwitchAt.current = performance.now();
+-    };
+-    const delay = currentActionRef.current
+-      ? minSwitchMs - (performance.now() - lastAnimSwitchAt.current)
+-      : 0;
+-    if (delay <= 0) {
+-      play();
++    if (next === current.action) {
++      // Another name for the clip already playing (run resolved to walk): keep its stride.
++      playingRef.current = { name, action: next, at: current.at };
++      motion.playing = name;
+       return;
+     }
+-    const timer = setTimeout(play, delay);
+-    return () => clearTimeout(timer);
+-  }, [actions, appearance.animation]);
++    next.enabled = true;
++    next.setEffectiveTimeScale(1);
++    next.setEffectiveWeight(1);
++    next.reset().play();
++    // No warp: warping scales the new clip's speed by the length ratio of the two clips for the whole fade.
++    if (current.action) next.crossFadeFrom(current.action, CLIP_FADE_S, false);
++    playingRef.current = { name, action: next, at: now };
++    motion.playing = name;
++  }, [actions, motion]);
+ 
+-  // The first network state already placed the motion; snap the new body there.
+-  useEffect(() => {
++  // The first network state already placed the motion; put the new body and avatar there.
++  useLayoutEffect(() => {
++    visualRef.current?.position.copy(motion.position);
++    visualRef.current?.quaternion.copy(motion.rotation);
+     const body = bodyRef.current;
+-    if (body) placeBody(body, motion);
++    if (body) {
++      body.setNextKinematicTranslation(motion.position);
++      body.setNextKinematicRotation(motion.rotation);
++    }
+   }, [motion]);
+ 
+-  // 부드러운 보간: network messages only write targets; the pose moves here, never through React.
++  // Network messages only add samples; the drawn pose and the clip follow here, never through React.
+   useSharedFrame(REMOTE_PLAYER_FRAME, (delta, _elapsedSeconds, three) => {
+-    const body = bodyRef.current;
+-    if (!body || !meshRef.current) return;
+-    if (stepRemoteMotion(motion, delta, three.camera.position, interpolationSpeed)) placeBody(body, motion);
++    const now = performance.now();
++    if (stepRemoteMotion(motion, delta, three.camera.position, undefined, now)) {
++      visualRef.current?.position.copy(motion.position);
++      visualRef.current?.quaternion.copy(motion.rotation);
++      const body = bodyRef.current;
++      if (body) {
++        body.setNextKinematicTranslation(motion.position);
++        body.setNextKinematicRotation(motion.rotation);
++      }
++    }
++    play(chooseRemoteClip(motion), now);
++    // A visitor walking past keeps the canvas at its full rate, as walking residents do.
++    if (motion.speed > 0.05 || motion.playing !== 'idle') scheduler.markActivity(now);
+   });
+ 
+   return (
+     <group userData={INTANGIBLE}>
++      {/* A sensor, not a solid: a visitor never shoves the local player, wherever latency puts them. */}
+       <RigidBody
+         ref={bodyRef}
+         type="kinematicPosition"
+-        // Important: do NOT bind position to network state.
+-        // Kinematic bodies are driven by setNextKinematicTranslation/Rotation in the frame loop.
+         position={initialPosition}
+         colliders={false}
+       >
+-        <CapsuleCollider args={CAPSULE_ARGS} position={CAPSULE_OFFSET} />
+-        <group ref={meshRef}>
+-          <group ref={animationRootRef} scale={[characterScale, characterScale, characterScale]}>
+-            <primitive object={clone} />
+-          </group>
+-        </group>
+-
++        <CapsuleCollider args={CAPSULE_ARGS} position={CAPSULE_OFFSET} sensor />
+       </RigidBody>
++      <group ref={visualRef} position={initialPosition}>
++        <group ref={animationRootRef} scale={[characterScale, characterScale, characterScale]}>
++          <primitive object={clone} />
++        </group>
++      </group>
+ 
+       {/* 말풍선 */}
+       {speechText ? (
+@@ -307,7 +300,7 @@ export const RemotePlayer = React.memo(function RemotePlayer({
+   speechText,
+   allowedModelOrigins,
+ }: RemotePlayerProps) {
+-  const [motion] = useState(createRemoteMotion);
++  const [motion] = React.useState(createRemoteMotion);
+   // Each new state lands in the motion; the avatar below re-renders only when its appearance changes.
+   syncRemoteMotion(motion, state, config?.tracking?.velocityThreshold ?? DEFAULT_REMOTE_VELOCITY_THRESHOLD);
+   return (
+diff --git a/src/core/networks/components/__tests__/RemotePlayer.test.tsx b/src/core/networks/components/__tests__/RemotePlayer.test.tsx
+index bb93639e..3feaa64d 100644
+--- a/src/core/networks/components/__tests__/RemotePlayer.test.tsx
++++ b/src/core/networks/components/__tests__/RemotePlayer.test.tsx
+@@ -6,6 +6,7 @@ import { SkeletonUtils } from 'three-stdlib';
+ import { useGLTFAsset } from '../../../assets/useGLTFAsset';
+ import { frameScheduler, getSharedFrameEntryCount } from '../../../runtime/frame';
+ import { useNameplate } from '../../../ui/components/Nameplates';
++import { defaultMultiplayerConfig } from '../../config/defaultConfig';
+ import type { PlayerState } from '../../types';
+ import { RemotePlayer } from '../RemotePlayer';
+ 
+@@ -138,39 +139,43 @@ describe('RemotePlayer', () => {
+     }
+   });
+ 
+-  test('plays initial idle immediately and completes or cancels delayed transitions', () => {
++  test('plays the first clip at full weight at once, follows the drawn speed for idle and walk, and keeps the peer clips', () => {
+     jest.useFakeTimers();
+-    const makeAction = () => {
+-      const action = new THREE.AnimationMixer(new THREE.Group()).clipAction(new THREE.AnimationClip('test', 1, []));
++    const makeAction = (name: string) => {
++      const action = new THREE.AnimationMixer(new THREE.Group()).clipAction(new THREE.AnimationClip(name, 1, []));
+       jest.spyOn(action, 'play');
++      jest.spyOn(action, 'crossFadeFrom');
+       return action;
+     };
+-    const idle = makeAction();
+-    const run = makeAction();
+-    const actions = { idle, run };
++    const idle = makeAction('idle');
++    const walk = makeAction('walk');
++    const wave = makeAction('wave');
+     const mockedAnimations = jest.mocked(useAnimations);
+     const original = mockedAnimations.getMockImplementation();
+-    mockedAnimations.mockReturnValue({ actions } as unknown as ReturnType<typeof useAnimations>);
++    mockedAnimations.mockReturnValue({ actions: { idle, walk, wave } } as unknown as ReturnType<typeof useAnimations>);
+     let renderer: ReactTestRenderer | undefined;
+-    const render = (animation: string) => <RemotePlayer playerId="animated" state={{ ...PLAYER_STATE, animation }} characterUrl="/cached.glb" />;
++    let sent = 1000;
++    const render = (x: number, animation: string) => (
++      <RemotePlayer playerId="animated" state={{ ...PLAYER_STATE, position: [x, 2, 3], velocity: [x === 1 ? 0 : 10, 0, 0], animation, t: sent }} characterUrl="/cached.glb" />
++    );
+     try {
+-      act(() => { renderer = create(render('idle')); });
++      act(() => { renderer = create(render(1, 'idle')); });
++      runFrame(1 / 60);
+       expect(idle.play).toHaveBeenCalledTimes(1);
+-      act(() => { renderer?.update(render('run')); });
+-      expect(run.play).not.toHaveBeenCalled();
+-      act(() => { jest.advanceTimersByTime(180); });
+-      expect(run.play).toHaveBeenCalledTimes(1);
+-      act(() => { renderer?.update(render('idle')); });
+-      act(() => { renderer?.update(render('run')); });
+-      act(() => { jest.advanceTimersByTime(180); });
+-      expect(idle.play).toHaveBeenCalledTimes(1);
+-      act(() => { renderer?.update(render('idle')); });
+-      expect(idle.play).toHaveBeenCalledTimes(2);
+-      act(() => { renderer?.update(render('run')); });
+-      act(() => { renderer?.unmount(); });
+-      renderer = undefined;
+-      act(() => { jest.advanceTimersByTime(180); });
+-      expect(run.play).toHaveBeenCalledTimes(1);
++      expect(idle.crossFadeFrom).not.toHaveBeenCalled();
++      // The peer walks: 0.5 m every 50 ms. Walk starts once the drawn avatar moves, not on the packet.
++      for (let step = 1; step <= 20; step++) {
++        sent += 50;
++        act(() => { jest.advanceTimersByTime(50); renderer?.update(render(1 + step * 0.5, 'walk')); });
++        for (let frame = 0; frame < 3; frame++) { jest.advanceTimersByTime(16); runFrame(1 / 60); }
++      }
++      expect(walk.play).toHaveBeenCalledTimes(1);
++      expect(walk.crossFadeFrom).toHaveBeenCalledWith(idle, expect.any(Number), false);
++      // A wave is the peer's own clip and plays as sent.
++      sent += 50;
++      act(() => { jest.advanceTimersByTime(50); renderer?.update(render(11, 'wave')); });
++      for (let frame = 0; frame < 30; frame++) { jest.advanceTimersByTime(16); runFrame(1 / 60); }
++      expect(wave.play).toHaveBeenCalledTimes(1);
+     } finally {
+       act(() => renderer?.unmount());
+       if (original) mockedAnimations.mockImplementation(original);
+@@ -191,10 +196,13 @@ describe('RemotePlayer', () => {
+     let renderer: ReactTestRenderer | undefined;
+     try {
+       act(() => { renderer = create(<RemotePlayer playerId="replacement" state={{ ...PLAYER_STATE, animation: 'idle' }} characterUrl="/first.glb" />); });
++      runFrame(1 / 60);
+       expect(first.isRunning()).toBe(true);
+       first.stop();
+       mockedAnimations.mockReturnValue({ actions: { idle: second } } as unknown as ReturnType<typeof useAnimations>);
+       act(() => { renderer?.update(<RemotePlayer playerId="replacement" state={{ ...PLAYER_STATE, animation: 'idle' }} characterUrl="/second.glb" />); });
++      jest.advanceTimersByTime(200);
++      runFrame(1 / 60);
+       expect(secondPlay).toHaveBeenCalledTimes(1);
+       expect(second.isRunning()).toBe(true);
+       expect(crossFade).not.toHaveBeenCalled();
+@@ -206,6 +214,7 @@ describe('RemotePlayer', () => {
+   });
+ 
+   test('preserves WXYZ half-turn rotations on initial placement and subsequent updates', () => {
++    jest.useFakeTimers();
+     const rotation = new THREE.Quaternion();
+     const body = {
+       setNextKinematicTranslation: jest.fn(),
+@@ -219,12 +228,15 @@ describe('RemotePlayer', () => {
+         });
+       });
+       expect(rotation.toArray()).toEqual([0, 0, 1, 0]);
++      jest.advanceTimersByTime(50);
+       act(() => { renderer?.update(<RemotePlayer playerId="rotation" state={{ ...PLAYER_STATE, rotation: [0, 1, 0, 0] }} characterUrl="/rotation.glb" />); });
+       expect(frameScheduler.count('prePhysics')).toBe(1);
++      jest.advanceTimersByTime(500);
+       runFrame(0.3);
+       expect(rotation.toArray()).toEqual([1, 0, 0, 0]);
+     } finally {
+       act(() => renderer?.unmount());
++      jest.useRealTimers();
+     }
+   });
+ 
+@@ -297,7 +309,7 @@ describe('RemotePlayer', () => {
+     mockedUseGLTF.mockReturnValue({ scene, animations: [] } as unknown as ReturnType<typeof useGLTFAsset>);
+     let renderer: ReactTestRenderer | undefined;
+     try {
+-      act(() => { renderer = create(<RemotePlayer playerId="tint" state={{ ...PLAYER_STATE, color: '#ff0000' }} characterUrl="/tint.glb" />); });
++      act(() => { renderer = create(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={{ ...PLAYER_STATE, color: '#ff0000' }} characterUrl="/tint.glb" />); });
+       const single = clonedScene.children[0] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+       const multiple = clonedScene.children[1] as THREE.Mesh<THREE.BufferGeometry, THREE.Material[]>;
+       const tinted = single.material;
+@@ -305,21 +317,21 @@ describe('RemotePlayer', () => {
+       expect(tinted).not.toBe(source);
+       expect(tinted.color.getHexString()).toBe('ff0000');
+       expect(multiple.material).toEqual([tinted, tinted]);
+-      act(() => { renderer?.update(<RemotePlayer playerId="tint" state={{ ...PLAYER_STATE, color: '#00ff00' }} characterUrl="/tint.glb" />); });
++      act(() => { renderer?.update(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={{ ...PLAYER_STATE, color: '#00ff00' }} characterUrl="/tint.glb" />); });
+       const green = single.material;
+       const greenDispose = jest.spyOn(green, 'dispose');
+       expect(green).not.toBe(tinted);
+       expect(green.color.getHexString()).toBe('00ff00');
+       expect(multiple.material).toEqual([green, green]);
+       expect(tintedDispose).toHaveBeenCalledTimes(1);
+-      act(() => { renderer?.update(<RemotePlayer playerId="tint" state={PLAYER_STATE} characterUrl="/tint.glb" />); });
++      act(() => { renderer?.update(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={PLAYER_STATE} characterUrl="/tint.glb" />); });
+       expect(single.material).toBe(source);
+       expect(multiple.material).toBe(originalArray);
+       expect(greenDispose).toHaveBeenCalledTimes(1);
+       expect(tintedDispose).toHaveBeenCalledTimes(1);
+       expect(sourceDispose).not.toHaveBeenCalled();
+       expect(source.color.getHexString()).toBe('abcdef');
+-      act(() => { renderer?.update(<RemotePlayer playerId="tint" state={{ ...PLAYER_STATE, color: '#0000ff' }} characterUrl="/tint.glb" />); });
++      act(() => { renderer?.update(<RemotePlayer playerId="tint" config={{ ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, tintCharacter: true } }} state={{ ...PLAYER_STATE, color: '#0000ff' }} characterUrl="/tint.glb" />); });
+       const blueDispose = jest.spyOn(single.material, 'dispose');
+       act(() => renderer?.unmount());
+       renderer = undefined;
+@@ -336,7 +348,42 @@ describe('RemotePlayer', () => {
+     }
+   });
+ 
++  test('nameplate colours preserve authored model colours and figure matches the local material policy', () => {
++    const skin = new THREE.MeshStandardMaterial({ color: '#deab87', roughness: 0.2, metalness: 0.7 });
++    const cloth = new THREE.MeshStandardMaterial({ color: '#214d91', roughness: 0.3, metalness: 0.4 });
++    const geometry = new THREE.BufferGeometry();
++    const scene = new THREE.Group();
++    scene.add(new THREE.Mesh(geometry, skin), new THREE.Mesh(geometry, [skin, cloth]));
++    const cloned = scene.clone(true);
++    const originalLoader = mockedUseGLTF.getMockImplementation();
++    jest.mocked(SkeletonUtils.clone).mockReturnValueOnce(cloned);
++    mockedUseGLTF.mockReturnValue({ scene, animations: [] } as unknown as ReturnType<typeof useGLTFAsset>);
++    let renderer: ReactTestRenderer | undefined;
++    const config = { ...defaultMultiplayerConfig, rendering: { ...defaultMultiplayerConfig.rendering, materialPolicy: 'figure' as const } };
++    const view = (color: string) => <RemotePlayer playerId="figure" state={{ ...PLAYER_STATE, color }} characterUrl="/figure.glb" config={config} />;
++    try {
++      act(() => { renderer = create(view('#ff0000')); });
++      const figure = (cloned.children[0] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>).material;
++      const parts = (cloned.children[1] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial[]>).material;
++      expect(figure.color.getHexString()).toBe('deab87');
++      expect(figure.roughness).toBe(1);
++      expect(figure.metalness).toBe(0);
++      expect(parts[1]?.color.getHexString()).toBe('214d91');
++      expect(skin.roughness).toBe(0.2);
++      expect(skin.metalness).toBe(0.7);
++      act(() => { renderer?.update(view('#00ff00')); });
++      expect(figure.color.getHexString()).toBe('deab87');
++      expect(parts[1]?.color.getHexString()).toBe('214d91');
++      expect(jest.mocked(useNameplate)).toHaveBeenLastCalledWith(expect.anything(), PLAYER_STATE.name, defaultMultiplayerConfig.rendering.nameTagHeight);
++    } finally {
++      act(() => renderer?.unmount());
++      if (originalLoader) mockedUseGLTF.mockImplementation(originalLoader);
++      geometry.dispose(); skin.dispose(); cloth.dispose();
++    }
++  });
++
+   test('network rerenders reuse vectors and quaternions instead of allocating discarded replacements', () => {
++    jest.useFakeTimers();
+     const vectors = jest.mocked(THREE.Vector3).mockClear();
+     const quaternions = jest.mocked(THREE.Quaternion).mockClear();
+     const body = {
+@@ -357,6 +404,7 @@ describe('RemotePlayer', () => {
+       expect(initialVectors).toBeGreaterThan(0);
+       expect(initialQuaternions).toBeGreaterThan(0);
+       for (let tick = 1; tick <= 40; tick++) {
++        jest.advanceTimersByTime(50);
+         act(() => {
+           renderer?.update(<RemotePlayer playerId="remote-1" state={{ ...PLAYER_STATE, position: [1 + tick / 10, 2, 3] }} characterUrl="/avatars/remote.glb" />);
+         });
+@@ -371,6 +419,7 @@ describe('RemotePlayer', () => {
+       expect(quaternions).toHaveBeenCalledTimes(initialQuaternions);
+     } finally {
+       act(() => renderer?.unmount());
++      jest.useRealTimers();
+     }
+   });
+ 
+@@ -399,6 +448,8 @@ describe('RemotePlayer', () => {
+   });
+ 
+   test.each([64, 128])('distance throttling preserves elapsed interpolation time at %i FPS', (fps) => {
++    jest.useFakeTimers();
++    const frame = (seconds: number) => { jest.advanceTimersByTime(seconds * 1000); runFrame(seconds); };
+     const simulate = (distance: number) => {
+       const position = new THREE.Vector3();
+       const rotation = new THREE.Quaternion();
+@@ -414,14 +465,15 @@ describe('RemotePlayer', () => {
+             createNodeMock: element => element.type === 'RigidBody' ? body : new THREE.Group(),
+           });
+         });
+-        runFrame(0);
++        frame(0);
++        jest.advanceTimersByTime(50);
+         act(() => {
+           renderer?.update(<RemotePlayer playerId="lod" state={{ ...PLAYER_STATE, position: [5, 2, 3], rotation: [Math.SQRT1_2, 0, Math.SQRT1_2, 0] }} characterUrl="/lod.glb" />);
+         });
+         body.setNextKinematicTranslation.mockClear();
+-        for (let tick = 0; tick < fps / 2; tick++) runFrame(1 / fps);
++        for (let tick = 0; tick < fps / 2; tick++) frame(1 / fps);
+         const result = { x: position.x, rotation: rotation.clone(), writes: body.setNextKinematicTranslation.mock.calls.length };
+-        runFrame(0.3);
++        frame(0.3);
+         expect(position.x).toBe(5);
+         expect(rotation.y).toBeCloseTo(Math.SQRT1_2);
+         return result;
+@@ -429,13 +481,17 @@ describe('RemotePlayer', () => {
+         act(() => renderer?.unmount());
+       }
+     };
+-    const near = simulate(0);
+-    const far = simulate(200);
+-    expect(near.writes).toBe(fps / 2);
+-    expect(far.writes).toBe(4);
+-    expect(near.x).toBeGreaterThan(4.8);
+-    expect(Math.abs(near.x - far.x)).toBeLessThan(0.05);
+-    expect(near.rotation.angleTo(far.rotation)).toBeLessThan(0.001);
++    try {
++      const near = simulate(0);
++      const far = simulate(200);
++      expect(near.writes).toBe(fps / 2);
++      expect(far.writes).toBe(4);
++      expect(near.x).toBeGreaterThan(4.8);
++      expect(Math.abs(near.x - far.x)).toBeLessThan(0.05);
++      expect(near.rotation.angleTo(far.rotation)).toBeLessThan(0.001);
++    } finally {
++      jest.useRealTimers();
++    }
+   });
+ 
+   test('binds animations to the scaled model root without sharing the movement group ref', () => {
+diff --git a/src/core/networks/core/PlayerNetworkManager.ts b/src/core/networks/core/PlayerNetworkManager.ts
+index 969bacf3..49e12d31 100644
+--- a/src/core/networks/core/PlayerNetworkManager.ts
++++ b/src/core/networks/core/PlayerNetworkManager.ts
+@@ -609,6 +609,8 @@ export class PlayerNetworkManager {
+       out.rotation = [w / length, x / length, y / length, z / length];
+     }
+     if (state.velocity) out.velocity = [state.velocity[0], state.velocity[1], state.velocity[2]];
++    // The sender's sample time; only a finite, non-negative number within a plausible clock range is kept.
++    if (typeof state.t === 'number' && Number.isFinite(state.t) && state.t >= 0 && state.t < 1e13) out.t = state.t;
+     return out;
+   }
+ 
+diff --git a/src/core/networks/core/PlayerPositionTracker.ts b/src/core/networks/core/PlayerPositionTracker.ts
+index 440a0e0d..498f8ed0 100644
+--- a/src/core/networks/core/PlayerPositionTracker.ts
++++ b/src/core/networks/core/PlayerPositionTracker.ts
+@@ -10,6 +10,8 @@ export type PlayerUpdateData = {
+   animation: string;
+   velocity: [number, number, number];
+   modelUrl?: string | undefined;
++  /** Sample time on this page's clock (ms); see `PlayerState.t`. */
++  t: number;
+ };
+ 
+ export type PlayerTrackingConfig = {
+@@ -48,11 +50,11 @@ export class PlayerPositionTracker {
+   private tempRot = new THREE.Quaternion();
+   private tempSendRot = new THREE.Quaternion();
+   private tempEuler = new THREE.Euler();
+-  private baseYaw: number | null = null;
++  private lastBodyRotation = new THREE.Quaternion();
+   private scratchUpdate: PlayerUpdateData = {
+     name: '', color: '',
+     position: [0, 0, 0], rotation: [1, 0, 0, 0],
+-    animation: 'idle', velocity: [0, 0, 0],
++    animation: 'idle', velocity: [0, 0, 0], t: 0,
+   };
+ 
+   constructor(config: PlayerTrackingConfig) {
+@@ -69,6 +71,8 @@ export class PlayerPositionTracker {
+     playerColor: string,
+     modelUrl?: string,
+     animationName?: string | null,
++    visualRotation?: Readonly<{ x: number; y: number; z: number; w: number }> | null,
++    paused = false,
+   ): PlayerUpdateData | null {
+     if (!playerRef.current) return null;
+ 
+@@ -79,8 +83,12 @@ export class PlayerPositionTracker {
+     this.tempRot.set(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
+ 
+     // 속도 계산: Rapier의 linvel을 우선 사용 (더 안정적/저렴)
+-    const lv = playerRef.current.linvel();
+-    if (lv) {
++    const lv = paused ? null : playerRef.current.linvel();
++    if (paused) {
++      // A hidden page draws no frames, so its body stands still wherever it was: say so once instead of repeating the
++      // last walking velocity, which receivers would run on.
++      this.velocity.set(0, 0, 0);
++    } else if (lv) {
+       this.velocity.set(lv.x, lv.y, lv.z);
+     } else {
+       const deltaTime = (now - this.lastUpdateTime) / 1000;
+@@ -102,25 +110,18 @@ export class PlayerPositionTracker {
+       this.lastAnimation === 'run'
+         ? (speed < idleThreshold ? 'idle' : 'run')
+         : (speed > runThreshold ? 'run' : 'idle');
+-    const currentAnimation = requested.length > 0 ? requested : fallback;
++    const currentAnimation = paused ? 'idle' : requested.length > 0 ? requested : fallback;
+ 
+-    // 캐릭터는 물리에서 rigidbody 회전이 고정되는 경우가 많아서,
+-    // 이동 방향(velocity) 기반으로 yaw를 만들어 전송해야 원격에서도 방향전환이 된다.
++    // Visual character groups can rotate independently from their rotation-locked physics bodies.
++    // Prefer the rendered world orientation; +Z movement is the fallback, without an implicit model correction.
+     this.tempSendRot.copy(this.tempRot);
+-    const vx = this.velocity.x;
+-    const vz = this.velocity.z;
+-    const horizontalSpeed = Math.hypot(vx, vz);
+-    if (horizontalSpeed > 0.05) {
+-      if (this.baseYaw === null) {
+-        // 첫 프레임의 "모델 기본 정면" 보정 (예: 초기 y = PI)
+-        this.tempEuler.setFromQuaternion(this.tempRot, 'YXZ');
+-        // Many character rigs face -Z; our yaw (atan2(vx, vz)) assumes +Z forward.
+-        // Add PI so remote faces the same direction as local.
+-        this.baseYaw = this.tempEuler.y + Math.PI;
+-      }
+-      const yaw = Math.atan2(vx, vz) + (this.baseYaw ?? 0);
+-      this.tempEuler.set(0, yaw, 0, 'YXZ');
++    if (visualRotation) {
++      this.tempSendRot.copy(visualRotation).normalize();
++    } else if (Math.hypot(this.velocity.x, this.velocity.z) > 0.05) {
++      this.tempEuler.set(0, Math.atan2(this.velocity.x, this.velocity.z), 0, 'YXZ');
+       this.tempSendRot.setFromEuler(this.tempEuler);
++    } else if (this.hasSentSnapshot && !rotationChanged(this.lastBodyRotation, this.tempRot)) {
++      this.tempSendRot.copy(this.lastRotation);
+     }
+ 
+     const updateData = this.scratchUpdate;
+@@ -149,10 +150,12 @@ export class PlayerPositionTracker {
+     updateData.velocity[1] = quantize(this.velocity.y, 1e2);
+     updateData.velocity[2] = quantize(this.velocity.z, 1e2);
+     updateData.modelUrl = modelUrl;
++    updateData.t = Math.round(performance.now());
+ 
+     // 상태 업데이트
+     this.lastPosition.copy(this.tempPos);
+     this.lastRotation.copy(this.tempSendRot);
++    this.lastBodyRotation.copy(this.tempRot);
+     this.lastVelocity.copy(this.velocity);
+     this.lastAnimation = currentAnimation;
+     this.lastUpdateTime = now;
+@@ -173,6 +176,6 @@ export class PlayerPositionTracker {
+     this.velocity.set(0, 0, 0);
+     this.lastUpdateTime = 0;
+     this.hasSentSnapshot = false;
+-    this.baseYaw = null;
++    this.lastBodyRotation.identity();
+   }
+ }
+diff --git a/src/core/networks/core/remoteAnimation.ts b/src/core/networks/core/remoteAnimation.ts
+new file mode 100644
+index 00000000..82ca4966
+--- /dev/null
++++ b/src/core/networks/core/remoteAnimation.ts
+@@ -0,0 +1,22 @@
++import type { AnimationAction } from 'three';
++
++import { figureClipName } from '../../assets/pipeline/modelInspection';
++
++/** Resolve authored names before canonical aliases; an unknown animation never picks an unrelated first clip. */
++export function resolveRemoteAnimation(
++  actions: Readonly<Record<string, AnimationAction | null | undefined>>,
++  requested: string,
++): AnimationAction | null {
++  const direct = actions[requested];
++  if (direct) return direct;
++  const keys = Object.keys(actions).filter((key) => actions[key]);
++  const lower = requested.trim().toLowerCase();
++  const exact = keys.find((key) => key.toLowerCase() === lower);
++  if (exact) return actions[exact] ?? null;
++  const canonical = figureClipName(requested) ?? lower;
++  const named = (name: string) => keys.find((key) => figureClipName(key) === name);
++  const key = named(canonical)
++    ?? (canonical === 'run' ? named('walk') : canonical === 'walk' ? named('run') : undefined)
++    ?? named('idle');
++  return key ? actions[key] ?? null : null;
++}
+diff --git a/src/core/networks/core/remoteMotion.ts b/src/core/networks/core/remoteMotion.ts
+index 5b3a1321..8d46063f 100644
+--- a/src/core/networks/core/remoteMotion.ts
++++ b/src/core/networks/core/remoteMotion.ts
+@@ -7,43 +7,93 @@ import type { PlayerState } from '../types';
+ export type RemoteAppearance = {
+   readonly name: string;
+   readonly color: string;
+-  /** The peer's animation, or run/idle chosen from its speed when it sends none. */
++  /** The peer's own clip, or run/idle chosen from its sent speed when it sends none. */
+   readonly animation: string;
+   readonly modelUrl: string | undefined;
+ };
+ 
++/** One network pose on the sender's clock (milliseconds), with the velocity sent beside it. */
++type Sample = {
++  t: number;
++  readonly position: THREE.Vector3;
++  readonly rotation: THREE.Quaternion;
++  readonly velocity: THREE.Vector3;
++};
++
+ /**
+- * Network targets and smoothed pose of one remote avatar. Network messages write the targets
+- * directly, so a transform-only update never reaches React; the frame channel reads them.
++ * Network samples and the drawn pose of one remote avatar. Network messages only append samples, so a transform-only
++ * update never reaches React; the frame channel draws the pose a short, jitter-sized delay behind the newest sample,
++ * interpolating between the two that bracket that moment.
+  */
+ export type RemoteMotion = {
+   source: PlayerState | null;
+   appearance: RemoteAppearance;
++  /** The newest network pose. */
+   readonly target: THREE.Vector3;
+   readonly targetRotation: THREE.Quaternion;
+   readonly velocity: THREE.Vector3;
+   receivedAt: number;
++  /** The pose drawn this frame. */
+   readonly position: THREE.Vector3;
+   readonly rotation: THREE.Quaternion;
+-  readonly smoothVelocity: THREE.Vector3;
++  /** Horizontal speed of the drawn pose, smoothed (m/s); the receiver picks idle or walk from it. */
++  speed: number;
++  /** The clip the avatar plays now, as the receiver chose it. */
++  playing: string;
++  /** The last locomotion clip the peer asked for while moving (walk or run). */
++  gait: string;
++  readonly samples: Sample[];
++  /** Spare samples, so a stream of updates allocates nothing once an avatar exists. */
++  readonly spare: Sample[];
++  /** Whether the samples are on the sender's clock (`PlayerState.t`), else on arrival time. */
++  senderClock: boolean;
++  /** Arrival minus send time: the fastest seen in the current and the previous window, and the smoothed one used. */
++  offsetMin: number;
++  offsetPrevious: number;
++  offsetWindowStart: number;
++  offset: number;
++  /** How much later than the fastest a sample arrives (ms, smoothed) and how far apart moving samples are. */
++  lateness: number;
++  interval: number;
++  delay: number;
++  /** Visual correction that fades out after an interpolation jump (a late sample after extrapolating). */
++  readonly error: THREE.Vector3;
++  readonly lastOut: THREE.Vector3;
++  hasOut: boolean;
++  placedAt: number;
+   lodAccum: number;
+   lodInterval: number;
+ };
+ 
+ export const DEFAULT_REMOTE_VELOCITY_THRESHOLD = 0.5;
+-const MAX_PREDICTION_S = 0.12;
+-const SNAP_DISTANCE = 10;
+-const SNAP_ELAPSED_S = 0.25;
+-/** World units per second; effectively no clamp, but avoids blow-ups after stalls. */
+-const MAX_SPEED = 120;
++const MAX_SAMPLES = 40;
++
++const newSample = (): Sample => ({ t: 0, position: new THREE.Vector3(), rotation: new THREE.Quaternion(), velocity: new THREE.Vector3() });
++/** Window over which the fastest delivery is taken as the clock offset; two windows are kept. */
++const OFFSET_WINDOW_MS = 2000;
++const MIN_DELAY_MS = 60;
++const MAX_DELAY_MS = 320;
++/** Beyond the newest sample the pose runs on with that sample's velocity for at most this long. */
++const MAX_EXTRAPOLATION_MS = 120;
++const EXTRAPOLATION_RETURN_MS = 250;
++/** A move larger than this between two samples is a teleport: no sliding across the island. */
++const SNAP_DISTANCE = 6;
++/** Right after an avatar appears, a jump this large is a late first position, not a walk. */
++const EARLY_SNAP_DISTANCE = 1.5;
++const EARLY_WINDOW_MS = 1500;
++const STILL_EPSILON_SQ = 1e-6;
++/** Render time may run this much faster or slower than real time while the delay or offset settles. */
++const CLOCK_SLEW = 0.1;
++const ERROR_DECAY_S = 0.09;
++const SPEED_SMOOTHING_S = 0.12;
++/** Hysteresis for the receiver's own idle/walk choice (m/s of the drawn pose). */
++const START_MOVING = 0.8;
++const STOP_MOVING = 0.35;
+ 
+ // Scratch shared by every avatar: the frame channel steps them one at a time.
+-const predicted = new THREE.Vector3();
+-const change = new THREE.Vector3();
++const out = new THREE.Vector3();
++const outRotation = new THREE.Quaternion();
+ const step = new THREE.Vector3();
+-const adjustedTarget = new THREE.Vector3();
+-const toTarget = new THREE.Vector3();
+-const overshoot = new THREE.Vector3();
+ 
+ export function createRemoteMotion(): RemoteMotion {
+   return {
+@@ -55,7 +105,23 @@ export function createRemoteMotion(): RemoteMotion {
+     receivedAt: 0,
+     position: new THREE.Vector3(),
+     rotation: new THREE.Quaternion(),
+-    smoothVelocity: new THREE.Vector3(),
++    speed: 0,
++    playing: 'idle',
++    gait: 'walk',
++    samples: [],
++    spare: Array.from({ length: MAX_SAMPLES }, newSample),
++    senderClock: false,
++    offsetMin: Number.POSITIVE_INFINITY,
++    offsetPrevious: Number.POSITIVE_INFINITY,
++    offsetWindowStart: 0,
++    offset: 0,
++    lateness: 0,
++    interval: 50,
++    delay: 100,
++    error: new THREE.Vector3(),
++    lastOut: new THREE.Vector3(),
++    hasOut: false,
++    placedAt: 0,
+     lodAccum: 0,
+     lodInterval: 0,
+   };
+@@ -67,103 +133,215 @@ function fallbackAnimation(previous: string, speed: number, runThreshold: number
+   return speed > runThreshold ? 'run' : 'idle';
+ }
+ 
++function fastestOffset(motion: RemoteMotion): number {
++  return Math.min(motion.offsetMin, motion.offsetPrevious);
++}
++
++/** Keeps the fastest arrival-minus-send seen recently; a window rolls over so a slower route is followed too. */
++function observeOffset(motion: RemoteMotion, offset: number, now: number): void {
++  if (now - motion.offsetWindowStart > OFFSET_WINDOW_MS) {
++    motion.offsetPrevious = motion.offsetMin;
++    motion.offsetMin = Number.POSITIVE_INFINITY;
++    motion.offsetWindowStart = now;
++  }
++  motion.offsetMin = Math.min(motion.offsetMin, offset);
++  const lateness = Math.max(0, offset - fastestOffset(motion));
++  motion.lateness += (Math.min(lateness, 1000) - motion.lateness) * 0.1;
++}
++
++function addSample(motion: RemoteMotion, t: number): void {
++  const samples = motion.samples;
++  const last = samples[samples.length - 1];
++  if (last && t < last.t) return;
++  if (last && t === last.t) {
++    last.position.copy(motion.target);
++    last.rotation.copy(motion.targetRotation);
++    last.velocity.copy(motion.velocity);
++    return;
++  }
++  if (last) {
++    const gap = t - last.t;
++    if (gap < 400 && last.position.distanceToSquared(motion.target) > STILL_EPSILON_SQ) {
++      motion.interval += (Math.min(gap, 400) - motion.interval) * 0.15;
++    }
++  }
++  const sample = (samples.length >= MAX_SAMPLES ? samples.shift() : motion.spare.pop()) ?? newSample();
++  sample.t = t;
++  sample.position.copy(motion.target);
++  sample.rotation.copy(motion.targetRotation);
++  sample.velocity.copy(motion.velocity);
++  samples.push(sample);
++}
++
+ /**
+- * Writes a network state into the targets; the first state also places the avatar.
+- * Idempotent per state object. Returns true only when the appearance changed.
++ * Writes a network state into the sample buffer; the first state also places the avatar. Idempotent per state object.
++ * Returns true only when the appearance changed. `now` is the arrival time (performance.now()).
+  */
+-export function syncRemoteMotion(motion: RemoteMotion, state: PlayerState, velocityThreshold: number): boolean {
++export function syncRemoteMotion(
++  motion: RemoteMotion,
++  state: PlayerState,
++  velocityThreshold: number,
++  now: number = performance.now(),
++): boolean {
+   if (motion.source === state) return false;
+   const placed = motion.source !== null;
+   motion.source = state;
+-  motion.receivedAt = performance.now();
++  motion.receivedAt = now;
+   motion.target.set(state.position[0], state.position[1], state.position[2]);
+   const [w, x, y, z] = state.rotation;
+-  motion.targetRotation.set(x, y, z, w);
++  // Scale first so legacy or hostile very large/tiny finite quaternions retain their orientation.
++  const magnitude = Math.max(Math.abs(w), Math.abs(x), Math.abs(y), Math.abs(z));
++  if (magnitude > 0 && Number.isFinite(magnitude)) {
++    motion.targetRotation.set(x / magnitude, y / magnitude, z / magnitude, w / magnitude).normalize();
++  } else {
++    motion.targetRotation.identity();
++  }
+   if (state.velocity) motion.velocity.set(state.velocity[0], state.velocity[1], state.velocity[2]);
++
++  const sent = typeof state.t === 'number' && Number.isFinite(state.t) ? state.t : null;
++  if (sent !== null && !motion.senderClock) {
++    // The first send time: earlier samples (arrival times) move onto the sender's clock with this offset.
++    const offset = now - sent;
++    for (const sample of motion.samples) sample.t -= offset;
++    motion.senderClock = true;
++    motion.offsetMin = motion.offsetPrevious = motion.offset = offset;
++    motion.offsetWindowStart = now;
++  }
++  let t = now;
++  if (motion.senderClock) {
++    if (sent !== null) {
++      observeOffset(motion, now - sent, now);
++      t = sent;
++    } else {
++      // A snapshot without a send time (a room's Welcome) lands where the sender's clock is now.
++      t = now - motion.offset;
++    }
++  }
++  addSample(motion, t);
+   if (!placed) {
+     motion.position.copy(motion.target);
+     motion.rotation.copy(motion.targetRotation);
++    motion.placedAt = now;
+   }
+ 
+   const current = motion.appearance;
+   const animation = state.animation?.trim()
+     || fallbackAnimation(current.animation, motion.velocity.length(), velocityThreshold);
++  if (animation === 'walk' || animation === 'run') motion.gait = animation;
+   if (current.name === state.name && current.color === state.color
+     && current.animation === animation && current.modelUrl === state.modelUrl) return false;
+   motion.appearance = { name: state.name, color: state.color, animation, modelUrl: state.modelUrl };
+   return true;
+ }
+ 
+-/** Unity's SmoothDamp (critically damped spring) for a Vector3, updating `current` in place. */
+-function smoothDamp(
+-  current: THREE.Vector3,
+-  target: THREE.Vector3,
+-  velocity: THREE.Vector3,
+-  smoothTime: number,
+-  deltaTime: number,
+-): void {
+-  const st = Math.max(0.0001, smoothTime);
+-  const dt = Math.max(0, deltaTime);
+-  const omega = 2 / st;
+-  const x = omega * dt;
+-  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+-
+-  change.copy(current).sub(target);
+-  // Clamp maximum change (prevents extreme overshoot after long stalls).
+-  const maxChange = MAX_SPEED * st;
+-  const changeLength = change.length();
+-  if (changeLength > maxChange && changeLength > 0) change.multiplyScalar(maxChange / changeLength);
+-  adjustedTarget.copy(current).sub(change);
+-
+-  step.copy(velocity).addScaledVector(change, omega).multiplyScalar(dt);
+-  velocity.addScaledVector(step, -omega).multiplyScalar(exp);
+-
+-  toTarget.copy(target).sub(current);
+-  current.copy(change).add(step).multiplyScalar(exp).add(adjustedTarget);
+-  // Prevent overshooting the target.
+-  if (toTarget.dot(overshoot.copy(current).sub(target)) > 0) {
+-    current.copy(target);
+-    velocity.set(0, 0, 0);
++/** The pose at `renderT` on the sample clock: interpolated, held, or briefly extrapolated with the sent velocity. */
++function sampleAt(samples: readonly Sample[], renderT: number, snap: number): void {
++  const newest = samples[samples.length - 1]!;
++  if (renderT >= newest.t) {
++    const previous = samples[samples.length - 2];
++    // Extrapolate only a peer that is really moving: a keepalive repeats the position and carries no motion.
++    const moving = previous ? previous.position.distanceToSquared(newest.position) > STILL_EPSILON_SQ : false;
++    out.copy(newest.position);
++    if (moving) {
++      // Run on briefly over a late packet; a stream that stays silent eases back to where the peer was last seen.
++      const late = renderT - newest.t;
++      const ahead = late <= MAX_EXTRAPOLATION_MS
++        ? late
++        : MAX_EXTRAPOLATION_MS * Math.max(0, 1 - (late - MAX_EXTRAPOLATION_MS) / EXTRAPOLATION_RETURN_MS);
++      out.addScaledVector(newest.velocity, ahead / 1000);
++    }
++    outRotation.copy(newest.rotation);
++    return;
++  }
++  if (renderT <= samples[0]!.t) {
++    out.copy(samples[0]!.position);
++    outRotation.copy(samples[0]!.rotation);
++    return;
+   }
++  let index = samples.length - 1;
++  while (index > 0 && samples[index - 1]!.t > renderT) index--;
++  const from = samples[index - 1]!;
++  const to = samples[index]!;
++  const span = to.t - from.t;
++  const f = span > 0 ? (renderT - from.t) / span : 1;
++  if (from.position.distanceTo(to.position) > snap) {
++    out.copy(f < 1 ? from.position : to.position);
++    outRotation.copy(f < 1 ? from.rotation : to.rotation);
++    return;
++  }
++  out.lerpVectors(from.position, to.position, f);
++  outRotation.slerpQuaternions(from.rotation, to.rotation, f);
+ }
+ 
+ /**
+- * Moves the smoothed pose toward the network target. Distant avatars step less often, with the
++ * Moves the drawn pose to the sample timeline `delay` behind the sender. Distant avatars step less often, with the
+  * skipped time carried into the next step; returns false when this frame was skipped.
+  */
+ export function stepRemoteMotion(
+   motion: RemoteMotion,
+   delta: number,
+   camera: THREE.Vector3,
+-  interpolationSpeed: number,
++  _interpolationSpeed?: number,
++  now: number = performance.now(),
+ ): boolean {
+   motion.lodAccum += Math.max(0, delta);
+   if (motion.lodAccum < motion.lodInterval) return false;
+   const elapsed = motion.lodAccum;
+   motion.lodAccum = 0;
++  if (motion.samples.length === 0) return false;
+ 
+   // SFE-style suppression w = exp(-sigma(distance)) picks the next step interval.
+   const weight = weightFromDistance(camera.distanceTo(motion.position), 25, 140, 4);
+   motion.lodInterval = weight >= 0.7 ? 0 : weight >= 0.4 ? 1 / 30 : weight >= 0.2 ? 1 / 15 : 1 / 8;
+ 
+-  // Short prediction hides network jitter.
+-  const sinceNet = (performance.now() - motion.receivedAt) / 1000;
+-  predicted.copy(motion.target).addScaledVector(motion.velocity, Math.max(0, Math.min(MAX_PREDICTION_S, sinceNet)));
+-
+-  // Higher interpolationSpeed means a shorter time constant.
+-  const base = Math.max(0.01, Math.min(0.9, interpolationSpeed));
+-  const smoothTime = Math.max(0.03, Math.min(0.22, 0.03 + (1 - base) * 0.19));
++  // The playout delay covers the sample spacing and the recent lateness; offset and delay change at a bounded rate so
++  // the drawn timeline never jumps.
++  const wantedDelay = Math.min(MAX_DELAY_MS, Math.max(MIN_DELAY_MS, motion.interval + motion.lateness * 2 + 20));
++  const slew = Math.max(1, elapsed * 1000 * CLOCK_SLEW);
++  motion.delay += Math.max(-slew, Math.min(slew, wantedDelay - motion.delay));
++  if (motion.senderClock) {
++    const wantedOffset = fastestOffset(motion);
++    if (Math.abs(wantedOffset - motion.offset) > 500) motion.offset = wantedOffset;
++    else motion.offset += Math.max(-slew, Math.min(slew, wantedOffset - motion.offset));
++  }
++  const renderT = (motion.senderClock ? now - motion.offset : now) - motion.delay;
++  const young = now - motion.placedAt < EARLY_WINDOW_MS;
++  sampleAt(motion.samples, renderT, young ? EARLY_SNAP_DISTANCE : SNAP_DISTANCE);
++  // Samples far behind the drawn moment are no longer needed; two are kept for the interval around it.
++  while (motion.samples.length > 2 && motion.samples[1]!.t < renderT - 500) motion.spare.push(motion.samples.shift()!);
+ 
+-  // Snap on teleports, missed packets or long frame stalls.
+-  if (motion.position.distanceTo(predicted) > SNAP_DISTANCE || elapsed > SNAP_ELAPSED_S) {
+-    motion.position.copy(predicted);
+-    motion.smoothVelocity.set(0, 0, 0);
+-    motion.rotation.copy(motion.targetRotation);
+-    return true;
++  if (motion.hasOut) {
++    const jump = out.distanceTo(motion.lastOut);
++    if (jump > SNAP_DISTANCE || (young && jump > EARLY_SNAP_DISTANCE)) {
++      motion.error.set(0, 0, 0);
++    } else if (jump > Math.max(0.25, motion.speed * elapsed * 3)) {
++      // A late sample after extrapolating: keep drawing where we were and fade the difference out.
++      motion.error.add(motion.lastOut).sub(out);
++    }
++    step.subVectors(out, motion.lastOut).setY(0);
++    const instant = elapsed > 0 ? step.length() / elapsed : 0;
++    motion.speed += (instant - motion.speed) * (1 - Math.exp(-elapsed / SPEED_SMOOTHING_S));
+   }
+-  smoothDamp(motion.position, predicted, motion.smoothVelocity, smoothTime, elapsed);
+-  // Exponential rotation smoothing stays stable across frame rates.
+-  const rotationTime = Math.max(0.025, smoothTime * 0.7);
+-  motion.rotation.slerp(motion.targetRotation, 1 - Math.exp(-elapsed / rotationTime));
++  motion.error.multiplyScalar(Math.exp(-elapsed / ERROR_DECAY_S));
++  motion.lastOut.copy(out);
++  motion.hasOut = true;
++  motion.position.copy(out).add(motion.error);
++  motion.rotation.copy(outRotation);
+   return true;
+ }
++
++/**
++ * The clip a remote avatar plays: idle, walk and run follow the drawn speed, so a peer that stops is not seen sliding in
++ * its idle pose and one that starts does not walk on the spot; any other clip (jump, fall, a wave) is the peer's own.
++ */
++export function chooseRemoteClip(motion: RemoteMotion): string {
++  const requested = motion.appearance.animation || 'idle';
++  if (requested !== 'idle' && requested !== 'walk' && requested !== 'run') return requested;
++  const moving = motion.playing === 'idle' || !isLocomotion(motion.playing)
++    ? motion.speed > START_MOVING
++    : motion.speed > STOP_MOVING;
++  if (!moving) return 'idle';
++  return requested === 'idle' ? motion.gait : requested;
++}
++
++const isLocomotion = (clip: string) => clip === 'idle' || clip === 'walk' || clip === 'run';
+diff --git a/src/core/networks/hooks/__tests__/useMultiplayer.test.tsx b/src/core/networks/hooks/__tests__/useMultiplayer.test.tsx
+index 3976ca0e..5bf18e26 100644
+--- a/src/core/networks/hooks/__tests__/useMultiplayer.test.tsx
++++ b/src/core/networks/hooks/__tests__/useMultiplayer.test.tsx
+@@ -2,12 +2,44 @@ import type { RefObject } from 'react';
+ 
+ import type { RapierRigidBody } from '@react-three/rapier';
+ import { act, renderHook } from '@testing-library/react';
++import * as THREE from 'three';
+ 
+ import { defaultMultiplayerConfig } from '../../config/defaultConfig';
+ import { PlayerNetworkManager } from '../../core/PlayerNetworkManager';
+ import type { PlayerNetworkManagerOptions } from '../../core/PlayerNetworkManager';
+ import { useMultiplayer } from '../useMultiplayer';
+ 
++const mockAnimationSnapshot = jest.fn(() => ({ currentAnimation: 'idle', isPlaying: false }));
++jest.mock('../../../animation/hooks/useAnimationBridge', () => ({
++  useScopedAnimationBridge: () => ({ snapshot: mockAnimationSnapshot }),
++}));
++
++test('tracking reads the playing bridge and the visible world rotation without a store animation subscription', () => {
++  jest.clearAllMocks();
++  jest.useFakeTimers();
++  mockAnimationSnapshot.mockReturnValue({ currentAnimation: 'walk', isPlaying: true });
++  const parent = new THREE.Group();
++  parent.rotation.y = Math.PI / 4;
++  const visual = new THREE.Group();
++  visual.rotation.y = Math.PI / 4;
++  parent.add(visual);
++  const ref = { current: { translation: () => ({ x: 0, y: 0, z: 0 }), rotation: () => ({ x: 0, y: 0, z: 0, w: 1 }), linvel: () => ({ x: 4, y: 0, z: 0 }) } } as unknown as RefObject<RapierRigidBody>;
++  const view = renderHook(() => useMultiplayer({ config: defaultMultiplayerConfig, rigidBodyRef: ref, visualRotationRef: { current: visual } }));
++  try {
++    act(() => view.result.current.connect({ roomId: 'room', playerName: 'player', playerColor: '#fff' }));
++    act(() => jest.advanceTimersByTime(50));
++    const manager = jest.mocked(PlayerNetworkManager).mock.results[0]!.value as PlayerNetworkManager;
++    expect(manager.updateLocalPlayer).toHaveBeenLastCalledWith(expect.objectContaining({ animation: 'walk', rotation: [0.7071, 0, 0.7071, 0] }));
++    mockAnimationSnapshot.mockReturnValue({ currentAnimation: 'wave', isPlaying: true });
++    act(() => jest.advanceTimersByTime(50));
++    expect(manager.updateLocalPlayer).toHaveBeenLastCalledWith(expect.objectContaining({ animation: 'wave' }));
++  } finally {
++    view.unmount();
++    mockAnimationSnapshot.mockReturnValue({ currentAnimation: 'idle', isPlaying: false });
++    jest.useRealTimers();
++  }
++});
++
+ jest.mock('@stores/gaesupStore', () => ({
+   useGaesupStore: (selector: (state: object) => unknown) => selector({}),
+ }));
+diff --git a/src/core/networks/hooks/useMultiplayer.ts b/src/core/networks/hooks/useMultiplayer.ts
+index 1949372c..d51ef95d 100644
+--- a/src/core/networks/hooks/useMultiplayer.ts
++++ b/src/core/networks/hooks/useMultiplayer.ts
+@@ -1,9 +1,11 @@
+ import { useEffect, useRef, useState, useCallback, useMemo, type RefObject } from 'react';
+ 
+ import type { RapierRigidBody } from '@react-three/rapier';
++import { Quaternion, type Object3D } from 'three';
+ 
+ import { useGaesupStore } from '@stores/gaesupStore';
+ 
++import { useScopedAnimationBridge } from '../../animation/hooks/useAnimationBridge';
+ import { LivePlayerMap } from '../core/LivePlayerMap';
+ import { PlayerNetworkManager } from '../core/PlayerNetworkManager';
+ import { PlayerPositionTracker, PlayerTrackingConfig } from '../core/PlayerPositionTracker';
+@@ -21,6 +23,8 @@ interface UseMultiplayerOptions {
+   config: MultiplayerConfig;
+   characterUrl?: string;
+   rigidBodyRef?: RefObject<RapierRigidBody>;
++  /** The visible character group, including its retained orientation while stopped. */
++  visualRotationRef?: RefObject<Object3D | null>;
+ }
+ 
+ interface UseMultiplayerResult extends MultiplayerState {
+@@ -39,7 +43,12 @@ interface UseMultiplayerResult extends MultiplayerState {
+ export function useMultiplayer(options: UseMultiplayerOptions): UseMultiplayerResult {
+   const { config, characterUrl, rigidBodyRef } = options;
+   const modeType = useGaesupStore((s) => s.mode?.type ?? 'character');
+-  const animationState = useGaesupStore((s) => s.animationState);
++  const animationBridge = useScopedAnimationBridge();
++  const visualQuaternion = useMemo(() => new Quaternion(), []);
++  const visualRotationRef = useRef(options.visualRotationRef);
++  visualRotationRef.current = options.visualRotationRef;
++  const animationBridgeRef = useRef(animationBridge);
++  animationBridgeRef.current = animationBridge;
+   
+   const playersRef = useRef<LivePlayerMap>(new LivePlayerMap());
+   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+@@ -103,7 +112,6 @@ export function useMultiplayer(options: UseMultiplayerOptions): UseMultiplayerRe
+   const [trackingUpdateRate, setTrackingUpdateRate] = useState(config.tracking.updateRate);
+   const stateRef = useRef<MultiplayerState & { players: LivePlayerMap }>(state);
+   const modeTypeRef = useRef(modeType);
+-  const animationStateRef = useRef(animationState);
+   const characterUrlRef = useRef(characterUrl);
+   characterUrlRef.current = characterUrl;
+ 
+@@ -115,9 +123,6 @@ export function useMultiplayer(options: UseMultiplayerOptions): UseMultiplayerRe
+     modeTypeRef.current = modeType;
+   }, [modeType]);
+ 
+-  useEffect(() => {
+-    animationStateRef.current = animationState;
+-  }, [animationState]);
+ 
+   const [speechByPlayerId, setSpeechByPlayerId] = useState<Map<string, { text: string; expiresAt: number }>>(
+     () => new Map()
+@@ -366,13 +371,21 @@ export function useMultiplayer(options: UseMultiplayerOptions): UseMultiplayerRe
+ 
+       const { playerName, playerColor, characterUrl: connectedUrl } = connectionInfoRef.current;
+       const type = modeTypeRef.current;
+-      const localAnimation = animationStateRef.current?.[type]?.current ?? 'idle';
++      const snapshot = animationBridgeRef.current?.snapshot(type);
++      const localAnimation = snapshot?.isPlaying ? snapshot.currentAnimation : undefined;
++      const visual = visualRotationRef.current?.current;
++      const visualRotation = visual ? visual.getWorldQuaternion(visualQuaternion) : undefined;
++      // A hidden page draws no frames and its body stands still; the tracker reports it stopped instead of repeating
++      // the walking state it had when the page was hidden.
++      const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+       const updateData = positionTrackerRef.current.trackPosition(
+         trackingPlayerRef.current,
+         playerName,
+         playerColor,
+         connectedUrl || characterUrl,
+         localAnimation,
++        visualRotation,
++        hidden,
+       );
+ 
+       if (updateData) {
+@@ -385,7 +398,7 @@ export function useMultiplayer(options: UseMultiplayerOptions): UseMultiplayerRe
+     }, tickMs);
+ 
+     return () => window.clearInterval(id);
+-  }, [state.isConnected, characterUrl, trackingUpdateRate]);
++  }, [state.isConnected, characterUrl, trackingUpdateRate, visualQuaternion]);
+ 
+   // 정리
+   useEffect(() => {
+diff --git a/src/core/networks/types/index.ts b/src/core/networks/types/index.ts
+index c1f1159d..29479e86 100644
+--- a/src/core/networks/types/index.ts
++++ b/src/core/networks/types/index.ts
+@@ -1,3 +1,5 @@
++import type { ImportedMaterialPolicy } from '../../assets/materialPolicy';
++
+ export type NetworkPayload = object | string | number | boolean | null | undefined;
+ 
+ // 플레이어 상태 정보
+@@ -9,6 +11,11 @@ export interface PlayerState {
+   animation?: string;
+   velocity?: [number, number, number];
+   modelUrl?: string;
++  /**
++   * When the sender sampled this state, in milliseconds on its own clock (`performance.now()`). Receivers interpolate
++   * on this timeline instead of arrival times, which network jitter bunches up.
++   */
++  t?: number;
+ }
+ 
+ /** Settings the multiplayer client reads; `MultiplayerConfig` adds transport, tracking and rendering. */
+@@ -48,6 +55,10 @@ export interface MultiplayerConfig extends NetworkConfig {
+     nameTagHeight: number;
+     nameTagSize: number;
+     characterScale: number;
++    /** Imported glTF materials use the same policy as the local character. Defaults to keep. */
++    materialPolicy?: ImportedMaterialPolicy;
++    /** Explicitly tint model materials with playerColor; false preserves authored colours. */
++    tintCharacter?: boolean;
+   };
+ }
+ 
+diff --git a/test/accept/budgets.json b/test/accept/budgets.json
+index d7f9a82e..7f201095 100644
+--- a/test/accept/budgets.json
++++ b/test/accept/budgets.json
+@@ -13,7 +13,7 @@
+     "S-H10": { "title": "변경 없는 autosave, 이어서 도메인 1개 변경 후 autosave", "runner": "headless", "item": "AST-06a", "status": "green", "budget": { "unchangedSerializeCalls": 0, "changedDomainsSerialized": { "min": 1, "max": 1 } } },
+     "S-H11": { "title": "기본 runtime + NPC 30체 60초", "runner": "headless", "item": "DOM-03a", "status": "green", "budget": { "externalFetches": 0 } },
+     "S-H12": { "title": "save → load, legacy 포맷 load", "runner": "headless", "item": "AST-06b", "status": "pending", "budget": { "roundTripEqual": true, "legacyLoaded": true } },
+-    "S-H13": { "title": "로컬 정지 송신률과 Update 크기", "runner": "headless", "item": "DOM-08", "status": "green", "budget": { "restingUpdatesPerSecond": { "min": 0.5, "max": 2 }, "maxMovingUpdateBytes": 120 } },
++    "S-H13": { "title": "로컬 정지 송신률과 Update 크기", "runner": "headless", "item": "DOM-08", "status": "green", "budget": { "restingUpdatesPerSecond": { "min": 0.5, "max": 2 }, "maxMovingUpdateBytes": 136 } },
+     "S-H14": { "title": "공개 엔트리가 도달하는 모듈의 최상위 부수효과", "runner": "headless", "item": "COR-12b", "status": "green", "budget": { "statementCalls": 0, "classDecorators": 0, "globalStores": 0, "otherCalls": null, "sourceFiles": null } },
+     "S-H15": { "title": "에셋 URL 변경 후 저장본 load, prefab base 변경", "runner": "headless", "item": "AST-03b", "status": "pending", "budget": { "legacyUrlLoaded": true, "prefabChangePropagated": true } },
+     "S-H16": { "title": "2k 객체 문서에서 편집 후 undo", "runner": "headless", "item": "AST-07a", "status": "pending", "budget": { "undoTouchesOnlyChanged": true, "resetDeltas": 0 } }

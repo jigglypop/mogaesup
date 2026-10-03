@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createHomeSaveAdapter, isSaveConflict, IslandTooLargeError, MAX_ISLAND_BYTES } from '../persistence';
+import { createHomeSaveAdapter, IslandTooLargeError, MAX_ISLAND_BYTES } from '../persistence';
 import { setSessionOwner } from '../../auth/sessionWork';
 
 const blob = { version: 1, savedAt: 1, domains: { building: { objects: [] } } };
@@ -41,7 +41,61 @@ describe('home save adapter', () => {
     fetchMock.mockResolvedValueOnce(json(409, { code: 'revision_conflict', message: '다른 곳에서 먼저 저장했습니다.' }));
     const error = await adapter.write('main', blob).catch((problem: unknown) => problem);
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).baseRevision).toBe(7);
-    expect(isSaveConflict(error)).toBe(true);
+    expect(error).toMatchObject({ status: 409, code: 'revision_conflict' });
+    // Nothing was lost on the way, so the conflict is someone else's: the stored island is not even read.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  describe('대답을 잃은 저장 뒤의 충돌', () => {
+    const island = (savedAt: number, note = 'a') => ({ version: 1, savedAt, domains: { building: { objects: [], note } } });
+    const opened = async () => {
+      const adapter = createHomeSaveAdapter({ username: 'mogae', ownerId: 'owner', worldId: 'minihome-v6', writable: true });
+      fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 7, data: island(1), updatedAt: '' }));
+      await adapter.read('main');
+      return adapter;
+    };
+    const conflict = () => json(409, { code: 'revision_conflict', message: '다른 곳에서 먼저 저장했어요.' });
+    const bodyOf = (call: number) => JSON.parse(String(fetchMock.mock.calls[call]?.[1]?.body));
+
+    it('잃은 저장이 실제로 들어갔다면 충돌로 보지 않고 그 리비전을 이어받는다', async () => {
+      const adapter = await opened();
+      fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      await expect(adapter.write('main', island(2, 'b'))).rejects.toBeInstanceOf(TypeError);
+      // The retry: same island, a new savedAt. The server holds the first one (its keys in its own order).
+      fetchMock.mockResolvedValueOnce(conflict());
+      fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 8, data: { domains: { building: { note: 'b', objects: [] } }, savedAt: 2, version: 1 }, updatedAt: '' }));
+      await expect(adapter.write('main', island(3, 'b'))).resolves.toBeUndefined();
+      expect(adapter.revision).toBe(8);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(String(fetchMock.mock.calls[3]?.[0])).toBe('/api/homes/mogae/world?worldId=minihome-v6');
+
+      fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 9, data: island(4, 'c'), updatedAt: '' }));
+      await adapter.write('main', island(4, 'c'));
+      expect(bodyOf(4).baseRevision).toBe(8);
+    });
+
+    it('잃은 저장 뒤에 더 꾸몄다면 들어간 저장 위에 지금 섬을 다시 저장한다', async () => {
+      const adapter = await opened();
+      fetchMock.mockImplementationOnce(() => Promise.reject(new TypeError('Failed to fetch')));
+      await adapter.write('main', island(2, 'b')).catch(() => undefined);
+      fetchMock.mockResolvedValueOnce(conflict());
+      fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 8, data: island(2, 'b'), updatedAt: '' }));
+      fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 9, data: island(3, 'c'), updatedAt: '' }));
+      await expect(adapter.write('main', island(3, 'c'))).resolves.toBeUndefined();
+      expect(bodyOf(4)).toMatchObject({ baseRevision: 8, data: island(3, 'c') });
+      expect(adapter.revision).toBe(9);
+    });
+
+    it('저장된 섬이 보낸 적 없는 섬이면 다른 곳의 저장이라 충돌로 알린다', async () => {
+      const adapter = await opened();
+      fetchMock.mockResolvedValueOnce(json(504, { code: 'gateway_timeout', message: '' }));
+      await adapter.write('main', island(2, 'b')).catch(() => undefined);
+      fetchMock.mockResolvedValueOnce(conflict());
+      fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 8, data: island(5, 'other tab'), updatedAt: '' }));
+      const error = await adapter.write('main', island(3, 'b')).catch((problem: unknown) => problem);
+      expect(error).toMatchObject({ status: 409, code: 'revision_conflict' });
+      expect(adapter.revision).toBe(7);
+    });
   });
 
   it('2MB가 넘는 섬은 보내지 않고, 보낸 크기를 기억한다', async () => {
@@ -99,7 +153,6 @@ describe('home save adapter', () => {
     expect(await pending).toMatchObject({ name: 'AbortError' });
     const rejected = await adapter.write('main', blob).catch((problem: unknown) => problem);
     expect(rejected).toMatchObject({ status: 409, code: 'owner_changed' });
-    expect(isSaveConflict(rejected)).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

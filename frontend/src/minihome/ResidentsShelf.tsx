@@ -131,7 +131,6 @@ export function ResidentsShelf({ session, residents, items, query }: { session: 
               role="radio"
               className="mg-piece"
               aria-checked={candidate.id === chosen}
-              aria-pressed={candidate.id === chosen}
               onClick={() => setChosen(candidate.id)}
             >
               <Thumb item={candidate} />

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rememberStudioQuery, studioHref } from '../../studio/screens';
+import { usePaidWork } from '../../studio/usage';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { NativeAssembly } from '../factory/NativeAssembly';
 import { usePolling } from '../use-polling';
@@ -25,6 +26,8 @@ const tabs = { admin: '관리자페이지', animals: '동물', character: '캐�
 
 export function Workspace() {
   const navigate = useNavigate();
+  // The make screens start paid work: only viewers who may start it are sent there.
+  const paid = usePaidWork();
   const initial = new URLSearchParams(location.search);
   const [tab] = useState<keyof typeof tabs>((initial.get('tab') || '') in tabs ? initial.get('tab') as keyof typeof tabs : 'character');
   const [characterMode] = useState<'body' | 'photo' | 'parts'>(
@@ -108,7 +111,7 @@ export function Workspace() {
       jobs={jobs.value?.jobs || []} jobsLoading={jobs.loading && !jobs.value} jobsError={jobs.error}
       catalog={catalog.value} catalogError={catalog.error} bodyProfile={bodyProfile.value} bodyProfileError={bodyProfile.error}
       onJob={listJob} refreshJobs={jobs.refresh} /></Suspense> : <SinglePart slot={partType} onSlotChange={choosePart} bases={bases} base={base} native={nativeState} versions={versions} job={job} name={name} onBaseChange={id => { setBaseId(id); setJobId(''); }} onJobChange={setJobId} onJob={receiveJob} refreshJobs={jobs.refresh} />}</>}
-    {tab === 'admin' && <div className="workspace-content admin-library"><div className="workspace-heading"><h1>에셋 관리</h1><div className="admin-heading-actions"><button onClick={() => navigate(studioHref({ tab: 'character', mode: 'body' }))}>기본몸 추가</button><button onClick={() => choosePart('hair')}>헤어 생성</button><button aria-expanded={showUploads} onClick={() => setShowUploads(value => !value)}>GLB 등록</button></div></div>
+    {tab === 'admin' && <div className="workspace-content admin-library"><div className="workspace-heading"><h1>에셋 관리</h1><div className="admin-heading-actions">{paid && <><button onClick={() => navigate(studioHref({ tab: 'character', mode: 'body' }))}>기본몸 추가</button><button onClick={() => choosePart('hair')}>헤어 생성</button></>}<button aria-expanded={showUploads} onClick={() => setShowUploads(value => !value)}>GLB 등록</button></div></div>
         {deletedAsset && <div className="asset-delete-notice" role="status"><span>{deletedAsset.name} · 휴지통으로 이동했습니다.</span><button disabled={busy || !catalog.value} onClick={() => void perform(async () => { catalog.setValue(await studioApi.savePartMetadata(deletedAsset.id, deletedAsset.slot, { deleted: false }, catalog.value!.revision)); setDeletedAsset(undefined); })}>삭제 취소</button></div>}
         {showUploads && <GlbAssetLibrary bases={bases} defaultBaseId={base?.id} onJob={result => { setBaseId(result.base_job_id || result.id); setAdminAssetId(result.id); setAdminSlot(''); receiveJob(result); void jobs.refresh(); }} />}
         <AssetGallery jobs={candidates} loading={jobs.loading && !jobs.value} catalog={catalog.value} onCatalogChange={catalog.setValue} onRefresh={catalog.refresh} nativeJobId={managedAsset?.id} nativeState={managedNativeState} onOpen={(item, slot) => { setBaseId(item.base_job_id || item.id); setAdminAssetId(item.id); setAdminSlot(slot || ''); setJobId(item.id); setShowMotion(false); }} onCompose={item => setComposeId(item.id)} />
@@ -116,10 +119,10 @@ export function Workspace() {
         {managedAsset && <AdminAssetDetail managedAsset={managedAsset} adminSlot={adminSlot} base={base} hidden={!!composeJob} name={name}
           catalog={catalog} bodyProfile={bodyProfile} native={native} nativeState={nativeState} managedNativeState={managedNativeState} setManagedNative={managedNative.setValue}
           showInfo={showInfo} onShowInfo={setShowInfo} showMotion={showMotion} onShowMotion={setShowMotion} busy={busy} error={error} perform={perform}
-          onClose={() => setAdminAssetId('')} onDeleted={asset => { setDeletedAsset(asset); setAdminAssetId(''); }} onOpenProduction={openProduction} onCompose={setComposeId} />}
+          onClose={() => setAdminAssetId('')} onDeleted={asset => { setDeletedAsset(asset); setAdminAssetId(''); }} onOpenProduction={paid ? openProduction : undefined} onCompose={setComposeId} />}
     </div>}
     {tab === 'textures' && <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Textures /></Suspense>}
-    {tab === 'props' && <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Generations key="prop" kind="prop" /></Suspense>}
+    {tab === 'props' && <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Generations /></Suspense>}
     {tab === 'emoticons' && <Suspense fallback={<p className="workspace-content">불러오는 중</p>}><Emoticons /></Suspense>}
     {tab === 'animals' && <Suspense fallback={<p>불러오는 중</p>}><Animals /></Suspense>}
     {tab === 'prompts' && <Suspense fallback={<p className="workspace-content">프롬프트 불러오는 중</p>}><Prompts /></Suspense>}

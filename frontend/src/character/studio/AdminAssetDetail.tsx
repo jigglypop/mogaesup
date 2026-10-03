@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { usePaidWork } from '../../studio/usage';
 import { factoryApi, type BodyProfileState, type FactoryJob, type NativePartsState } from '../factory/api';
 import { usePolling } from '../use-polling';
 import { isCatalogJobDeleted, studioApi, type Catalog } from './api';
@@ -19,12 +20,15 @@ type AdminAssetDetailProps = {
   showInfo: boolean; onShowInfo: (open: boolean) => void; showMotion: boolean; onShowMotion: (open: boolean) => void;
   busy: boolean; error: string; perform: (action: () => Promise<void>) => Promise<void>;
   onClose: () => void; onDeleted: (asset: { id: string; slot: string; name: string }) => void;
-  onOpenProduction: (asset: FactoryJob, slot: string) => void; onCompose: (id: string) => void;
+  /** Opens the make screen the asset came from; absent for a viewer who cannot open those screens. */
+  onOpenProduction?: (asset: FactoryJob, slot: string) => void; onCompose: (id: string) => void;
 };
 
 // Stays mounted while an asset is selected in the admin tab so its reads survive the compose dialog.
 export function AdminAssetDetail({ managedAsset, adminSlot, base, hidden, name, catalog, bodyProfile, native, nativeState, managedNativeState, setManagedNative,
   showInfo, onShowInfo, showMotion, onShowMotion, busy, error, perform, onClose, onDeleted, onOpenProduction, onCompose }: AdminAssetDetailProps) {
+  // Refitting, re-assembling and rigging start paid work; the rest of the detail is for every operator.
+  const paid = usePaidWork();
   const managedSlot = adminSlot || managedAsset.requested_slots?.[0] || 'body';
   const managedDeleted = isCatalogJobDeleted(managedAsset, catalog.value) || !!catalog.value?.parts?.[`${managedAsset.id}:${managedSlot}`]?.deleted;
   const managedNativeDisplayed = managedNativeState?.preview?.status === 'review_required' ? managedNativeState.preview : managedNativeState;
@@ -85,7 +89,7 @@ export function AdminAssetDetail({ managedAsset, adminSlot, base, hidden, name, 
     <div className="admin-asset-detail">
       <AssetModelPreview key={`${managedAsset.id}:${managedSlot}:${managedStoredVersion}`} models={managedModels} image={managedImage} name={name(managedAsset)} emptyLabel="저장된 3D 파일 없음" detail autoLoad={hasManagedSlotModel} />
       <div className="admin-asset-data">
-      {!managedDeleted && <NativePartRefit key={managedAsset.id} jobId={managedAsset.id} state={managedNativeState} slot={managedSlot}
+      {paid && !managedDeleted && <NativePartRefit key={managedAsset.id} jobId={managedAsset.id} state={managedNativeState} slot={managedSlot}
         disabled={busy || !!managedAsset.character_flow?.busy} onChange={value => {
           if (managedAsset.id === base?.id) native.setValue({ jobId: managedAsset.id, parts: value });
           else setManagedNative({ jobId: managedAsset.id, parts: value });
@@ -111,14 +115,14 @@ export function AdminAssetDetail({ managedAsset, adminSlot, base, hidden, name, 
         const label = { front: '정면', back: '후면', side: '측면', opposite: '반대 측면' }[view];
         return artifact && <a key={view} href={artifact.url} target="_blank" rel="noreferrer"><img src={artifact.url} alt={`${name(managedAsset)} ${label}`} /><span>{label}</span></a>;
       })}</div>
-      <div className="admin-asset-actions"><button onClick={() => onOpenProduction(managedAsset, managedSlot)}>생성 작업 열기</button>{managedNativeDisplayed?.version && <button onClick={() => onCompose(managedAsset.id)}>착용·조합</button>}</div>
+      <div className="admin-asset-actions">{onOpenProduction && <button onClick={() => onOpenProduction(managedAsset, managedSlot)}>생성 작업 열기</button>}{managedNativeDisplayed?.version && <button onClick={() => onCompose(managedAsset.id)}>착용·조합</button>}</div>
       {managedAsset.id === base.id && nativeState?.origin !== 'uploaded_glb' && <button disabled={busy || !nativeState?.version || !bodyProfile.value || (bodyProfile.value.body?.job_id === base.id && bodyProfile.value.body.version === nativeState.version)} onClick={() => void perform(async () => { bodyProfile.setValue(await factoryApi.saveBodyProfile(base.id, nativeState!.version!, bodyProfile.value!.revision)); })}>{bodyProfile.value?.body?.job_id === base.id ? '공통 기본 몸' : '공통 기본 몸으로 지정'}</button>}
       </div>
     </div>
     <details className="admin-record"><summary>이름·보관·다운로드</summary>
     <form key={`${managedAsset.id}:${catalog.value?.revision}`} onSubmit={e => { e.preventDefault(); const data = new FormData(e.currentTarget); void perform(async () => { catalog.setValue(await studioApi.saveMetadata(managedAsset.id, String(data.get('name')), data.get('archived') === 'on', catalog.value!.revision)); }); }}><label>이름<input name="name" required maxLength={80} defaultValue={catalog.value?.items[managedAsset.id]?.name || managedAsset.part_name || managedAsset.character_name} /></label><label className="slot-choice"><input type="checkbox" name="archived" defaultChecked={catalog.value?.items[managedAsset.id]?.archived || false} />보관</label><button disabled={busy || !catalog.value}>저장</button></form>
     <div className="artifact-grid">{managedGlbs.map(a => <a key={`${a.name}:${a.url}`} href={a.url} download>{managedModelLabel(a, !a.name.startsWith('generated-'))}</a>)}</div></details>
-  </section>{managedAsset.id === base.id && <details className="admin-record base-motion-panel" open={showMotion} onToggle={event => onShowMotion(event.currentTarget.open)}><summary>기본 몸 동작</summary>{showMotion && <>
+  </section>{paid && managedAsset.id === base.id && <details className="admin-record base-motion-panel" open={showMotion} onToggle={event => onShowMotion(event.currentTarget.open)}><summary>기본 몸 동작</summary>{showMotion && <>
     {runtime && runtime.optimized > 0 && <dl className="runtime-budget"><div><dt>런타임 삼각형</dt><dd>{runtime.optimized.toLocaleString()}</dd></div><div><dt>원본 삼각형</dt><dd>{runtime.source.toLocaleString()}</dd></div><div><dt>파츠 예산 합계</dt><dd>{runtime.target.toLocaleString()}</dd></div><div><dt>축소 텍스쳐</dt><dd>{runtime.textures.toLocaleString()}</dd></div></dl>}
     <button disabled={busy || !nativeState?.version || ['accepted', 'running'].includes(nativeState.status) || !!base.character_flow?.busy} onClick={() => void perform(async () => { native.setValue({ jobId: base.id, parts: await factoryApi.assemble(base.id, true) }); })}>기본 자세 정렬 · 새 버전 저장</button>
     <MeshyMotion key={base.id} jobId={base.id} visibleSlots={['idle', 'walk', 'run', 'jump', 'fall']} onRigRecovery={() => void native.refresh()} />

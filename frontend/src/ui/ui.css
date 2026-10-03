@@ -282,17 +282,17 @@ textarea.mg-field { height: auto; min-height: 76px; padding: 11px 14px; resize: 
   height: 36px;
   border-radius: 12px;
   overflow: hidden;
-  background: linear-gradient(160deg, #efe9ff, #dcd3fb);
-  color: #3b2a8c;
+  background: var(--mg-tone-0);
+  color: var(--mg-tone-0-ink);
   font-size: 15px;
   font-weight: 850;
 }
 .mg-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .mg-avatar.is-round { border-radius: 50%; }
 .mg-avatar.is-large { width: 64px; height: 64px; border-radius: 18px; font-size: 26px; }
-.mg-avatar[data-tone='1'] { background: linear-gradient(160deg, #ffe4dc, #ffd0c2); color: #8a2d15; }
-.mg-avatar[data-tone='2'] { background: linear-gradient(160deg, #dff4ea, #c6ead8); color: #0f5b3d; }
-.mg-avatar[data-tone='3'] { background: linear-gradient(160deg, #fff1d6, #fbe0ad); color: #6b4608; }
+.mg-avatar[data-tone='1'] { background: var(--mg-tone-1); color: var(--mg-tone-1-ink); }
+.mg-avatar[data-tone='2'] { background: var(--mg-tone-2); color: var(--mg-tone-2-ink); }
+.mg-avatar[data-tone='3'] { background: var(--mg-tone-3); color: var(--mg-tone-3-ink); }
 
 /* Text helpers */
 .mg-muted { color: var(--mg-muted); }

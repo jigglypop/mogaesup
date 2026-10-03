@@ -24,7 +24,7 @@
 .mg-save-status { gap: 8px; height: 54px; padding: 0 16px; border: 1px solid var(--mg-line); color: var(--mg-ink); font-size: 14px; }
 .mg-save-dot { width: 9px; height: 9px; flex: none; border-radius: 50%; background: var(--mg-good); }
 .mg-save-status[data-tone='busy'] .mg-save-dot { background: var(--mg-primary); animation: mg-save-pulse 1s ease-in-out infinite; }
-.mg-save-status[data-tone='warn'] .mg-save-dot { background: #e0a030; }
+.mg-save-status[data-tone='warn'] .mg-save-dot { background: var(--mg-warn-dot); }
 .mg-save-status[data-tone='bad'] .mg-save-dot { background: var(--mg-bad); }
 .mg-save-status[data-tone='bad'] { color: var(--mg-bad); }
 @keyframes mg-save-pulse { 50% { opacity: 0.35; } }
@@ -47,8 +47,7 @@
 .mg-stepper { display: flex; align-items: center; gap: 6px; padding: 4px; border-radius: 16px; background: var(--mg-tint); justify-self: start; }
 .mg-stepper output { min-width: 56px; text-align: center; font-size: 14px; font-weight: 800; color: var(--mg-ink); font-variant-numeric: tabular-nums; }
 .mg-selection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.mg-edit-tips { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 12px; color: var(--mg-muted); }
-.mg-edit-tips kbd, .mg-help kbd {
+.mg-help kbd {
   display: inline-block;
   min-width: 22px;
   height: 22px;

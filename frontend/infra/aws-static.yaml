@@ -156,6 +156,29 @@ Resources:
       ResponseHeadersPolicyConfig:
         Name: !Sub '${AWS::StackName}-security-headers'
         SecurityHeadersConfig:
+          # What the built app needs (checked in Chrome on the island with GI and the live room, and the wardrobe):
+          # script-src: the bundles, the inline theme script of frontend/index.html by its sha256, WebAssembly (physics,
+          # gaesup_core, the GI worker). When that inline script changes, put its new hash here and deploy this stack;
+          # until then browsers skip it (dark themes flash light) and Chrome's console names the hash it expected.
+          # style-src 'unsafe-inline': the engine renders <style> elements (its toast keyframes), whose hashes would change
+          # with each engine release. img-src data: and connect-src blob:: the engine's SVG textures and three.js reading
+          # GLB textures from blob: URLs. worker-src blob:: the GI worker. 'self' in connect-src also covers the live
+          # room's wss: on this host.
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: >-
+              default-src 'self';
+              script-src 'self' 'sha256-D2PZNR0vxjZdeZxPL0VCEkMuwUEEIyIKks6viRiCnIQ=' 'wasm-unsafe-eval';
+              style-src 'self' 'unsafe-inline';
+              img-src 'self' data: blob:;
+              media-src 'self' data: blob:;
+              font-src 'self';
+              connect-src 'self' blob:;
+              worker-src 'self' blob:;
+              object-src 'none';
+              base-uri 'none';
+              form-action 'self';
+              frame-ancestors 'none'
+            Override: true
           ContentTypeOptions:
             Override: true
           FrameOptions:
@@ -168,6 +191,14 @@ Resources:
             AccessControlMaxAgeSec: 31536000
             IncludeSubdomains: true
             Override: true
+        CustomHeadersConfig:
+          Items:
+            - Header: Permissions-Policy
+              Value: >-
+                accelerometer=(), bluetooth=(), camera=(), display-capture=(), fullscreen=(self), gamepad=(self),
+                geolocation=(), gyroscope=(), hid=(), magnetometer=(), microphone=(), midi=(), payment=(), serial=(),
+                usb=()
+              Override: true
 
   SiteRequestFunction:
     Type: AWS::CloudFront::Function
@@ -183,7 +214,15 @@ Resources:
             var request = event.request;
             var host = request.headers.host ? request.headers.host.value : '';
             if ('${Redirect}' !== '' && host === '${Redirect}') {
-              return { statusCode: 301, statusDescription: 'Moved Permanently', headers: { location: { value: 'https://${Site}' + request.uri } } };
+              // Keys and values arrive percent-encoded as the viewer sent them, so they go on unchanged.
+              var query = [];
+              for (var key in request.querystring) {
+                var field = request.querystring[key];
+                var values = field.multiValue || [field];
+                for (var i = 0; i < values.length; i++) query.push(key + '=' + values[i].value);
+              }
+              var target = 'https://${Site}' + request.uri + (query.length ? '?' + query.join('&') : '');
+              return { statusCode: 301, statusDescription: 'Moved Permanently', headers: { location: { value: target } } };
             }
             var uri = request.uri;
             var segment = uri.substring(uri.lastIndexOf('/') + 1);

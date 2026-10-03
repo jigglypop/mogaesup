@@ -1,19 +1,19 @@
 import './studio.css';
 
-import { lazy, Suspense, useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useLayoutEffect, useState, type ReactNode } from 'react';
 
 import { Link, Navigate, useLocation } from 'react-router-dom';
 
-import { catalogApi } from '../api/endpoints';
-import { useStudioSleep } from '../api/studioSleep';
-import type { FactoryUsage } from '../api/types';
+import { useStudioSleep, type StudioSleep } from '../api/studioSleep';
 import { useAuth } from '../auth/AuthProvider';
 import { can } from '../auth/can';
+import { SignInRedirect } from '../auth/signIn';
 import { AdminTabs } from '../pages/AdminTabs';
 import { Loading } from '../pages/Loading';
 import { PageShell } from '../shell/Shell';
-import { routeOf, studioSections, type Screen } from './screens';
+import { routeOf, studioSections, type Screen, type Section } from './screens';
 import { StudioPowerLine, StudioWaking } from './StudioPower';
+import { FactoryUsageContext, useFactoryUsage } from './usage';
 
 // The character studio's own screens (src/character), mounted as they are.
 const Workspace = lazy(() => import('../character/studio/Workspace').then((module) => ({ default: module.Workspace })));
@@ -47,26 +47,31 @@ export function Stage({ children }: { children: ReactNode }) {
 
 const ACCESS = { read: '읽기만', write: '기록 바꾸기까지', paid: '유료 작업까지' } as const;
 
-/** For admins: whether the character server is connected here and how far the screens may go. */
-function Connection() {
-  const [usage, setUsage] = useState<FactoryUsage | null>(null);
-  useEffect(() => {
-    catalogApi.factoryUsage().then(setUsage, () => setUsage({ connected: false }));
-  }, []);
-  if (!usage) return null;
+/**
+ * For admins: whether the character server is connected here and how far the screens may go, as last read. A read
+ * that got no answer shows as unread, never as a server that is not connected.
+ */
+function Connection({ usage, failed, refresh }: ReturnType<typeof useFactoryUsage>) {
+  if (!usage && !failed) return null;
+  const known = failed ? null : usage;
   return (
     <section className="mg-studio-connection">
-      <p>
-        <i className={`mg-dot${usage.connected ? ' is-good' : ''}`} />
-        {usage.connected ? `캐릭터 서버 · ${ACCESS[usage.access]}` : '캐릭터 서버 연결 안 됨'}
+      <p role="status">
+        <i className={`mg-dot${known?.connected ? ' is-good' : ''}`} />
+        {!known ? '캐릭터 서버 상태를 읽지 못함' : known.connected ? `캐릭터 서버 · ${ACCESS[known.access]}` : '캐릭터 서버 연결 안 됨'}
       </p>
-      {usage.connected && usage.access === 'paid' && (
+      {!known && (
+        <button type="button" className="mg-btn is-small" onClick={refresh}>
+          다시 확인
+        </button>
+      )}
+      {known?.connected && known.access === 'paid' && (
         <small>
-          이번 달 유료 작업 {usage.paidThisMonth} / {usage.paidMonthly}
+          이번 달 유료 작업 {known.paidThisMonth} / {known.paidMonthly}
         </small>
       )}
-      {usage.connected && usage.access !== 'paid' && <small>비용이 드는 작업은 이 서버에서 막혀 있어요</small>}
-      {usage.connected && <StudioPowerLine />}
+      {known?.connected && known.access !== 'paid' && <small>비용이 드는 작업은 이 서버에서 막혀 있어요</small>}
+      {usage?.connected && <StudioPowerLine canStart />}
     </section>
   );
 }
@@ -80,7 +85,7 @@ export default function StudioPage() {
   const { pathname, search, hash } = useLocation();
   const sleep = useStudioSleep();
   if (status === 'loading') return <Loading />;
-  if (!user) return <Navigate to="/" replace />;
+  if (!user) return <SignInRedirect />;
   if (!can(user, 'operator')) return <Navigate to="/character" replace />;
   const sections = studioSections(can(user, 'paid_operator'));
   const screen = sections.flatMap((section) => section.screens).find((item) => pathname === item.path);
@@ -89,7 +94,12 @@ export default function StudioPage() {
     const allowed = legacy && sections.some((section) => section.screens.some((item) => item.path === legacy.split('?')[0]));
     return <Navigate to={allowed ? `${legacy}${hash}` : sections[0]!.screens[0]!.path} replace />;
   }
+  return <Studio sections={sections} screen={screen} pathname={pathname} sleep={sleep} />;
+}
 
+/** The menu and the stage, for an operator. The usage it reads also tells the screens whether paid work is open here. */
+function Studio({ sections, screen, pathname, sleep }: { sections: Section[]; screen: Screen; pathname: string; sleep: StudioSleep | null }) {
+  const usage = useFactoryUsage();
   return (
     <PageShell title="캐릭터 공장" wide>
       <AdminTabs />
@@ -106,12 +116,14 @@ export default function StudioPage() {
               ))}
             </section>
           ))}
-          <Connection />
+          <Connection {...usage} />
         </nav>
-        <Stage>
-          {/* While the studio sleeps its screens stay closed; they open afresh once it answers. */}
-          {sleep ? <StudioWaking sleep={sleep} member={false} /> : <WorkspaceFrame screen={screen} />}
-        </Stage>
+        <FactoryUsageContext.Provider value={usage.usage}>
+          <Stage>
+            {/* While the studio sleeps its screens stay closed; they open afresh once it answers. */}
+            {sleep ? <StudioWaking sleep={sleep} member={false} /> : <WorkspaceFrame screen={screen} />}
+          </Stage>
+        </FactoryUsageContext.Provider>
       </div>
     </PageShell>
   );

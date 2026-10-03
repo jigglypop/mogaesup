@@ -1,3 +1,5 @@
+import './admin-tabs.css';
+
 import { Link, useLocation } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthProvider';

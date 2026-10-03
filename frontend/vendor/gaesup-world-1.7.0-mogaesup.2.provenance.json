@@ -1,0 +1,657 @@
+{
+  "name": "gaesup-world",
+  "version": "1.7.0-mogaesup.2",
+  "upstreamVersion": "1.7.0",
+  "sourceCommit": "dc676864f9dbefa03958a7e67ba4ed8e5863767c",
+  "sourceUrl": "https://github.com/jigglypop/gaesup-world/commit/dc676864f9dbefa03958a7e67ba4ed8e5863767c",
+  "supersedes": "1.7.0-mogaesup.1",
+  "artifactBytes": 22819499,
+  "artifactSha256": "23daad9aaf82169e941beb1e13bcb1545a902fbbd7578ccecd4353a35316b30d",
+  "patchSha256": "3c5f3cd63c9f0e12234fd394f77076d169297e6dbd427a4f8d697e3a41b93238",
+  "preservedAssets": [
+    {
+      "path": "integrations/unity/Editor/GaesupSceneBridge.cs",
+      "bytes": 7141,
+      "sha256": "f48aafe115fa2ec55d6058c23b249381000e98d451e600d700b05cecaa5c6837",
+      "byteIdenticalToNpm170": false,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "integrations/unity/Runtime/GaesupSceneObject.cs",
+      "bytes": 398,
+      "sha256": "c7848e4f6b1e29b7da3ff4f61b5a5490cfbc2f8dce4ae022c3629ed7bc39f5a3",
+      "byteIdenticalToNpm170": false,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bag-001-lod1.glb",
+      "bytes": 6332,
+      "sha256": "060427e50d37a179060e88e89cbf4a4b236a27c31bfd0a737a28bbe775fffa98",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bag-001.glb",
+      "bytes": 10628,
+      "sha256": "fbeee14e1193b4ced25a8e9c4c402d18007b7b6bef06fb5c80caad456ef13142",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/bed.glb",
+      "bytes": 258208,
+      "sha256": "e2bbb906e6f97f181017e10f1ca33f39beda517e0fca1d0a07d36835e6f86581",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/body-sd-neutral-v1-lod1.glb",
+      "bytes": 147992,
+      "sha256": "36cef8bfd79ee9206da91e437c045fa3a925055d78205a5d2470a053ed29eb9e",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/body-sd-neutral-v1.glb",
+      "bytes": 317084,
+      "sha256": "4c4d5bfd4a90712d187d4b322cce71cb3e796c1af16f3542caf03e1fb1ee2a66",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bottom-001-lod1.glb",
+      "bytes": 25176,
+      "sha256": "9f7c5b33a9de87920e689f65989f288c3e0c83b5871553e90cb89c14a862920e",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bottom-001.glb",
+      "bytes": 61916,
+      "sha256": "7c932c43291cf3108fb116a6ae22aa39946a8cdf815c2b47a16795492d68fa94",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bottom-002-lod1.glb",
+      "bytes": 25172,
+      "sha256": "c9b319b652c6f8aadb4d200849383927170ece7f52131435fa0f4b9f1dc6713f",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bottom-002.glb",
+      "bytes": 61912,
+      "sha256": "9590474ec468e55e2c798ff91ed556709e34a36e25605016ecc48369a952d00f",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bottom-003-lod1.glb",
+      "bytes": 25172,
+      "sha256": "c6c273a9edccb4fc36ddfa13f8ac85139be66e2aa83e1b90517183daf1a8442b",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/bottom-003.glb",
+      "bytes": 61912,
+      "sha256": "ad2bce28a660f5dce2b6383fedb4d19192c92ea109bfc1c9630a9c72f7fda1f5",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/boy.glb",
+      "bytes": 1005188,
+      "sha256": "2f2635596201621c1684b05a1ca3e9ae67f893f90ffa2d3c914e5f738a396222",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/bush.glb",
+      "bytes": 9392,
+      "sha256": "7c735b6bff7b9af5531507bd8fb28bf2d76c4ce30126704dad871959a8c1581b",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/chair.glb",
+      "bytes": 140544,
+      "sha256": "9c78e4ba5b7e16247038641a6d2c0b3f6fc031dbd6a48f04598132011f16762d",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/crafting.glb",
+      "bytes": 135916,
+      "sha256": "3878f6d93d946d77f3e1be55919627a81435696252137ae33c22391c0411f3ce",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/docter.glb",
+      "bytes": 1995136,
+      "sha256": "122f38111e879f2403f4c1019ce2191a12d4f3858d122a2fe5acb51358949553",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/door.glb",
+      "bytes": 61568,
+      "sha256": "f35dbb855a735a3c2c9deca61b08d744c12888a60bff028c4c13ae1775987ffd",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/fallen-log.glb",
+      "bytes": 7584,
+      "sha256": "099caa814fe2b944d1691ddf0de4127146ca6748c69c14bc45fee63c603cf0bc",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/fence.glb",
+      "bytes": 12132,
+      "sha256": "5ca7f29343614054f7cc0d86bffe6d5b297b3ab930fa7bb5ac99f73c7d077cb8",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/fern.glb",
+      "bytes": 23320,
+      "sha256": "d40ba133d107f92b7fd8d800228e853551e47af35454dec0c7ea74bf6752a6c6",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/fish.glb",
+      "bytes": 1239540,
+      "sha256": "68c96a02de22a77c684a927d3fd440957f26b354dc79cafa42fcb5e11ead856e",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/flower-purple.glb",
+      "bytes": 7848,
+      "sha256": "325a0e9d222a8222cf5bc1a985b0bdeacd95e0f31d32aaef18d6bc012bc56de7",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/flower-red.glb",
+      "bytes": 6988,
+      "sha256": "9918a758a88490e3e791ce69c858520c252200990358a04e7d9b290ae25cf541",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/flower-yellow.glb",
+      "bytes": 10908,
+      "sha256": "033936f756ac18a10e494804112cead12825cc85bb1571988bfa38098dee2bb5",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/glass.glb",
+      "bytes": 1748352,
+      "sha256": "3c36f701bc7dae7acab0f46c16a9ec1c2bd3c74da8dd2846f7f30ea9d7e464b7",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hair-001-lod1.glb",
+      "bytes": 15352,
+      "sha256": "5bbe299fc633e837683a7e897ff21bf258f53b2b1a813f53a06b7d645712988c",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hair-001.glb",
+      "bytes": 32028,
+      "sha256": "2bdd4466985b5a113fe76e1e5bdfb57430bbb1623d60f0030323b4723c742f32",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hair-002-lod1.glb",
+      "bytes": 15348,
+      "sha256": "ad0e61aa95f0b589ee1dc9582e5dd449f4008c641d4adec1141a6295aa0f9bf4",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hair-002.glb",
+      "bytes": 32020,
+      "sha256": "28e44e2da29c1adad86ad8b3c0967778a1ba55d9127df210c2a91a74d363a450",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hair-003-lod1.glb",
+      "bytes": 15352,
+      "sha256": "52a0f3ab1d96b721c121efa4a8c924abac43e0b1ee83c5f1c658e57f774c1cad",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hair-003.glb",
+      "bytes": 32028,
+      "sha256": "078a4f0089adefd12ca1fe19b20e43f22deec8f07918632389ce273c36841cfe",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hand-001-lod1.glb",
+      "bytes": 8356,
+      "sha256": "04add3a60c25483db894fcaf77b60e4ef10ba59fc77e1dc69abad07f2c9694fc",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hand-001.glb",
+      "bytes": 12656,
+      "sha256": "ae7a2e42b3b26ba41833ec49d0f9eba0a3a959ba494f99923a9b19d5e718681c",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hat-001-lod1.glb",
+      "bytes": 8340,
+      "sha256": "4145aaab3c794b40f821e96e128b7c5cfc3b7ebb0bee332243334ff2abe6a147",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hat-001.glb",
+      "bytes": 14324,
+      "sha256": "5ff70b890be7bf16f97bbe4dabcbf57f421e17922f686215ccb1f6ba59dbce1c",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hat-002-lod1.glb",
+      "bytes": 8892,
+      "sha256": "debddebf938905f0f082b7c366f29b54aeb55d5c46d9090e82a649b30e902ee3",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/hat-002.glb",
+      "bytes": 17496,
+      "sha256": "1bb4f1f600aa34dfb5ab1a2459c7ed6852bc4de17279c70b66f37c2477872ee4",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/lamp.glb",
+      "bytes": 10136,
+      "sha256": "f08dad2fe7711ebb650c4a2427980b25be5abb2652f9f12903988311762651a8",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/lily.glb",
+      "bytes": 8228,
+      "sha256": "44065d33cdfcd9b39b4902ed43c1d02fc56def79cdcb221571c1bdfe37c4ac2d",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/mailbox.glb",
+      "bytes": 25264,
+      "sha256": "cd8819e46fec234f1d0c68d3af92a4ec5ec4e607b06f91f6f9681e5eaf03a531",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/man.glb",
+      "bytes": 1821636,
+      "sha256": "19e24d131feb20d6d24885e31b7142a133e87a27dc0de852c02d109230614da4",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/mountain.glb",
+      "bytes": 2500772,
+      "sha256": "7cef9e74a7e6e264edaed4e92a7205d7056d8f68c9058f8f7de1c7c94b68cb65",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/mushroom-cluster.glb",
+      "bytes": 14256,
+      "sha256": "8512786a2fd98a8b56cea38fb27292e2875273b0c903b2ddbede80c8c18d0359",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nurse.glb",
+      "bytes": 2199456,
+      "sha256": "f346a8c33cece002e1bba2570b6d965fb767cfb3422e07ba47b2098657ff6800",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/onepiece-001-lod1.glb",
+      "bytes": 32904,
+      "sha256": "89d7eadc51f988031c83bf199f9ef4fe4b49cfb8a2d9270aa491e088a0062ddd",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/onepiece-001.glb",
+      "bytes": 80136,
+      "sha256": "f0eb85b16d32b7ba45ebf5d4eea96b0ead9a00a1aa595e0b6f38dacce2cdeec3",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/police.glb",
+      "bytes": 2094112,
+      "sha256": "5f6e9d0ec836d69d06bd7b3cd8bf0f0ee97f92e91332a50d9951ff1ec9a1bedb",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/police2.glb",
+      "bytes": 1709524,
+      "sha256": "275577184fb0cc839250f81b5f60bbd7e8adcd02b2a7408533fc7892672b152d",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/rock-flat.glb",
+      "bytes": 3356,
+      "sha256": "8f553db52bf9c7e5a02d0ebb00d578e731d06b00dde8026d762efd1e2d969a4b",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/rock-large.glb",
+      "bytes": 7260,
+      "sha256": "45dda024f8ab12e8e9f700e686749706c9df76a68d1cbf8b7f72a3f2d8c51377",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/rock-moss.glb",
+      "bytes": 6268,
+      "sha256": "aed77cb3338d0e1b178a911a9b69e73e8b4b2d0aaa7dd98beca6dcc0088feb03",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/rock-round.glb",
+      "bytes": 17084,
+      "sha256": "757c2a0ad0f89fd708ad9f53ddd1b88b6e92b3c7304272729b102d36b168d3b1",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/rock-small.glb",
+      "bytes": 3160,
+      "sha256": "4e0de98e6a74baa2085880c729eefd7ea06239ad5638732353c3c91552c2f1ad",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/rock-tall.glb",
+      "bytes": 17112,
+      "sha256": "ff940ea51c27cc9c77079cfb3ee5c47632b3c0a9379cda573b49129f3132140c",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/rock-wide.glb",
+      "bytes": 17100,
+      "sha256": "0f9699340aa4ca1b63773fa72d0dfc35edb79f7488146e8c80ffd6c1280fccaf",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/shoes-001-lod1.glb",
+      "bytes": 12316,
+      "sha256": "043459d75f2298bc3c10297189c37d85e469a8005d4b0ce064555ad5f32d983c",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/shoes-001.glb",
+      "bytes": 27020,
+      "sha256": "be23e518369887e3e925fc4709da883d1314fc41e0c35a7bb8a1451507ab3fcc",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/shoes-002-lod1.glb",
+      "bytes": 12316,
+      "sha256": "32d84e4e18c60ec01175ac476698d498c3e118c0b4e42013cfe81375e229325d",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/shoes-002.glb",
+      "bytes": 27024,
+      "sha256": "ec2f54d01844c113eb74e3a2cde69231bc05ccd81a50dd4b9c529ca4d235d061",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/shop-stall.glb",
+      "bytes": 63640,
+      "sha256": "8f3aadd10a1392e5dcc9890d8c331b53cadbb9afc0ebab935256b2905a3e0487",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/storage.glb",
+      "bytes": 13436,
+      "sha256": "9bf0585a55c907a2449d0d068abb801ee250ae625618f2b0da563432c2ad5145",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/stump.glb",
+      "bytes": 7816,
+      "sha256": "a9de575344c7932857d09649e1f05baba79a63a4fe2c0d17adc8eee7ed249105",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/table.glb",
+      "bytes": 73616,
+      "sha256": "230ac925ef408b64f3b215eb64c9999e2cd81a82c6d114b2cd50ea6d6d5e0cbe",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/teacher.glb",
+      "bytes": 1986452,
+      "sha256": "5341ba5cc99e49c039ede63dbfbd3312d38390c6b2b1bc67c24b2725294465f5",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/top-001-lod1.glb",
+      "bytes": 29440,
+      "sha256": "c7fd7da1091ff4da1c0e4ddc073abc5a3457b90480cbc2dee4abfd9fa18e2e54",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/top-001.glb",
+      "bytes": 73540,
+      "sha256": "7cce730ee54152e4cafcabec5e3f66689eb1c680ffc27312afdd621c167dfdf2",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/top-002-lod1.glb",
+      "bytes": 42296,
+      "sha256": "7be6910fc9212ac4f0c73f03d5c7895034b55a2bf41ce893f90972262dee277c",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/top-002.glb",
+      "bytes": 108444,
+      "sha256": "fc23eba673c5c68bda3b5d97a5dd9df42d8a4df5a566c4863f290af7689738cb",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/top-003-lod1.glb",
+      "bytes": 29440,
+      "sha256": "e5abf8ee99396523f85ee8cf84d1628f22069198f1cae4fae1bb6f06ad329657",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/top-003.glb",
+      "bytes": 73540,
+      "sha256": "6036abbb53f690f40be669a75030a4c3405f6d20b1cf862fe728caef9caf4cfe",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/trainer_green.glb",
+      "bytes": 1565984,
+      "sha256": "3674b8c20952addd6b109aa2a76202e16d25250ba2a810965fa7ad4569c04126",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/trainer_red.glb",
+      "bytes": 1696360,
+      "sha256": "2f23a86b2cf6b991bb069801e9cc01dec6b3d8e36b3d8de96d51d41dc67f07a0",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/tree-fat.glb",
+      "bytes": 42924,
+      "sha256": "3272b84b6d6583f80de21dac0fd58858a055d06a972f94328f198260abee6c84",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/tree-oak.glb",
+      "bytes": 59016,
+      "sha256": "27ac207618bfaaf8af916f551b23c698106a01f72ad21c3f95d849726e315127",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/tree-pine.glb",
+      "bytes": 25636,
+      "sha256": "a55a7bb4b4e29365456f64c858afbe7edcb4114b3a46c1695cb7ae75f82943cd",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/tree-round.glb",
+      "bytes": 43756,
+      "sha256": "38e23963e15c8a6a7b1e5e64f53667531841855bff03e20e204ce95c546cc1d8",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/tree-thin.glb",
+      "bytes": 42916,
+      "sha256": "1a7ab450597d3beb7d4e7c982c39e71d70e6454d5cc2db7f924485e171586be6",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/window.glb",
+      "bytes": 9248,
+      "sha256": "e487854eb7d239491cddcc1cc7cb11731b987a3b44043994eaf0c2dffb789973",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/catalog.json",
+      "bytes": 63469,
+      "sha256": "4e9b8efef2d09f7cd13ab4166c7de70d917a7d898f58996f5bf175fd2b9803da",
+      "byteIdenticalToNpm170": false,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/avatars/manual-v1/evidence.json",
+      "bytes": 6956,
+      "sha256": "6b4129b81be77e3b7ec12f54277a862f5237df02ce2ccd8be608332528818a07",
+      "byteIdenticalToNpm170": false,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/manifest.json",
+      "bytes": 3948,
+      "sha256": "83754a4cb626ebbdc1fbcef7b05483cdf135ad460b6253822d22bc0ceab814f6",
+      "byteIdenticalToNpm170": false,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/nature/kenney/LICENSE.txt",
+      "bytes": 611,
+      "sha256": "cb96b75e3560ac78d7a53ce6f083f4cdb5c53faea6141b62d63458dcfe1e4b9d",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "public/gltf/props/LICENSE.txt",
+      "bytes": 1601,
+      "sha256": "1658d8691d0859c6c0cf058da840d620c1932c0488efaaac28916a0fba5e5b89",
+      "byteIdenticalToNpm170": false,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "dist/wasm/gaesup_core.wasm",
+      "bytes": 36372,
+      "sha256": "367de5b9b22d2fa1c3f480d2af4eb692c10257053baae2ee61b9355043d76389",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    },
+    {
+      "path": "dist/wasm/gaesup_gi.wasm",
+      "bytes": 28570,
+      "sha256": "4f601f950b3a33f50ac82a3267191159ac107e724c596954e43b630aab1282e4",
+      "byteIdenticalToNpm170": true,
+      "byteIdenticalToMogaesup1": true
+    }
+  ],
+  "textLineEndingOnlyDifferences": [
+    "integrations/unity/Editor/GaesupSceneBridge.cs",
+    "integrations/unity/Runtime/GaesupSceneObject.cs",
+    "public/gltf/avatars/manual-v1/catalog.json",
+    "public/gltf/avatars/manual-v1/evidence.json",
+    "public/gltf/nature/manifest.json",
+    "public/gltf/props/LICENSE.txt"
+  ],
+  "validation": {
+    "node": "24.15.0",
+    "networkSuites": "src/core/networks: 230 tests passed",
+    "acceptance": "test/accept passed (S-H13 moving update budget 136 bytes: the update carries the sender time t)",
+    "wholeTypecheck": "passed (source, tests, build declarations)",
+    "build": "passed (ESM, CJS, .d.ts and .d.cts)",
+    "publint": "0.3.24 passed",
+    "packageConsumer": "npm run test:package:built passed",
+    "visualAcceptance": "two-browser lab run in the app (see the .md)"
+  },
+  "integrity": "sha512-KwZVUtAv9yoL67Y2NssA/Hgis2EPAXNWwMi7OIWy9dPXyC/Gi2415Gn5i/di4TkQgoPGho8coAIhgrVG07FNJQ==",
+  "sourceChanges": [
+    "src/core/networks/__tests__/PlayerPositionTracker.test.ts",
+    "src/core/networks/__tests__/multiplayerWire.test.tsx",
+    "src/core/networks/__tests__/remoteAnimation.test.ts",
+    "src/core/networks/__tests__/remoteMotion.test.ts",
+    "src/core/networks/components/RemotePlayer.tsx",
+    "src/core/networks/components/__tests__/RemotePlayer.test.tsx",
+    "src/core/networks/core/PlayerNetworkManager.ts",
+    "src/core/networks/core/PlayerPositionTracker.ts",
+    "src/core/networks/core/remoteAnimation.ts",
+    "src/core/networks/core/remoteMotion.ts",
+    "src/core/networks/hooks/__tests__/useMultiplayer.test.tsx",
+    "src/core/networks/hooks/useMultiplayer.ts",
+    "src/core/networks/types/index.ts",
+    "test/accept/budgets.json"
+  ]
+}

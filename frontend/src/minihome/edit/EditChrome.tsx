@@ -1,11 +1,15 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
+
+import { Link } from 'react-router-dom';
 
 import type { HomeView } from '../../api/types';
+import { useSignInPath } from '../../auth/signIn';
 import { Brand, usePopover } from '../../shell/Shell';
+import { useFocusTrap } from '../../ui/focus';
 import { Icon } from '../../ui/icons';
 import { useEditState, useHistory, useSaver } from './context';
 import { EditIcon } from './icons';
-import { clock, describeStatus, SIZE_LIMIT_TEXT, sizeText, type IslandSaver } from './save';
+import { clock, describeStatus, retryable, SIZE_LIMIT_TEXT, sizeText, type IslandSaver } from './save';
 import type { EditSession } from './session';
 import { useEditKeys } from './useEditKeys';
 import { MAX_ISLAND_BYTES } from '../persistence';
@@ -58,7 +62,8 @@ function SaveStatus({ saver }: { saver: IslandSaver }) {
   const state = useSaver(saver);
   const status = describeStatus(state);
   const { open, setOpen, ref } = usePopover();
-  const retry = state.phase === 'ready' && !state.conflict && !state.saving && state.problem !== null;
+  // Only a failure that sending the same island again can get past; the others need a change, or a sign-in, first.
+  const retry = state.phase === 'ready' && !state.conflict && !state.saving && state.problem !== null && retryable(state.problem);
   return (
     <div className="mg-anchor" ref={ref}>
       <button
@@ -74,7 +79,7 @@ function SaveStatus({ saver }: { saver: IslandSaver }) {
         {status.tone === 'good' && state.lastSavedAt && <small>{clock(state.lastSavedAt)}</small>}
       </button>
       {open && (
-        <div className="mg-popover mg-menu mg-save-pop is-right" role="dialog" aria-label="저장 상태">
+        <div className="mg-popover mg-menu mg-save-pop is-right" role="dialog" aria-label="저장 상태" tabIndex={-1}>
           <p className="mg-menu-title">{status.label}</p>
           <p className="mg-save-detail">{status.detail}</p>
           {state.bytes !== null && (
@@ -113,10 +118,13 @@ export function StartBanner({ onRetry }: { onRetry: () => void }) {
 
 /**
  * What needs the owner's say about saving: another copy of the island saved first, the island did not load, or saving
- * keeps failing. Edits stay in the world meanwhile; nothing here reloads the page.
+ * keeps failing. Edits stay in the world meanwhile; nothing here reloads the page. When the session ran out the way
+ * on is signing in again, which comes back here and saves what is held (the link is marked so leaving by it keeps the
+ * edits rather than asking to drop them).
  */
 export function SaveBanners({ saver, editing, onReloaded }: { saver: IslandSaver; editing: boolean; onReloaded: () => void }) {
   const state = useSaver(saver);
+  const signIn = useSignInPath();
   if (state.phase === 'loadFailed') {
     return (
       <div className="mg-conflict mg-glass" role="alert">
@@ -158,9 +166,17 @@ export function SaveBanners({ saver, editing, onReloaded }: { saver: IslandSaver
       <div className="mg-conflict mg-glass mg-save-problem" role="alert">
         <EditIcon name="alert" />
         <span>{state.problem.message}</span>
-        <button className="mg-btn is-small" onClick={() => void saver.save()}>
-          다시 시도
-        </button>
+        {state.problem.kind === 'session' ? (
+          <Link className="mg-btn is-primary is-small" to={signIn} data-keep-edits="">
+            다시 로그인
+          </Link>
+        ) : (
+          retryable(state.problem) && (
+            <button className="mg-btn is-small" onClick={() => void saver.save()}>
+              다시 시도
+            </button>
+          )
+        )}
       </div>
     );
   }
@@ -228,14 +244,18 @@ const SHORTCUTS: { title: string; keys: [keys: string[], label: string][] }[] = 
   },
 ];
 
-/** Every decorating shortcut and gesture, from the ? key or the toolbar; touch comes first on a touch screen. */
+/**
+ * Every decorating shortcut and gesture, from the ? key or the toolbar; touch comes first on a touch screen. A modal
+ * dialog: the keyboard stays in it until it closes (Escape, ? or 닫기), and then goes back where it was.
+ */
 function ShortcutHelp({ onClose }: { onClose: () => void }) {
+  const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
-  useEffect(() => close.current?.focus(), []);
+  useFocusTrap(dialog, close);
   const groups = matchMedia('(pointer: coarse)').matches ? [TOUCH, ...SHORTCUTS] : [...SHORTCUTS, TOUCH];
   return (
     <div className="mg-help-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="mg-help mg-glass" role="dialog" aria-modal="true" aria-label="꾸미기 단축키">
+      <section ref={dialog} className="mg-help mg-glass" role="dialog" aria-modal="true" aria-label="꾸미기 단축키" tabIndex={-1}>
         <header>
           <h2 className="mg-heading">꾸미기 단축키와 손동작</h2>
           <button ref={close} className="mg-icon-btn is-quiet" aria-label="닫기" onClick={onClose}>

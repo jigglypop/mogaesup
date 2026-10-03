@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiRequestError, ApiTimeoutError } from '../../api/client';
 import type { Credentials, Registration, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
+import { Loading } from '../../pages/Loading';
 import { AuthProvider, useAuth } from '../AuthProvider';
-import { followSession, SESSION_RETRY_MS } from '../session';
-import { followSessionOwner, setSessionOwner } from '../sessionWork';
+import { draftKey } from '../drafts';
+import { followSession, SESSION_RETRY_MS, SESSION_UNREACHABLE_AFTER } from '../session';
+import { expireSession, followSessionOwner, sessionEpoch, sessionLapsed, setSessionOwner } from '../sessionWork';
 
 const { me, login, register, logout } = vi.hoisted(() => ({
   me: vi.fn<() => Promise<{ user: User | null }>>(),
@@ -86,6 +88,22 @@ describe('세션 확인', () => {
     const last = SESSION_RETRY_MS[SESSION_RETRY_MS.length - 1]!;
     await vi.advanceTimersByTimeAsync(last * 3);
     expect(ask).toHaveBeenCalledTimes(SESSION_RETRY_MS.length + 4);
+  });
+
+  it('실패할 때마다 몇 번째 실패인지 알린다', async () => {
+    const failed = vi.fn();
+    const ask = vi
+      .fn<() => Promise<{ user: User | null }>>()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new ApiRequestError(503, 'database', ''))
+      .mockResolvedValueOnce({ user: mogae });
+    followSession(ask, vi.fn(), [10], failed);
+    await flush();
+    expect(failed).toHaveBeenLastCalledWith(1);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(failed).toHaveBeenLastCalledWith(2);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(failed).toHaveBeenCalledTimes(2);
   });
 
   it('멈추면 기다리던 질문도 늦게 온 대답도 버린다', async () => {
@@ -200,5 +218,121 @@ describe('로그인 상태 제공자', () => {
     await act(async () => { await auth.logout(); });
     expect(stop).toHaveBeenCalledTimes(1); expect(shown(container)).toBe('anonymous:-');
     await unmount();
+  });
+
+  it('로그아웃하면 이 브라우저에 남은 그 계정의 초안을 지운다', async () => {
+    me.mockResolvedValueOnce({ user: mogae }); logout.mockResolvedValueOnce(undefined);
+    const { unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+    localStorage.setItem(draftKey(mogae.id, 'status'), JSON.stringify({ text: '쓰다 만 글', base: '' }));
+    localStorage.setItem('mogaesup.theme', 'dark');
+    await act(async () => { await auth.logout(); });
+    expect(localStorage.getItem(draftKey(mogae.id, 'status'))).toBeNull();
+    expect(localStorage.getItem('mogaesup.theme')).toBe('dark');
+    localStorage.clear();
+    await unmount();
+  });
+
+  describe('세션이 풀렸을 때', () => {
+    const visible = () => Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    beforeEach(visible);
+
+    it('로그아웃 상태가 되지만, 그 계정의 작업은 멈추지 않고 다시 로그인하면 이어진다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn(); const resume = vi.fn();
+      const unwatch = followSessionOwner(mogae.id, stop, resume);
+      await act(async () => { expireSession(); });
+      expect(shown(container)).toBe('anonymous:-');
+      expect(auth.lapsed).toEqual(mogae);
+      expect(stop).not.toHaveBeenCalled();
+
+      // Back on the tab it asks again; the server saying nobody is the lapse itself and stops nothing.
+      me.mockResolvedValueOnce({ user: null });
+      await act(async () => { window.dispatchEvent(new Event('focus')); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(stop).not.toHaveBeenCalled();
+      expect(auth.lapsed).toEqual(mogae);
+
+      login.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { await auth.login({ username: 'mogae', password: 'password' }); });
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(stop).not.toHaveBeenCalled();
+      expect(shown(container)).toBe('signedIn:mogae');
+      expect(auth.lapsed).toBeNull();
+      unwatch(); await unmount();
+    });
+
+    it('다른 탭에서 다시 로그인했다면 이 탭으로 돌아올 때 알아채고 작업을 잇는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const resume = vi.fn();
+      const unwatch = followSessionOwner(mogae.id, vi.fn(), resume);
+      await act(async () => { expireSession(); });
+      me.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await flush(); });
+      expect(shown(container)).toBe('signedIn:mogae');
+      expect(resume).toHaveBeenCalledTimes(1);
+      unwatch(); await unmount();
+    });
+
+    it('다른 사람이 로그인하면 이전 계정의 작업을 멈추고 초안을 지운다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn(); const resume = vi.fn();
+      followSessionOwner(mogae.id, stop, resume);
+      localStorage.setItem(draftKey(mogae.id, 'title'), JSON.stringify({ text: '초안', base: '' }));
+      await act(async () => { expireSession(); });
+      login.mockResolvedValueOnce({ user: { ...mogae, id: 'u2', username: 'other' } });
+      await act(async () => { await auth.login({ username: 'other', password: 'password' }); });
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(resume).not.toHaveBeenCalled();
+      expect(localStorage.getItem(draftKey(mogae.id, 'title'))).toBeNull();
+      await unmount();
+    });
+
+    it('아무도 로그인하지 않았거나 이미 풀린 세션에는 아무 일도 없다', () => {
+      setSessionOwner(null);
+      expireSession();
+      expect(sessionLapsed()).toBe(false);
+      setSessionOwner('u1');
+      const sentAt = sessionEpoch();
+      setSessionOwner('u1');
+      expireSession(sentAt);
+      expect(sessionLapsed()).toBe(false);
+      expireSession();
+      expect(sessionLapsed()).toBe(true);
+    });
+  });
+
+  describe('서버에 닿지 않을 때', () => {
+    it('몇 번 연달아 실패하면 서버에 연결하지 못했다고 보이고, 다시 시도하면 바로 다시 묻는다', async () => {
+      me.mockRejectedValue(new TypeError('Failed to fetch'));
+      const { container, unmount } = await mount(<AuthProvider><Loading /></AuthProvider>);
+      expect(container.textContent).toContain('불러오는 중');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SESSION_RETRY_MS[0] + SESSION_RETRY_MS[1]);
+      });
+      expect(me).toHaveBeenCalledTimes(SESSION_UNREACHABLE_AFTER);
+      expect(container.querySelector('[role=alert]')?.textContent).toContain('서버에 연결하지 못했어요');
+
+      me.mockReset();
+      me.mockResolvedValueOnce({ user: null });
+      const retry = [...container.querySelectorAll('button')].find((button) => button.textContent === '다시 시도')!;
+      await act(async () => { retry.click(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(1);
+      await unmount();
+    });
+
+    it('늦게라도 대답이 오면 기다리던 화면이 그대로 이어진다', async () => {
+      me.mockRejectedValueOnce(new TypeError('a')).mockRejectedValueOnce(new TypeError('b')).mockRejectedValueOnce(new TypeError('c'));
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(SESSION_RETRY_MS[0] + SESSION_RETRY_MS[1]); });
+      expect(auth.unreachable).toBe(true);
+      me.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { await vi.advanceTimersByTimeAsync(SESSION_RETRY_MS[2]); });
+      expect(auth.unreachable).toBe(false);
+      expect(shown(container)).toBe('signedIn:mogae');
+      await unmount();
+    });
   });
 });

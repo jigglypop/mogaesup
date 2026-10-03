@@ -11,12 +11,11 @@ const QUALITY: { value: WorldQuality & string; label: string }[] = [
   { value: 'low', label: '낮음' },
 ];
 
-function Switch({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (checked: boolean) => void }) {
+function Switch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
   return (
     <label className="mg-switch">
       <span>
         <b>{label}</b>
-        <small>{hint}</small>
       </span>
       <input type="checkbox" role="switch" checked={checked} onChange={(event) => onChange(event.target.checked)} />
     </label>
@@ -40,7 +39,7 @@ export function SettingsMenu({ settings, onChange, bgm, onBgm, onPerformance }: 
         <Icon name="gear" />
       </button>
       {open && (
-        <div className="mg-popover mg-menu mg-settings is-right" role="dialog" aria-label="화면 설정">
+        <div className="mg-popover mg-menu mg-settings is-right" role="dialog" aria-label="화면 설정" tabIndex={-1}>
           <p className="mg-menu-title">화면 품질</p>
           <div className="mg-tabs" role="radiogroup" aria-label="화면 품질">
             {QUALITY.map((option) => (
@@ -49,21 +48,16 @@ export function SettingsMenu({ settings, onChange, bgm, onBgm, onPerformance }: 
               </button>
             ))}
           </div>
-          <Switch label="후처리" hint="블룸·톤매핑. 켤 때만 불러와요" checked={settings.postProcessing} onChange={(postProcessing) => onChange({ postProcessing })} />
+          <Switch label="후처리" checked={settings.postProcessing} onChange={(postProcessing) => onChange({ postProcessing })} />
+          {/* Turning it on turns 후처리 on with it, which the switch above then shows. */}
           <Switch
             label="고품질 조명"
-            hint="섬에 튄 햇빛과 하늘빛(월드 GI), 반사를 더해요. WebGPU에서만, 후처리와 함께 켜져요"
             checked={settings.postProcessing && !!settings.cinematic}
             onChange={(cinematic) => onChange(cinematic ? { cinematic, postProcessing: true } : { cinematic })}
           />
-          <Switch
-            label="가리면 반투명"
-            hint="앞을 가린 나무나 집을 반투명하게 해요. 끄면 카메라가 앞으로 당겨져요"
-            checked={settings.cameraFade ?? true}
-            onChange={(cameraFade) => onChange({ cameraFade })}
-          />
-          <Switch label="절전 모드" hint="입력이 2초 없으면 30fps로 그려요" checked={settings.idleThrottle} onChange={(idleThrottle) => onChange({ idleThrottle })} />
-          <Switch label="배경 음악" hint="섬의 소리를 틀어요" checked={bgm} onChange={onBgm} />
+          <Switch label="가리면 반투명" checked={settings.cameraFade ?? true} onChange={(cameraFade) => onChange({ cameraFade })} />
+          <Switch label="절전 모드" checked={settings.idleThrottle} onChange={(idleThrottle) => onChange({ idleThrottle })} />
+          <Switch label="배경 음악" checked={bgm} onChange={onBgm} />
           <button
             className="mg-btn is-quiet is-small"
             onClick={() => {

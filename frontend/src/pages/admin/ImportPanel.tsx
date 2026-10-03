@@ -86,7 +86,7 @@ export function ImportPanel({
         </p>
       )}
       {imports === null && !problem && <p className="mg-empty">가져오기 기록을 불러오는 중…</p>}
-      {imports !== null && imports.length === 0 && <p className="mg-empty">아직 가져온 적이 없어요. 아래 스튜디오 캐릭터에서 시작하세요.</p>}
+      {imports !== null && imports.length === 0 && <p className="mg-empty">가져오기 기록이 없어요</p>}
       <ol className="mg-admin-import-list">
         {[...running, ...shown].map((item) => (
           <ImportRow key={item.id} item={item} onRetry={onRetry} />

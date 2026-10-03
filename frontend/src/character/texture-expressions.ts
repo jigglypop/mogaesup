@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { texture, uniform } from 'three/tsl';
 import type { GLTF } from 'three/addons/loaders/GLTFLoader.js';
+import { downloadBytes } from './assets/download';
 import { loadFailure } from './assets/load-failure';
 import { matteMaterial } from './matte-materials';
 import { ownProgramKey } from './program-key';
@@ -93,11 +94,8 @@ export class TextureExpressions {
 
 async function loadImage(url: string, expected: string) {
   let bytes: ArrayBuffer;
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(20000) });
-    if (!response.ok) throw new Error('표정 텍스처를 불러올 수 없습니다.');
-    bytes = await response.arrayBuffer();
-  } catch (error) { throw loadFailure(error, '표정 텍스처'); }
+  try { bytes = await downloadBytes(url, { refused: '표정 텍스처를 불러올 수 없습니다.' }); }
+  catch (error) { throw loadFailure(error, '표정 텍스처'); }
   const sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(value => value.toString(16).padStart(2, '0')).join('');
   if (sha !== expected) throw new Error('표정 텍스처가 변경되었습니다.');
   return createImageBitmap(new Blob([bytes], { type: 'image/png' }), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });

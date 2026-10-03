@@ -26,6 +26,17 @@ describe('방명록 요청', () => {
   beforeEach(() => { guestbook.mockResolvedValue(page(['1'], 'cursor')); });
   afterEach(() => { guestbook.mockReset(); write.mockReset(); remove.mockReset(); });
 
+  it('로그인하지 않은 방문자의 로그인 링크는 로그인한 뒤 이 섬으로 돌아온다', async () => {
+    const { container, unmount } = await mount(
+      <MemoryRouter initialEntries={['/@home']}>
+        <Guestbook username="home" viewer={null} />
+      </MemoryRouter>,
+    );
+    const link = [...container.querySelectorAll('a')].find((anchor) => anchor.textContent === '로그인');
+    expect(link?.getAttribute('href')).toBe('/?next=%2F%40home');
+    await unmount();
+  });
+
   it('응답 전 두 번 제출해도 글은 한 번만 쓴다', async () => {
     let finish!: (result: { id: string }) => void;
     write.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));

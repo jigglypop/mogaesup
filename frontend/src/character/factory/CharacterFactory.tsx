@@ -70,7 +70,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
   const [hairLength, setHairLength] = useState<'source' | 'short' | 'long'>('source');
   const [baseId, setBaseId] = useState(new URLSearchParams(location.search).get('photoBase') || '');
   const [useCommonBody, setUseCommonBody] = useState(!new URLSearchParams(location.search).has('photoBase') && new URLSearchParams(location.search).get('photoBody') !== 'new');
-  const locked = useRef(false), alive = useRef(true), fileInput = useRef<HTMLInputElement>(null), dragDepth = useRef(0);
+  const locked = useRef(false), alive = useRef(true), dragDepth = useRef(0);
   const partJobs = jobs.filter(j => j.production_mode === 'character_parts').sort((a, b) => b.created_at.localeCompare(a.created_at));
   const photoJobs = partJobs.filter(isPhotoJob);
   const suggested = photoJobs.find(j => j.id === jobId) || photoJobs[0];
@@ -256,7 +256,9 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
     <main>
       <section className="character-input">
         <h1>사진으로 전체 생성</h1>
-        <label className={`character-upload ${draggingPhoto ? 'is-dragging' : ''}`} tabIndex={busy ? -1 : 0} role="button" aria-disabled={busy} onPaste={pasteUpload} onDragEnter={enterPhotoDrop} onDragLeave={leavePhotoDrop} onDragOver={overPhotoDrop} onDrop={dropPhoto} onKeyDown={event => { if (!busy && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); fileInput.current?.click(); } }}>{reference ? <img src={reference.url} alt="캐릭터 원본 사진" /> : <span>{live.loading && (characterId || suggested) ? '사진 불러오는 중' : '캐릭터 사진을 클릭하거나 놓거나 Ctrl+V로 붙여넣으세요'}</span>}<b>{reference ? '사진 바꾸기 · 끌어놓기 가능' : '사진 선택 · 끌어놓기 가능'}</b><input ref={fileInput} aria-label="캐릭터 사진" type="file" accept="image/png,image/jpeg" disabled={busy} onChange={e => { void upload(e.target.files?.[0]); e.target.value = ''; }} /></label>
+        {/* The file input is the one control here: Tab reaches it, Space or Enter opens the picker, and a paste or drop
+            anywhere on the label uploads too. */}
+        <label className={`character-upload${draggingPhoto ? ' is-dragging' : ''}${busy ? ' is-disabled' : ''}`} onPaste={pasteUpload} onDragEnter={enterPhotoDrop} onDragLeave={leavePhotoDrop} onDragOver={overPhotoDrop} onDrop={dropPhoto}>{reference ? <img src={reference.url} alt="캐릭터 원본 사진" /> : <span>{live.loading && (characterId || suggested) ? '사진 불러오는 중' : '캐릭터 사진을 클릭하거나 놓거나 Ctrl+V로 붙여넣으세요'}</span>}<b>{reference ? '사진 바꾸기 · 끌어놓기 가능' : '사진 선택 · 끌어놓기 가능'}</b><input aria-label="캐릭터 사진" type="file" accept="image/png,image/jpeg" disabled={busy} onChange={e => { void upload(e.target.files?.[0]); e.target.value = ''; }} /></label>
         {live.characters.length > 0 && <details className="character-history"><summary>작업 선택</summary><select aria-label="작업 선택" disabled={busy} value={source?.id || ''} onChange={e => remember(e.target.value)}><option value="" disabled>선택</option>{live.characters.filter(c => c.artifacts.some(a => a.id === 'reference') || photoJobs.some(j => j.character_id === c.id)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></details>}
         <label className="character-history">기본 몸<select aria-label="기본 몸" value={selectedBaseId} disabled={busy || running || !!pending} onChange={event => { setBaseId(event.target.value); setUseCommonBody(false); }}>
           <option value="">사진에서 새 기본 몸 생성</option>
@@ -287,7 +289,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
             : <p role="status">{job.reference_preparation.failure?.message || job.error || (job.reference_preparation.status === 'pending' ? '대기 중' : '규격 이미지 준비 중')}</p>}
           {normalizedSideReference && <a href={normalizedSideReference.url} target="_blank" rel="noreferrer"><img src={normalizedSideReference.url} alt={'공통 규격으로 맞추고 배경을 제거한 오른쪽 측면 캐릭터'} /></a>}
         </section>}
-        {job && <RigRecovery jobId={job.id} onComplete={() => { void refreshJobs(); }} />}
+        {job && <RigRecovery jobId={job.id} refreshKey={`${job.status}:${job.character_flow?.stage ?? ''}:${job.updated_at ?? ''}`} onComplete={() => { void refreshJobs(); }} />}
         {job && <StageRunner key={`stages:${job.id}`} jobId={job.id} onChange={() => { void refreshJobs(); void selectedJob.refresh(); }} />}
         {job ? <NativeAssembly key={`assembly:${job.id}`} jobId={job.id} simple flow={job.character_flow} /> : <div className="character-empty"><h2>캐릭터 미리보기</h2><p>{jobsLoading ? '작업 불러오는 중…' : '제작 결과 없음'}</p></div>}
       </section>

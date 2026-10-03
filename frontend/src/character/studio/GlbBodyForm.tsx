@@ -69,12 +69,11 @@ export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
       <label className="base-body-check"><input type="radio" name={`glb-mode-${bodyType}`} checked={mode === 'register'} onChange={() => update({ import_mode: 'register' })} />바로 등록</label>
       <label className="base-body-check"><input type="radio" name={`glb-mode-${bodyType}`} checked={mode === 'rig'} onChange={() => update({ import_mode: 'rig' })} />새로 리깅 후 등록</label>
     </fieldset>
-    {mode === 'rig' ? <>
+    {mode === 'rig' && <>
       <label className="base-body-check"><input type="checkbox" checked={motions} disabled={disabled} onChange={event => update({ generate_motions: event.target.checked })} />저장된 기본 동작 5종 생성</label>
       <label className="base-body-check"><input type="checkbox" checked={input?.prepare_expression_uv ?? draft.prepare_expression_uv} disabled={disabled} onChange={event => update({ prepare_expression_uv: event.target.checked })} />표정용 빈 얼굴 준비</label>
-      {(input?.prepare_expression_uv ?? draft.prepare_expression_uv) && <small>얼굴 색을 비우고 PNG 표정용 UV를 준비합니다. 입체 형상은 유지됩니다.</small>}
       <small>Meshy 유료 리깅 1회{motions ? ' · 기본 동작 5종' : ''} · 기존 골격·동작 교체</small>
-    </> : <small>리깅 유무와 관계없이 원본 메시·텍스처·골격·동작을 그대로 저장합니다.</small>}
+    </>}
     <button className="base-body-create" onClick={() => void submit()} disabled={busy || checking || !!recovery.error || (!pending && (!draft.name.trim() || !draft.asset))}>{busy ? '접수 중' : pending ? '같은 GLB 요청 복구' : mode === 'rig' ? '새 리깅 시작 후 등록' : '바로 등록'}</button>
     {pending && <p className="base-body-recovery">저장된 GLB와 같은 요청 키로 접수 결과를 확인합니다.</p>}
     {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}

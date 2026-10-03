@@ -1,7 +1,7 @@
 .prompt-manager{max-width:1560px}
 .prompt-manager .workspace-heading{gap:16px;flex-wrap:wrap}
 .prompt-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.prompt-actions>span,.prompt-scope,.prompt-rule{font-size:13px;color:var(--muted);line-height:1.7}
+.prompt-actions>span,.prompt-rule{font-size:13px;color:var(--muted);line-height:1.7}
 .prompt-manager button:disabled{opacity:.45;cursor:default}
 .prompt-manager button.prompt-save{background:var(--accent-strong);border-color:transparent;color:var(--accent-ink)}
 .prompt-groups{margin:22px 0}

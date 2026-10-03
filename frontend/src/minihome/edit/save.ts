@@ -3,8 +3,17 @@ import type { SaveSystem } from 'gaesup-world';
 import { ApiRequestError, ApiTimeoutError } from '../../api/client';
 import { IslandTooLargeError, MAX_ISLAND_BYTES } from '../persistence';
 
-type SaveProblemKind = 'tooLarge' | 'invalid' | 'auth' | 'network' | 'server';
+/**
+ * `session`: the session ran out; the same island saves once its owner signs in again. `network` and `server` the
+ * saver retries on its own. The rest need a change first: to the island (`tooLarge`, `invalid`) or to who is saving it.
+ */
+type SaveProblemKind = 'tooLarge' | 'invalid' | 'auth' | 'session' | 'network' | 'server';
 export type SaveProblem = { kind: SaveProblemKind; message: string };
+
+/** A failure that sending the same island again may get past: the line or the server was down for a moment. */
+export const retryable = (problem: SaveProblem) => problem.kind === 'network' || problem.kind === 'server';
+/** A failure after which the island still saves without being changed: by a retry, or once its owner signs in again. */
+export const savesLater = (problem: SaveProblem) => retryable(problem) || problem.kind === 'session';
 
 const megabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 const LIMIT = megabytes(MAX_ISLAND_BYTES).replace('.0', '');
@@ -21,12 +30,16 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
   if (error instanceof ApiRequestError) {
     if (error.code === 'owner_changed') return { kind: 'auth', message: error.message };
     if (error.status === 409) return 'conflict';
+    if (error.status === 401) return { kind: 'session', message: '로그인이 풀려 저장하지 못했어요. 다시 로그인하면 이어서 저장해요.' };
+    if (error.status === 403) return { kind: 'auth', message: '이 섬을 저장할 권한이 없어요.' };
+    // A timeout, a rate limit or a server error may pass in a moment; any other refusal would come back the same.
+    if (error.status === 408 || error.status === 429 || error.status >= 500) {
+      return { kind: 'server', message: '서버가 잠시 대답하지 않아요. 조금 뒤에 다시 저장해 볼게요.' };
+    }
     if (error.status === 422) {
       return { kind: 'invalid', message: '섬에 저장할 수 없는 내용이 섞여 있어요. 최근에 놓은 물건을 치우고 다시 저장해 주세요.' };
     }
-    if (error.status === 401) return { kind: 'auth', message: '로그인이 풀렸어요. 다시 로그인한 뒤 저장해 주세요.' };
-    if (error.status === 403) return { kind: 'auth', message: '이 섬을 저장할 권한이 없어요.' };
-    return { kind: 'server', message: '서버가 잠시 대답하지 않아요. 조금 뒤에 다시 저장해 볼게요.' };
+    return { kind: 'invalid', message: `섬을 저장하지 못했어요. ${error.message}` };
   }
   // fetch rejects with a TypeError when the request never reached the server.
   if (error instanceof TypeError) return { kind: 'network', message: '인터넷 연결이 끊겼어요. 연결되면 다시 저장해 볼게요.' };
@@ -175,8 +188,10 @@ export function createIslandSaver({
   };
 
   const schedule = () => {
-    // A save that failed waits out its own retry delay; editing meanwhile does not shorten it.
+    // A save that failed waits out its own retry delay; editing meanwhile does not shorten it. A lapsed session waits
+    // for its owner to sign in again (`flush` then), since every save before that would be refused the same way.
     if (disposed || !writable || state.phase !== 'ready' || state.conflict || !state.dirty || stuck() || retryTimer !== undefined) return;
+    if (state.problem?.kind === 'session') return;
     const at = now();
     firstDirtyAt ??= at;
     const due = Math.min(at + idleMs, firstDirtyAt + maxWaitMs);
@@ -210,10 +225,9 @@ export function createIslandSaver({
           set({ saving: false, conflict: true, dirty: isDirty() });
           return false;
         }
-        const retryable = problem.kind === 'network' || problem.kind === 'server';
-        failed = retryable ? null : captured;
+        failed = savesLater(problem) ? null : captured;
         set({ saving: false, problem, bytes: adapter.lastBytes, dirty: isDirty() });
-        if (retryable && !disposed) {
+        if (retryable(problem) && !disposed) {
           const delay = retryMs[Math.min(retries, retryMs.length - 1)] ?? 60_000;
           retries++;
           stopRetry();

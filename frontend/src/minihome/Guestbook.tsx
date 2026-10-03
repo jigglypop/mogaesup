@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import { problemText } from '../api/client';
 import { socialApi } from '../api/endpoints';
 import type { GuestbookEntry, User } from '../api/types';
+import { useSignInPath } from '../auth/signIn';
 import { initialOf, toneOf } from '../shell/Shell';
 
 const when = (at: string) => {
@@ -18,6 +19,7 @@ const when = (at: string) => {
 
 /** The island's guestbook: a note to leave at the top, then the notes, newest first. */
 export function Guestbook({ username, viewer }: { username: string; viewer: User | null }) {
+  const signIn = useSignInPath();
   const [entries, setEntries] = useState<GuestbookEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -115,7 +117,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
         </form>
       ) : (
         <p className="mg-compose mg-card mg-muted">
-          <Link to="/">로그인</Link>하면 방명록을 남길 수 있어요.
+          <Link to={signIn}>로그인</Link>하면 방명록을 남길 수 있어요.
         </p>
       )}
       {error && (
@@ -126,7 +128,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
       <p className="mg-list-count">
         방명록 <b>{total}</b>
       </p>
-      {entries.length === 0 && <p className="mg-empty" role="status">{loading ? '불러오는 중…' : '첫 번째로 한마디를 남겨 보세요'}</p>}
+      {entries.length === 0 && <p className="mg-empty" role="status">{loading ? '불러오는 중…' : '방명록이 없어요'}</p>}
       <ul className="mg-entries">
         {entries.map((entry) => (
           <li key={entry.id}>

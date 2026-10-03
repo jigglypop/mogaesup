@@ -13,6 +13,7 @@ import { NativeWardrobe, type Tuck, type Wearable } from './native-wardrobe';
 import { TextureExpressions } from './texture-expressions';
 import { matteCharacter } from './matte-materials';
 import { disposeObjectResources } from './assets/gpu-resources';
+import { downloadBytes } from './assets/download';
 import { loadFailure } from './assets/load-failure';
 
 type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
@@ -295,6 +296,7 @@ export class ModelViewer {
   private expressionError = '';
   private wardrobe?: NativeWardrobe;
   private root?: ReturnType<typeof createRoot>;
+  private store?: ReturnType<ReturnType<typeof createRoot>['render']>;
   private mount = document.createElement('div');
   private canvas = document.createElement('canvas');
   private observer: ResizeObserver;
@@ -390,18 +392,30 @@ export class ModelViewer {
     if (!this.model || this.disposed || !this.root) return;
     const store = this.root.render(<CharacterViewport model={this.model} animation={this.animation} studio={this.presentation === 'studio'} card={this.presentation === 'card'} cardView={this.cardView}
       onReady={this.onReady} onError={this.onError} onWorld={this.onWorld} />);
+    this.store = store;
     store.getState().invalidate();
+  }
+  /**
+   * A still picture of the loaded model as the view frames it: R3F advances its own scene and camera one frame and
+   * the canvas is read in that same task, before the browser presents (and may clear) it. A first frame warms the
+   * pipelines and textures; the picture is the frame after it. `renderer` says which backend drew it.
+   */
+  async snapshot(type = 'image/webp') {
+    const store = this.store;
+    if (!store || this.disposed) throw new Error('3D 미리보기가 준비되지 않았습니다.');
+    store.getState().advance(store.getState().clock.elapsedTime);
+    await new Promise(requestAnimationFrame);
+    if (this.disposed || store !== this.store) throw new Error('3D 미리보기가 닫혔습니다.');
+    store.getState().advance(store.getState().clock.elapsedTime);
+    return { src: this.canvas.toDataURL(type, .92), renderer: this.container.dataset.renderer || '' };
   }
   async load(url: string, options: { sha256?: string; wardrobe?: boolean } = {}) {
     const token = ++this.generation;
     this.request?.abort(); this.finish?.();
     this.request = new AbortController();
     let content: ArrayBuffer;
-    try {
-      const response = await fetch(url, { signal: AbortSignal.any([this.request.signal, AbortSignal.timeout(20000)]) });
-      if (!response.ok) throw new Error('모델 파일을 불러올 수 없습니다.');
-      content = await response.arrayBuffer();
-    } catch (error) { throw loadFailure(error, '모델 파일'); }
+    try { content = await downloadBytes(url, { signal: this.request.signal, refused: '모델 파일을 불러올 수 없습니다.' }); }
+    catch (error) { throw loadFailure(error, '모델 파일'); }
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content))).map(value => value.toString(16).padStart(2, '0')).join('');
     if (options.sha256 && options.sha256 !== digest) throw new Error('모델이 고정한 몸 버전과 다릅니다.');
     const gltf = await new GLTFLoader().parseAsync(content, '');
@@ -471,7 +485,7 @@ export class ModelViewer {
   dispose() {
     this.expressions?.dispose(); this.expressions = undefined;
     this.wardrobe?.dispose(); this.wardrobe = undefined;
-    this.disposed = true; this.generation++; this.request?.abort(); this.finish?.();
+    this.disposed = true; this.generation++; this.request?.abort(); this.finish?.(); this.store = undefined;
     this.observer.disconnect(); this.visibilityObserver.disconnect();
     document.removeEventListener('visibilitychange', this.updateVisibility); this.root?.unmount();
     // R3F completes its canvas cleanup on a deferred callback; release the WebGPU device afterwards.

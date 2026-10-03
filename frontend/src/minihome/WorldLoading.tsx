@@ -16,7 +16,7 @@ export function WorldLoading() {
     return () => clearTimeout(timer);
   }, [stage]);
   if (gone) return null;
-  const detail = stage === 'assets' && total > 0 ? `모델과 텍스처 ${loaded}/${total}` : stage === 'shaders' ? '처음 한 번만 걸려요' : ' ';
+  const detail = stage === 'assets' && total > 0 ? `모델과 텍스처 ${loaded}/${total}` : ' ';
   return (
     <div className={`mg-world-loading${stage === 'ready' ? ' is-done' : ''}`} role="status" aria-live="polite">
       <div className="mg-loading-card mg-glass">

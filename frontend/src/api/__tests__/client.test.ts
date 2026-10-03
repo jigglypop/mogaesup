@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { onSessionLapse, sessionLapsed, setSessionOwner } from '../../auth/sessionWork';
 import { api, ApiRequestError, ApiTimeoutError } from '../client';
 
 const json = (status: number, body: unknown) =>
@@ -42,6 +43,44 @@ describe('api client', () => {
   it('본문이 없는 오류도 상태 코드로 알린다', async () => {
     fetchMock.mockResolvedValueOnce(new Response('bad gateway', { status: 502 }));
     await expect(api('/homes')).rejects.toMatchObject({ status: 502, code: 'http_error' });
+  });
+
+  describe('세션이 끝났다는 401', () => {
+    const lapses = vi.fn();
+    let stop = () => {};
+    beforeEach(() => {
+      setSessionOwner('u1');
+      stop = onSessionLapse(lapses);
+    });
+    afterEach(() => {
+      stop();
+      lapses.mockReset();
+      setSessionOwner(null);
+    });
+
+    it('로그인한 사람의 요청이 401을 받으면 세션이 풀린 것으로 알린다', async () => {
+      fetchMock.mockResolvedValueOnce(json(401, { code: 'login_required', message: '로그인이 필요합니다.' }));
+      await expect(api('/homes/me/world', { method: 'PUT', body: {} })).rejects.toMatchObject({ status: 401 });
+      expect(lapses).toHaveBeenCalledTimes(1);
+      expect(sessionLapsed()).toBe(true);
+    });
+
+    it('틀린 비밀번호의 401은 세션과 상관없다', async () => {
+      fetchMock.mockResolvedValueOnce(json(401, { code: 'invalid_credentials', message: '아이디 또는 비밀번호가 올바르지 않습니다.' }));
+      await expect(api('/auth/login', { method: 'POST', body: {} })).rejects.toMatchObject({ status: 401 });
+      expect(lapses).not.toHaveBeenCalled();
+    });
+
+    it('보낸 뒤에 세션이 바뀌었다면 늦게 온 401은 새 세션을 건드리지 않는다', async () => {
+      let answer!: (response: Response) => void;
+      fetchMock.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+      const pending = api('/homes/me/world', { method: 'PUT', body: {} }).catch(() => undefined);
+      setSessionOwner('u1');
+      answer(json(401, { code: 'login_required', message: '' }));
+      await pending;
+      expect(lapses).not.toHaveBeenCalled();
+      expect(sessionLapsed()).toBe(false);
+    });
   });
 
   describe('대답이 없을 때', () => {

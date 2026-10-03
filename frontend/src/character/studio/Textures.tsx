@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
 import { studioApi, type Tile } from './api';
 import type { TileShape } from './TilePreview';
@@ -11,7 +11,7 @@ const surfaces: Record<string, string> = {
   wood: '나뭇결', bark: '나무껍질', brick: '벽돌',
 };
 
-export default function Textures({ extra }: { extra?: ReactNode }) {
+export default function Textures() {
   const listing = usePolling(studioApi.textures, 15000);
   const [surface, setSurface] = useState('snow');
   const [size, setSize] = useState(512);
@@ -56,7 +56,6 @@ export default function Textures({ extra }: { extra?: ReactNode }) {
         onChange={event => setSeed(Number(event.target.value))} /></label>
       <button disabled={busy}>{busy ? '생성 중' : '타일 생성'}</button>
     </form>
-    {extra}
     {(error || listing.error) && <p className="workspace-error" role="alert">{error || listing.error}</p>}
     {selected && <section className="management-panel tile-inspector" aria-label="선택한 타일 3D 미리보기">
       <div className="tile-preview-heading"><div><h2>{surfaces[selected.surface] || selected.surface}</h2><small>{selected.size}px · 시드 {selected.seed}</small></div>

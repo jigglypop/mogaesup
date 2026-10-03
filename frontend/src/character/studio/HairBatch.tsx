@@ -50,7 +50,9 @@ function readDraft(): Draft {
 export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: string; version?: string; disabled: boolean; setup?: ReactNode; onJob: (job: FactoryJob) => void}) {
   const readBatches = useCallback((signal: AbortSignal) => hairBatchesApi.list(signal), []);
   const batches = usePolling(readBatches, 5000);
-  const initialRecovery = useRef(hairBatchesApi.recovery());
+  // The saved batch request as storage holds it now (another tab or a lost answer may have saved one).
+  const recovery = hairBatchesApi.recovery(), pending = recovery.pending, recoveryError = recovery.error;
+  const [, setDiscarded] = useState(0);
   const initialDraft = useRef(readDraft());
   const [mode,setMode] = useState<InputMode>(initialDraft.current.mode);
   const [source, setSource] = useState(initialDraft.current.source);
@@ -62,14 +64,12 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
   const [redrawNotes,setRedrawNotes] = useState(initialDraft.current.redrawNotes);
   const [worn,setWorn] = useState(initialDraft.current.worn);
   const [sourceSideFacing,setSourceSideFacing] = useState(initialDraft.current.sourceSideFacing);
-  const [pending,setPending] = useState(initialRecovery.current.pending);
   const submitLock = useRef(false);
   const resumeLocks = useRef(new Set<string>());
   const [uploadProgress,setUploadProgress] = useState('');
   const [panel,setPanel] = useState<'input'|'saved'>('input');
   const [expandedBatch,setExpandedBatch] = useState('');
   const [regeneration,setRegeneration] = useState<Regeneration|null>(null);
-  const recoveryError = initialRecovery.current.error;
   const rowEdges = useMemo(() => layout === 'attached' ? attachedRowEdges : equalEdges(rows), [layout, rows]);
   const validGrid = Number.isInteger(rows) && rows >= 1 && rows <= 12 && Number.isInteger(columns) && columns >= 1 && columns <= 8 && rows * columns <= 48;
   useEffect(() => {
@@ -127,14 +127,18 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       if (!pending) {
         if(!baseId || !version || !selected.length)throw new Error('기준 몸과 생성할 스타일을 선택하세요.');
       }
+      // With a saved request this resumes it as it was saved; a request saved since this render is refused by `create`.
       const input = pending?.input || {base_job_id:baseId!,base_version:version!,items:selected.flatMap(i=>items[i]?[{name:items[i].name.trim(),views:items[i].views}]:[]),concurrency:4,meshy_options:meshyDefaultsFor('hair'),
         redraw:{notes:redrawNotes.trim(),source_side_facing:sourceSideFacing,...(worn ? {worn:true} : {})}};
       const created = await hairBatchesApi.create(input);
-      setPending(null);
       setPanel('saved');setExpandedBatch(created.id);
       batches.setValue(current => ({items:[created, ...(current?.items || []).filter(batch => batch.id !== created.id)]}));
       void batches.refresh();
-    }catch(e){setPending(hairBatchesApi.recovery().pending);setError((e as Error).message);}finally{submitLock.current=false;setBusy(false);}
+    }catch(e){setError((e as Error).message);}finally{submitLock.current=false;setBusy(false);}
+  }
+  function discard(key: string) {
+    hairBatchesApi.discard(key);
+    setError(''); setDiscarded(count => count + 1);
   }
   async function resume(id:string){
     if(resumeLocks.current.has(id))return;
@@ -164,7 +168,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       setRegeneration(null);setExpandedBatch(created.id);
       batches.setValue(current => ({items:[created, ...(current?.items || []).filter(value => value.id !== created.id)]}));
       void batches.refresh();
-    }catch(e){setPending(hairBatchesApi.recovery().pending);setError((e as Error).message);}finally{submitLock.current=false;setBusy(false);}
+    }catch(e){setError((e as Error).message);}finally{submitLock.current=false;setBusy(false);}
   }
   function useEqualGrid(nextRows = rows, nextColumns = columns) {
     setRows(nextRows); setColumns(nextColumns); setLayout('equal'); setItems([]); setSelected([]);
@@ -192,7 +196,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
     </fieldset>
     {uploadProgress && <p role="status">3뷰 이미지 처리 중 · {uploadProgress}</p>}
     <button disabled={busy || !!recoveryError || (!pending && (disabled || !baseId || !version || !selected.length || selected.some(index=>!items[index]?.name.trim())))} onClick={()=>void generate()}>{pending?'같은 요청 키로 접수 복구':`${selected.length}종 생성 · 유료 이미지 ${selected.length*(worn?3:4)}장 + 3D ${selected.length}회`}</button>
-    {pending && <small className="generation-recovery">응답이 확인되지 않은 배치입니다. 입력과 요청 키를 유지해 결과를 복구합니다.</small>}
+    {pending && <p className="generation-recovery">응답을 확인하지 못한 배치 · {pending.input.items.map(item=>item.name).join(', ')} <button type="button" disabled={busy} onClick={()=>discard(pending.key)}>저장된 요청 지우기</button></p>}
     </div>
     {(error || recoveryError || batches.error) && <p role="alert">{error || recoveryError || batches.error}</p>}
     <div hidden={panel !== 'saved'}>

@@ -3,8 +3,9 @@ import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { HomeView } from '../../api/types';
+import { draftKey } from '../../auth/drafts';
 import { mount, type } from '../../__tests__/mount';
-import { About, wantsSave } from '../Profile';
+import { About, openingText, wantsSave } from '../Profile';
 
 const view = (changes: Partial<HomeView['profile']> = {}): HomeView => ({
   isOwner: true,
@@ -100,9 +101,52 @@ describe('상태 메시지 저장', () => {
       const { container, unmount } = await open();
       await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '내일은 비'); await wait(900);
       await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '오늘도 맑음');
-      expect(localStorage.getItem('mogaesup:profile:owner:status')).toBe('오늘도 맑음');
+      expect(JSON.parse(localStorage.getItem(draftKey('owner', 'status'))!)).toEqual({ text: '오늘도 맑음', base: '오늘도 맑음' });
       await unmount(); finish(); await wait(0);
       expect(onUpdate).toHaveBeenNthCalledWith(2, { statusMessage: '오늘도 맑음' });
+    });
+
+    it('저장한 값이 돌아와도 이어 치던 끝의 빈칸을 지우지 않는다', async () => {
+      let finish!: () => void;
+      onUpdate.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+      const { container, rerender, unmount } = await open();
+      const field = () => container.querySelector<HTMLTextAreaElement>('textarea')!;
+      await type(field(), '내일은 비');
+      await wait(900);
+      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '내일은 비' });
+      // The next word is on its way: a space typed while the save answers.
+      await type(field(), '내일은 비 ');
+      finish();
+      await wait(0);
+      await rerender(<About view={view({ statusMessage: '내일은 비' })} minimes={[]} look={null} onUpdate={onUpdate} onWearLook={() => {}} />);
+      await wait(0);
+      expect(field().value).toBe('내일은 비 ');
+      await wait(900);
+      expect(onUpdate).toHaveBeenCalledTimes(1);
+      await unmount();
+    });
+
+    it('남겨 둔 초안은 그 초안을 쓸 때의 서버 값이 그대로일 때만 되살리고, 서버 값이 바뀌었으면 버린다', async () => {
+      localStorage.setItem(draftKey('owner', 'status'), JSON.stringify({ text: '쓰다 만 글', base: '오늘도 맑음' }));
+      const kept = await open();
+      expect(kept.container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('쓰다 만 글');
+      await kept.unmount();
+      onUpdate.mockReset();
+
+      // Meanwhile another device saved a newer message.
+      localStorage.setItem(draftKey('owner', 'status'), JSON.stringify({ text: '쓰다 만 글', base: '오늘도 맑음' }));
+      const newer = await mount(<About view={view({ statusMessage: '다른 기기에서 쓴 글' })} minimes={[]} look={null} onUpdate={onUpdate} onWearLook={() => {}} />);
+      expect(newer.container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('다른 기기에서 쓴 글');
+      expect(localStorage.getItem(draftKey('owner', 'status'))).toBeNull();
+      await newer.unmount();
+      expect(onUpdate).not.toHaveBeenCalled();
+    });
+
+    it('예전 형식(글만 있는) 초안은 무엇을 바탕으로 썼는지 몰라 되살리지 않는다', () => {
+      localStorage.setItem(draftKey('owner', 'title'), '"옛 초안"');
+      expect(openingText(draftKey('owner', 'title'), '모개숲')).toBe('모개숲');
+      localStorage.setItem(draftKey('owner', 'title'), '옛 초안');
+      expect(openingText(draftKey('owner', 'title'), '모개숲')).toBe('모개숲');
     });
   });
 });

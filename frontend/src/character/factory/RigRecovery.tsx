@@ -20,10 +20,23 @@ function readPending(storage: string): { pending: Pending | null; error: string 
   }
 }
 
-export function RigRecovery({ jobId, onComplete }: { jobId: string; onComplete?: () => void }) {
+/** How often a transfer under way is asked about. */
+export const RIG_TRANSFER_POLL_MS = 5000;
+const underWay = (status?: string) => status === 'accepted' || status === 'running';
+
+/**
+ * Recovering a body's rig from a saved one. It asks every 5 s only while a transfer is under way and the tab is in view;
+ * otherwise it reads again when the job it belongs to changes (`refreshKey`), the tab comes back or the connection does.
+ */
+export function RigRecovery({ jobId, onComplete, refreshKey }: { jobId: string; onComplete?: () => void; refreshKey?: string }) {
   const storage = `gaesup.rig-transfer:${jobId}`;
   const read = useCallback((signal: AbortSignal) => factoryApi.rigTransfer(jobId, signal), [jobId]);
-  const polling = usePolling(read, 5000), state = polling.value;
+  const polling = usePolling(read, value => underWay(value?.status) ? RIG_TRANSFER_POLL_MS : null), state = polling.value;
+  const seenKey = useRef(refreshKey);
+  useEffect(() => {
+    if (seenKey.current === refreshKey) return;
+    seenKey.current = refreshKey; void polling.refresh();
+  }, [refreshKey, polling.refresh]);
   const recovered = readPending(storage), pending = recovered.pending;
   const recommendedKey = state?.recommended_source
     ? `${state.recommended_source.job_id}:${state.recommended_source.version}`
@@ -76,7 +89,7 @@ export function RigRecovery({ jobId, onComplete }: { jobId: string; onComplete?:
   if (!state) {
     return polling.error ? <section className="rig-recovery"><p role="alert">{polling.error}</p><button onClick={() => void polling.refresh()}>복구 상태 다시 확인</button></section> : null;
   }
-  if (!state.can_start && !pending && !['accepted', 'running', 'paused'].includes(state.status)) return null;
+  if (!state.can_start && !pending && !underWay(state.status) && state.status !== 'paused') return null;
   const source = pending ? `${pending.input.source_job_id}:${pending.input.source_version}` : selected;
   const usingRecommended = !!recommendedKey && source === recommendedKey;
   const status = state.status === 'accepted' ? '복구 대기' : state.status === 'running' ? '골격·동작 이전 중' : state.status === 'paused' ? '복구 중단' : '';
@@ -92,6 +105,6 @@ export function RigRecovery({ jobId, onComplete }: { jobId: string; onComplete?:
     {sources === undefined && state.can_start && !sourceError && <p role="status">저장된 골격 불러오는 중…</p>}
     {sources?.length === 0 && state.can_start && <p>재사용할 저장 골격이 없습니다.</p>}
     {sourceError && <p role="alert">{sourceError} <button onClick={() => { setSources(undefined); setSourceError(''); void loadSources(); }}>목록 다시 불러오기</button></p>}
-    {(recovered.error || submitError || polling.error || state.error) && <p role="alert">{recovered.error || submitError || polling.error || state.error}</p>}
+    {(recovered.error || submitError || polling.error || state.error) && <p role="alert">{recovered.error || submitError || polling.error || state.error}{polling.error && <> <button onClick={() => void polling.refresh()}>복구 상태 다시 확인</button></>}</p>}
   </section>;
 }

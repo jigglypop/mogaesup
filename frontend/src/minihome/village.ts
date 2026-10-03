@@ -34,6 +34,17 @@ const cell = (x: number, z: number) => MAP[z]?.[x] ?? 's';
 
 /** Where the player starts: the crossroads south of the miniroom. */
 export const SPAWN: [number, number, number] = [at(8), 1, at(5)];
+/** How far from the crossroads a visitor starts, so the owner and visitors do not start inside one another. */
+const VISITOR_SPAWN_RADIUS = 1.6;
+
+/** Where `visitor` starts: the owner (null) at the crossroads, each visitor at their own spot on the crossroads. */
+export function spawnFor(visitor: string | null): [number, number, number] {
+  if (!visitor) return SPAWN;
+  let hash = 2166136261;
+  for (let index = 0; index < visitor.length; index += 1) hash = Math.imul(hash ^ visitor.charCodeAt(index), 16777619);
+  const angle = ((hash >>> 0) / 2 ** 32) * Math.PI * 2;
+  return [SPAWN[0] + Math.cos(angle) * VISITOR_SPAWN_RADIUS, SPAWN[1], SPAWN[2] + Math.sin(angle) * VISITOR_SPAWN_RADIUS];
+}
 /** The miniroom's floor cells. */
 const ROOM = { x0: 3, x1: 4, z0: 2, z1: 3 };
 

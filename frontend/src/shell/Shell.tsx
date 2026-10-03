@@ -8,25 +8,64 @@ import { problemText } from '../api/client';
 import { socialApi } from '../api/endpoints';
 import type { IlchonRequest } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
+import { useSignInPath } from '../auth/signIn';
 import { can } from '../auth/can';
 import { Icon, type IconName } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
 
-/** Open state for a menu that closes on Escape or a press outside it. */
+/** Where an arrow, Home or End key moves to in a menu of `count` items from `index` (-1: none focused yet). */
+export function nextMenuIndex(key: string, index: number, count: number): number | null {
+  if (count === 0) return null;
+  if (key === 'ArrowDown') return index < 0 ? 0 : (index + 1) % count;
+  if (key === 'ArrowUp') return index < 0 ? count - 1 : (index - 1 + count) % count;
+  if (key === 'Home') return 0;
+  if (key === 'End') return count - 1;
+  return null;
+}
+
+/**
+ * Open state for a popover beside its button (`ref` goes on the element holding both). Opening moves the keyboard into
+ * it: to a menu's first item, or onto a dialog itself. Escape closes it and gives focus back to the button; a press
+ * outside, or Tab past its end, closes it. In a menu (role=menu) the up and down arrows, Home and End move between items.
+ */
 export function usePopover<T extends HTMLElement = HTMLDivElement>() {
   const [open, setOpen] = useState(false);
   const ref = useRef<T>(null);
   useEffect(() => {
-    if (!open) return undefined;
+    const anchor = ref.current;
+    if (!open || !anchor) return undefined;
+    const focused = document.activeElement;
+    const trigger = focused instanceof HTMLElement && anchor.contains(focused) ? focused : anchor.querySelector<HTMLElement>('[aria-expanded]');
+    const popover = anchor.querySelector<HTMLElement>('.mg-popover');
+    const menu = popover?.matches('[role="menu"]') ? popover : popover?.querySelector<HTMLElement>('[role="menu"]');
+    const items = () => (menu ? [...menu.querySelectorAll<HTMLElement>('[role^="menuitem"]:not(:disabled)')] : []);
+    (items()[0] ?? popover)?.focus();
     const outside = (event: PointerEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+      if (!anchor.contains(event.target as Node)) setOpen(false);
     };
-    const escape = (event: KeyboardEvent) => event.key === 'Escape' && setOpen(false);
+    const keys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        trigger?.focus();
+        return;
+      }
+      if (!menu?.contains(document.activeElement)) return;
+      const list = items();
+      const next = nextMenuIndex(event.key, list.indexOf(document.activeElement as HTMLElement), list.length);
+      if (next === null) return;
+      event.preventDefault();
+      list[next]?.focus();
+    };
+    const left = (event: FocusEvent) => {
+      if (event.relatedTarget instanceof Node && !anchor.contains(event.relatedTarget)) setOpen(false);
+    };
     document.addEventListener('pointerdown', outside);
-    document.addEventListener('keydown', escape);
+    document.addEventListener('keydown', keys);
+    anchor.addEventListener('focusout', left);
     return () => {
       document.removeEventListener('pointerdown', outside);
-      document.removeEventListener('keydown', escape);
+      document.removeEventListener('keydown', keys);
+      anchor.removeEventListener('focusout', left);
     };
   }, [open]);
   return { open, setOpen, ref };
@@ -156,7 +195,7 @@ function Notifications() {
         {received.length > 0 && <span className="mg-count">{received.length}</span>}
       </button>
       {open && (
-        <div className="mg-popover mg-menu is-right" role="dialog" aria-label="알림">
+        <div className="mg-popover mg-menu is-right" role="dialog" aria-label="알림" tabIndex={-1}>
           <p className="mg-menu-title">이웃 신청</p>
           {received.length === 0 && <p className="mg-empty">새 알림이 없어요</p>}
           <ul className="mg-requests">
@@ -180,7 +219,7 @@ function Notifications() {
               </li>
             ))}
           </ul>
-          {error && <p className="mg-error">{error}</p>}
+          {error && <p className="mg-error" role="alert">{error}</p>}
         </div>
       )}
     </div>
@@ -196,6 +235,7 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
 function UserMenu() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const signIn = useSignInPath();
   const { open, setOpen, ref } = usePopover();
   const [theme, setTheme] = useTheme();
   const [leaving, setLeaving] = useState(false);
@@ -211,7 +251,7 @@ function UserMenu() {
   };
   if (!user) {
     return (
-      <Link className="mg-btn is-primary" to="/">
+      <Link className="mg-btn is-primary" to={signIn}>
         로그인
       </Link>
     );
@@ -219,41 +259,44 @@ function UserMenu() {
   const home = `/@${user.username}`;
   return (
     <div className="mg-anchor" ref={ref}>
-      <button className="mg-me" aria-label="내 메뉴" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <button className="mg-me" aria-label="내 메뉴" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span className="mg-avatar is-round" data-tone={toneOf(user.username)}>
           {initialOf(user.displayName)}
         </span>
       </button>
       {open && (
-        <div className="mg-popover mg-menu is-right" role="menu" aria-label="내 메뉴">
+        <div className="mg-popover mg-menu is-right">
           <div className="mg-menu-who">
             <b>{user.displayName}</b>
             <small>@{user.username}</small>
             {user.role === 'admin' && <span className="mg-badge is-admin">관리자</span>}
           </div>
-          <Link role="menuitem" to={home} onClick={() => setOpen(false)}>
-            <Icon name="island" /> 내 섬
-          </Link>
-          <Link role="menuitem" to={`${home}/edit`} onClick={() => setOpen(false)}>
-            <Icon name="brush" /> 섬 꾸미기
-          </Link>
-          <Link role="menuitem" to="/character" onClick={() => setOpen(false)}>
-            <Icon name="person" /> 내 캐릭터
-          </Link>
-          <div className="mg-menu-row">
-            <span>화면</span>
-            <div className="mg-tabs" role="radiogroup" aria-label="화면 밝기">
-              {THEMES.map((option) => (
-                <button key={option.value} role="radio" aria-checked={theme === option.value} onClick={() => setTheme(option.value)}>
-                  {option.label}
-                </button>
-              ))}
+          <div className="mg-menu-items" role="menu" aria-label="내 메뉴">
+            <Link role="menuitem" to={home} onClick={() => setOpen(false)}>
+              <Icon name="island" /> 내 섬
+            </Link>
+            <Link role="menuitem" to={`${home}/edit`} onClick={() => setOpen(false)}>
+              <Icon name="brush" /> 섬 꾸미기
+            </Link>
+            <Link role="menuitem" to="/character" onClick={() => setOpen(false)}>
+              <Icon name="person" /> 내 캐릭터
+            </Link>
+            <div className="mg-menu-row" role="group" aria-label="화면 밝기">
+              <span aria-hidden="true">화면</span>
+              <div className="mg-tabs">
+                {THEMES.map((option) => (
+                  <button key={option.value} role="menuitemradio" aria-checked={theme === option.value} onClick={() => setTheme(option.value)}>
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
+            <button role="menuitem" disabled={leaving} onClick={() => void signOut()}>
+              <Icon name="logout" /> {leaving ? '로그아웃 중…' : '로그아웃'}
+            </button>
           </div>
-          <button role="menuitem" disabled={leaving} onClick={() => void signOut()}>
-            <Icon name="logout" /> {leaving ? '로그아웃 중…' : '로그아웃'}
-          </button>
-          {error && <p className="mg-error" role="alert">{error}</p>}
+          {/* A menu holds only its items; what went wrong with one is said beside it. */}
+          {error && <p className="mg-error mg-menu-error" role="alert">{error}</p>}
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
 # 캐릭터 스튜디오 AGENTS.md
 
-`frontend/src/character/`는 앱의 `/studio`에 뜨는 캐릭터 목록·상세·작업 제어·파츠 미리보기·검수 화면이다. 스택과 빌드는 앱(`frontend/`)과 같다.
+`frontend/src/character/`는 캐릭터 목록·상세·작업 제어·파츠 미리보기·검수 화면이다. 회원 옷장 `/character`(`frontend/src/studio/CharacterPage.tsx`가 이 폴더의 `studio/Wardrobe.tsx`를 띄운다)와 운영 탭 '캐릭터 공장' `/admin/studio/*`(`frontend/src/studio/StudioPage.tsx`가 `studio/Workspace.tsx`를 띄운다)에서 쓰고, 옛 `/studio` 주소는 이 둘로 넘긴다(`frontend/src/main.tsx`). 스택과 빌드는 앱(`frontend/`)과 같다.
 
 ## 렌더링 스택
 
@@ -26,4 +26,4 @@
 
 ## 검증
 
-현재 사용자 지시에 따라 `npm run build`만 수행하며 Playwright·실제 생성 검사는 실행하지 않는다. 빌드 결과로 실제 Meshy 성공이나 브라우저·시각 검수 완료를 주장하지 않는다.
+루트에서 `npm run typecheck && npm test && npm run build`를 돌리고, 화면 흐름은 `npm run test:character`(임시 DB와 가짜 캐릭터 서버, Chrome WebGPU, 비용 없음)로 확인한다(루트 README의 검증). 유료 생성(이미지·3D)은 사용자가 요청할 때만 실행한다. 빌드나 가짜 캐릭터 서버의 결과로 실제 Meshy 성공이나 시각 검수 완료를 주장하지 않는다.

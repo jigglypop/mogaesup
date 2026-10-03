@@ -187,6 +187,9 @@ type BoardProps = {
   characters: FactoryCharacter[] | null;
   factoryProblem: string;
   items: AdminCatalogItem[] | null;
+  /** Why the catalog did not load (the first time, or on the last refresh). */
+  itemsProblem: string;
+  onRetryItems: () => void;
   imports: CatalogImport[];
   busy: ReadonlySet<string>;
   onImport: (character: FactoryCharacter, fields: ImportFields) => Promise<boolean>;
@@ -196,7 +199,7 @@ type BoardProps = {
 };
 
 /** `/admin`: finished studio characters become drafts, and drafts go public, one column each. */
-export function PipelineBoard({ characters, factoryProblem, items, imports, busy, onImport, onStatus, onPreview, onVersions }: BoardProps) {
+export function PipelineBoard({ characters, factoryProblem, items, itemsProblem, onRetryItems, imports, busy, onImport, onStatus, onPreview, onVersions }: BoardProps) {
   const [filter, setFilter] = useState<CharacterFilter>('todo');
   const [query, setQuery] = useState('');
   const counts = countGroups(characters ?? []);
@@ -252,6 +255,16 @@ export function PipelineBoard({ characters, factoryProblem, items, imports, busy
           <b>초안</b>
           <span>{drafts.length}</span>
         </header>
+        {itemsProblem && (
+          <>
+            <p className="mg-error" role="alert">
+              {itemsProblem}
+            </p>
+            <button type="button" className="mg-btn is-small" onClick={onRetryItems}>
+              <Icon name="rotate" /> 다시 불러오기
+            </button>
+          </>
+        )}
         {items !== null && drafts.length === 0 && <p className="mg-empty">확인할 초안이 없어요</p>}
         {drafts.map((item) => {
           const running = activeImportFor(imports, { itemId: item.id });

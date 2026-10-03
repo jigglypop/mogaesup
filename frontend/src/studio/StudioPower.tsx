@@ -42,7 +42,8 @@ export function WakeBanner({ sleep, text, inline = false }: { sleep: StudioSleep
       <span className="mg-wake-bar" aria-hidden="true">
         <i />
       </span>
-      <small>{elapsed}</small>
+      {/* Ticks every second; inside the live region it would be read out again each time. */}
+      <small aria-hidden="true">{elapsed}</small>
     </div>
   );
 }
@@ -65,13 +66,26 @@ const STATE_LABEL: Record<string, string> = {
   stopped: '스튜디오 꺼짐',
 };
 
+/** Reads in a row that may fail before the line stops asking by itself; asking again by hand starts the count over. */
+export const POWER_READ_TRIES = 3;
+
 /**
- * For admins: the studio instance's power, and a start button while it is stopped. Asked again every 10 s until it runs;
- * nothing when this server does not manage the instance (local runs), nor while it runs when `quietWhenRunning`.
+ * For admins: the studio instance's power, and a start button while it is stopped for those who may start it
+ * (`canStart`, operators). Asked again every 10 s until it runs, but only `POWER_READ_TRIES` times in a row while the
+ * server cannot say; a read that fails shows why, with a retry. Nothing when this server does not manage the instance
+ * (local runs), nor while it runs when `quietWhenRunning`.
  */
-export function StudioPowerLine({ quietWhenRunning = false, onRunning }: { quietWhenRunning?: boolean; onRunning?: () => void }) {
+export function StudioPowerLine({
+  quietWhenRunning = false,
+  canStart = false,
+  onRunning,
+}: {
+  quietWhenRunning?: boolean;
+  canStart?: boolean;
+  onRunning?: () => void;
+}) {
   const [power, setPower] = useState<StudioPower | null>(null);
-  const [problem, setProblem] = useState('');
+  const [problem, setProblem] = useState(''), [failures, setFailures] = useState(0);
   const [starting, setStarting] = useState(false);
   const running = useRef(onRunning);
   useEffect(() => {
@@ -83,19 +97,43 @@ export function StudioPowerLine({ quietWhenRunning = false, onRunning }: { quiet
     last.current = next;
     setPower(next);
     setProblem('');
+    setFailures(0);
     if (next.configured && next.state === 'running' && previous?.configured && previous.state !== 'running') running.current?.();
   }, []);
   const read = useCallback(
-    () => catalogApi.studioPower().then(apply, (reason: unknown) => setProblem(problemText(reason))),
+    () =>
+      catalogApi.studioPower().then(apply, (reason: unknown) => {
+        setProblem(problemText(reason));
+        setFailures((count) => count + 1);
+      }),
     [apply],
   );
   useEffect(() => {
     void read();
   }, [read]);
   const settled = power !== null && (!power.configured || power.state === 'running');
-  useEvery(settled ? null : WAKE_RETRY_MS, read);
+  useEvery(settled || failures >= POWER_READ_TRIES ? null : WAKE_RETRY_MS, read);
+  const retry = () => {
+    setFailures(0);
+    void read();
+  };
 
-  if (!power?.configured || (quietWhenRunning && power.state === 'running' && !problem)) return null;
+  if (!power) {
+    if (!problem) return null;
+    return (
+      <div className="mg-studio-power">
+        <p role="alert">
+          <i className="mg-dot" />
+          스튜디오 상태를 읽지 못함
+        </p>
+        <button type="button" className="mg-btn is-small" onClick={retry}>
+          다시 확인
+        </button>
+        <small className="mg-error">{problem}</small>
+      </div>
+    );
+  }
+  if (!power.configured || (quietWhenRunning && power.state === 'running' && !problem)) return null;
   const start = async () => {
     setStarting(true);
     try {
@@ -118,9 +156,14 @@ export function StudioPowerLine({ quietWhenRunning = false, onRunning }: { quiet
           <i />
         </span>
       )}
-      {power.state === 'stopped' && (
+      {power.state === 'stopped' && canStart && (
         <button type="button" className="mg-btn is-small" disabled={starting} onClick={() => void start()}>
           {starting ? '켜는 중' : '스튜디오 켜기'}
+        </button>
+      )}
+      {problem && failures > 0 && (
+        <button type="button" className="mg-btn is-small" onClick={retry}>
+          다시 확인
         </button>
       )}
       {problem && <small className="mg-error">{problem}</small>}

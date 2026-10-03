@@ -1,23 +1,27 @@
-import type { IslandSaver, SaverState } from './save';
+import { savesLater, type IslandSaver, type SaverState } from './save';
 
 /** What leaving the island could lose: edits not saved yet, or a save that has not answered. */
 export const hasUnsaved = (state: SaverState) => state.phase === 'ready' && (state.dirty || state.saving);
 
 /**
- * Whether a saver has nothing more to do for what it holds: it is all saved, or no retry will save it. A failed save the
- * line or the server caused is retried by the saver itself; one that waits for the owner's choice (a conflict) or for
- * a change to the island (too large, refused) is not.
+ * Whether a saver has nothing more to do for what it holds: it is all saved, or nothing will save it. A failed save the
+ * line or the server caused is retried by the saver itself, and one refused for a lapsed session is saved once its
+ * owner signs in again; one that waits for the owner's choice (a conflict) or for a change to the island (too large,
+ * refused) is not.
  */
 function finished(state: SaverState): boolean {
   if (state.saving) return false;
   if (!hasUnsaved(state)) return true;
-  return state.conflict || (state.problem !== null && state.problem.kind !== 'network' && state.problem.kind !== 'server');
+  return state.conflict || (state.problem !== null && !savesLater(state.problem));
 }
 
-/** Islands that were left with edits that could not be saved yet, and the question closing the page asks for them. */
-const holding = new Set<IslandSaver>();
+/**
+ * Islands that were left with edits that could not be saved yet (each under the key it was left with), and the question
+ * closing the page asks for them.
+ */
+const holding = new Map<IslandSaver, string | undefined>();
 const closing = (event: BeforeUnloadEvent) => {
-  for (const saver of holding) void saver.flush();
+  for (const saver of holding.keys()) void saver.flush();
   event.preventDefault();
 };
 const askBeforeClosing = () => {
@@ -26,11 +30,32 @@ const askBeforeClosing = () => {
 };
 
 /**
- * Lets go of an island that is being left, once nothing is left to lose. What could not be saved yet is not dropped: its
- * saver keeps retrying in the background and `release` runs when it is saved, or when nothing could save it. Until then
- * closing the page asks first. `discard` is the owner's choice to leave without the edits: it releases at once.
+ * Resolves once no island left under `key` has a save on its way, so opening the same island again reads what that
+ * save stored rather than the copy before it (signing in again resumes a held save just before the island reopens).
  */
-export function leaveIsland(saver: IslandSaver, release: () => void, discard = false): void {
+export function heldSavesSettled(key: string): Promise<void> {
+  const busy = [...holding].filter(([saver, of]) => of === key && saver.getState().saving).map(([saver]) => saver);
+  return Promise.all(
+    busy.map(
+      (saver) =>
+        new Promise<void>((done) => {
+          const stop = saver.subscribe(() => {
+            if (saver.getState().saving) return;
+            stop();
+            done();
+          });
+        }),
+    ),
+  ).then(() => undefined);
+}
+
+/**
+ * Lets go of an island that is being left, once nothing is left to lose. What could not be saved yet is not dropped: its
+ * saver keeps retrying in the background (or waits for its owner to sign in again) and `release` runs when it is saved,
+ * or when nothing could save it. Until then closing the page asks first. `discard` is the owner's choice to leave
+ * without the edits: it releases at once. `key` names the island for `heldSavesSettled`.
+ */
+export function leaveIsland(saver: IslandSaver, release: () => void, discard = false, key?: string): void {
   let stopWatching: (() => void) | undefined;
   let released = false;
   const letGo = () => {
@@ -48,7 +73,7 @@ export function leaveIsland(saver: IslandSaver, release: () => void, discard = f
   }
   void saver.flush().then(() => {
     if (saver.disposed || finished(saver.getState())) return letGo();
-    holding.add(saver);
+    holding.set(saver, key);
     askBeforeClosing();
     stopWatching = saver.subscribe(() => {
       if (saver.disposed || finished(saver.getState())) letGo();

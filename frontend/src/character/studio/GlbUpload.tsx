@@ -25,7 +25,9 @@ export function GlbUpload({ disabled = false, onUpload, maxMb = 64 }: { disabled
     catch (e) { setError(e instanceof Error ? e.message : 'GLB 등록에 실패했습니다.'); }
     finally { locked.current = false; setUploading(false); }
   }
-  return <div className="glb-upload" tabIndex={unavailable ? -1 : 0} aria-label="GLB 파일 선택, 드래그 또는 붙여넣기" data-dragging={dragging && !unavailable} data-disabled={unavailable} aria-busy={uploading}
+  // The file input inside is the one control: Tab reaches it, Space or Enter opens the picker, and a paste while it
+  // has focus or a drop anywhere here selects too.
+  return <div className="glb-upload" data-dragging={dragging && !unavailable} data-disabled={unavailable} aria-busy={uploading}
     onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); select(files); } }}
     onDragEnter={event => { event.preventDefault(); if (!unavailable) { dragDepth.current++; setDragging(true); } }}
     onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = unavailable ? 'none' : 'copy'; }}

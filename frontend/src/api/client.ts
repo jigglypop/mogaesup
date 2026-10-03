@@ -1,3 +1,5 @@
+import { expireSession, sessionEpoch } from '../auth/sessionWork';
+
 export class ApiRequestError extends Error {
   constructor(
     readonly status: number,
@@ -56,13 +58,15 @@ export function deadline(timeoutMs: number, outer?: AbortSignal | null) {
 /**
  * JSON with the server's session cookie. The server takes writes only as same-origin JSON, so every non-GET request
  * carries a JSON body, `{}` when there is nothing to send. A request that gets no answer in time fails with
- * `ApiTimeoutError` rather than holding whoever waits on it for good.
+ * `ApiTimeoutError` rather than holding whoever waits on it for good. A 401 (other than a wrong password) means the
+ * session ran out, and signs the member out (`expireSession`).
  */
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? 'GET';
   const write = method !== 'GET' && method !== 'HEAD';
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const wait = deadline(timeoutMs, options.signal);
+  const sentAt = sessionEpoch();
   try {
     const response = await fetch(`/api${path}`, {
       method,
@@ -76,11 +80,9 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     const body: unknown = await response.json().catch((error: unknown) => (wait.signal.aborted ? Promise.reject(error) : null));
     if (!response.ok) {
       const error = body as { code?: string; message?: string } | null;
-      throw new ApiRequestError(
-        response.status,
-        error?.code ?? 'http_error',
-        error?.message ?? `요청이 실패했어요 (${response.status})`,
-      );
+      const code = error?.code ?? 'http_error';
+      if (response.status === 401 && code !== 'invalid_credentials') expireSession(sentAt);
+      throw new ApiRequestError(response.status, code, error?.message ?? `요청이 실패했어요 (${response.status})`);
     }
     return body as T;
   } catch (error) {

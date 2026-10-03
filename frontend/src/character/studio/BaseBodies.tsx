@@ -30,7 +30,6 @@ function BodyViewUpload({ view, asset, disabled, busy, onUpload, onClear }: {
   view: BodyView; asset?: string; disabled: boolean; busy: boolean;
   onUpload: (file: File) => void; onClear: () => void;
 }) {
-  const input = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   function accept(file?: File) {
     if (file && !disabled) onUpload(file);
@@ -45,13 +44,13 @@ function BodyViewUpload({ view, asset, disabled, busy, onUpload, onClear }: {
     event.preventDefault(); accept(file);
   }
   return <div className="base-body-view">
-    <label className={`base-body-drop ${dragging ? 'is-dragging' : ''}`} tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
+    {/* The file input is the one control: Tab reaches it and Space or Enter opens the picker; paste and drop work here too. */}
+    <label className={`base-body-drop${dragging ? ' is-dragging' : ''}${disabled ? ' is-disabled' : ''}`}
       onPaste={paste} onDragEnter={event => { event.preventDefault(); if (!disabled) setDragging(true); }} onDragOver={event => event.preventDefault()}
-      onDragLeave={event => { event.preventDefault(); setDragging(false); }} onDrop={drop}
-      onKeyDown={event => { if (!disabled && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); input.current?.click(); } }}>
+      onDragLeave={event => { event.preventDefault(); setDragging(false); }} onDrop={drop}>
       {asset ? <img src={baseBodiesApi.imageUrl(asset)} alt={`${viewLabels[view]} 기본 몸`} /> : <span>{viewLabels[view]} PNG/JPEG</span>}
       <strong>{busy ? '등록 중' : asset ? '이미지 바꾸기' : '선택 · 놓기 · 붙여넣기'}</strong>
-      <input ref={input} type="file" accept="image/png,image/jpeg" disabled={disabled} aria-label={`${viewLabels[view]} 이미지`} onChange={event => { accept(event.target.files?.[0]); event.target.value = ''; }} />
+      <input type="file" accept="image/png,image/jpeg" disabled={disabled} aria-label={`${viewLabels[view]} 이미지`} onChange={event => { accept(event.target.files?.[0]); event.target.value = ''; }} />
     </label>
     {asset && <button type="button" disabled={disabled} onClick={onClear}>제거</button>}
   </div>;
@@ -146,7 +145,8 @@ export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: 
   const rigValue = shownRig ? `${shownRig.job_id}:${shownRig.version}` : '';
 
   return <div className="base-bodies workspace-content">
-    <div className="workspace-heading"><h1>기본 몸</h1><div className="base-body-tabs" role="tablist" aria-label="기본 몸 타입">{(['male', 'female'] as const).map(value => <button key={value} role="tab" aria-selected={bodyType === value} disabled={busy || !!uploading || glbBusy} onClick={() => { setBodyType(value); setError(''); setNotice(''); }}>{bodyLabels[value]}</button>)}</div></div>
+    {/* Switches, not tabs: they swap the whole form below and lock while a request is out. */}
+    <div className="workspace-heading"><h1>기본 몸</h1><div className="base-body-tabs" role="group" aria-label="기본 몸 타입">{(['male', 'female'] as const).map(value => <button key={value} type="button" aria-pressed={bodyType === value} disabled={busy || !!uploading || glbBusy} onClick={() => { setBodyType(value); setError(''); setNotice(''); }}>{bodyLabels[value]}</button>)}</div></div>
     <WardrobeBodies jobs={jobs} selectedJob={selectedJob} onSelect={job => {
       const type = bodyTypeOf(job);
       if (!type || busy || uploading || glbBusy) return;
@@ -154,9 +154,9 @@ export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: 
     }} />
     <div className="base-body-layout">
       <section className="base-body-compose" aria-busy={busy || !!uploading}>
-        <div className="base-body-tabs base-body-source" role="tablist" aria-label="기본 몸 입력 방식">
-          <button role="tab" aria-selected={sourceMode === 'glb' && !pending} disabled={busy || !!uploading || glbBusy || !!pending} onClick={() => setSourceMode('glb')}>GLB 등록</button>
-          <button role="tab" aria-selected={sourceMode === 'images' || !!pending} disabled={busy || !!uploading || glbBusy} onClick={() => setSourceMode('images')}>이미지로 생성</button>
+        <div className="base-body-tabs base-body-source" role="group" aria-label="기본 몸 입력 방식">
+          <button type="button" aria-pressed={sourceMode === 'glb' && !pending} disabled={busy || !!uploading || glbBusy || !!pending} onClick={() => setSourceMode('glb')}>GLB 등록</button>
+          <button type="button" aria-pressed={sourceMode === 'images' || !!pending} disabled={busy || !!uploading || glbBusy} onClick={() => setSourceMode('images')}>이미지로 생성</button>
         </div>
         {sourceMode === 'glb' && !pending ? <GlbBodyForm key={bodyType} bodyType={bodyType} onBusy={setGlbBusy}
           onJob={job => { onJob(job); setSelected(current => ({ ...current, [bodyType]: job.id })); }} refreshJobs={refreshJobs} /> : <>

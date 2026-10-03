@@ -1,6 +1,7 @@
 import { BufferAttribute, Group, Matrix4, MeshStandardMaterial, Skeleton, type Bone, type Object3D, type SkinnedMesh, type Material, type Texture } from 'three';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { disposeObjectResources } from './assets/gpu-resources';
+import { downloadBytes } from './assets/download';
 import { loadFailure } from './assets/load-failure';
 import { hairColorControl } from './hair-color';
 import { regionColorControl } from './region-color';
@@ -181,11 +182,8 @@ export class NativeWardrobe {
     }
     const request = (async () => {
       let bytes: ArrayBuffer;
-      try {
-        const response = await fetch(spec.url, { signal: AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(20000)]) });
-        if (!response.ok) throw new Error('의상 모델을 불러올 수 없습니다.');
-        bytes = await response.arrayBuffer();
-      } catch (error) { throw loadFailure(error, '의상 모델'); }
+      try { bytes = await downloadBytes(spec.url, { signal: this.lifetime.signal, refused: '의상 모델을 불러올 수 없습니다.' }); }
+      catch (error) { throw loadFailure(error, '의상 모델'); }
       const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(v => v.toString(16).padStart(2, '0')).join('');
       if (digest !== spec.sha256) throw new Error('의상 파일이 검수한 버전과 다릅니다.');
       const source = await new GLTFLoader().parseAsync(bytes, '');

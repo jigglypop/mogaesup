@@ -10,6 +10,7 @@ import { WAKE_RETRY_MS, isStudioAsleep, type StudioSleep } from '../api/studioSl
 import type { AdminCatalogItem, CatalogChanges, CatalogImport, CatalogKind, CatalogStatus, FactoryCharacter } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { can } from '../auth/can';
+import { SignInRedirect } from '../auth/signIn';
 import { PageShell } from '../shell/Shell';
 import { StudioPowerLine, WakeBanner, useEvery } from '../studio/StudioPower';
 import { Icon } from '../ui/icons';
@@ -36,6 +37,8 @@ export function AdminPage() {
   const isAdmin = can(user, 'catalog_editor');
   const catalogTab = pathname.startsWith('/admin/catalog');
   const [items, setItems] = useState<AdminCatalogItem[] | null>(null);
+  /** Why the catalog did not load; `items` stays null meanwhile, which is not the same as still loading. */
+  const [itemsProblem, setItemsProblem] = useState('');
   const [characters, setCharacters] = useState<FactoryCharacter[] | null>(null);
   const [factoryProblem, setFactoryProblem] = useState('');
   /** Set while the studio's instance starts (or stops); the listing is asked again every 10 s until it answers. */
@@ -48,11 +51,18 @@ export function AdminPage() {
   const reloadItems = useCallback(
     () =>
       catalogApi.adminItems().then(
-        (result) => setItems(result.items),
-        (problem: unknown) => setNotice({ tone: 'error', text: `카탈로그를 불러오지 못했어요: ${problemText(problem)}` }),
+        (result) => {
+          setItems(result.items);
+          setItemsProblem('');
+        },
+        (problem: unknown) => setItemsProblem(`카탈로그를 불러오지 못했어요: ${problemText(problem)}`),
       ),
     [],
   );
+  const retryItems = () => {
+    setItemsProblem('');
+    void reloadItems();
+  };
   const reloadCharacters = useCallback(
     () =>
       catalogApi.factoryCharacters().then(
@@ -102,7 +112,7 @@ export function AdminPage() {
   }, [isAdmin, reloadItems, reloadCharacters]);
 
   if (status === 'loading') return <Loading />;
-  if (!user) return <Navigate to="/" replace />;
+  if (!user) return <SignInRedirect />;
   if (!isAdmin) return <Navigate to={`/@${user.username}`} replace />;
 
   const mark = (keys: string[], on: boolean) =>
@@ -198,12 +208,14 @@ export function AdminPage() {
         {asleep && !catalogTab ? (
           <WakeBanner sleep={asleep} inline />
         ) : (
-          <StudioPowerLine quietWhenRunning onRunning={() => void reloadCharacters()} />
+          <StudioPowerLine quietWhenRunning canStart={can(user, 'operator')} onRunning={() => void reloadCharacters()} />
         )}
 
         {catalogTab ? (
           <CatalogTable
             items={items}
+            problem={itemsProblem}
+            onRetry={retryItems}
             imports={queue.imports ?? []}
             busy={busy}
             onPatch={patch}
@@ -225,6 +237,8 @@ export function AdminPage() {
               characters={characters}
               factoryProblem={factoryProblem}
               items={items}
+              itemsProblem={itemsProblem}
+              onRetryItems={retryItems}
               imports={queue.imports ?? []}
               busy={busy}
               onImport={(character, fields) => startImport({ ...fields, factoryJobId: character.jobId })}
