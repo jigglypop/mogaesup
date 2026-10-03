@@ -28,6 +28,12 @@ SERVICE_GROUP = 'CloudFront-VPCOrigins-Service-SG'
 IMAGE = 'ami-03137ee2d0c5af1fe'
 CHANGE_SET = re.compile(r'arn:aws[a-z-]*:cloudformation:\S+:changeSet/\S+')
 UNAPPLIED = 'Infrastructure changes are listed above and not applied; run again with --yes to apply them'
+# What the bootstrap rewrites on the instance; kept as <file>.prev before it runs, and put back with the binary.
+SERVER_ENV = '/etc/mogaesup/server.env'
+SERVICE_UNIT = '/etc/systemd/system/mogaesup.service'
+# The SSM command's own limit (executionTimeout), and how long its invocation is waited for past it.
+COMMAND_SECONDS = 900
+COMMAND_WAIT = COMMAND_SECONDS + 120
 
 
 def aws(*args):
@@ -62,7 +68,8 @@ def change_set_arn(output):
 
 
 def change_lines(description):
-    """One line per resource change of `describe-change-set`; a replacement is called out."""
+    """One line per resource change of `describe-change-set`, a replacement called out, then a line for what of it
+    changes (its scope) and one per changed attribute or property, with whether that change replaces the resource."""
     lines = []
     for change in description.get('Changes', []):
         resource = change.get('ResourceChange', {})
@@ -70,7 +77,52 @@ def change_lines(description):
             resource.get('Replacement'), '')
         lines.append(f"{resource.get('Action', '?'):<8}{resource.get('LogicalResourceId', '?')} "
                      f"({resource.get('ResourceType', '?')}){replacement}")
+        if resource.get('Scope'):
+            lines.append(f"        scope: {', '.join(resource['Scope'])}")
+        for detail in resource.get('Details', []):
+            target = detail.get('Target', {})
+            name = '.'.join(part for part in (target.get('Attribute'), target.get('Name')) if part) or '?'
+            recreation = {'Always': '  requires replacement', 'Conditionally': '  may require replacement'}.get(
+                target.get('RequiresRecreation'), '')
+            source = f" ({detail['ChangeSource']})" if detail.get('ChangeSource') else ''
+            lines.append(f'        {name}{source}{recreation}')
     return lines
+
+
+def stack_settled(status):
+    """Whether the stack can be deployed onto now (True), is still changing (False), or failed (RuntimeError). A
+    rolled-back update leaves the stack as it was before that update, which a release can go onto."""
+    if status in ('CREATE_COMPLETE', 'UPDATE_COMPLETE'):
+        return True
+    if status == 'UPDATE_ROLLBACK_COMPLETE':
+        print('Warning: the last stack update was rolled back (UPDATE_ROLLBACK_COMPLETE); deploying onto the stack as '
+              'it stands', flush=True)
+        return True
+    if status.endswith('_IN_PROGRESS'):
+        return False
+    raise RuntimeError(status)
+
+
+def wait_for_command(command, instance, deadline_seconds=COMMAND_WAIT, interval=10, sleep=time.sleep,
+                     clock=time.monotonic):
+    """The finished invocation of an SSM command. A failed lookup (the invocation not registered yet, a throttled call)
+    is asked again until the deadline instead of ending the deploy while the install goes on."""
+    deadline = clock() + deadline_seconds
+    failure = None
+    while True:
+        try:
+            result = aws('ssm', 'get-command-invocation', '--region', REGION, '--command-id', command,
+                         '--instance-id', instance)
+            failure = None
+            if result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
+                return result
+        except RuntimeError as error:
+            failure = error
+        if clock() > deadline:
+            raise RuntimeError(f'SSM command {command} did not finish within {deadline_seconds} s'
+                               + (f'; the last lookup failed: {failure}' if failure else ''))
+        print('Installing the verified release via SSM', flush=True)
+        sleep(interval)
 
 
 def provision(studio_instance=None, yes=False):
@@ -123,8 +175,9 @@ def bootstrap_command(args, outputs, studio_instance):
 
 
 def install_commands(release, bucket, bootstrap):
-    """The SSM script lines that install a release. The binary being replaced is kept as mogaesup-server.prev; once the
-    service is stopped, any failure up to a healthy new release (the exit trap) puts that binary back and starts it again."""
+    """The SSM script lines that install a release. The binary being replaced is kept as mogaesup-server.prev, and the
+    server.env and systemd unit the bootstrap rewrites as <file>.prev; once the service is stopped, any failure up to a
+    healthy new release (the exit trap) puts those back and starts the previous release again."""
     folder = f'/opt/mogaesup/releases/{release}'
     binary = '/opt/mogaesup/mogaesup-server'
     health = 'curl -fsS http://127.0.0.1:8080/api/health'
@@ -134,7 +187,7 @@ def install_commands(release, bucket, bootstrap):
         f'aws s3 cp s3://{bucket}/{release}/ {folder}/ --recursive --region {REGION} --no-progress --only-show-errors',
         f'cd {folder}', 'sha256sum -c SHA256SUMS',
         'curl --fail --silent --show-error https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /opt/mogaesup/global-bundle.pem',
-        'stopped=0; swapped=0; ok=0',
+        'stopped=0; swapped=0; configured=0; ok=0',
         'restore() {',
         '  status=$?; trap - EXIT',
         '  if [ "$stopped" = 1 ] && [ "$ok" != 1 ]; then',
@@ -144,6 +197,10 @@ def install_commands(release, bucket, bootstrap):
         '    systemctl stop mogaesup.service 2>/dev/null || true',
         '    if [ "$swapped" = 1 ]; then',
         f'      if [ -f {binary}.prev ]; then install -m 755 -o root -g mogaesup {binary}.prev {binary} || true; else echo \'there is no previous binary to put back\' >&2; fi',
+        '    fi',
+        '    if [ "$configured" = 1 ]; then',
+        f'      for file in {SERVER_ENV} {SERVICE_UNIT}; do if [ -f "$file.prev" ]; then cp -p "$file.prev" "$file" || true; fi; done',
+        '      systemctl daemon-reload || true',
         '    fi',
         '    systemctl restart mogaesup.service || true',
         f'    for attempt in $(seq 1 30); do if {health} >/dev/null; then echo \'the previous release answers again\' >&2; break; fi; sleep 2; done',
@@ -159,6 +216,9 @@ def install_commands(release, bucket, bootstrap):
         f'install -m 755 mogaesup-server {binary}',
         'chown -R root:mogaesup /opt/mogaesup', 'chmod -R g+rX /opt/mogaesup/releases',
         'install -d -m 750 -o mogaesup -g mogaesup /var/lib/mogaesup',
+        # The settings the previous release ran with, kept (with their owner and mode) before the bootstrap rewrites them.
+        f'for file in {SERVER_ENV} {SERVICE_UNIT}; do if [ -f "$file" ]; then cp -p "$file" "$file.prev.new"; mv -f "$file.prev.new" "$file.prev"; fi; done',
+        'configured=1',
         ' '.join(shlex.quote(part) for part in bootstrap),
         f'for attempt in $(seq 1 30); do if {health}; then break; fi; sleep 2; done',
         'systemctl is-active mogaesup', health,
@@ -201,10 +261,8 @@ def main():
     deadline = time.monotonic() + 1800
     while True:
         stack = aws('cloudformation', 'describe-stacks', '--region', REGION, '--stack-name', STACK)['Stacks'][0]
-        if stack['StackStatus'] in ('CREATE_COMPLETE', 'UPDATE_COMPLETE'):
+        if stack_settled(stack['StackStatus']):
             break
-        if 'FAILED' in stack['StackStatus'] or 'ROLLBACK' in stack['StackStatus']:
-            raise RuntimeError(stack['StackStatus'])
         if time.monotonic() > deadline:
             raise RuntimeError('Provisioning still pending; inspect the stack before retrying')
         print(f"Infrastructure {stack['StackStatus']}", flush=True)
@@ -230,7 +288,8 @@ def main():
 
     commands = install_commands(release, bucket, bootstrap_command(args, outputs, studio_instance))
     parameters = receipt_dir / 'ssm-parameters.json'
-    parameters.write_text(json.dumps({'commands': commands, 'executionTimeout': ['900']}), encoding='utf-8')
+    parameters.write_text(json.dumps({'commands': commands, 'executionTimeout': [str(COMMAND_SECONDS)]}),
+                          encoding='utf-8')
     command = aws('ssm', 'send-command', '--region', REGION, '--instance-ids', instance, '--document-name',
                   'AWS-RunShellScript', '--parameters', f'file://{parameters.as_posix()}', '--comment',
                   f'Mogaesup verified {release}')['Command']['CommandId']
@@ -238,12 +297,7 @@ def main():
                'files': {name: sha(path) for name, path in files.items()}, 'commandId': command, 'outputs': outputs}
     (receipt_dir / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
     time.sleep(3)
-    for _ in range(90):
-        result = aws('ssm', 'get-command-invocation', '--region', REGION, '--command-id', command, '--instance-id', instance)
-        if result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
-            break
-        print('Installing the verified release via SSM', flush=True)
-        time.sleep(10)
+    result = wait_for_command(command, instance)
     (receipt_dir / 'ssm-result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
     if result['Status'] != 'Success':
         raise RuntimeError(f"SSM {result['Status']}; inspect {receipt_dir / 'ssm-result.json'} (once the script has stopped "

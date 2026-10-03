@@ -1169,3 +1169,46 @@ async fn 탐색_목록은_아이디와_이름과_제목으로_찾고_와일드�
     }
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn 진행이_멈춘_가져오기는_실패로_적혀_항목을_다시_가져올_수_있다() {
+    let app = TestApp::new(None).await;
+    for (item, status, minutes) in [("stuck", "running", 31), ("moving", "running", 1), ("waiting", "queued", 31)] {
+        sqlx::query(
+            "INSERT INTO catalog_imports (id, item_id, kind, label, emoji, factory_job_id, status, updated_at)
+             VALUES ($1, $2, 'minime', '이름', '🙂', 'job', $3, now() - make_interval(mins => $4))",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(item)
+        .bind(status)
+        .bind(minutes)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    }
+    assert_eq!(mogaesup_server::imports::interrupt_stale(&app.state.db).await.unwrap(), 1);
+    let rows: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT item_id, status, error_code FROM catalog_imports ORDER BY item_id")
+            .fetch_all(&app.state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("moving".into(), "running".into(), None),
+            ("stuck".into(), "failed".into(), Some("interrupted".into())),
+            ("waiting".into(), "queued".into(), None),
+        ]
+    );
+    // The item is free again: a new import of it is no longer refused as one already running.
+    let again = sqlx::query(
+        "INSERT INTO catalog_imports (id, item_id, kind, label, emoji, factory_job_id) VALUES ($1, 'stuck', 'minime', '이름', '🙂', 'job')
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(again.rows_affected(), 1);
+    app.cleanup().await;
+}

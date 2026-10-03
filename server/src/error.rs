@@ -35,8 +35,26 @@ impl IntoResponse for ApiError {
     }
 }
 
+const CLASHED: ApiError = conflict("conflict", "다른 요청과 겹쳐 처리하지 못했습니다. 다시 시도해 주세요.");
+const REFUSED_VALUE: ApiError = bad("invalid_value", "저장할 수 없는 값입니다.");
+
 impl From<sqlx::Error> for ApiError {
+    /// A constraint the request ran into, or a value the database cannot take (SQLSTATE class 22), is the request's
+    /// problem; anything else is the database's.
     fn from(error: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(database) = &error {
+            use sqlx::error::ErrorKind;
+            let refusal = match database.kind() {
+                ErrorKind::UniqueViolation | ErrorKind::ForeignKeyViolation => Some(CLASHED),
+                ErrorKind::NotNullViolation | ErrorKind::CheckViolation => Some(REFUSED_VALUE),
+                _ if database.code().is_some_and(|code| code.starts_with("22")) => Some(REFUSED_VALUE),
+                _ => None,
+            };
+            if let Some(refusal) = refusal {
+                tracing::warn!(%error, "Database refused a request");
+                return refusal;
+            }
+        }
         tracing::error!(%error, "Database request failed");
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "database", "저장 서버 요청에 실패했습니다.")
     }

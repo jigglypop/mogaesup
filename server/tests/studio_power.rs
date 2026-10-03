@@ -40,6 +40,8 @@ struct Ec2 {
     credential_reads: usize,
     /// Requests whose SigV4 signature did not match.
     bad_signatures: usize,
+    /// StartInstances is refused, as for a role without the permission.
+    refuse_start: bool,
 }
 
 #[derive(Clone)]
@@ -140,6 +142,7 @@ async fn fake_aws(aws: FakeAws) -> String {
                             ec2.state
                         )
                         .into_response(),
+                        "StartInstances" if ec2.refuse_start => ec2_error("UnauthorizedOperation"),
                         "StartInstances" => {
                             let previous = ec2.state.clone();
                             if previous == "stopped" {
@@ -342,5 +345,50 @@ async fn 관리자만_스튜디오_전원을_보고_켠다() {
     assert_eq!(app.call("POST", POWER, None, Some(&admin)).await.body["code"], "studio_power_unconfigured");
     let member = app.register("member_l", "회원").await;
     assert_eq!(app.call("GET", WARDROBE, None, Some(&member)).await.body["code"], "factory_unavailable");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 스튜디오를_켜는_것은_운영자만_하고_보기_권한은_상태만_본다() {
+    let aws = FakeAws::new("stopped");
+    let app = app_with(unreachable().await, &aws).await;
+    let viewer = app.register("viewer_o", "보기").await;
+    app.grant("viewer_o", "catalog:mogaesup", "editor").await;
+    let operator = app.register("operator_o", "운영").await;
+    app.grant("operator_o", "system:mogaesup", "operator").await;
+
+    assert_eq!(app.call("GET", POWER, None, Some(&viewer)).await.body["state"], "stopped");
+    let refused = app.call("POST", POWER, None, Some(&viewer)).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::FORBIDDEN, Some("operator_only")));
+    assert!(!aws.actions().contains(&"StartInstances".to_owned()), "a refused press starts nothing");
+    let started = app.call("POST", POWER, None, Some(&operator)).await;
+    assert_eq!((started.status, started.body["state"].as_str()), (StatusCode::OK, Some("pending")));
+    checked(&aws);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 켜지_못한_스튜디오는_요청마다_다시_켜려_하지_않는다() {
+    let aws = FakeAws::new("stopped");
+    aws.0.lock().unwrap().refuse_start = true;
+    let app = app_with(unreachable().await, &aws).await;
+    let member = app.register("member_f", "회원").await;
+    let starts = || aws.actions().iter().filter(|action| *action == "StartInstances").count();
+
+    // A burst while the studio is off and cannot be started makes one StartInstances call, not one per request.
+    let replies = futures_util::future::join_all((0..5).map(|_| app.call("GET", WARDROBE, None, Some(&member)))).await;
+    for reply in &replies {
+        assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("factory_unavailable")));
+    }
+    assert_eq!(starts(), 1);
+    // Later requests, and the operators' button, wait out the retry instead of asking EC2 again.
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert_eq!(app.call("GET", WARDROBE, None, Some(&member)).await.body["code"], "factory_unavailable");
+    let admin = app.register("operator_f", "운영자").await;
+    app.make_admin("operator_f").await;
+    let pressed = app.call("POST", POWER, None, Some(&admin)).await;
+    assert_eq!((pressed.status, pressed.body["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("studio_start_failed")));
+    assert_eq!(starts(), 1);
+    assert_eq!(aws.0.lock().unwrap().bad_signatures, 0);
     app.cleanup().await;
 }

@@ -15,22 +15,35 @@ use crate::{
     AppState,
     auth::{current_user, optional_user},
     error::{ApiResult, bad, conflict, forbidden, not_found},
-    homes::{Page, visible_home},
+    homes::{Page, plain_text, visible_home},
     rebac::{Checker, MODERATOR, Subject},
     security::{client_address, rate_limit},
 };
 
 const MAX_GUESTBOOK_ENTRIES: i64 = 2_000;
 const MAX_PENDING_REQUESTS: i64 = 100;
+/// Guestbook entries in the rate window (ten minutes): each member's own, and all from one address. An address may be
+/// a whole school or mobile carrier, so it is charged only for entries that could be written.
+const ENTRIES_PER_MEMBER: u32 = 30;
+const ENTRIES_PER_ADDRESS: u32 = 300;
+/// Advisory locks of one account's relationships: `hashtextextended(id, PAIR_LOCKS)`.
+const PAIR_LOCKS: i64 = 7_309_004;
 
-/// Every change of one relationship locks both accounts in UUID order. Opposite requests and accept/unlink cannot
-/// observe a stale pair, and concurrent requests involving one account cannot pass its pending-request cap.
+/// Every change of one relationship takes both accounts' advisory locks in UUID order. Opposite requests and
+/// accept/unlink cannot observe a stale pair, and concurrent requests involving one account cannot pass its
+/// pending-request cap. Account rows are left unlocked: foreign keys from other writes (guestbook entries) lock them.
 async fn pair_transaction(db: &PgPool, left: Uuid, right: Uuid) -> ApiResult<Transaction<'_, Postgres>> {
     let mut tx = db.begin().await?;
-    sqlx::query("SELECT id FROM users WHERE id = ANY($1) ORDER BY id FOR UPDATE")
-        .bind(vec![left, right])
-        .fetch_all(&mut *tx)
-        .await?;
+    let mut ids = vec![left, right];
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))")
+            .bind(id.to_string())
+            .bind(PAIR_LOCKS)
+            .execute(&mut *tx)
+            .await?;
+    }
     Ok(tx)
 }
 
@@ -122,13 +135,17 @@ async fn write(
     Json(entry): Json<NewEntry>,
 ) -> ApiResult<Response> {
     let author = current_user(&state, &headers).await?;
-    rate_limit(&state, format!("guestbook-user:{}", author.id), 30)?;
-    rate_limit(&state, format!("guestbook-address:{}", client_address(&headers)), 60)?;
-    let (home, _) = visible_home(&state, &name, Some(&author)).await?;
+    rate_limit(&state, format!("guestbook-user:{}", author.id), ENTRIES_PER_MEMBER)?;
     let body = entry.body.trim();
     if body.is_empty() || body.chars().count() > 300 {
         return Err(bad("invalid_body", "방명록은 1~300자로 남겨 주세요."));
     }
+    // Entries are written in a text area: line breaks, but no other control characters.
+    if !plain_text(body, true) {
+        return Err(bad("invalid_body", "방명록에 쓸 수 없는 문자가 들어 있어요."));
+    }
+    let (home, _) = visible_home(&state, &name, Some(&author)).await?;
+    rate_limit(&state, format!("guestbook-address:{}", client_address(&headers)), ENTRIES_PER_ADDRESS)?;
     let id = Uuid::new_v4();
     let mut tx = state.db.begin().await?;
     sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(home.owner_id).execute(&mut *tx).await?;
@@ -244,13 +261,15 @@ fn relation(relation: &str, ilchon: Option<Value>, request: Option<Value>) -> Js
     Json(json!({"relation": relation, "ilchon": ilchon, "request": request}))
 }
 
+/// Read in one snapshot and without locks: an accept between its two reads cannot make a pair look unrelated.
 async fn status(State(state): State<AppState>, headers: HeaderMap, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let viewer = current_user(&state, &headers).await?;
     let other = other(&state, &name).await?;
     if other == viewer.id {
         return Ok(relation("self", None, None));
     }
-    let mut tx = pair_transaction(&state.db, viewer.id, other).await?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(&mut *tx).await?;
     if let Some(ilchon) = find_ilchon(&mut *tx, viewer.id, other).await? {
         tx.commit().await?;
         return Ok(relation("ilchon", Some(ilchon), None));
@@ -286,6 +305,9 @@ fn ilchon_name(value: &str) -> ApiResult<String> {
     if name.is_empty() || name.chars().count() > 12 {
         return Err(bad("invalid_ilchon_name", "일촌명은 1~12자로 정해 주세요."));
     }
+    if !plain_text(name, false) {
+        return Err(bad("invalid_ilchon_name", "일촌명에 쓸 수 없는 문자가 들어 있어요."));
+    }
     Ok(name.to_owned())
 }
 
@@ -303,6 +325,9 @@ async fn request(
     let message = ask.message.trim();
     if message.chars().count() > 100 {
         return Err(bad("invalid_message", "한마디는 100자 이하로 적어 주세요."));
+    }
+    if !plain_text(message, false) {
+        return Err(bad("invalid_message", "한마디에 쓸 수 없는 문자가 들어 있어요."));
     }
     let my_name = ilchon_name(&ask.name)?;
     let their_name = ilchon_name(&ask.their_name)?;

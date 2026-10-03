@@ -47,7 +47,10 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a socket we closed is kept for the peer's answer.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 const WINDOW: Duration = Duration::from_secs(1);
-const MESSAGES_PER_SECOND: usize = 60;
+/// All frames, counted over three seconds: a phone whose link stalls delivers seconds of 20 Hz updates at once, and
+/// that burst must not close its socket. Sustained floods still do.
+const MESSAGE_WINDOW: Duration = Duration::from_secs(3);
+const MESSAGES_PER_WINDOW: usize = 180;
 const UPDATES_PER_SECOND: usize = 30;
 const CHATS_PER_SECOND: usize = 4;
 /// Malformed frames tolerated per second before the peer is dropped.
@@ -89,14 +92,17 @@ pub fn issue_ticket(secret: &[u8], user: &User, session: &str) -> (String, u64) 
     (format!("{body}.{signature}"), exp)
 }
 
-struct RateWindow(VecDeque<Instant>);
+struct RateWindow(VecDeque<Instant>, Duration);
 
 impl RateWindow {
     fn new() -> Self {
-        Self(VecDeque::new())
+        Self(VecDeque::new(), WINDOW)
+    }
+    fn over(window: Duration) -> Self {
+        Self(VecDeque::new(), window)
     }
     fn allow(&mut self, now: Instant, maximum: usize) -> bool {
-        while self.0.front().is_some_and(|time| now.duration_since(*time) >= WINDOW) {
+        while self.0.front().is_some_and(|time| now.duration_since(*time) >= self.1) {
             self.0.pop_front();
         }
         if self.0.len() >= maximum {
@@ -138,6 +144,10 @@ struct PartialState {
     velocity: Option<[f64; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_url: Option<String>,
+    /// When the sender sampled this update, in milliseconds on its own clock. Relayed untouched, so receivers draw
+    /// a peer on the sender's timeline instead of on arrival times that network jitter bunches up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    t: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +219,7 @@ impl PartialState {
             && self.color.as_deref().is_none_or(hex_color)
             && self.animation.as_deref().is_none_or(label)
             && self.model_url.as_deref().is_none_or(|url| model_url(url, origins))
+            && self.t.is_none_or(|t| t.is_finite() && (0.0..1e13).contains(&t))
     }
 }
 
@@ -219,6 +230,9 @@ struct Peer {
     user: User,
     name: String,
     state: Option<PlayerState>,
+    /// Whether the others know this peer: a Join carries no position, so the peer is announced with its first
+    /// positioned Update instead of at the island's origin, where it would appear and then slide to the spawn.
+    placed: bool,
     acked: VecDeque<String>,
     messages: RateWindow,
     updates: RateWindow,
@@ -259,11 +273,14 @@ fn text(message: &Value) -> Message {
     Message::Text(message.to_string().into())
 }
 
+/// Sends to everyone else in the room who has joined. A peer whose queue is full has stopped reading; dropping its
+/// messages would leave it with stale players (a missed PlayerLeft is a ghost), so it is closed and reconnects with a
+/// fresh Welcome instead.
 fn broadcast(room: &HashMap<String, Peer>, from: &str, message: &Value) {
     let frame = text(message);
     for (id, peer) in room {
-        if id != from && peer.state.is_some() {
-            let _ = peer.tx.try_send(frame.clone());
+        if id != from && peer.state.is_some() && peer.tx.try_send(frame.clone()).is_err() {
+            peer.close.send_replace(Some((4408, "too slow")));
         }
     }
 }
@@ -332,8 +349,9 @@ impl Rooms {
                 user,
                 name,
                 state: None,
+                placed: false,
                 acked: VecDeque::new(),
-                messages: RateWindow::new(),
+                messages: RateWindow::over(MESSAGE_WINDOW),
                 updates: RateWindow::new(),
                 chats: RateWindow::new(),
                 invalid: RateWindow::new(),
@@ -348,7 +366,7 @@ impl Rooms {
         let mut hub = self.hub();
         let Some(room) = hub.rooms.get_mut(room_key) else { return };
         let Some(peer) = room.remove(id) else { return };
-        if peer.state.is_some() {
+        if peer.placed {
             broadcast(room, id, &json!({"type": "PlayerLeft", "client_id": id}));
         }
         if room.is_empty() {
@@ -401,7 +419,7 @@ impl Rooms {
         let mut hub = self.hub();
         let Some(room) = hub.rooms.get_mut(room_key) else { return Flow::Close(1011, "room closed") };
         let Some(peer) = room.get_mut(id) else { return Flow::Close(1011, "peer closed") };
-        if !peer.messages.allow(now, MESSAGES_PER_SECOND) {
+        if !peer.messages.allow(now, MESSAGES_PER_WINDOW) {
             return Flow::Close(4429, "too many messages");
         }
         let Ok(message) = serde_json::from_str::<ClientMessage>(raw) else { return malformed(&mut peer.invalid, now) };
@@ -414,7 +432,7 @@ impl Rooms {
                 if !hex_color(&color) || model.as_deref().is_some_and(|url| !model_url(url, origins)) {
                     return malformed(&mut peer.invalid, now);
                 }
-                let rejoin = peer.state.is_some();
+                let rejoin = peer.placed;
                 let previous = peer.state.take();
                 let state = PlayerState {
                     name: peer.name.clone(),
@@ -428,14 +446,15 @@ impl Rooms {
                 peer.state = Some(state.clone());
                 let others: serde_json::Map<String, Value> = room
                     .iter()
-                    .filter(|(other, peer)| *other != id && peer.state.is_some())
+                    .filter(|(other, peer)| *other != id && peer.placed)
                     .map(|(other, peer)| (other.clone(), json!(peer.state)))
                     .collect();
                 if let Some(peer) = room.get(id) {
                     let _ = peer.tx.try_send(text(&json!({"type": "Welcome", "client_id": id, "room_state": others})));
                 }
-                if !rejoin {
-                    broadcast(room, id, &json!({"type": "PlayerJoined", "client_id": id, "state": state}));
+                // A rejoin keeps its place; a new peer is announced with its first position (see `placed`).
+                if rejoin {
+                    broadcast(room, id, &json!({"type": "PlayerUpdate", "client_id": id, "state": state}));
                 }
             }
             ClientMessage::Update { state: mut changes } => {
@@ -465,10 +484,19 @@ impl Rooms {
                 if let Some(value) = changes.model_url.clone() {
                     state.model_url = Some(value);
                 }
-                broadcast(room, id, &json!({"type": "PlayerUpdate", "client_id": id, "state": changes}));
+                if peer.placed {
+                    broadcast(room, id, &json!({"type": "PlayerUpdate", "client_id": id, "state": changes}));
+                } else if changes.position.is_some() {
+                    peer.placed = true;
+                    let mut joined = json!(state);
+                    if let Some(t) = changes.t {
+                        joined["t"] = json!(t);
+                    }
+                    broadcast(room, id, &json!({"type": "PlayerJoined", "client_id": id, "state": joined}));
+                }
             }
             ClientMessage::Chat { text: said, range, ack_id } => {
-                let Some(state) = peer.state.as_ref() else { return Flow::Continue };
+                let Some(state) = peer.state.as_ref().filter(|_| peer.placed) else { return Flow::Continue };
                 // A resend of a chat already delivered only needs its Ack again.
                 if let Some(ack) = ack_id.as_deref().filter(|ack| peer.acked.iter().any(|seen| seen == ack)) {
                     let _ = peer.tx.try_send(text(&json!({"type": "Ack", "ackId": ack})));
@@ -508,6 +536,15 @@ impl Rooms {
             }
         }
         Flow::Continue
+    }
+}
+
+/// Stops a spawned task when its owner goes, however the owner ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -598,12 +635,46 @@ async fn send(socket: &mut WebSocket, message: Message) -> bool {
     matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await, Ok(Ok(())))
 }
 
+/// The session and the island's visibility are checked on their own task, so a slow database never stops this
+/// socket's relay (a stalled loop delivers its peers' movement in bursts). Only a definite refusal closes the peer; a
+/// failed check keeps it, as `revalidate` does.
+async fn watch_access(state: AppState, room: String, id: String, session: String, user: Uuid) {
+    let mut every = tokio::time::interval(HEARTBEAT_INTERVAL);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        // The first tick also closes the handshake/logout race.
+        every.tick().await;
+        if let Ok(false) = auth::active_session(&state, &session, user).await {
+            state.rooms.close_peer(&room, &id, 4401, "session ended");
+            return;
+        }
+        let Some(viewer) = state.rooms.occupants(&room).into_iter().find(|(peer, _)| peer == &id).map(|(_, user)| user)
+        else {
+            return;
+        };
+        if let Err(error) = visible_home(&state, &room, Some(&viewer)).await
+            && matches!(error.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND)
+        {
+            state.rooms.close_peer(&room, &id, 4403, "no access");
+            return;
+        }
+    }
+}
+
 async fn connection(
     mut socket: WebSocket,
     mut registration: Registration,
     mut outbound: mpsc::Receiver<Message>,
     state: AppState,
 ) {
+    let access = tokio::spawn(watch_access(
+        state.clone(),
+        registration.room.clone(),
+        registration.id.clone(),
+        registration.session.clone(),
+        registration.user,
+    ));
+    let _access = AbortOnDrop(access);
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_seen = Instant::now();
@@ -643,16 +714,6 @@ async fn connection(
                 None => break *registration.cancelled.borrow(),
             },
             _ = heartbeat.tick() => {
-                // The first tick also closes the handshake/logout race; subsequent ticks enforce DB-side expiry,
-                // revocations by another server, and visibility changes concurrent with the handshake.
-                if !auth::active_session(&state, &registration.session, registration.user).await.unwrap_or(false) {
-                    break Some((4401, "session ended"));
-                }
-                let user = registration.rooms.occupants(&registration.room).into_iter()
-                    .find(|(id, _)| id == &registration.id).map(|(_, user)| user);
-                if let Some(user) = user {
-                    if visible_home(&state, &registration.room, Some(&user)).await.is_err() { break Some((4403, "no access")); }
-                } else { break Some((4403, "no access")); }
                 if last_seen.elapsed() >= HEARTBEAT_TIMEOUT { break Some((4000, "heartbeat timeout")); }
                 if !send(&mut socket, Message::Ping(Vec::new().into())).await { break None; }
             }

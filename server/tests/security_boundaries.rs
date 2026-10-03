@@ -33,9 +33,18 @@ async fn edits_remain_bound_to_the_account_that_loaded_the_page() {
         app.call("GET", "/api/homes/edit_bob/world?worldId=shared", None, None).await.status,
         StatusCode::NO_CONTENT
     );
+    // A legacy/stale draft must not be attributed to whichever account is now signed in.
+    let world = json!({"worldId": "older", "baseRevision": 0, "data": {"version": 1, "savedAt": 1, "domains": {}}});
     for (method, path, body) in [
-        ("PATCH", "/api/homes/me", json!({"title": "missing owner"})),
-        ("PUT", "/api/homes/me/world", json!({"worldId": "x", "baseRevision": 0, "data": {}})),
+        ("PATCH", "/api/homes/me", json!({"title": "older tab", "fieldFromANewerPage": true})),
+        ("PATCH", "/api/homes/me", json!({"title": "null owner", "expectedOwnerId": null})),
+        (
+            "PUT",
+            "/api/homes/me/world",
+            json!({"worldId": "null-owner", "baseRevision": 0,
+            "expectedOwnerId": null, "data": {"version": 1, "savedAt": 1, "domains": {}}}),
+        ),
+        ("PUT", "/api/homes/me/world", world),
     ] {
         let request = Request::builder()
             .method(method)
@@ -45,38 +54,120 @@ async fn edits_remain_bound_to_the_account_that_loaded_the_page() {
             .header(header::COOKIE, &bob)
             .body(Body::from(body.to_string()))
             .unwrap();
-        assert_eq!(app.send(request).await.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let reply = app.send(request).await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{method} {path}: {:?}", reply.body);
+        assert_eq!(reply.body["code"], "owner_changed");
     }
+    assert_eq!(app.call("GET", "/api/homes/edit_bob", None, None).await.body["profile"]["title"], "Bob의 섬");
+    let saved = app.call("GET", "/api/homes/edit_bob/world?worldId=older", None, None).await;
+    assert_eq!(saved.status, StatusCode::NO_CONTENT);
+    app.cleanup().await;
+}
+
+fn login(username: &str, password: &str) -> Option<serde_json::Value> {
+    Some(json!({"username": username, "password": password}))
+}
+
+#[tokio::test]
+async fn concurrent_logins_reserve_the_accounts_remaining_failure_budget_and_success_refunds_it() {
+    let app = TestApp::new(None).await;
+    app.register("login_budget", "Member").await;
+    for _ in 0..49 {
+        rate_record(&app.state, "login-failed:login_budget".into());
+    }
+    let ok = app.call("POST", "/api/auth/login", login("login_budget", "correct horse battery"), None).await;
+    assert_eq!(ok.status, StatusCode::OK);
+    let replies =
+        join_all((0..5).map(|_| app.call("POST", "/api/auth/login", login("login_budget", "wrong password"), None)))
+            .await;
+    assert_eq!(replies.iter().filter(|reply| reply.status == StatusCode::UNAUTHORIZED).count(), 1);
+    assert_eq!(replies.iter().filter(|reply| reply.status == StatusCode::TOO_MANY_REQUESTS).count(), 4);
     app.cleanup().await;
 }
 
 #[tokio::test]
-async fn concurrent_logins_reserve_the_remaining_failure_budget_and_success_refunds_it() {
+async fn people_behind_one_address_do_not_lock_each_other_out() {
     let app = TestApp::new(None).await;
-    app.register("login_budget", "Member").await;
+    let names: Vec<String> = (0..5).map(|at| format!("shared_{at}")).collect();
+    let mut cookies = Vec::new();
+    for name in &names {
+        cookies.push(app.register(name, "Member").await);
+    }
+    // Sign-ins still running or that succeed never use the address's budget; only wrong passwords do.
     for _ in 0..29 {
         rate_record(&app.state, "login-failed-address:local".into());
     }
-    let login = app
-        .call(
-            "POST",
-            "/api/auth/login",
-            Some(json!({"username": "login_budget", "password": "correct horse battery"})),
-            None,
-        )
-        .await;
-    assert_eq!(login.status, StatusCode::OK);
-    let replies = join_all((0..5).map(|_| {
-        app.call(
-            "POST",
-            "/api/auth/login",
-            Some(json!({"username": "login_budget", "password": "wrong password"})),
-            None,
-        )
-    }))
+    let replies = join_all(
+        names.iter().map(|name| app.call("POST", "/api/auth/login", login(name, "correct horse battery"), None)),
+    )
     .await;
-    assert_eq!(replies.iter().filter(|reply| reply.status == StatusCode::UNAUTHORIZED).count(), 1);
-    assert_eq!(replies.iter().filter(|reply| reply.status == StatusCode::TOO_MANY_REQUESTS).count(), 4);
+    let statuses: Vec<StatusCode> = replies.iter().map(|reply| reply.status).collect();
+    assert!(statuses.iter().all(|status| *status == StatusCode::OK), "{statuses:?}");
+    let wrong = app.call("POST", "/api/auth/login", login("shared_0", "wrong password"), None).await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    let spent = app.call("POST", "/api/auth/login", login("shared_1", "correct horse battery"), None).await;
+    assert_eq!(spent.status, StatusCode::TOO_MANY_REQUESTS);
+
+    // Guestbook entries that could not be written cost the address nothing.
+    for cookie in &cookies[..3] {
+        for _ in 0..25 {
+            let reply =
+                app.call("POST", "/api/homes/shared_4/guestbook", Some(json!({"body": " "})), Some(cookie)).await;
+            assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+    let written =
+        app.call("POST", "/api/homes/shared_4/guestbook", Some(json!({"body": "안녕"})), Some(&cookies[3])).await;
+    assert_eq!(written.status, StatusCode::CREATED);
+
+    // Anonymous visits share the address's budget; members and the owner's own page loads do not use it.
+    for _ in 0..120 {
+        assert_eq!(app.call("POST", "/api/homes/shared_4/visits", Some(json!({})), None).await.status, StatusCode::OK);
+    }
+    let anonymous = app.call("POST", "/api/homes/shared_4/visits", Some(json!({})), None).await;
+    assert_eq!(anonymous.status, StatusCode::TOO_MANY_REQUESTS);
+    let member = app.call("POST", "/api/homes/shared_4/visits", Some(json!({})), Some(&cookies[0])).await;
+    assert_eq!((member.status, member.body["today"].as_i64()), (StatusCode::OK, Some(2)));
+    let owner = app.call("POST", "/api/homes/shared_4/visits", Some(json!({})), Some(&cookies[4])).await;
+    assert_eq!((owner.status, owner.body["today"].as_i64()), (StatusCode::OK, Some(2)));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_burst_of_wrong_passwords_passes_the_address_budget_by_a_few_at_most() {
+    let app = TestApp::new(None).await;
+    app.register("burst_member", "Member").await;
+    for _ in 0..25 {
+        rate_record(&app.state, "login-failed-address:local".into());
+    }
+    let replies =
+        join_all((0..14).map(|_| app.call("POST", "/api/auth/login", login("burst_member", "wrong password"), None)))
+            .await;
+    let statuses: Vec<StatusCode> = replies.iter().map(|reply| reply.status).collect();
+    let checked = statuses.iter().filter(|status| **status == StatusCode::UNAUTHORIZED).count();
+    // Five were left. All fourteen pass the first look at the budget together; the second, once a hashing slot is held,
+    // lets through only the few still hashing or about to be counted.
+    assert!((1..=9).contains(&checked), "{statuses:?}");
+    assert!(statuses.iter().all(|status| matches!(
+        *status,
+        StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    )));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_burst_of_password_checks_is_turned_away_instead_of_waiting_forever() {
+    let app = TestApp::new(None).await;
+    app.register("busy_member", "Member").await;
+    let held = app.state.hashing.clone().acquire_many_owned(2).await.unwrap();
+    let started = std::time::Instant::now();
+    let reply = app.call("POST", "/api/auth/login", login("busy_member", "correct horse battery"), None).await;
+    assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("busy")));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    drop(held);
+    // The refused attempt was not a wrong password: the account and the address keep their budgets.
+    let again = app.call("POST", "/api/auth/login", login("busy_member", "correct horse battery"), None).await;
+    assert_eq!(again.status, StatusCode::OK);
     app.cleanup().await;
 }
 
@@ -278,7 +369,8 @@ async fn bootstrap_requires_existing_account_ownership_and_reserved_names_cannot
         .await;
     assert_eq!(reserved.status, StatusCode::CONFLICT);
     let member = app.register("claimed_admin", "Member").await;
-    assert!(auth::bootstrap_admin(&app.state, "claimed_admin", "another password").await.is_err());
+    // Another password grants nothing, and the server still starts: the account keeps its own password.
+    auth::bootstrap_admin(&app.state, "claimed_admin", "another password").await.unwrap();
     assert_eq!(app.call("GET", "/api/auth/me", None, Some(&member)).await.body["user"]["role"], "user");
     auth::bootstrap_admin(&app.state, "claimed_admin", "correct horse battery").await.unwrap();
     assert_eq!(app.call("GET", "/api/auth/me", None, Some(&member)).await.body["user"]["role"], "admin");
@@ -308,5 +400,212 @@ async fn bootstrap_requires_existing_account_ownership_and_reserved_names_cannot
         "admin"
     );
     old.remove().await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn names_that_read_as_staff_are_kept_from_new_accounts() {
+    let app = TestApp::new(None).await;
+    for name in ["admin", "Administrator", "MOGAESUP", "root", "system", "support", "staff"] {
+        let reply = app
+            .call(
+                "POST",
+                "/api/auth/register",
+                Some(json!({"username": name, "password": "correct horse battery"})),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str()),
+            (StatusCode::CONFLICT, Some("username_taken")),
+            "{name}"
+        );
+    }
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users").fetch_one(&app.state.db).await.unwrap(), 0);
+    // The operator can still be given one of them, and names that only contain one are free.
+    auth::bootstrap_admin(&app.state, "admin", "bootstrap password").await.unwrap();
+    let signed_in = app.call("POST", "/api/auth/login", login("admin", "bootstrap password"), None).await;
+    assert_eq!(signed_in.body["user"]["role"], "admin");
+    app.register("admin_fan", "Member").await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn text_is_refused_for_control_characters_and_line_breaks_go_only_into_text_areas() {
+    let app = TestApp::new(None).await;
+    let host = app.register("text_host", "Host").await;
+    let guest = app.register("text_guest", "Guest").await;
+    let book = "/api/homes/text_host/guestbook";
+    let entry = |body: &str| Some(json!({"body": body}));
+    assert_eq!(app.call("POST", book, entry("두 줄\n방명록"), Some(&guest)).await.status, StatusCode::CREATED);
+    for body in ["벨\u{7}소리", "널\u{0}문자", "탈출\u{1b}[31m"] {
+        let reply = app.call("POST", book, entry(body), Some(&guest)).await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid_body")),
+            "{body:?}"
+        );
+    }
+    let ask = |name: &str, message: &str| Some(json!({"name": name, "theirName": "친구", "message": message}));
+    for (body, code) in [(ask("탭\t이름", ""), "invalid_ilchon_name"), (ask("친구", "줄\n바꿈"), "invalid_message")]
+    {
+        let reply = app.call("POST", "/api/ilchon/text_host/request", body, Some(&guest)).await;
+        assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some(code)));
+    }
+    // The status is a two-line text area; the title is one line.
+    let status =
+        app.call("PATCH", "/api/homes/me", Some(json!({"statusMessage": "오늘은\n느긋하게"})), Some(&host)).await;
+    assert_eq!(status.body["profile"]["statusMessage"], "오늘은\n느긋하게");
+    for changes in [json!({"statusMessage": "벨\u{7}"}), json!({"title": "두 줄\n제목"})] {
+        let reply = app.call("PATCH", "/api/homes/me", Some(changes.clone()), Some(&host)).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{changes}");
+    }
+    // A NUL anywhere in an island save is refused as island data, not failed in the database.
+    let world = json!({"worldId": "nul", "baseRevision": 0, "data": {"version": 1, "savedAt": 1,
+        "domains": {"building": {"sign": "a\u{0}b"}}}});
+    let reply = app.call("PUT", "/api/homes/me/world", Some(world), Some(&host)).await;
+    assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid_world")));
+    app.cleanup().await;
+}
+
+/// A save of an island envelope of about `bytes` bytes.
+fn sized_world(world: &str, base: i64, bytes: usize) -> serde_json::Value {
+    json!({"worldId": world, "baseRevision": base, "data": {"version": 1, "savedAt": 1,
+        "domains": {"building": {"pad": "x".repeat(bytes)}}}})
+}
+
+#[tokio::test]
+async fn a_members_islands_share_one_byte_budget_and_come_back_as_they_were_saved() {
+    let app = TestApp::new(None).await;
+    let owner = app.register("bytes_owner", "Owner").await;
+    let kept = || async {
+        sqlx::query_as::<_, (String, i64)>("SELECT world_id, byte_size::bigint FROM home_worlds ORDER BY updated_at")
+            .fetch_all(&app.state.db)
+            .await
+            .unwrap()
+    };
+    let total = |worlds: &[(String, i64)]| worlds.iter().map(|(_, bytes)| bytes).sum::<i64>();
+    let big = 1900 * 1024;
+    for world in ["w1", "w2", "w3"] {
+        let reply = app.call("PUT", "/api/homes/me/world", Some(sized_world(world, 0, big)), Some(&owner)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{world}: {:?}", reply.body);
+    }
+    assert_eq!(kept().await.len(), 3);
+    let ids = |worlds: &[(String, i64)]| worlds.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    // A fourth would pass 6 MiB in all: the least recently updated other island makes room.
+    let fourth = app.call("PUT", "/api/homes/me/world", Some(sized_world("w4", 0, big)), Some(&owner)).await;
+    assert_eq!(fourth.status, StatusCode::OK);
+    let worlds = kept().await;
+    assert_eq!(ids(&worlds), ["w2", "w3", "w4"]);
+    assert!(total(&worlds) <= 6 * 1024 * 1024);
+    // A small fifth fits beside them; growing it later pushes out the oldest of the others, never the island saved.
+    let fifth = app.call("PUT", "/api/homes/me/world", Some(sized_world("w5", 0, 10 * 1024)), Some(&owner)).await;
+    assert_eq!(fifth.status, StatusCode::OK);
+    assert_eq!(ids(&kept().await), ["w2", "w3", "w4", "w5"]);
+    let grown = app.call("PUT", "/api/homes/me/world", Some(sized_world("w5", 1, big)), Some(&owner)).await;
+    assert_eq!((grown.status, grown.body["revision"].as_i64()), (StatusCode::OK, Some(2)));
+    let worlds = kept().await;
+    assert_eq!(ids(&worlds), ["w3", "w4", "w5"]);
+    assert!(total(&worlds) <= 6 * 1024 * 1024, "{worlds:?}");
+
+    // The stored envelope is read back with the shape the app expects.
+    let small = json!({"worldId": "plain", "baseRevision": 0, "data": {"version": 2, "savedAt": 1.5,
+        "domains": {"building": {"tiles": [1, 2.25, -3], "name": "꽃 \"섬\"\n", "deep": {"ok": true, "none": null}}}}});
+    let saved = app.call("PUT", "/api/homes/me/world", Some(small.clone()), Some(&owner)).await;
+    assert_eq!(saved.headers[header::CONTENT_TYPE], "application/json");
+    assert_eq!(saved.body["data"], small["data"]);
+    let read = app.call("GET", "/api/homes/bytes_owner/world?worldId=plain", None, None).await;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!((read.body["worldId"].as_str(), read.body["revision"].as_i64()), (Some("plain"), Some(1)));
+    assert_eq!(read.body["data"], small["data"]);
+    assert_eq!(read.body["updatedAt"], saved.body["updatedAt"]);
+    assert!(read.body["updatedAt"].as_str().is_some_and(|at| at.ends_with('Z')), "{}", read.body["updatedAt"]);
+    // A body that is not a save at all is refused as island data the server cannot take.
+    let request = Request::builder()
+        .method("PUT")
+        .uri("/api/homes/me/world")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, &owner)
+        .body(Body::from("{\"worldId\": \"x\", \"data\": "))
+        .unwrap();
+    assert_eq!(app.send(request).await.status, StatusCode::UNPROCESSABLE_ENTITY);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn database_refusals_are_the_requests_problem_and_outages_the_servers() {
+    use mogaesup_server::error::ApiError;
+    let app = TestApp::new(None).await;
+    let insert = |username: &'static str, role: &'static str| {
+        sqlx::query("INSERT INTO users (id, username, display_name, password_hash, role) VALUES ($1, $2, 'x', 'x', $3)")
+            .bind(uuid::Uuid::new_v4())
+            .bind(username)
+            .bind(role)
+            .execute(&app.state.db)
+    };
+    insert("twice", "user").await.unwrap();
+    let unique = ApiError::from(insert("twice", "user").await.unwrap_err());
+    assert_eq!((unique.status, unique.code), (StatusCode::CONFLICT, "conflict"));
+    let checked = ApiError::from(insert("checked", "owner").await.unwrap_err());
+    assert_eq!((checked.status, checked.code), (StatusCode::UNPROCESSABLE_ENTITY, "invalid_value"));
+    let value = ApiError::from(sqlx::query("SELECT 'not a number'::int").execute(&app.state.db).await.unwrap_err());
+    assert_eq!((value.status, value.code), (StatusCode::UNPROCESSABLE_ENTITY, "invalid_value"));
+    app.state.db.close().await;
+    let down = ApiError::from(sqlx::query("SELECT 1").execute(&app.state.db).await.unwrap_err());
+    assert_eq!((down.status, down.code), (StatusCode::SERVICE_UNAVAILABLE, "database"));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn visitors_do_not_learn_which_studio_job_an_item_was_copied_from() {
+    let app = TestApp::new(None).await;
+    let admin = app.register("source_admin", "Admin").await;
+    app.make_admin("source_admin").await;
+    let member = app.register("source_member", "Member").await;
+    sqlx::query(
+        "INSERT INTO catalog_items (id, kind, label, emoji, model_url, source, source_ref, status)
+         VALUES ('copied', 'minime', '복사본', '🙂', '/models/copied.glb', 'factory', 'job_9/v2/smile', 'published')",
+    )
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let find = |items: &serde_json::Value| {
+        items["items"].as_array().unwrap().iter().find(|item| item["id"] == "copied").unwrap().clone()
+    };
+    for cookie in [None, Some(member.as_str()), Some(admin.as_str())] {
+        let item = find(&app.call("GET", "/api/catalog/items?kind=minime", None, cookie).await.body);
+        assert_eq!(
+            (item["sourceRef"].clone(), item["modelUrl"].as_str()),
+            (serde_json::Value::Null, Some("/models/copied.glb"))
+        );
+    }
+    let item = find(&app.call("GET", "/api/catalog/admin/items", None, Some(&admin)).await.body);
+    assert_eq!(item["sourceRef"], "job_9/v2/smile");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn reading_where_two_people_stand_takes_no_row_locks() {
+    let app = TestApp::new(None).await;
+    let alice = app.register("lock_alice", "Alice").await;
+    app.register("lock_bob", "Bob").await;
+    let body = json!({"name": "friend", "theirName": "friend"});
+    let asked = app.call("POST", "/api/ilchon/lock_bob/request", Some(body), Some(&alice)).await;
+    assert_eq!(asked.status, StatusCode::CREATED);
+    // Another transaction holds both accounts' rows, as a sign-in or a foreign key check can.
+    let mut held = app.state.db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE username IN ('lock_alice', 'lock_bob') FOR UPDATE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.call("GET", "/api/ilchon/lock_bob", None, Some(&alice)),
+    )
+    .await
+    .expect("the status read must not wait for the rows");
+    assert_eq!(status.body["relation"], "requested");
+    held.rollback().await.unwrap();
     app.cleanup().await;
 }

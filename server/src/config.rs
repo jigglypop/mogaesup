@@ -115,15 +115,55 @@ fn var(name: &str) -> Option<String> {
     env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
+/// `APP_ORIGIN`'s entries as browsers send `Origin`: scheme and host in lowercase, no default port, no path or trailing
+/// slash. An entry that is no http(s) origin stops the start.
+fn origins(list: &str) -> anyhow::Result<Vec<String>> {
+    let mut origins: Vec<String> = Vec::new();
+    for entry in list.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+        let url = reqwest::Url::parse(entry).with_context(|| format!("APP_ORIGIN entry {entry} is not a URL"))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            bail!("APP_ORIGIN entry {entry} is not an http(s) origin");
+        }
+        let origin = url.origin().ascii_serialization();
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    Ok(origins)
+}
+
+/// `FACTORY_URL` without a trailing slash. Plain http only reaches this machine: the operator token and the API and
+/// gateway keys travel in every request's headers.
+fn factory_url(raw: &str) -> anyhow::Result<String> {
+    let url = reqwest::Url::parse(raw).context("FACTORY_URL is not a URL")?;
+    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let local =
+        host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    match url.scheme() {
+        "https" => {}
+        "http" if local => {}
+        "http" => bail!("FACTORY_URL must use https unless the character server runs on this machine, not {raw}"),
+        other => bail!("FACTORY_URL must be an http(s) URL, not {other}"),
+    }
+    Ok(raw.trim_end_matches('/').to_owned())
+}
+
+/// `MODEL_STORE`, which a production server (secure cookies) must name: models written to a local directory there
+/// would be lost with the instance and never reach CloudFront's `/models/*`.
+fn model_store(configured: Option<String>, cookie_secure: bool) -> anyhow::Result<String> {
+    match configured {
+        Some(store) => Ok(store),
+        None if cookie_secure => {
+            bail!("MODEL_STORE is required when COOKIE_SECURE is on; set it, or COOKIE_SECURE=false for a local run")
+        }
+        None => Ok("data/local/models".into()),
+    }
+}
+
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let origins = var("APP_ORIGIN")
-            .unwrap_or_else(|| "http://127.0.0.1:5180,http://localhost:5180".into())
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let origins =
+            origins(&var("APP_ORIGIN").unwrap_or_else(|| "http://127.0.0.1:5180,http://localhost:5180".into()))?;
         let ticket_secret = var("REALTIME_TICKET_SECRET").context("REALTIME_TICKET_SECRET is required")?.into_bytes();
         if ticket_secret.len() < 32 {
             bail!("REALTIME_TICKET_SECRET must be at least 32 bytes");
@@ -140,7 +180,7 @@ impl Config {
                 })
                 .transpose()?;
             Ok(Factory {
-                url: url.trim_end_matches('/').to_owned(),
+                url: factory_url(&url)?,
                 api_key: var("FACTORY_API_KEY"),
                 token,
                 access: var("FACTORY_ACCESS").map_or(Ok(FactoryAccess::Read), |value| value.parse())?,
@@ -151,13 +191,49 @@ impl Config {
                 instance: StudioInstance::from_env()?,
             })
         });
+        let cookie_secure = var("COOKIE_SECURE").is_none_or(|value| value != "false");
+        let factory = factory.transpose()?;
         Ok(Self {
             origins,
-            cookie_secure: var("COOKIE_SECURE").is_none_or(|value| value != "false"),
+            cookie_secure,
             ticket_secret,
-            models: Models::open(&var("MODEL_STORE").unwrap_or_else(|| "data/local/models".into()))
-                .context("MODEL_STORE")?,
-            factory: factory.transpose()?,
+            models: Models::open(&model_store(var("MODEL_STORE"), cookie_secure)?).context("MODEL_STORE")?,
+            factory,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origins_are_kept_as_browsers_send_them() {
+        assert_eq!(
+            origins(" https://Mogaesup.COM/ , HTTPS://www.mogaesup.com:443,https://mogaesup.com").unwrap(),
+            ["https://mogaesup.com", "https://www.mogaesup.com"]
+        );
+        assert_eq!(origins("http://127.0.0.1:5180").unwrap(), ["http://127.0.0.1:5180"]);
+        for broken in ["mogaesup.com", "ftp://mogaesup.com", "https://"] {
+            assert!(origins(broken).is_err(), "{broken}");
+        }
+    }
+
+    #[test]
+    fn the_character_server_is_reached_over_https_unless_it_is_local() {
+        assert_eq!(factory_url("https://studio.example.com/").unwrap(), "https://studio.example.com");
+        for local in ["http://127.0.0.1:8016", "http://localhost:8016", "http://[::1]:8016"] {
+            assert!(factory_url(local).is_ok(), "{local}");
+        }
+        for refused in ["http://studio.example.com", "http://10.0.0.5:8016", "ftp://127.0.0.1", "studio"] {
+            assert!(factory_url(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_production_server_names_its_model_store() {
+        assert!(model_store(None, true).is_err());
+        assert_eq!(model_store(None, false).unwrap(), "data/local/models");
+        assert_eq!(model_store(Some("s3://bucket/models".into()), true).unwrap(), "s3://bucket/models");
     }
 }

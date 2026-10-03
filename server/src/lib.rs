@@ -36,6 +36,10 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
+use tower_http::compression::{
+    CompressionLayer,
+    predicate::{DefaultPredicate, NotForContentType, Predicate},
+};
 
 use crate::{config::Config, error::ApiResult, security::RateTable};
 
@@ -83,7 +87,14 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(auth::logout))
         .route("/me", get(auth::me))
         .route("/realtime-ticket", post(auth::realtime_ticket))
-        .layer(DefaultBodyLimit::max(4096));
+        .layer(DefaultBodyLimit::max(4096))
+        .layer(middleware::from_fn(auth::deadline));
+    // Models and other files pass through as they came, so their length and byte ranges hold.
+    let compression = CompressionLayer::new().compress_when(
+        DefaultPredicate::new()
+            .and(NotForContentType::const_new("model/"))
+            .and(NotForContentType::const_new("application/octet-stream")),
+    );
     let api = Router::new()
         .nest("/api/auth", auth)
         .route("/api/health", get(health))
@@ -94,7 +105,7 @@ pub fn router(state: AppState) -> Router {
         .merge(looks::router())
         .merge(permissions::router())
         .layer(middleware::from_fn_with_state(state.clone(), security::protect))
-        .layer(tower_http::compression::CompressionLayer::new())
+        .layer(compression)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state.clone());
     // In production CloudFront serves /models/* from S3 and never sends it here.

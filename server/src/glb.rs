@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::Cursor;
 
+pub use crate::glb_validation::Problem;
 use crate::gltf::{Matrix, index, numbers, pad, view_range, walk};
 
 const MAGIC: u32 = 0x4654_6c67; // "glTF"
@@ -22,6 +23,8 @@ pub struct Summary {
     pub skinned: bool,
     /// Engine clip names the model can play, sorted and without repeats.
     pub clips: Vec<String>,
+    /// Why the data cannot back a playable character; None when it can (it is skinned).
+    pub problem: Option<Problem>,
 }
 
 impl Summary {
@@ -112,8 +115,10 @@ pub fn split(bytes: &[u8]) -> Option<(Value, &[u8])> {
 }
 
 fn summarize(json: &Value, bin: &[u8]) -> Summary {
-    let (skinned, clips) = crate::glb_validation::character(json, bin);
-    Summary { skinned, clips }
+    match crate::glb_validation::character(json, bin) {
+        Ok(clips) => Summary { skinned: true, clips, problem: None },
+        Err(problem) => Summary { skinned: false, clips: Vec::new(), problem: Some(problem) },
+    }
 }
 
 /// One image the model embeds; sizes are None when it is not in the binary chunk or its header cannot be read.
@@ -138,6 +143,9 @@ impl Texture {
 #[serde(rename_all = "camelCase")]
 pub struct Details {
     pub skinned: bool,
+    /// Why the data cannot back a playable character, as in [`Summary`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<Problem>,
     /// Joints of the largest skin.
     pub joints: usize,
     /// Engine clip names, as in [`Summary`].
@@ -156,7 +164,7 @@ pub struct Details {
 
 impl Details {
     pub fn summary(&self) -> Summary {
-        Summary { skinned: self.skinned, clips: self.clips.clone() }
+        Summary { skinned: self.skinned, clips: self.clips.clone(), problem: self.problem }
     }
 }
 
@@ -266,11 +274,12 @@ fn textures(json: &Value, bin: &[u8]) -> Vec<Texture> {
 /// chunk is its JSON.
 pub fn details(bytes: &[u8]) -> Option<Details> {
     let (json, bin) = split(bytes)?;
-    let Summary { skinned, clips } = summarize(&json, bin);
+    let Summary { skinned, clips, problem } = summarize(&json, bin);
     let (triangles, vertices, size) = placed(&json);
     let count = |key: &str| json[key].as_array().map_or(0, Vec::len);
     Some(Details {
         skinned,
+        problem,
         joints: json["skins"]
             .as_array()
             .into_iter()

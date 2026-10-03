@@ -9,7 +9,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use sqlx::PgExecutor;
+use sqlx::{PgConnection, PgExecutor};
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
@@ -20,7 +20,7 @@ use crate::{
     auth::{User, current_user, require},
     config::{Factory, FactoryAccess, FactoryToken},
     error::{ApiError, ApiResult, forbidden, internal, not_found},
-    rebac::{ADMIN, OPERATOR, PAID_OPERATOR, STUDIO_VIEWER},
+    rebac::{ADMIN, Checker, OPERATOR, PAID_OPERATOR, STUDIO_VIEWER, Subject},
     security::{epoch_seconds, hmac_sha256},
 };
 
@@ -32,6 +32,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(600);
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 /// A cold job listing can take the character server twelve seconds.
 const JSON_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a member's wardrobe read or part download may take in all, slow phone networks included.
+const MEMBER_TIMEOUT: Duration = Duration::from_secs(300);
 /// The largest JSON answer read: the job listing is the biggest and stays far below this.
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const LISTING_ATTEMPTS: u32 = 3;
@@ -64,6 +66,9 @@ const FORWARDED_RESPONSE_HEADERS: [HeaderName; 9] = [
 
 const UNAVAILABLE: ApiError =
     ApiError::new(StatusCode::BAD_GATEWAY, "factory_unavailable", "캐릭터 서버에 연결하지 못했습니다.");
+/// The character server took the request but did not answer in time: unlike [`UNAVAILABLE`], it may have started it.
+const TIMED_OUT: ApiError =
+    ApiError::new(StatusCode::GATEWAY_TIMEOUT, "factory_timeout", "캐릭터 서버가 제때 답하지 않았습니다.");
 const TOO_LARGE: ApiError = ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "model_too_large", "모델 파일이 너무 큽니다.");
 
 /// The HMAC key exactly as the character server's `auth.py` (backend/src) derives it: the stripped secret, used decoded when Python's
@@ -122,11 +127,22 @@ fn python_b64decode(text: &str) -> Option<Vec<u8>> {
 
 /// A five-minute HS256 access token for the character server, as its operator (`owner_id`).
 pub fn operator_token(token: &FactoryToken, username: &str) -> String {
+    scoped_token(token, username, false)
+}
+
+/// The operator's token, marked `MEMBER` for a member's wardrobe read: the character server then lists only what
+/// members may see and serves only the part files its wardrobe offers (`auth.py` still requires `ADMIN`).
+pub fn member_token(token: &FactoryToken, username: &str) -> String {
+    scoped_token(token, username, true)
+}
+
+fn scoped_token(token: &FactoryToken, username: &str, member: bool) -> String {
     let now = epoch_seconds();
+    let roles = if member { json!(["ADMIN", "MEMBER"]) } else { json!(["ADMIN"]) };
     let claims = json!({
         "sub": token.owner_id.to_string(),
         "userId": token.owner_id,
-        "roles": ["ADMIN"],
+        "roles": roles,
         "token_type": "access",
         "name": username,
         "iss": token.issuer,
@@ -182,15 +198,28 @@ async fn send(state: &AppState, request: reqwest::RequestBuilder) -> ApiResult<r
             Ok(response)
         }
         Err(error) => {
-            tracing::warn!(%error, "Character server request failed");
-            Err(state.power.after_failure().await.unwrap_or(UNAVAILABLE))
+            let failure = if error.is_timeout() { TIMED_OUT } else { UNAVAILABLE };
+            // Without the address: a presigned one carries its signature in the query.
+            tracing::warn!(error = %error.without_url(), "Character server request failed");
+            Err(state.power.after_failure().await.unwrap_or(failure))
         }
     }
 }
 
 fn signed(request: reqwest::RequestBuilder, factory: &Factory, username: &str) -> reqwest::RequestBuilder {
+    signed_as(request, factory, username, false)
+}
+
+fn signed_as(
+    request: reqwest::RequestBuilder,
+    factory: &Factory,
+    username: &str,
+    member: bool,
+) -> reqwest::RequestBuilder {
     let request = match &factory.token {
-        Some(token) => request.bearer_auth(operator_token(token, username)),
+        Some(token) => {
+            request.bearer_auth(if member { member_token(token, username) } else { operator_token(token, username) })
+        }
         None => request,
     };
     let request = match &factory.gateway_key {
@@ -240,11 +269,16 @@ enum Need {
     Paid,
 }
 
-/// Uploads, selections and local image crops that never start paid work. Every other POST is treated as paid: the
-/// character server starts generation, rigging, retries and resumes with POSTs, and a new one must not slip through as
-/// free.
-const FREE_POSTS: [&[&str]; 10] = [
+/// Uploads, selections, and work the character server does on its own machine (Blender fitting, image crops, procedural
+/// textures, tracing, 2D rigs and motions, baking saved faces), none of which asks a paid provider for anything. Every
+/// other POST is treated as paid: the character server starts generation, rigging, retries and resumes with POSTs, and
+/// a new one must not slip through as free. Rig transfer stays paid although its own step is local: the assembly after
+/// it requests the job's default faces from the image provider when they were never made.
+const FREE_POSTS: [&[&str]; 19] = [
     &["avatar-factory", "jobs", "*", "native-parts", "select"],
+    // Fitting the generated parts to the body, and fitting one again, without a provider request.
+    &["avatar-factory", "jobs", "*", "native-parts"],
+    &["avatar-factory", "jobs", "*", "native-parts", "refit"],
     &["avatar-factory", "base-bodies", "glb-assets"],
     &["avatar-factory", "meshy-options", "texture-assets"],
     &["avatar-factory", "part-batches", "split-sheet"],
@@ -252,9 +286,45 @@ const FREE_POSTS: [&[&str]; 10] = [
     &["studio", "glb-assets"],
     &["studio", "glb-assets", "upload"],
     &["studio", "animals", "references"],
+    &["studio", "textures"],
+    &["studio", "generations", "*", "vector"],
+    &["studio", "generations", "*", "rig"],
+    &["studio", "generations", "*", "motions"],
+    // A face drawn, picked from saved PNGs, or already generated, baked into the body.
+    &["studio", "bodies", "*", "*", "expressions"],
+    &["studio", "bodies", "*", "*", "expressions", "overlay"],
+    &["studio", "bodies", "*", "*", "expression-generations", "*", "bake"],
     &["characters"],
     &["characters", "*", "sources"],
 ];
+
+/// Paid POSTs for which the character server requires an `Idempotency-Key` and keeps one piece of work per key: a
+/// request sent again with the same key gets the work already started. Only on these does the monthly budget count a
+/// key once. The other paid POSTs ignore the header, so each of their requests counts.
+const KEYED_POSTS: [&[&str]; 15] = [
+    &["avatar-factory", "base-bodies"],
+    &["avatar-factory", "base-bodies", "glb"],
+    &["avatar-factory", "image-jobs"],
+    &["avatar-factory", "jobs", "*", "rig-transfer"],
+    &["avatar-factory", "jobs", "*", "stages", "*", "resume"],
+    &["avatar-factory", "part-batches"],
+    &["avatar-factory", "variants"],
+    &["avatar-factory", "variants", "single-part"],
+    &["characters", "*", "actions", "*"],
+    &["studio", "animals"],
+    &["studio", "animals", "*", "regenerate"],
+    &["studio", "bodies", "*", "*", "expression-generations"],
+    &["studio", "bodies", "*", "*", "expression-generations", "batch"],
+    &["studio", "generations"],
+    &["studio", "glb-assets", "*", "prepare"],
+];
+
+/// Whether `segments` are one of `patterns`, a `*` standing for any one segment.
+fn listed(patterns: &[&[&str]], segments: &[&str]) -> bool {
+    patterns.iter().any(|pattern| {
+        pattern.len() == segments.len() && pattern.iter().zip(segments).all(|(want, got)| *want == "*" || want == got)
+    })
+}
 
 /// The policy for one studio request; `segments` are its path below `/api/`, read by [`path_segments`], e.g.
 /// `avatar-factory`, `wardrobe`, `bodies`.
@@ -268,10 +338,7 @@ fn need(method: &Method, segments: &[String]) -> Need {
         };
         return if member { Need::Member } else { Need::Read };
     }
-    let free = |pattern: &&[&str]| {
-        pattern.len() == segments.len() && pattern.iter().zip(&segments).all(|(want, got)| *want == "*" || want == got)
-    };
-    if *method == Method::POST && !FREE_POSTS.iter().any(free) { Need::Paid } else { Need::Write }
+    if *method == Method::POST && !listed(&FREE_POSTS, &segments) { Need::Paid } else { Need::Write }
 }
 
 const READ_ONLY: ApiError = forbidden("factory_read_only", "이 서버에서는 캐릭터 스튜디오를 읽기만 할 수 있습니다.");
@@ -279,14 +346,57 @@ const PAID_OFF: ApiError = forbidden("factory_paid_off", "이 서버에서는 �
 const BUDGET_SPENT: ApiError =
     ApiError::new(StatusCode::TOO_MANY_REQUESTS, "factory_budget", "이번 달 유료 캐릭터 작업 한도를 다 썼습니다.");
 
-/// Paid studio requests started since the start of this month (UTC).
+/// The paid requests of this month (UTC) that count against its budget: every one that may have started work. One the
+/// character server answered with an error of its own (5xx), or that never reached it (asleep, no connection), started
+/// nothing; one still in flight, or whose answer was never recorded, counts; one that timed out (504) may have started.
+const COUNTED: &str = "paid AND created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+    AND (status IS NULL OR status < 500 OR status = 504)";
+
+/// Paid studio requests counted this month. Requests sent again with the same `Idempotency-Key` to the same path are
+/// one: only requests to [`KEYED_POSTS`] keep their key, and the character server answers their replays with the work
+/// it already started.
 async fn paid_this_month(db: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT count(*) FROM factory_requests
-         WHERE paid AND created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'",
-    )
+    sqlx::query_scalar(&format!(
+        "SELECT count(*) FILTER (WHERE idempotency_key IS NULL)
+              + count(DISTINCT (path, idempotency_key)) FILTER (WHERE idempotency_key IS NOT NULL)
+         FROM factory_requests WHERE {COUNTED}"
+    ))
     .fetch_one(db)
     .await
+}
+
+/// Whether the month's paid budget refuses a request to `path`: a replay of a counted request (by its key) costs
+/// nothing more, so it passes even when the budget is spent.
+async fn budget_spent(
+    connection: &mut PgConnection,
+    monthly: i64,
+    path: &str,
+    key: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    if let Some(key) = key {
+        let replay: bool = sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM factory_requests WHERE {COUNTED} AND path = $1 AND idempotency_key = $2)"
+        ))
+        .bind(path)
+        .bind(key)
+        .fetch_one(&mut *connection)
+        .await?;
+        if replay {
+            return Ok(false);
+        }
+    }
+    Ok(paid_this_month(&mut *connection).await? >= monthly)
+}
+
+/// The `Idempotency-Key` of a POST to one of [`KEYED_POSTS`], which the studio's screens send with every change and
+/// resend on a retry. Elsewhere the character server ignores the header, so it is not kept.
+fn idempotency_key(method: &Method, segments: &[String], headers: &HeaderMap) -> Option<String> {
+    let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+    if *method != Method::POST || !listed(&KEYED_POSTS, &segments) {
+        return None;
+    }
+    let key = headers.get("idempotency-key")?.to_str().ok()?.trim();
+    (!key.is_empty() && key.len() <= 200).then(|| key.to_owned())
 }
 
 const NO_SUCH_PATH: ApiError = not_found("not_found", "찾을 수 없습니다.");
@@ -387,11 +497,18 @@ async fn proxy(
 async fn relay(state: &AppState, user: &User, need: Need, call: Call) -> ApiResult<Response> {
     let factory = factory(state)?;
     let paid = need == Need::Paid;
+    let key = idempotency_key(&call.method, &call.segments, &call.headers);
     match need {
         Need::Write if factory.access < FactoryAccess::Write => return Err(READ_ONLY),
         Need::Paid if factory.access < FactoryAccess::Paid => return Err(PAID_OFF),
         // Refused before the sleeping studio is woken for it, and counted again under the lock when it is recorded.
-        Need::Paid if paid_this_month(&state.db).await? >= factory.paid_monthly => return Err(BUDGET_SPENT),
+        Need::Paid => {
+            let path = call.segments.join("/");
+            let mut connection = state.db.acquire().await?;
+            if budget_spent(&mut connection, factory.paid_monthly, &path, key.as_deref()).await? {
+                return Err(BUDGET_SPENT);
+            }
+        }
         _ => {}
     }
     let record = if matches!(need, Need::Write | Need::Paid) {
@@ -399,11 +516,15 @@ async fn relay(state: &AppState, user: &User, need: Need, call: Call) -> ApiResu
         if let Some(asleep) = state.power.before().await {
             return Err(asleep);
         }
-        Some(record_change(state, factory, user, &call.method, &call.segments, paid).await?)
+        Some(record_change(state, factory, user, &call.method, &call.segments, paid, key.as_deref()).await?)
     } else {
         None
     };
-    let response = forward(state, &user.username, call).await;
+    let timeout = (need == Need::Member).then_some(MEMBER_TIMEOUT);
+    // A member's wardrobe read goes out member-scoped; studio staff keep the operator's full view on the same routes.
+    let member = need == Need::Member
+        && !Checker::new(&state.db).allows(Subject::User(user.id), &STUDIO_VIEWER).await.unwrap_or(false);
+    let response = forward(state, &user.username, call, timeout, member).await;
     if let Some(id) = record {
         let status =
             response.as_ref().map_or_else(|error| error.status.as_u16(), |response| response.status().as_u16());
@@ -442,23 +563,26 @@ async fn record_change(
     method: &Method,
     segments: &[String],
     paid: bool,
+    key: Option<&str>,
 ) -> ApiResult<i64> {
     let path = segments.join("/");
     let mut tx = state.db.begin().await?;
     if paid {
         sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(PAID_LOCK).execute(&mut *tx).await?;
-        if paid_this_month(&mut *tx).await? >= factory.paid_monthly {
+        if budget_spent(&mut tx, factory.paid_monthly, &path, key).await? {
             tx.rollback().await?;
             return Err(BUDGET_SPENT);
         }
     }
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO factory_requests (user_id, method, path, paid) VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO factory_requests (user_id, method, path, paid, idempotency_key) VALUES ($1, $2, $3, $4, $5)
+         RETURNING id",
     )
     .bind(user.id)
     .bind(method.as_str())
     .bind(&path)
     .bind(paid)
+    .bind(key)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -490,12 +614,22 @@ fn api_url(factory: &Factory, api_path: &str) -> ApiResult<reqwest::Url> {
     target(factory, &segments, query)
 }
 
-/// Sends one request to the character server's `/api/` as the operator and streams its answer back.
-async fn forward(state: &AppState, username: &str, call: Call) -> ApiResult<Response> {
+/// Sends one request to the character server's `/api/` as the operator and streams its answer back, all of it within
+/// `timeout` when one is given.
+async fn forward(
+    state: &AppState,
+    username: &str,
+    call: Call,
+    timeout: Option<Duration>,
+    member: bool,
+) -> ApiResult<Response> {
     let factory = factory(state)?;
     let url = target(factory, &call.segments, call.query.as_deref())?;
     let read = matches!(call.method, Method::GET | Method::HEAD);
     let mut request = state.http.request(call.method, url);
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
     if !read {
         request = request.body(reqwest::Body::wrap_stream(call.body.into_data_stream()));
     }
@@ -504,7 +638,7 @@ async fn forward(state: &AppState, username: &str, call: Call) -> ApiResult<Resp
             request = request.header(name, value.clone());
         }
     }
-    let upstream = send(state, signed(request, factory, username)).await?;
+    let upstream = send(state, signed_as(request, factory, username, member)).await?;
     let mut response = Response::builder().status(upstream.status().as_u16());
     for name in FORWARDED_RESPONSE_HEADERS {
         if let Some(value) = upstream.headers().get(name.as_str()) {
@@ -515,7 +649,8 @@ async fn forward(state: &AppState, username: &str, call: Call) -> ApiResult<Resp
 }
 
 fn unavailable(error: reqwest::Error) -> ApiError {
-    tracing::warn!(%error, "Character server request failed");
+    // Without the address: a presigned one carries its signature in the query.
+    tracing::warn!(error = %error.without_url(), "Character server request failed");
     UNAVAILABLE
 }
 
@@ -704,6 +839,11 @@ mod tests {
         assert_eq!(claims["roles"][0], "ADMIN");
         let expected = URL_SAFE_NO_PAD.encode(hmac_sha256(&token.key, format!("{}.{}", parts[0], parts[1]).as_bytes()));
         assert_eq!(parts[2], expected);
+        // A member's wardrobe read keeps ADMIN (auth.py requires it) and adds MEMBER, which narrows what is served.
+        let member = member_token(&token, "member");
+        let claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(member.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!(claims["roles"], serde_json::json!(["ADMIN", "MEMBER"]));
     }
 
     fn read(path: &str) -> Option<Vec<String>> {
@@ -765,21 +905,61 @@ mod tests {
             assert_eq!(need_of(&Method::GET, path), Need::Read, "{path}");
         }
         assert_eq!(need_of(&Method::HEAD, "avatar-factory/wardrobe/bodies"), Need::Member);
-        // Uploads, selections and the local sheet crop are free; every other POST starts paid work.
+        // Uploads, selections and what the character server does on its own machine are free; every other POST starts
+        // paid work.
         for path in [
             "avatar-factory/part-batches/split-sheet",
             "avatar-factory/jobs/j1/native-parts/select",
+            "avatar-factory/jobs/j1/native-parts",
+            "avatar-factory/jobs/j1/native-parts/refit",
             "studio/glb-assets/upload",
+            "studio/textures",
+            "studio/generations/g1/vector",
+            "studio/generations/g1/rig",
+            "studio/generations/g1/motions",
+            "studio/bodies/j1/v1/expressions",
+            "studio/bodies/j1/v1/expressions/overlay",
+            "studio/bodies/j1/v1/expression-generations/e1/bake",
             "characters",
         ] {
             assert_eq!(need_of(&Method::POST, path), Need::Write, "{path}");
         }
-        for path in ["avatar-factory/part-batches", "avatar-factory/part-batches/b1/resume", "studio/%67enerations"] {
+        for path in [
+            "avatar-factory/part-batches",
+            "avatar-factory/part-batches/b1/resume",
+            "studio/%67enerations",
+            "studio/generations/g1/resume",
+            "studio/glb-assets/a1/prepare",
+            "studio/bodies/j1/v1/expression-generations",
+            "studio/bodies/j1/v1/expression-generations/e1/resume",
+            "avatar-factory/jobs/j1/meshy/rig",
+            "avatar-factory/jobs/j1/native-parts/v2",
+            // Its assembly can request the job's default faces from the image provider.
+            "avatar-factory/jobs/j1/rig-transfer",
+        ] {
             assert_eq!(need_of(&Method::POST, path), Need::Paid, "{path}");
         }
         for method in [Method::PUT, Method::PATCH, Method::DELETE] {
             assert_eq!(need_of(&method, "studio/generations"), Need::Write, "{method}");
         }
+    }
+
+    #[test]
+    fn a_key_is_kept_only_where_the_character_server_keeps_one_piece_of_work_per_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", " k-1 ".parse().unwrap());
+        let key = |method: &Method, path: &str| idempotency_key(method, &read(path).unwrap(), &headers);
+        for path in ["studio/generations", "studio/%67enerations", "avatar-factory/jobs/j1/stages/meshy/resume"] {
+            assert_eq!(key(&Method::POST, path).as_deref(), Some("k-1"), "{path}");
+        }
+        // These start their work again on every request, whatever key they carry.
+        for path in
+            ["studio/generations/g1/resume", "avatar-factory/jobs/j1/meshy/rig", "avatar-factory/jobs/j1/retry-images"]
+        {
+            assert_eq!(key(&Method::POST, path), None, "{path}");
+        }
+        assert_eq!(key(&Method::PUT, "studio/generations"), None);
+        assert_eq!(idempotency_key(&Method::POST, &read("studio/generations").unwrap(), &HeaderMap::new()), None);
     }
 
     fn settings(url: &str) -> Factory {

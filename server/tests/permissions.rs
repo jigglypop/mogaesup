@@ -389,7 +389,8 @@ async fn 부트스트랩_관리자는_튜플로_관리자가_되고_기존_비�
     assert_eq!(login.body["user"]["role"], "admin");
 
     app.register("existing_b", "원래 회원").await;
-    assert!(auth::bootstrap_admin(&app.state, "existing_b", "some other password").await.is_err());
+    // Another password keeps the account as it is, with no admin grant; the server still starts.
+    auth::bootstrap_admin(&app.state, "existing_b", "some other password").await.unwrap();
     let denied = app
         .call(
             "POST",

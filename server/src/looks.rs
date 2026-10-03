@@ -27,6 +27,7 @@ use crate::{
     glb,
     look_bake::{self, COVERED_SLOTS, Coverage, HAIR_SLOTS, Palette, Part},
     models::{self, is_sha256},
+    runtime::retry,
     security::rate_limit,
     slim,
     studio::segment,
@@ -58,7 +59,6 @@ const PART_CHANGED: ApiError = conflict("look_part_changed", "옷장에 없는 �
 const INVALID: ApiError = bad("invalid_look", "입힐 수 없는 조합이에요.");
 const NOT_READY: ApiError = conflict("look_not_ready", "아직 입을 수 있는 모습이 없어요.");
 const NO_LOOK: ApiError = not_found("look_not_found", "저장한 모습이 없어요.");
-const NOT_PLAYABLE: &str = "옷장 몸에 idle·walk 애니메이션이 없어 섬에서 걸을 수 없어요.";
 const TOO_LARGE: &str = "입힌 모습이 너무 커요(16 MB, 삼각형 15만 개까지). 파츠를 줄여 주세요.";
 const INTERRUPTED: &str = "서버가 다시 시작되어 입히기가 멈췄어요. 다시 저장해 주세요.";
 
@@ -123,7 +123,7 @@ pub fn request(body: LookBody) -> ApiResult<Value> {
     }
     let hair_worn = HAIR_SLOTS.iter().any(|slot| parts.contains_key(*slot));
     let hair_color = match body.hair_color.as_deref() {
-        Some(value) => Some(color(value).ok_or(INVALID)?).filter(|_| hair_worn),
+        Some(value) => hair_worn.then_some(color(value).ok_or(INVALID)?),
         None => None,
     };
     let mut colors = Map::new();
@@ -325,6 +325,22 @@ impl From<ApiError> for Failure {
     }
 }
 
+impl From<sqlx::Error> for Failure {
+    fn from(error: sqlx::Error) -> Self {
+        ApiError::from(error).into()
+    }
+}
+
+/// Why an assembled look cannot walk on the island: what its data does not hold, or the clips it lacks.
+fn unplayable(summary: &glb::Summary) -> Failure {
+    let message = match summary.problem {
+        Some(glb::Problem::NoSkin) => "입힌 모습에 리깅(스킨)이 없어 섬에서 걸을 수 없어요.".to_owned(),
+        Some(problem) => format!("입힌 모습의 모델 데이터를 확인하지 못했어요: {}", problem.message()),
+        None => format!("옷장 몸에 {} 애니메이션이 없어 섬에서 걸을 수 없어요.", summary.missing_clips().join("·")),
+    };
+    Failure("look_not_playable", message)
+}
+
 /// A garment of a covered slot whose coverage record is missing or unreadable: without it the body would show through.
 fn no_coverage(slot: &str) -> Failure {
     Failure("look_coverage", format!("{slot} 파츠가 몸을 가리는 모양을 읽지 못했어요. 옷장을 다시 불러와 주세요."))
@@ -375,38 +391,43 @@ struct Bake {
 impl Bake {
     async fn run(self) {
         // A newer save, or the cleanup after a restart, ends this bake before it does any work.
-        if !self.current().await {
-            return;
-        }
-        let outcome = match AssertUnwindSafe(self.make()).catch_unwind().await {
-            Ok(outcome) => outcome,
-            Err(_) => Err(Failure("internal", "잠시 후 다시 시도해 주세요.".into())),
+        let outcome = match self.current().await {
+            Ok(false) => return,
+            Ok(true) => match AssertUnwindSafe(self.make()).catch_unwind().await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(Failure("internal", "잠시 후 다시 시도해 주세요.".into())),
+            },
+            Err(failure) => Err(failure),
         };
         let saved = match outcome {
             Ok(None) => return,
             Ok(Some((model_url, report))) => {
-                sqlx::query(
-                    "UPDATE user_looks SET status = 'ready', model_url = $3, baked = request, report = $4,
-                     worn = wear_on_ready, updated_at = now() WHERE user_id = $1 AND revision = $2",
-                )
-                .bind(self.user.id)
-                .bind(self.revision)
-                .bind(model_url)
-                .bind(report)
-                .execute(&self.state.db)
+                retry(|| {
+                    sqlx::query(
+                        "UPDATE user_looks SET status = 'ready', model_url = $3, baked = request, report = $4,
+                         worn = wear_on_ready, updated_at = now() WHERE user_id = $1 AND revision = $2",
+                    )
+                    .bind(self.user.id)
+                    .bind(self.revision)
+                    .bind(&model_url)
+                    .bind(&report)
+                    .execute(&self.state.db)
+                })
                 .await
             }
             Err(Failure(code, message)) => {
                 tracing::warn!(user = %self.user.id, code, "Look bake failed");
-                sqlx::query(
-                    "UPDATE user_looks SET status = 'failed', error_code = $3, error_message = $4, updated_at = now()
-                     WHERE user_id = $1 AND revision = $2",
-                )
-                .bind(self.user.id)
-                .bind(self.revision)
-                .bind(code)
-                .bind(message)
-                .execute(&self.state.db)
+                retry(|| {
+                    sqlx::query(
+                        "UPDATE user_looks SET status = 'failed', error_code = $3, error_message = $4, updated_at = now()
+                         WHERE user_id = $1 AND revision = $2",
+                    )
+                    .bind(self.user.id)
+                    .bind(self.revision)
+                    .bind(code)
+                    .bind(&message)
+                    .execute(&self.state.db)
+                })
                 .await
             }
         };
@@ -415,16 +436,18 @@ impl Bake {
         }
     }
 
-    /// Whether this is still the look's latest bake and still `baking`.
-    async fn current(&self) -> bool {
-        let found = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM user_looks WHERE user_id = $1 AND revision = $2 AND status = 'baking')",
-        )
-        .bind(self.user.id)
-        .bind(self.revision)
-        .fetch_one(&self.state.db)
-        .await;
-        found.unwrap_or(false)
+    /// Whether this is still the look's latest bake and still `baking`. A database that cannot say even after a few
+    /// tries fails the bake, which is then recorded, instead of leaving the look `baking`.
+    async fn current(&self) -> Result<bool, Failure> {
+        Ok(retry(|| {
+            sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM user_looks WHERE user_id = $1 AND revision = $2 AND status = 'baking')",
+            )
+            .bind(self.user.id)
+            .bind(self.revision)
+            .fetch_one(&self.state.db)
+        })
+        .await?)
     }
 
     /// A file under the character server's `/api/`, checked against the SHA-256 the wardrobe listed for it.
@@ -497,7 +520,7 @@ impl Bake {
     async fn make(&self) -> Result<Option<(String, Value)>, Failure> {
         // Waiting bakes hold no model files. Imports and bakes share the same two memory-heavy slots.
         let slot = self.state.imports.clone().acquire_owned().await.map_err(|error| Failure::from(internal(error)))?;
-        if !self.current().await {
+        if !self.current().await? {
             return Ok(None);
         }
         let mut budget = InputBudget::default();
@@ -529,7 +552,7 @@ impl Bake {
             files.push((slot.clone(), bytes, coverage, palette));
         }
         let hair = self.look["hairColor"].as_str().and_then(look_bake::linear_color);
-        if !self.current().await {
+        if !self.current().await? {
             return Ok(None);
         }
         let (web, details, report) = tokio::task::spawn_blocking(move || {
@@ -551,8 +574,9 @@ impl Bake {
         })
         .await
         .map_err(|error| Failure::from(internal(error)))??;
-        if !details.summary().playable() {
-            return Err(Failure("look_not_playable", NOT_PLAYABLE.into()));
+        let summary = details.summary();
+        if !summary.playable() {
+            return Err(unplayable(&summary));
         }
         if web.len() > MAX_LOOK_BYTES || details.triangles > MAX_LOOK_TRIANGLES {
             return Err(Failure("look_too_large", TOO_LARGE.into()));

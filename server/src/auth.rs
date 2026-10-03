@@ -4,8 +4,9 @@ use argon2::{
 };
 use axum::{
     Json,
-    extract::State,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use rand::RngCore;
@@ -14,18 +15,36 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use std::time::Duration;
+use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
 use crate::{
     AppState,
     error::{ApiError, ApiResult, LOGIN_REQUIRED, bad, conflict, forbidden, internal},
     rebac::{self, Actor, Checker, PERMISSIONS, Permission, ROLE_COLUMN, Subject, Tuple},
-    security::{client_address, rate_limit, rate_reserve},
+    security::{client_address, rate_exceeded, rate_limit, rate_record, rate_reserve},
 };
 
 const SESSION_COOKIE: &str = "mogaesup_session";
 const SESSIONS_PER_USER: i64 = 8;
 const SESSION_MAX_AGE_SECONDS: u32 = 30 * 24 * 60 * 60;
+/// Wrong passwords from one address, and for one account, in the rate window (ten minutes).
+const LOGIN_FAILURES_PER_ADDRESS: u32 = 30;
+const LOGIN_FAILURES_PER_ACCOUNT: u32 = 50;
+/// How long a password check waits for a hashing slot: a burst of sign-ins is turned away instead of queueing forever.
+const HASH_WAIT: Duration = Duration::from_secs(10);
+/// How long a sign-in route may take in all.
+const AUTH_DEADLINE: Duration = Duration::from_secs(30);
+const BUSY: ApiError = ApiError::new(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "busy",
+    "지금 로그인하는 사람이 많아요. 잠시 뒤에 다시 시도해 주세요.",
+);
+/// Names that read as the site's own staff. New accounts cannot take them; existing ones keep working. Usernames are
+/// ASCII, so the Korean ones only matter if that ever changes.
+const RESERVED_NAMES: [&str; 9] =
+    ["admin", "administrator", "mogaesup", "root", "system", "support", "staff", "운영자", "관리자"];
+const USERNAME_TAKEN: ApiError = conflict("username_taken", "이미 사용 중인 아이디입니다.");
 
 /// A signed-in account. `role` is `admin` while it holds `system:mogaesup#admin` (see [`rebac`]), else `user`.
 #[derive(Clone, Debug, Serialize)]
@@ -148,8 +167,21 @@ fn new_password(password: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// A hashing slot, waited for at most [`HASH_WAIT`].
+async fn hashing_slot(state: &AppState) -> ApiResult<OwnedSemaphorePermit> {
+    match tokio::time::timeout(HASH_WAIT, state.hashing.clone().acquire_owned()).await {
+        Ok(permit) => permit.map_err(internal),
+        Err(_) => Err(BUSY),
+    }
+}
+
+/// The sign-in routes answer within [`AUTH_DEADLINE`], whatever they wait for.
+pub async fn deadline(request: Request, next: Next) -> Response {
+    tokio::time::timeout(AUTH_DEADLINE, next.run(request)).await.unwrap_or_else(|_| BUSY.into_response())
+}
+
 async fn hash_password(state: &AppState, password: String) -> ApiResult<String> {
-    let permit = state.hashing.clone().acquire_owned().await.map_err(internal)?;
+    let permit = hashing_slot(state).await?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let salt = SaltString::generate(&mut rand::rngs::OsRng);
@@ -162,7 +194,11 @@ async fn hash_password(state: &AppState, password: String) -> ApiResult<String> 
 
 /// Checks against `hash`, or spends the same work on a throwaway hash so unknown usernames take as long.
 async fn verify_password(state: &AppState, hash: Option<String>, password: String) -> ApiResult<bool> {
-    let permit = state.hashing.clone().acquire_owned().await.map_err(internal)?;
+    verify_in(hashing_slot(state).await?, hash, password).await
+}
+
+/// [`verify_password`] in a hashing slot already held.
+async fn verify_in(permit: OwnedSemaphorePermit, hash: Option<String>, password: String) -> ApiResult<bool> {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         match hash {
@@ -255,6 +291,9 @@ pub async fn register(
     let name = username(&body.username)?;
     new_password(&body.password)?;
     let display = display_name(body.display_name.as_deref(), &name)?;
+    if RESERVED_NAMES.iter().any(|reserved| reserved.eq_ignore_ascii_case(&name)) {
+        return Err(USERNAME_TAKEN);
+    }
     // Attempts are limited per address; the site-wide cap counts only created accounts, so rejected requests cannot
     // close sign-up for everyone.
     rate_limit(&state, format!("register-address:{}", client_address(&headers)), 20)?;
@@ -263,7 +302,7 @@ pub async fn register(
     let hash = hash_password(&state, body.password).await?;
     let user = User { id: Uuid::new_v4(), username: name, display_name: display, role: "user".into() };
     if !create_account(&state.db, &user, &hash, false).await? {
-        return Err(conflict("username_taken", "이미 사용 중인 아이디입니다."));
+        return Err(USERNAME_TAKEN);
     }
     created.keep();
     session(&state, user, StatusCode::CREATED).await
@@ -279,10 +318,11 @@ pub async fn login(
         return Err(bad("invalid_password", "비밀번호를 확인해 주세요."));
     }
     // Only wrong passwords count, per address and per account; a limit shared by everyone would let one client lock
-    // all players out.
+    // all players out. Checks still running are held against the account alone: many people share one address (a
+    // school, a mobile carrier), and their sign-ins in flight must not use up its budget.
     let address_key = format!("login-failed-address:{}", client_address(&headers));
-    let user_key = format!("login-failed:{name}");
-    let attempt = rate_reserve(&state, &[(address_key, 30), (user_key, 50)])?;
+    rate_exceeded(&state, &address_key, LOGIN_FAILURES_PER_ADDRESS)?;
+    let attempt = rate_reserve(&state, &[(format!("login-failed:{name}"), LOGIN_FAILURES_PER_ACCOUNT)])?;
     let row = sqlx::query(&format!(
         "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, u.password_hash FROM users u WHERE u.username = $1"
     ))
@@ -290,8 +330,13 @@ pub async fn login(
     .fetch_optional(&state.db)
     .await?;
     let hash = row.as_ref().map(|r| r.get::<String, _>("password_hash"));
-    if !verify_password(&state, hash, body.password).await? {
+    // Asked again once a hashing slot is held: checks run two at a time (HASHING_SLOTS), so a burst of wrong passwords
+    // from one address passes its budget by a few at most, however many of them were waiting.
+    let slot = hashing_slot(&state).await?;
+    rate_exceeded(&state, &address_key, LOGIN_FAILURES_PER_ADDRESS)?;
+    if !verify_in(slot, hash, body.password).await? {
         attempt.keep();
+        rate_record(&state, address_key);
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_credentials",
@@ -328,7 +373,8 @@ pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) 
     Ok(Json(json!({"ticket": ticket, "expiresAt": expires_at, "user": user})))
 }
 
-/// Creates the configured operator, or verifies ownership of the existing account before granting it admin.
+/// Creates the configured operator, or verifies ownership of the existing account before granting it admin. An existing
+/// account whose password is another keeps it and is granted nothing; the server still starts.
 pub async fn bootstrap_admin(state: &AppState, username_raw: &str, password: &str) -> anyhow::Result<()> {
     let name = username(username_raw)?;
     new_password(password)?;
@@ -340,32 +386,33 @@ pub async fn bootstrap_admin(state: &AppState, username_raw: &str, password: &st
         .bind(&name)
         .fetch_optional(&state.db)
         .await?;
-    let id = match existing {
-        Some(row) => {
-            if !verify_password(state, Some(row.get("password_hash")), password.to_owned()).await? {
-                anyhow::bail!("bootstrap administrator password does not match the existing account");
-            }
-            row.get("id")
-        }
+    let row = match existing {
+        Some(row) => row,
         None => {
             let hash = hash_password(state, password.to_owned()).await?;
             let user =
                 User { id: Uuid::new_v4(), username: name.clone(), display_name: name.clone(), role: "user".into() };
             if create_account(&state.db, &user, &hash, true).await? {
-                user.id
-            } else {
-                // A concurrent bootstrap may have created it. Ownership is still verified before any grant.
-                let row = sqlx::query("SELECT id, password_hash FROM users WHERE username = $1")
-                    .bind(&name)
-                    .fetch_one(&state.db)
-                    .await?;
-                if !verify_password(state, Some(row.get("password_hash")), password.to_owned()).await? {
-                    anyhow::bail!("bootstrap administrator password does not match the existing account");
-                }
-                row.get("id")
+                return grant_bootstrap(state, &name, user.id).await;
             }
+            // A concurrent bootstrap may have created it. Ownership is still verified before any grant.
+            sqlx::query("SELECT id, password_hash FROM users WHERE username = $1")
+                .bind(&name)
+                .fetch_one(&state.db)
+                .await?
         }
     };
+    if !verify_password(state, Some(row.get("password_hash")), password.to_owned()).await? {
+        tracing::warn!(
+            username = %name,
+            "BOOTSTRAP_ADMIN_PASSWORD does not match the existing account; it keeps its password and is not made admin"
+        );
+        return Ok(());
+    }
+    grant_bootstrap(state, &name, row.get("id")).await
+}
+
+async fn grant_bootstrap(state: &AppState, name: &str, id: Uuid) -> anyhow::Result<()> {
     let granted =
         rebac::grant(&state.db, &Tuple::admin(id), Actor::server("bootstrap"), "BOOTSTRAP_ADMIN_USERNAME").await?;
     if granted {
@@ -434,6 +481,11 @@ pub fn spawn_cleanup(db: PgPool) {
                 if let Err(error) = sqlx::query(statement).execute(&db).await {
                     tracing::warn!(%error, "Cleanup failed");
                 }
+            }
+            match crate::imports::interrupt_stale(&db).await {
+                Ok(0) => {}
+                Ok(stalled) => tracing::warn!(stalled, "Catalog imports that stopped moving were marked failed"),
+                Err(error) => tracing::warn!(%error, "Cleanup failed"),
             }
         }
     });

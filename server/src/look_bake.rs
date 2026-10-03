@@ -78,7 +78,7 @@ fn words<T>(value: &Value, from: fn([u8; 4]) -> T) -> Option<BTreeMap<String, Ve
         .iter()
         .map(|(key, data)| {
             let bytes = decode_base64(data)?;
-            Some((key.clone(), bytes.chunks_exact(4).map(|word| from([word[0], word[1], word[2], word[3]])).collect()))
+            Some((key.clone(), bytes.as_chunks::<4>().0.iter().map(|word| from(*word)).collect()))
         })
         .collect()
 }
@@ -384,7 +384,7 @@ impl Out {
     fn push_positions(&mut self, positions: &[f32]) -> usize {
         let mut low = [f32::INFINITY; 3];
         let mut high = [f32::NEG_INFINITY; 3];
-        for point in positions.chunks_exact(3) {
+        for point in positions.as_chunks::<3>().0 {
             for axis in 0..3 {
                 low[axis] = low[axis].min(point[axis]);
                 high[axis] = high[axis].max(point[axis]);
@@ -483,7 +483,7 @@ fn covered_vertices(json: &Value, bin: &[u8], outer: &Bits) -> (HashMap<String, 
             continue;
         };
         let mut marked = vec![0u8; vertices];
-        for (triangle, corners) in indices.chunks_exact(3).enumerate() {
+        for (triangle, corners) in indices.as_chunks::<3>().0.iter().enumerate() {
             if bit(bits, triangle) {
                 for &corner in corners {
                     if let Some(slot) = marked.get_mut(corner as usize) {
@@ -493,7 +493,7 @@ fn covered_vertices(json: &Value, bin: &[u8], outer: &Bits) -> (HashMap<String, 
             }
         }
         let mut grown = marked.clone();
-        for corners in indices.chunks_exact(3) {
+        for corners in indices.as_chunks::<3>().0 {
             if corners.iter().any(|&corner| marked.get(corner as usize) == Some(&1)) {
                 for &corner in corners {
                     if let Some(slot) = grown.get_mut(corner as usize) {
@@ -522,7 +522,9 @@ fn hide_triangles(out: &mut Out, hidden: &Bits) -> (usize, usize) {
             continue;
         };
         let kept: Vec<u32> = indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(triangle, _)| !bit(bits, *triangle))
             .flat_map(|(_, corners)| corners.iter().copied())

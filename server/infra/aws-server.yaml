@@ -179,10 +179,12 @@ Resources:
       DBInstanceIdentifier: mogaesup-postgres
       DBName: mogaesup
       Engine: postgres
+      # Pinned, with automatic minor upgrades off: RDS must not move the instance past this version, or the next stack
+      # change to it would read as a downgrade. Take a minor upgrade by raising this.
       EngineVersion: '17.9'
       DBInstanceClass: db.t4g.micro
       AllocatedStorage: '20'
-      MaxAllocatedStorage: 25
+      MaxAllocatedStorage: 100
       StorageType: gp3
       StorageEncrypted: true
       MasterUsername: mogaesup
@@ -193,7 +195,7 @@ Resources:
       PubliclyAccessible: false
       BackupRetentionPeriod: 7
       DeleteAutomatedBackups: false
-      AutoMinorVersionUpgrade: true
+      AutoMinorVersionUpgrade: false
       CopyTagsToSnapshot: true
       DeletionProtection: true
       EnableCloudwatchLogsExports: [postgresql]

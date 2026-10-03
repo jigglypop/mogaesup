@@ -17,8 +17,8 @@ async fn main() -> anyhow::Result<()> {
     let process_lock = ProcessLock::acquire(&db).await?;
     // Monitor the ownership connection during migrations and recovery too, before any HTTP listener exists.
     tokio::select! {
-        result = run(db, config) => result?,
-        result = process_lock.monitor() => result?,
+        result = run(db.clone(), config) => result?,
+        result = process_lock.monitor(db) => result?,
     }
     Ok(())
 }
@@ -32,7 +32,9 @@ async fn run(db: PgPool, config: Config) -> anyhow::Result<()> {
     .await?;
     let mut migrator = sqlx::migrate!("./migrations");
     // A rollback restores the previous binary but not the schema, so an older release must start on a database that
-    // a newer release already migrated. Migrations stay additive.
+    // a newer release already migrated. Migrations stay additive (new tables, columns, indexes and rows), except
+    // 20260930160000_residents_looks: it deleted the packaged 미니미 other than `man` and moved the islands wearing them
+    // to `man`, and a rollback past it does not bring them back.
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
     let interrupted = imports::interrupt_unfinished(&db).await.context("interrupted catalog imports")?;

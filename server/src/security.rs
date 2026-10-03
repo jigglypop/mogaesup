@@ -7,6 +7,7 @@ use axum::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    net::{IpAddr, Ipv6Addr},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -18,10 +19,10 @@ use crate::{
 
 pub const FOREIGN_ORIGIN: ApiError = forbidden("origin", "허용되지 않은 요청 출처입니다.");
 
-/// Whether the request's Origin is one of the site's own (`APP_ORIGIN`).
+/// Whether the request's Origin is one of the site's own (`APP_ORIGIN`, kept as serialized origins).
 pub fn same_origin(state: &AppState, headers: &HeaderMap) -> bool {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-    origin.is_some_and(|origin| state.config.origins.iter().any(|v| v == origin))
+    origin.is_some_and(|origin| state.config.origins.iter().any(|v| v.eq_ignore_ascii_case(origin)))
 }
 
 /// Writes must come from the site itself: a matching Origin, not cross-site, and JSON bodies (a cross-site form cannot
@@ -57,11 +58,17 @@ const RATE_WINDOW: Duration = Duration::from_secs(600);
 const RATE_KEYS: usize = 50_000;
 
 /// Fixed ten-minute windows per key. Expired windows are swept at most every thirty seconds, and a full table drops its
-/// oldest windows: a flood of new keys must never refuse existing callers.
+/// oldest windows: a flood of new keys must never refuse existing callers. Site-wide counters are never dropped that
+/// way, or a flood could reset them.
 #[derive(Default)]
 pub struct RateTable {
     windows: HashMap<String, (Instant, u32)>,
     swept: Option<Instant>,
+}
+
+/// A counter for the whole site (`register-created`): its key names no caller, so it has no `:`.
+fn site_wide(key: &str) -> bool {
+    !key.contains(':')
 }
 
 impl RateTable {
@@ -86,7 +93,7 @@ impl RateTable {
             let mut starts: Vec<Instant> = self.windows.values().map(|(start, _)| *start).collect();
             starts.sort_unstable();
             let cutoff = starts[starts.len() / 10];
-            self.windows.retain(|_, (start, _)| *start > cutoff);
+            self.windows.retain(|key, (start, _)| *start > cutoff || site_wide(key));
         }
         let entry = self.windows.entry(key).or_insert((now, 0));
         if now.duration_since(entry.0) >= RATE_WINDOW {
@@ -165,15 +172,24 @@ pub fn rate_record(state: &AppState, key: String) {
 }
 
 /// The viewer address CloudFront appended to X-Forwarded-For. Earlier entries come from the client and are ignored;
-/// without the header (local development) every caller shares one key.
+/// without the header (local development) every caller shares one key. An IPv6 address stands for its /64: one home
+/// or phone holds a whole /64 and can pick any address in it.
 pub fn client_address(headers: &HeaderMap) -> String {
-    headers
+    let address = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.rsplit(',').next())
         .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty() && value.len() <= 64)
-        .unwrap_or_else(|| "local".into())
+        .filter(|value| !value.is_empty() && value.len() <= 64);
+    let Some(address) = address else { return "local".into() };
+    match address.parse::<IpAddr>() {
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => format!("{}/64", Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX))),
+        },
+        Ok(IpAddr::V4(v4)) => v4.to_string(),
+        Err(_) => address,
+    }
 }
 
 /// Now in whole seconds since the Unix epoch, as signed tokens count their expiry.
@@ -218,5 +234,35 @@ mod tests {
         headers.insert("x-forwarded-for", "10.0.0.9, 203.0.113.7".parse().unwrap());
         assert_eq!(client_address(&headers), "203.0.113.7");
         assert_eq!(client_address(&HeaderMap::new()), "local");
+    }
+
+    #[test]
+    fn ipv6_callers_share_their_slash_64() {
+        let address = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", value.parse().unwrap());
+            client_address(&headers)
+        };
+        assert_eq!(address("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64");
+        assert_eq!(address("2001:db8:1:2:bbbb:cccc:dddd:eeee"), "2001:db8:1:2::/64");
+        assert_ne!(address("2001:db8:1:3::1"), address("2001:db8:1:2::1"));
+        assert_eq!(address("::ffff:203.0.113.7"), "203.0.113.7");
+        assert_eq!(address("not an address"), "not an address");
+    }
+
+    #[test]
+    fn a_full_table_never_drops_site_wide_counters() {
+        let mut table = RateTable::default();
+        let start = Instant::now();
+        // The site-wide counter is the oldest window of all.
+        table.windows.insert("register-created".into(), (start, 599));
+        for at in 0..RATE_KEYS {
+            table.windows.insert(format!("visits-address:{at}"), (start + Duration::from_nanos(at as u64 + 1), 1));
+        }
+        table.swept = Some(Instant::now());
+        table.record("visits-address:new".into());
+        assert!(table.windows.len() < RATE_KEYS, "the oldest per-caller windows made room");
+        assert_eq!(table.windows.get("register-created").map(|(_, count)| *count), Some(599));
+        assert!(!table.windows.contains_key("visits-address:0"));
     }
 }

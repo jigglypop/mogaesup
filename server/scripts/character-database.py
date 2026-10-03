@@ -11,6 +11,9 @@ import time
 
 REGION = 'ap-northeast-2'
 STACK = 'mogaesup-server'
+# The SSM command's own limit, and how long its invocation is waited for past it.
+COMMAND_SECONDS = 600
+COMMAND_WAIT = COMMAND_SECONDS + 120
 
 SCRIPT = r'''
 set -euo pipefail
@@ -41,17 +44,21 @@ def main():
     script = SCRIPT.replace('{region}', REGION).replace('{master}', outputs['DatabaseSecretArn']) \
         .replace('{app}', outputs['CharacterDatabaseSecretArn']).replace('{endpoint}', outputs['DatabaseEndpoint'])
     parameters = json.dumps({'commands': ["cat > /var/tmp/character-database.sh <<'SETUP'", *script.strip().splitlines(), 'SETUP',
-                                          'bash /var/tmp/character-database.sh; status=$?; rm -f /var/tmp/character-database.sh; exit $status']})
+                                          'bash /var/tmp/character-database.sh; status=$?; rm -f /var/tmp/character-database.sh; exit $status'],
+                             'executionTimeout': [str(COMMAND_SECONDS)]})
     command = aws('ssm', 'send-command', '--instance-ids', outputs['InstanceId'], '--document-name', 'AWS-RunShellScript',
                   '--parameters', parameters, '--comment', 'character records database')['Command']['CommandId']
+    deadline = time.monotonic() + COMMAND_WAIT
     while True:
         time.sleep(4)
         try:
             result = aws('ssm', 'get-command-invocation', '--command-id', command, '--instance-id', outputs['InstanceId'])
         except subprocess.CalledProcessError:
-            continue
-        if result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
+            result = None
+        if result and result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
             break
+        if time.monotonic() > deadline:
+            raise SystemExit(f'setup did not finish within {COMMAND_WAIT} s; inspect SSM command {command} on the instance')
     print(result['StandardOutputContent'], result['StandardErrorContent'])
     if result['Status'] != 'Success':
         raise SystemExit(f"failed: {result['Status']}")

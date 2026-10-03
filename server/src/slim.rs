@@ -87,7 +87,9 @@ pub fn slim(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let (mut json, bin) = split(bytes)?;
     let views = json["bufferViews"].as_array()?.clone();
+    // The buffer must be an object: its byteLength is written below.
     if json["buffers"].as_array().map_or(0, Vec::len) != 1
+        || !json["buffers"][0].is_object()
         || views.iter().any(|view| view["buffer"].as_u64() != Some(0))
     {
         return None;
@@ -320,5 +322,9 @@ mod tests {
         let bare =
             json!({"asset": {"version": "2.0"}, "images": [], "bufferViews": [], "buffers": [{"byteLength": 0}]});
         assert!(slim(&join(&bare, &[])).is_none());
+        // A buffer that is not an object is left alone rather than written into.
+        let mut odd = json.clone();
+        odd["buffers"] = json!([bin.len()]);
+        assert!(slim(&join(&odd, &bin)).is_none());
     }
 }

@@ -173,6 +173,7 @@ async fn 방에_들어가면_서로_보이고_가까운_사람에게만_말이_�
     let mut host_socket = connect(&base, "host_r", &ticket(&app, &host).await, ORIGIN).await.unwrap();
     send(&mut host_socket, json!({"type": "Join", "room_id": "host_r", "name": "위조", "color": "#ff7a59"})).await;
     assert_eq!(next(&mut host_socket, "Welcome").await.unwrap()["room_state"], json!({}));
+    send(&mut host_socket, json!({"type": "Update", "state": {"position": [0.0, 0.0, 0.0]}})).await;
 
     let mut guest_socket = connect(&base, "host_r", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
     let model = "http://test.local/gltf/man.glb";
@@ -184,15 +185,24 @@ async fn 방에_들어가면_서로_보이고_가까운_사람에게만_말이_�
     let welcome = next(&mut guest_socket, "Welcome").await.unwrap();
     let states: Vec<Value> = welcome["room_state"].as_object().unwrap().values().cloned().collect();
     assert_eq!(states[0]["name"], "호스트");
+    assert_eq!(states[0]["position"], json!([0.0, 0.0, 0.0]));
+    // The others hear of the guest only with its first position, not at the island's origin.
+    assert!(next(&mut host_socket, "PlayerJoined").await.is_none());
+    send(&mut guest_socket, json!({"type": "Update", "state": {"position": [3.0, 0.0, 4.0], "rotation": [1.0, 0.0, 0.0, 0.0], "animation": "walk", "name": "바꾼 이름", "t": 1234.0}})).await;
     let joined = next(&mut host_socket, "PlayerJoined").await.unwrap();
     assert_eq!(joined["state"]["name"], "손님");
     assert_eq!(joined["state"]["modelUrl"], model);
+    assert_eq!(joined["state"]["position"], json!([3.0, 0.0, 4.0]));
+    assert_eq!(joined["state"]["animation"], "walk");
+    assert_eq!(joined["state"]["t"], 1234.0);
     let guest_id = joined["client_id"].as_str().unwrap().to_owned();
 
-    send(&mut guest_socket, json!({"type": "Update", "state": {"position": [3.0, 0.0, 4.0], "rotation": [1.0, 0.0, 0.0, 0.0], "animation": "walk", "name": "바꾼 이름"}})).await;
+    send(&mut guest_socket, json!({"type": "Update", "state": {"position": [3.5, 0.0, 4.0], "animation": "run", "name": "바꾼 이름", "t": 1284.0}})).await;
     let update = next(&mut host_socket, "PlayerUpdate").await.unwrap();
     assert_eq!(update["client_id"], guest_id.as_str());
-    assert_eq!(update["state"]["animation"], "walk");
+    assert_eq!(update["state"]["animation"], "run");
+    // The sender's sample time is relayed so receivers can draw the peer on its own timeline.
+    assert_eq!(update["state"]["t"], 1284.0);
     assert!(update["state"].get("name").is_none());
 
     // A peer's finite but non-unit quaternion must never reach the others' renderer or physics unchanged.
@@ -316,6 +326,7 @@ async fn 다른_곳의_모델_주소와_스타일로_번질_색은_받지_않는
     let model = "http://test.local/gltf/man.glb";
     send(&mut guest_socket, json!({"type": "Join", "room_id": "host_x", "color": "#8b6cf0", "modelUrl": model})).await;
     next(&mut guest_socket, "Welcome").await.unwrap();
+    send(&mut guest_socket, json!({"type": "Update", "state": {"position": [1.0, 0.0, 1.0]}})).await;
     assert_eq!(next(&mut host_socket, "PlayerJoined").await.unwrap()["state"]["modelUrl"], model);
 
     // Updates change what the others see only with a hex colour and a model of the site's own.
@@ -390,6 +401,7 @@ async fn 섬이_더_좁게_공개되거나_일촌이_끊기면_들어와_있던_
     let mut guest_socket = connect(&base, "host_e", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
     send(&mut guest_socket, join("guest")).await;
     next(&mut guest_socket, "Welcome").await.unwrap();
+    send(&mut guest_socket, json!({"type": "Update", "state": {"position": [2.0, 0.0, 2.0]}})).await;
     let guest_id = next(&mut host_socket, "PlayerJoined").await.unwrap()["client_id"].as_str().unwrap().to_owned();
 
     // Staying open to everyone lets nobody out; closing the island to its 일촌 lets the guest out and only the guest.
@@ -428,5 +440,37 @@ async fn 섬이_더_좁게_공개되거나_일촌이_끊기면_들어와_있던_
     assert_eq!(unlinked.status, StatusCode::NO_CONTENT);
     assert_eq!(closed(&mut friend_socket).await, Some(4403));
     assert!(connect(&base, "host_e", &ticket(&app, &friend).await, ORIGIN).await.is_err());
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 끊겼던_링크가_한꺼번에_보낸_움직임은_연결을_끊지_않고_범람만_막는다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_b", "호스트").await;
+    let guest = app.register("guest_b", "손님").await;
+    let base = serve(&app).await;
+    let mut host_socket = connect(&base, "host_b", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    send(&mut host_socket, json!({"type": "Join", "room_id": "host_b", "color": "#ff7a59"})).await;
+    next(&mut host_socket, "Welcome").await.unwrap();
+    let mut guest_socket = connect(&base, "host_b", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    send(&mut guest_socket, json!({"type": "Join", "room_id": "host_b", "color": "#8b6cf0"})).await;
+    next(&mut guest_socket, "Welcome").await.unwrap();
+    // Three seconds of 20 Hz movement a stalled phone delivers at once.
+    for index in 0..60 {
+        let x = f64::from(index) * 0.5;
+        send(
+            &mut guest_socket,
+            json!({"type": "Update", "state": {"position": [x, 0.0, 0.0], "t": 1000.0 + f64::from(index) * 50.0}}),
+        )
+        .await;
+    }
+    send(&mut guest_socket, json!({"type": "Ping", "ts": 7})).await;
+    assert_eq!(next(&mut guest_socket, "Pong").await.unwrap()["ts"], 7, "the burst keeps the socket open");
+    assert!(next(&mut host_socket, "PlayerJoined").await.is_some());
+    // A real flood still closes it.
+    for _ in 0..400 {
+        send(&mut guest_socket, json!({"type": "Ping", "ts": 1})).await;
+    }
+    assert_eq!(closed(&mut guest_socket).await, Some(4429));
     app.cleanup().await;
 }

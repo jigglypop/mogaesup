@@ -83,9 +83,15 @@ struct ItemsQuery {
     kind: Option<String>,
 }
 
+/// `GET /api/catalog/items`: what islands may show, for anyone. Which studio job an item was copied from is for the
+/// admin screens (`/api/catalog/admin/items`), so `sourceRef` is null here.
 async fn items(State(state): State<AppState>, Query(query): Query<ItemsQuery>) -> ApiResult<Json<Value>> {
     let kind = query.kind.filter(|kind| KINDS.contains(&kind.as_str()));
-    Ok(Json(json!({"items": list(&state.db, kind.as_deref(), true).await?})))
+    let mut items = list(&state.db, kind.as_deref(), true).await?;
+    for item in &mut items {
+        item["sourceRef"] = Value::Null;
+    }
+    Ok(Json(json!({"items": items})))
 }
 
 /// Admin rows: the item, how many homes wear it (미니미 only), how many versions it has, and where it came from.

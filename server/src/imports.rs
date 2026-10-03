@@ -27,6 +27,7 @@ use crate::{
     factory::{self, MAX_MODEL_BYTES, Received},
     glb,
     rebac::CATALOG_EDITOR,
+    runtime::retry,
     slim, studio,
 };
 
@@ -65,6 +66,10 @@ const RESIDENT_CLIPS: [&str; 1] = ["idle"];
 const RUNNING: ApiError = conflict("import_running", "이 항목은 이미 가져오는 중입니다. 끝난 뒤 다시 시도해 주세요.");
 const NOT_FOUND: ApiError = not_found("import_not_found", "없는 가져오기 작업입니다.");
 const INTERRUPTED: &str = "서버가 다시 시작되어 가져오기가 멈췄습니다. 다시 시도해 주세요.";
+/// A running import records its progress at least every step, and about every second while it downloads; one silent
+/// this long has stopped without recording why.
+const STALLED_MINUTES: i32 = 30;
+const STALLED: &str = "가져오기가 30분 넘게 진행되지 않아 멈춘 것으로 처리했습니다. 다시 시도해 주세요.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -151,8 +156,8 @@ fn thumbnail(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 /// Runs every check on a downloaded model into `report`, then fails on the first hard problem, in this order: not a
-/// GLB, a checksum that differs from the character server's record, a 미니미 without a rig or without idle and walk, a
-/// resident (`npc`) without a rig or without idle.
+/// GLB, a checksum that differs from the character server's record, a character whose data cannot be read (with what
+/// could not), a 미니미 without a rig or without idle and walk, a resident (`npc`) without a rig or without idle.
 fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report) -> ApiResult<glb::Details> {
     let sha256 = hex::encode(Sha256::digest(bytes));
     let checksum = match expected {
@@ -187,14 +192,22 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
     let must = if character { Level::Error } else { Level::Info };
     let wanted: &[&'static str] = if resident { &RESIDENT_CLIPS } else { &glb::REQUIRED_CLIPS };
     let summary = details.summary();
-    if details.skinned {
-        report.check("skin", Level::Ok, format!("리깅(스킨)이 있습니다 · 관절 {}개", details.joints));
-    } else {
-        report.check("skin", must, "리깅(스킨)이 없습니다.");
+    // Data that cannot be read leaves the rig and the clips unknown, and says why.
+    let unreadable = details.problem.filter(|problem| *problem != glb::Problem::NoSkin);
+    if let Some(problem) = unreadable {
+        report.check("model_data", must, problem.message());
+    }
+    match details.problem {
+        None => report.check("skin", Level::Ok, format!("리깅(스킨)이 있습니다 · 관절 {}개", details.joints)),
+        Some(glb::Problem::NoSkin) => report.check("skin", must, glb::Problem::NoSkin.message()),
+        Some(_) => report.check("skin", must, "모델 데이터를 읽지 못해 리깅(스킨)을 확인하지 못했습니다."),
     }
     let missing = summary.missing(wanted);
     if missing.is_empty() {
         report.check("clips", Level::Ok, format!("필요한 애니메이션({})이 있습니다.", wanted.join("·")));
+    } else if unreadable.is_some() {
+        let message = format!("모델 데이터를 읽지 못해 애니메이션({})을 확인하지 못했습니다.", wanted.join("·"));
+        report.check("clips", must, message);
     } else {
         report.check("clips", must, format!("필요한 애니메이션이 없습니다: {}", missing.join(", ")));
     }
@@ -231,6 +244,9 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
     report.model = Some(details.clone());
     if checksum == Level::Error {
         return Err(CHECKSUM);
+    }
+    if character && let Some(problem) = unreadable {
+        return Err(bad("not_playable", problem.message()));
     }
     if character && (!summary.skinned || !missing.is_empty()) {
         return Err(if resident { NOT_RESIDENT } else { NOT_PLAYABLE });
@@ -409,6 +425,21 @@ pub async fn interrupt_unfinished(db: &PgPool) -> Result<u64, sqlx::Error> {
     Ok(stopped.rows_affected())
 }
 
+/// Marks running imports that stopped recording progress as failed, so they no longer hold their item (a new import of
+/// it would be refused as `import_running`). Run periodically; a task that could not record its own failure ends here.
+pub async fn interrupt_stale(db: &PgPool) -> Result<u64, sqlx::Error> {
+    let stopped = sqlx::query(
+        "UPDATE catalog_imports SET status = 'failed', error_code = 'interrupted', error_message = $1, detail = NULL,
+         updated_at = now(), finished_at = now()
+         WHERE status = 'running' AND updated_at < now() - make_interval(mins => $2)",
+    )
+    .bind(STALLED)
+    .bind(STALLED_MINUTES)
+    .execute(db)
+    .await?;
+    Ok(stopped.rows_affected())
+}
+
 /// One queued import, run by its own task.
 struct Task {
     state: AppState,
@@ -429,16 +460,20 @@ impl Task {
             Err(_) => internal("catalog import panicked"),
         };
         tracing::warn!(import = %self.id, code = error.code, "Catalog import failed");
-        // The step stays where it stopped, so the page can point at it.
-        let saved = sqlx::query(
-            "UPDATE catalog_imports SET status = 'failed', error_code = $2, error_message = $3, report = $4, detail = NULL,
-             updated_at = now(), finished_at = now() WHERE id = $1",
-        )
-        .bind(self.id)
-        .bind(error.code)
-        .bind(error.message)
-        .bind(report.json())
-        .execute(&self.state.db)
+        // The step stays where it stopped, so the page can point at it. Left `running`, the import would hold its item
+        // until `interrupt_stale` gives up on it, so a database that does not answer at once is asked again.
+        let report = report.json();
+        let saved = retry(|| {
+            sqlx::query(
+                "UPDATE catalog_imports SET status = 'failed', error_code = $2, error_message = $3, report = $4,
+                 detail = NULL, updated_at = now(), finished_at = now() WHERE id = $1",
+            )
+            .bind(self.id)
+            .bind(error.code)
+            .bind(error.message)
+            .bind(&report)
+            .execute(&self.state.db)
+        })
         .await;
         if let Err(error) = saved {
             tracing::error!(%error, import = %self.id, "Could not record a failed catalog import");
@@ -729,12 +764,22 @@ mod tests {
 
         let mut report = Report::default();
         let sha = hex::encode(Sha256::digest(&statue));
-        assert_eq!(verify("minime", &statue, Some(sha.as_str()), &mut report).unwrap_err().code, "not_playable");
+        // Its animations have no channels, which the glTF schema requires: the reason is named, not just the rig.
+        let error = verify("minime", &statue, Some(sha.as_str()), &mut report).unwrap_err();
+        assert_eq!((error.code, error.message), ("not_playable", glb::Problem::Schema.message()));
+        assert_eq!(levels(&report).iter().find(|(code, _)| *code == "model_data"), Some(&("model_data", Level::Error)));
         // A resident needs a rig and idle, not a walk; furniture needs neither a rig nor clips.
         let mut report = Report::default();
         let error = verify("npc", &statue, None, &mut report).unwrap_err();
-        assert_eq!((error.code, error.message), ("not_playable", NOT_RESIDENT.message));
+        assert_eq!((error.code, error.message), ("not_playable", glb::Problem::Schema.message()));
         assert!(report.checks.iter().any(|check| check.code == "clips" && check.level == Level::Error));
+        let (mut unrigged, bin) = crate::test_glb::document(&["Idle"]);
+        unrigged["nodes"][2].as_object_mut().unwrap().remove("skin");
+        let mut report = Report::default();
+        let error = verify("npc", &glb::join(&unrigged, &bin), None, &mut report).unwrap_err();
+        assert_eq!((error.code, error.message), ("not_playable", NOT_RESIDENT.message));
+        assert!(report.checks.iter().any(|check| check.code == "skin" && check.message == "리깅(스킨)이 없습니다."));
+        assert!(!levels(&report).iter().any(|(code, _)| *code == "model_data"));
         let standing = crate::test_glb::character(&["Idle"]);
         let mut report = Report::default();
         assert!(verify("npc", &standing, None, &mut report).is_ok());

@@ -21,7 +21,7 @@ use crate::{
     auth::require,
     config::StudioInstance,
     error::{ApiError, ApiResult, conflict, not_found},
-    rebac::STUDIO_VIEWER,
+    rebac::{OPERATOR, STUDIO_VIEWER},
     security::hmac_sha256,
 };
 
@@ -36,6 +36,11 @@ const STOPPING_NOW: ApiError = conflict("studio_stopping", "스튜디오가 꺼�
 const UNCONFIGURED: ApiError = not_found("studio_power_unconfigured", "이 서버에는 스튜디오 전원 설정이 없습니다.");
 const UNREADABLE: ApiError =
     ApiError::new(StatusCode::BAD_GATEWAY, "studio_power_unavailable", "스튜디오 전원 상태를 읽지 못했습니다.");
+const START_FAILED: ApiError = ApiError::new(
+    StatusCode::BAD_GATEWAY,
+    "studio_start_failed",
+    "스튜디오를 켜지 못했어요. 1분쯤 뒤에 다시 시도해 주세요.",
+);
 
 /// How long after a start (or after seeing the instance off) a request that cannot reach the studio still means
 /// "waking": boot, Docker and the API take one to two minutes.
@@ -45,6 +50,9 @@ const WAKE_WINDOW: Duration = Duration::from_secs(10 * 60);
 const TRUST_ANSWER: Duration = Duration::from_secs(90 * 60);
 /// A described state is reused this long, so one page's burst of requests asks EC2 once.
 const STATE_TTL: Duration = Duration::from_secs(2);
+/// After a start that failed, none is tried again for this long: requests meanwhile get the failure without an EC2
+/// call, or an error in the log, each.
+const START_RETRY: Duration = Duration::from_secs(60);
 const EC2_TIMEOUT: Duration = Duration::from_secs(10);
 const IMDS_TIMEOUT: Duration = Duration::from_secs(3);
 /// Role credentials are fetched again this long before they expire.
@@ -165,12 +173,23 @@ struct Marks {
     answered: Option<Instant>,
 }
 
+/// The last StartInstances calls made here.
+#[derive(Default)]
+struct Starts {
+    /// When one last succeeded, and the state it left the instance in.
+    started: Option<(Instant, String)>,
+    /// When one last failed.
+    failed: Option<Instant>,
+}
+
 struct Inner {
     instance: StudioInstance,
     http: reqwest::Client,
     credentials: tokio::sync::Mutex<Option<Credentials>>,
     /// The last described state; the lock also makes concurrent lookups wait for one call.
     state: tokio::sync::Mutex<Option<(Instant, String)>>,
+    /// The lock makes concurrent starts wait for one call.
+    starts: tokio::sync::Mutex<Starts>,
     marks: Mutex<Marks>,
 }
 
@@ -192,6 +211,7 @@ impl StudioPower {
                 http,
                 credentials: Default::default(),
                 state: Default::default(),
+                starts: Default::default(),
                 marks: Default::default(),
             })
         }))
@@ -265,13 +285,8 @@ impl Inner {
                 self.mark_woken();
                 Some(STOPPING)
             }
-            "stopped" => match self.start().await {
-                Ok(_) => Some(WAKING),
-                Err(error) => {
-                    tracing::error!(%error, "Could not start the studio instance");
-                    None
-                }
-            },
+            // A start that fails is logged where it is made; the request then reports its own failure.
+            "stopped" => self.start().await.ok().map(|_| WAKING),
             // shutting-down, terminated: nothing here can bring it back.
             _ => None,
         }
@@ -292,12 +307,30 @@ impl Inner {
         Ok(state)
     }
 
-    /// Starts the instance and returns its state after the call (`pending` for a stopped one).
+    /// Starts the instance and returns its state after the call (`pending` for a stopped one). Callers at the same time
+    /// share one call and its answer; for [`START_RETRY`] after a failure, none is made.
     async fn start(&self) -> Result<String, PowerError> {
-        let xml = self.call("StartInstances").await?;
+        let mut starts = self.starts.lock().await;
+        if let Some((at, state)) = &starts.started
+            && at.elapsed() < STATE_TTL
+        {
+            return Ok(state.clone());
+        }
+        if starts.failed.is_some_and(|at| at.elapsed() < START_RETRY) {
+            return Err(PowerError("the last start failed moments ago; not trying again yet".into()));
+        }
+        let xml = match self.call("StartInstances").await {
+            Ok(xml) => xml,
+            Err(error) => {
+                tracing::error!(%error, "Could not start the studio instance");
+                starts.failed = Some(Instant::now());
+                return Err(error);
+            }
+        };
         let state = state_in(&xml, "currentState").unwrap_or_else(|| "pending".into());
         *self.state.lock().await = Some((Instant::now(), state.clone()));
         self.mark_woken();
+        *starts = Starts { started: Some((Instant::now(), state.clone())), failed: None };
         tracing::warn!(instance = %self.instance.id, %state, "Started the studio instance");
         Ok(state)
     }
@@ -404,15 +437,16 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok(Json(json!({"configured": true, "instanceId": inner.instance.id, "state": current})))
 }
 
-/// `POST /api/catalog/admin/studio-power`: starts the studio's instance when it is stopped.
+/// `POST /api/catalog/admin/studio-power`: starts the studio's instance when it is stopped. A running instance costs
+/// money, so this is for operators; viewers only read its state.
 pub async fn start(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let admin = require(&state, &headers, STUDIO_VIEWER).await?;
+    let admin = require(&state, &headers, OPERATOR).await?;
     let inner = state.power.0.as_ref().ok_or(UNCONFIGURED)?;
     let current = inner.describe().await.map_err(unreadable)?;
     let current = match current.as_str() {
         "stopped" => {
             tracing::warn!(user = %admin.username, "Studio start requested");
-            inner.start().await.map_err(unreadable)?
+            inner.start().await.map_err(|_| START_FAILED)?
         }
         "stopping" => return Err(STOPPING_NOW),
         _ => current,

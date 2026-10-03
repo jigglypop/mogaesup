@@ -1,24 +1,75 @@
 //! Validate the binary data used by a playable character, rather than trusting skin and clip labels.
 use gltf_json::validation::Validate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::{collections::HashSet, panic::AssertUnwindSafe};
 
 use crate::gltf::{index, walk};
 
 // Overlapping accessors, instances and reused animation samplers must not turn a small BIN into unbounded work.
 const MAX_SCALAR_READS: usize = 64 * 1024 * 1024;
 
+/// Why a model's data cannot back a playable character.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Problem {
+    /// The glTF JSON breaks the schema or names something it does not have.
+    Schema,
+    /// A node's transform or its place in the tree.
+    Nodes,
+    /// A scene names a node that does not exist or is not a root.
+    Scenes,
+    /// Vertices, indices or morph targets of a mesh.
+    Geometry,
+    /// A skin's joints or inverse bind matrices, or the joints and weights its vertices are bound with.
+    Skin,
+    /// Nothing drawn is skinned.
+    NoSkin,
+    /// An animation's channels or samplers.
+    Animation,
+    /// Reading it all would take more work than any character needs.
+    TooComplex,
+}
+
+impl Problem {
+    /// The reason, as the import report and the wardrobe show it.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Schema => "glTF 구조가 규격에 맞지 않거나 없는 항목을 가리킵니다.",
+            Self::Nodes => "노드의 변환(행렬·이동·회전·크기)이나 부모 관계가 올바르지 않습니다.",
+            Self::Scenes => "장면이 없는 노드나 루트가 아닌 노드를 가리킵니다.",
+            Self::Geometry => "메시의 정점·인덱스·모프 데이터를 읽을 수 없습니다.",
+            Self::Skin => "스킨의 관절·역바인드 행렬이나 정점의 관절·가중치를 읽을 수 없습니다.",
+            Self::NoSkin => "리깅(스킨)이 없습니다.",
+            Self::Animation => "애니메이션의 채널이나 샘플러 데이터를 읽을 수 없습니다.",
+            Self::TooComplex => "검사할 데이터가 너무 많습니다.",
+        }
+    }
+}
+
 struct ScanBudget {
     remaining: usize,
+    /// Set once a charge did not fit: what failed then is the size, not the data.
+    spent: bool,
 }
 
 impl ScanBudget {
+    fn new(remaining: usize) -> Self {
+        Self { remaining, spent: false }
+    }
+
     fn charge(&mut self, count: usize, components: usize) -> bool {
-        let Some(cost) = count.checked_mul(components) else { return false };
-        let Some(remaining) = self.remaining.checked_sub(cost) else { return false };
-        self.remaining = remaining;
-        true
+        let fits = count.checked_mul(components).and_then(|cost| self.remaining.checked_sub(cost));
+        match fits {
+            Some(remaining) => self.remaining = remaining,
+            None => self.spent = true,
+        }
+        fits.is_some()
+    }
+
+    /// `problem`, unless the budget ran out on the way to it.
+    fn or(&self, problem: Problem) -> Problem {
+        if self.spent { Problem::TooComplex } else { problem }
     }
 
     fn finite(&mut self, accessor: &Accessor<'_>) -> bool {
@@ -143,7 +194,26 @@ fn skin_joints(
     Some(joints)
 }
 
-fn primitive_valid(json: &Value, bin: &[u8], p: &Value, joints: Option<&[usize]>, budget: &mut ScanBudget) -> bool {
+/// Whether a primitive's geometry can be read, and with `joints` its skinning: `Geometry` or `Skin` when not.
+fn primitive_valid(
+    json: &Value,
+    bin: &[u8],
+    p: &Value,
+    joints: Option<&[usize]>,
+    budget: &mut ScanBudget,
+) -> Result<(), Problem> {
+    if !geometry_valid(json, bin, p, budget) {
+        return Err(budget.or(Problem::Geometry));
+    }
+    if let Some(joints) = joints
+        && !skinning_valid(json, bin, p, joints, budget)
+    {
+        return Err(budget.or(Problem::Skin));
+    }
+    Ok(())
+}
+
+fn geometry_valid(json: &Value, bin: &[u8], p: &Value, budget: &mut ScanBudget) -> bool {
     let Some(position) = accessor(json, bin, &p["attributes"]["POSITION"]) else { return false };
     if position.components != 3 || position.kind != 5126 || position.count < 3 || !budget.finite(&position) {
         return false;
@@ -190,33 +260,34 @@ fn primitive_valid(json: &Value, bin: &[u8], p: &Value, joints: Option<&[usize]>
         position.count
     };
     match p["mode"].as_u64().unwrap_or(4) {
-        4 if elements >= 3 && elements.is_multiple_of(3) => {}
-        5 | 6 if elements >= 3 => {}
-        _ => return false,
+        4 => elements >= 3 && elements.is_multiple_of(3),
+        5 | 6 => elements >= 3,
+        _ => false,
     }
-    if let Some(joints) = joints {
-        let Some(ids) = accessor(json, bin, &p["attributes"]["JOINTS_0"]) else { return false };
-        let Some(weights) = accessor(json, bin, &p["attributes"]["WEIGHTS_0"]) else { return false };
-        if ids.components != 4
-            || !matches!(ids.kind, 5121 | 5123)
-            || ids.normalized
-            || weights.components != 4
-            || !(weights.kind == 5126 || weights.normalized)
-        {
-            return false;
-        }
-        if !budget.charge(position.count, 12)
-            || !(0..position.count).all(|at| {
-                let sum: f64 = (0..4).map(|c| weights.value(at, c)).sum();
-                sum.is_finite()
-                    && sum > 0.0
-                    && (0..4).all(|c| ids.value(at, c) < joints.len() as f64 && weights.value(at, c) >= 0.0)
-            })
-        {
-            return false;
-        }
+}
+
+/// The joints and weights of a primitive whose geometry was read: four of each per vertex, naming joints of the skin.
+fn skinning_valid(json: &Value, bin: &[u8], p: &Value, joints: &[usize], budget: &mut ScanBudget) -> bool {
+    let Some(vertices) = accessor(json, bin, &p["attributes"]["POSITION"]).map(|position| position.count) else {
+        return false;
+    };
+    let Some(ids) = accessor(json, bin, &p["attributes"]["JOINTS_0"]) else { return false };
+    let Some(weights) = accessor(json, bin, &p["attributes"]["WEIGHTS_0"]) else { return false };
+    if ids.components != 4
+        || !matches!(ids.kind, 5121 | 5123)
+        || ids.normalized
+        || weights.components != 4
+        || !(weights.kind == 5126 || weights.normalized)
+    {
+        return false;
     }
-    true
+    budget.charge(vertices, 12)
+        && (0..vertices).all(|at| {
+            let sum: f64 = (0..4).map(|c| weights.value(at, c)).sum();
+            sum.is_finite()
+                && sum > 0.0
+                && (0..4).all(|c| ids.value(at, c) < joints.len() as f64 && weights.value(at, c) >= 0.0)
+        })
 }
 
 fn clip_valid(
@@ -296,33 +367,50 @@ fn clip_valid(
     Some(moves_rig)
 }
 
-pub(crate) fn character(json: &Value, bin: &[u8]) -> (bool, Vec<String>) {
-    character_with_budget(json, bin, ScanBudget { remaining: MAX_SCALAR_READS })
+/// The engine clips a playable character's data certifies, or why its data cannot back one.
+pub(crate) fn character(json: &Value, bin: &[u8]) -> Result<Vec<String>, Problem> {
+    character_with_budget(json, bin, ScanBudget::new(MAX_SCALAR_READS))
 }
 
-fn character_with_budget(json: &Value, bin: &[u8], mut budget: ScanBudget) -> (bool, Vec<String>) {
-    // Typed schema validation covers all glTF references, including morphs, materials, textures and images.
-    let Ok(root) = gltf_json::Root::deserialize(json) else { return (false, vec![]) };
-    let mut valid = true;
-    root.validate(&root, gltf_json::Path::new, &mut |_, _| valid = false);
-    if !valid {
-        return (false, vec![]);
+/// Typed schema validation, which covers every glTF reference, including morphs, materials, textures and images.
+fn schema_valid(json: &Value) -> bool {
+    let Ok(root) = gltf_json::Root::deserialize(json) else { return false };
+    // gltf-json reads each primitive's POSITION accessor by index before it checks indices; one out of range would
+    // panic there, so every attribute index is checked first.
+    let in_range = root
+        .meshes
+        .iter()
+        .flat_map(|mesh| &mesh.primitives)
+        .all(|primitive| primitive.attributes.values().all(|accessor| accessor.value() < root.accessors.len()));
+    if !in_range {
+        return false;
     }
-    let Some(nodes) = json["nodes"].as_array() else { return (false, vec![]) };
+    let mut valid = true;
+    let checked = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        root.validate(&root, gltf_json::Path::new, &mut |_, _| valid = false);
+    }));
+    checked.is_ok() && valid
+}
+
+fn character_with_budget(json: &Value, bin: &[u8], mut budget: ScanBudget) -> Result<Vec<String>, Problem> {
+    if !schema_valid(json) {
+        return Err(Problem::Schema);
+    }
+    let Some(nodes) = json["nodes"].as_array() else { return Err(Problem::NoSkin) };
     let mut parents: Vec<Option<usize>> = vec![None; nodes.len()];
     for (at, node) in nodes.iter().enumerate() {
         if node.get("matrix").is_some()
             && ["translation", "rotation", "scale"].iter().any(|key| node.get(key).is_some())
         {
-            return (false, vec![]);
+            return Err(Problem::Nodes);
         }
         if node.get("children").is_some_and(|v| !v.is_array()) {
-            return (false, vec![]);
+            return Err(Problem::Nodes);
         }
         for child in node["children"].as_array().into_iter().flatten() {
-            let Some(child) = index(child).filter(|c| *c < nodes.len() && *c != at) else { return (false, vec![]) };
+            let Some(child) = index(child).filter(|c| *c < nodes.len() && *c != at) else { return Err(Problem::Nodes) };
             if parents[child].replace(at).is_some() {
-                return (false, vec![]);
+                return Err(Problem::Nodes);
             }
         }
         for (key, length) in [("matrix", 16), ("translation", 3), ("rotation", 4), ("scale", 3)] {
@@ -331,13 +419,13 @@ fn character_with_budget(json: &Value, bin: &[u8], mut budget: ScanBudget) -> (b
                     .as_array()
                     .is_some_and(|v| v.len() == length && v.iter().all(|n| n.as_f64().is_some_and(f64::is_finite)))
             {
-                return (false, vec![]);
+                return Err(Problem::Nodes);
             }
         }
         if let Some(rotation) = node["rotation"].as_array() {
             let norm = rotation.iter().map(|value| value.as_f64().unwrap().powi(2)).sum::<f64>();
             if (norm - 1.0).abs() > 0.01 {
-                return (false, vec![]);
+                return Err(Problem::Nodes);
             }
         }
     }
@@ -348,7 +436,7 @@ fn character_with_budget(json: &Value, bin: &[u8], mut budget: ScanBudget) -> (b
         let mut cursor = Some(start);
         while let Some(at) = cursor {
             match visited[at] {
-                1 => return (false, vec![]),
+                1 => return Err(Problem::Nodes),
                 2 => break,
                 _ => {
                     visited[at] = 1;
@@ -362,31 +450,34 @@ fn character_with_budget(json: &Value, bin: &[u8], mut budget: ScanBudget) -> (b
         }
     }
     if let Some(scenes) = json.get("scenes") {
-        let Some(scenes) = scenes.as_array() else { return (false, vec![]) };
+        let Some(scenes) = scenes.as_array() else { return Err(Problem::Scenes) };
         if json.get("scene").is_some_and(|scene| index(scene).is_none_or(|s| s >= scenes.len())) {
-            return (false, vec![]);
+            return Err(Problem::Scenes);
         }
         if scenes.iter().any(|s| {
             !s["nodes"].as_array().is_some_and(|roots| {
                 roots.iter().all(|r| index(r).is_some_and(|n| n < nodes.len() && parents[n].is_none()))
             })
         }) {
-            return (false, vec![]);
+            return Err(Problem::Scenes);
         }
     }
     let mut active = HashSet::new();
     walk(json, |at, _, _| {
         active.insert(at);
     });
+    // In node order, so a model with several problems always reports the same one.
+    let mut drawn: Vec<usize> = active.iter().copied().collect();
+    drawn.sort_unstable();
     let mut joints = HashSet::<usize>::new();
     let mut skinned = false;
-    for at in &active {
-        let node = &json["nodes"][*at];
+    for at in drawn {
+        let node = &json["nodes"][at];
         if let Some(mesh) = node.get("mesh") {
-            let Some(mesh) = index(mesh).and_then(|i| json["meshes"].get(i)) else { return (false, vec![]) };
+            let Some(mesh) = index(mesh).and_then(|i| json["meshes"].get(i)) else { return Err(Problem::Geometry) };
             let skin = if let Some(reference) = node.get("skin") {
                 let Some(skin) = skin_joints(json, bin, reference, &active, &mut budget) else {
-                    return (false, vec![]);
+                    return Err(budget.or(Problem::Skin));
                 };
                 skinned = true;
                 joints.extend(skin.iter().copied());
@@ -395,15 +486,15 @@ fn character_with_budget(json: &Value, bin: &[u8], mut budget: ScanBudget) -> (b
                 None
             };
             let Some(primitives) = mesh["primitives"].as_array().filter(|p| !p.is_empty()) else {
-                return (false, vec![]);
+                return Err(Problem::Geometry);
             };
-            if !primitives.iter().all(|p| primitive_valid(json, bin, p, skin.as_deref(), &mut budget)) {
-                return (false, vec![]);
+            for primitive in primitives {
+                primitive_valid(json, bin, primitive, skin.as_deref(), &mut budget)?;
             }
         }
     }
     if !skinned {
-        return (false, vec![]);
+        return Err(Problem::NoSkin);
     }
     // Armature/root motion affects its descendant joints too.
     let mut pending: Vec<_> = joints.iter().copied().collect();
@@ -416,14 +507,16 @@ fn character_with_budget(json: &Value, bin: &[u8], mut budget: ScanBudget) -> (b
     }
     let mut clips = Vec::new();
     for animation in json["animations"].as_array().into_iter().flatten() {
-        let Some(moves_rig) = clip_valid(json, bin, animation, &joints, &mut budget) else { return (false, vec![]) };
+        let Some(moves_rig) = clip_valid(json, bin, animation, &joints, &mut budget) else {
+            return Err(budget.or(Problem::Animation));
+        };
         if moves_rig && let Some(clip) = animation["name"].as_str().and_then(crate::glb::engine_clip) {
             clips.push(clip.to_owned());
         }
     }
     clips.sort();
     clips.dedup();
-    (true, clips)
+    Ok(clips)
 }
 
 #[cfg(test)]
@@ -437,28 +530,45 @@ mod tests {
         let matrix = json!([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
         let mut zero_rotation = document.clone();
         zero_rotation["nodes"][0]["rotation"] = json!([0, 0, 0, 0]);
-        assert!(!character(&zero_rotation, &bin).0);
+        assert_eq!(character(&zero_rotation, &bin), Err(Problem::Nodes));
         let mut conflicting = document.clone();
         conflicting["nodes"][2]["matrix"] = matrix.clone();
         conflicting["nodes"][2]["translation"] = json!([0, 0, 0]);
-        assert!(!character(&conflicting, &bin).0);
+        assert_eq!(character(&conflicting, &bin), Err(Problem::Nodes));
         let mut animated_matrix = document;
         let target = index(&animated_matrix["animations"][0]["channels"][0]["target"]["node"]).unwrap();
         animated_matrix["nodes"][target]["matrix"] = matrix;
-        assert!(!character(&animated_matrix, &bin).0);
+        assert_eq!(character(&animated_matrix, &bin), Err(Problem::Animation));
     }
 
     #[test]
     fn instances_and_reused_accessors_share_a_scan_budget() {
         let (mut document, bin) = crate::test_glb::document(&["Idle", "Walking"]);
-        assert!(character_with_budget(&document, &bin, ScanBudget { remaining: 512 }).0);
+        assert!(character_with_budget(&document, &bin, ScanBudget::new(512)).is_ok());
         for _ in 0..20 {
             let at = document["nodes"].as_array().unwrap().len();
             document["nodes"].as_array_mut().unwrap().push(json!({"mesh": 0, "skin": 0}));
             document["scenes"][0]["nodes"].as_array_mut().unwrap().push(at.into());
         }
-        assert!(character(&document, &bin).0, "ordinary instances remain supported");
-        assert!(!character_with_budget(&document, &bin, ScanBudget { remaining: 512 }).0);
+        assert!(character(&document, &bin).is_ok(), "ordinary instances remain supported");
+        assert_eq!(character_with_budget(&document, &bin, ScanBudget::new(512)), Err(Problem::TooComplex));
         assert_eq!(bin.len(), crate::test_glb::document(&["Idle", "Walking"]).1.len());
+    }
+
+    #[test]
+    fn indices_out_of_range_are_refused_as_schema_errors_without_a_panic() {
+        let (document, bin) = crate::test_glb::document(&["Idle", "Walking"]);
+        for attribute in ["POSITION", "NORMAL", "JOINTS_0"] {
+            let mut broken = document.clone();
+            broken["meshes"][0]["primitives"][0]["attributes"][attribute] = 999.into();
+            assert_eq!(character(&broken, &bin), Err(Problem::Schema), "{attribute}");
+        }
+        let mut no_skin = document.clone();
+        no_skin["nodes"][2].as_object_mut().unwrap().remove("skin");
+        assert_eq!(character(&no_skin, &bin), Err(Problem::NoSkin));
+        let mut unread_weights = document.clone();
+        let weights = index(&unread_weights["meshes"][0]["primitives"][0]["attributes"]["WEIGHTS_0"]).unwrap();
+        unread_weights["accessors"][weights]["componentType"] = 5121.into();
+        assert_eq!(character(&unread_weights, &bin), Err(Problem::Skin));
     }
 }

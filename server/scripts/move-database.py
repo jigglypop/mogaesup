@@ -15,9 +15,15 @@ import time
 
 REGION = 'ap-northeast-2'
 STACK = 'mogaesup-server'
+# The SSM command's own limit, and how long its invocation is waited for past it.
+COMMAND_SECONDS = 1800
+COMMAND_WAIT = COMMAND_SECONDS + 120
 
 SCRIPT = r'''
 set -euo pipefail
+# The dump holds every account and island: only root reads it, and it is gone however the script ends.
+umask 077
+trap 'rm -f /var/tmp/mogaesup.dump' EXIT
 export PGSSLMODE=verify-full PGSSLROOTCERT=/opt/mogaesup/global-bundle.pem
 restore_service() { echo "failed; starting the service on the old database"; systemctl start mogaesup.service || true; }
 trap restore_service ERR
@@ -73,19 +79,23 @@ def main():
     script = SCRIPT.replace('{region}', REGION).replace('{from_secret}', rds['MasterUserSecret']['SecretArn']) \
         .replace('{to_secret}', args.to_secret).replace('{from_endpoint}', rds['Endpoint']['Address']) \
         .replace('{to_endpoint}', args.to_endpoint)
-    parameters = json.dumps({'commands': ['cat > /var/tmp/move-database.sh <<\'MOVE\'', *script.strip().splitlines(), 'MOVE',
+    parameters = json.dumps({'commands': ['umask 077', 'cat > /var/tmp/move-database.sh <<\'MOVE\'', *script.strip().splitlines(),
+                                          'MOVE',
                                           'bash /var/tmp/move-database.sh; status=$?; rm -f /var/tmp/move-database.sh; exit $status'],
-                             'executionTimeout': ['1800']})
+                             'executionTimeout': [str(COMMAND_SECONDS)]})
     command = aws('ssm', 'send-command', '--instance-ids', outputs['InstanceId'], '--document-name', 'AWS-RunShellScript',
                   '--parameters', parameters, '--comment', 'mogaesup database move')['Command']['CommandId']
+    deadline = time.monotonic() + COMMAND_WAIT
     while True:
         time.sleep(5)
         try:
             result = aws('ssm', 'get-command-invocation', '--command-id', command, '--instance-id', outputs['InstanceId'])
         except subprocess.CalledProcessError:
-            continue
-        if result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
+            result = None
+        if result and result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
             break
+        if time.monotonic() > deadline:
+            raise SystemExit(f'move did not finish within {COMMAND_WAIT} s; inspect SSM command {command} on the instance')
     print(result['StandardOutputContent'])
     if result['StandardErrorContent'].strip():
         print(result['StandardErrorContent'])
