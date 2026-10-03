@@ -15,7 +15,7 @@ const auth = vi.hoisted(() => ({ user: null as unknown }));
 vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: auth.user, status: 'signedIn' }) }));
 
 // The WebGPU viewer is not what is tested: it only has to take parts on and off and say what it was told.
-const viewers = vi.hoisted(() => [] as { wear: ReturnType<typeof vi.fn>; setPartColors: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }[]);
+const viewers = vi.hoisted(() => [] as { wear: ReturnType<typeof vi.fn>; setPartColors: ReturnType<typeof vi.fn>; setHiddenBodyTriangles: ReturnType<typeof vi.fn>; setTucked: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }[]);
 /** How many of the next body loads fail. */
 const bodyLoads = vi.hoisted(() => ({ failing: 0 }));
 vi.mock('../viewer', () => ({
@@ -30,6 +30,7 @@ vi.mock('../viewer', () => ({
     setHiddenBodyTriangles = vi.fn();
     setTucked = vi.fn();
     setPartColors = vi.fn();
+    setPartEdit = vi.fn();
     dispose = vi.fn();
     constructor() {
       viewers.push(this);
@@ -136,6 +137,42 @@ describe('옷장', () => {
     expect(container.querySelector<HTMLInputElement>('.wardrobe-swatches input')?.value).toBe('#abcdef');
     await click(button(container, '내 캐릭터로 입기')); await settle();
     expect(save).toHaveBeenCalledExactlyOnceWith(saved.request);
+    await unmount();
+  });
+
+  it('회원의 저장된 헤어 크기·위치를 복원해 다시 저장하고 원래대로 되돌릴 수 있다', async () => {
+    const hair = part('hair-job', 'hair', '단발'); parts = [hair];
+    const edit = { scale: [1.1, 1, .9] as [number, number, number], translation: [.01, -.005, 0] as [number, number, number] };
+    const saved: Look = { request: { body: { jobId: body.job_id, version: body.version }, parts: { hair: { jobId: hair.job_id, version: hair.version, sha256: hair.sha256 } }, hairColor: null, colors: {}, partEdits: { hair: edit } }, status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '' };
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+    const save = vi.spyOn(lookApi, 'save').mockResolvedValue({ look: saved });
+    const { container, unmount } = await open(); await settle();
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="헤어 가로 크기"]')?.value).toBe('1.1');
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="헤어 상하 위치"]')?.value).toBe('-0.005');
+    await click(button(container, '내 캐릭터로 입기')); await settle(); expect(save).toHaveBeenLastCalledWith(saved.request);
+    await click(button(container, '원래 크기와 위치')); await settle();
+    await click(button(container, '내 캐릭터로 입기')); await settle();
+    expect(save.mock.calls.at(-1)![0].partEdits).toBeUndefined();
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="헤어 가로 크기"]')?.value).toBe('1');
+    await unmount();
+  });
+
+  it('수정한 모자의 원본 coverage로 피부를 지우거나 헤어를 누르지 않고 복구하면 다시 적용한다', async () => {
+    const hair = part('hair-job', 'hair', '헤어'), hat = part('hat-job', 'hat', '모자'); parts = [hair, hat];
+    const encode = (values: Uint8Array) => btoa(String.fromCharCode(...values));
+    const anchor = encode(new Uint8Array(new Int32Array([0]).buffer)), move = encode(new Uint8Array(new Float32Array([0, 0, -.01]).buffer));
+    vi.mocked(factoryApi.wardrobeCoverage).mockImplementation(async (_body, item) => item.slot === 'hat'
+      ? { slot: 'hat', hidden: { '0:0': encode(new Uint8Array([2])) }, triangles: {}, covers_bottom: false, covers_head: true }
+      : { slot: 'hair', hidden: { '0:0': encode(new Uint8Array([1])) }, triangles: {}, covers_bottom: false, anchors: { '0:0': anchor }, tucks: { '0:0': move }, anchor_keys: ['0:0'], under: ['hat'] });
+    const saved: Look = { request: { body: { jobId: body.job_id, version: body.version }, parts: Object.fromEntries(parts.map(item => [item.slot, { jobId: item.job_id, version: item.version, sha256: item.sha256 }])), hairColor: null, colors: {}, partEdits: { hat: { scale: [.8, .8, .8], translation: [0, .05, 0] } } }, status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '' };
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+    const { container, unmount } = await open(); await settle();
+    expect(viewers[0]!.setHiddenBodyTriangles).toHaveBeenLastCalledWith({ '0:0': new Uint8Array([1]) });
+    expect(viewers[0]!.setTucked).toHaveBeenLastCalledWith('hair', expect.any(Object), null);
+    const reset = container.querySelector('input[aria-label$="가로 크기"][value="0.8"]')?.closest('fieldset')?.querySelector('button');
+    await click(reset); await settle();
+    expect(viewers[0]!.setHiddenBodyTriangles).toHaveBeenLastCalledWith({ '0:0': new Uint8Array([3]) });
+    expect(viewers[0]!.setTucked).toHaveBeenLastCalledWith('hair', expect.any(Object), { '0:0': new Uint8Array([2]) });
     await unmount();
   });
 

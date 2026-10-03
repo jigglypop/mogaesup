@@ -23,6 +23,7 @@ type RequestOptions = {
   body?: unknown;
   signal?: AbortSignal;
   keepalive?: boolean;
+  headers?: Record<string, string>;
   /** How long the whole exchange may take before it is given up as unanswered; 30 seconds by default. */
   timeoutMs?: number;
 };
@@ -71,7 +72,8 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     const response = await fetch(`/api${path}`, {
       method,
       credentials: 'same-origin',
-      ...(write ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(options.body ?? {}) } : {}),
+      headers: { ...options.headers, ...(write ? { 'content-type': 'application/json' } : {}) },
+      ...(write ? { body: JSON.stringify(options.body ?? {}) } : {}),
       signal: wait.signal,
       ...(options.keepalive ? { keepalive: true } : {}),
     });

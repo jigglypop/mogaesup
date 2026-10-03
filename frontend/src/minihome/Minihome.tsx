@@ -403,7 +403,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
               <EditBar view={view} session={session} saver={saver} onSave={saveNow} onExit={exit} />
               <Rail />
               {saverState.phase === 'ready' || editActive ? (
-                <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} />
+                <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} ownerId={profile.ownerId} />
               ) : (
                 <p className="mg-edit-wait mg-glass" role="status">
                   {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요. 다 불러오면 꾸밀 수 있어요.' : '섬을 불러와야 꾸밀 수 있어요.'}

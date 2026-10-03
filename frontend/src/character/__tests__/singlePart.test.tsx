@@ -46,6 +46,7 @@ describe('파츠 하나 만들기', () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     localStorage.clear();
   });
 
@@ -142,6 +143,28 @@ describe('파츠 하나 만들기', () => {
       bottom_kind: 'skirt',
       fit_profile: { revision: 'garment-fit-v1', kind: 'skirt', ease: 'source' },
     });
+    await unmount();
+  });
+
+  it('생성된 블루종 참조를 미리 보고 기존 업로드 API를 통해 텍스처 요청에 전달한다', async () => {
+    const reference = '/character/references/oatmeal-utility-blouson.png';
+    const image = new Blob(['reference pixels'], { type: 'image/png' });
+    const fetchMock = vi.fn<typeof fetch>(async url => {
+      if (url === reference) return { ok: true, blob: async () => image } as Response;
+      if (url === '/api/avatar-factory/meshy-options/texture-assets') return new Response(JSON.stringify({ id: 'blouson-reference-asset' }), { status: 201 });
+      throw new Error(`unexpected request: ${String(url)}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container, unmount } = await open('top');
+    await settle();
+    await choose(container, '스타일', '오트밀 유틸리티 블루종');
+    expect(container.querySelector('img[alt="오트밀 유틸리티 블루종 참조 그림"]')?.getAttribute('src')).toBe(reference);
+    await submit(container, '텍스처 참조로 사용');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]).toEqual(['/api/avatar-factory/meshy-options/texture-assets', expect.objectContaining({ method: 'POST', body: expect.any(Blob), headers: { 'Content-Type': 'image/png' } })]);
+    expect(singlePart).not.toHaveBeenCalled();
+    await submit(container, '상의 하나 생성');
+    expect(singlePart.mock.calls[0]![0]).toMatchObject({ part_name: '오트밀 유틸리티 블루종', meshy_options: { should_texture: true, texture_mode: 'image', texture_image_assets: ['blouson-reference-asset'] } });
     await unmount();
   });
 });

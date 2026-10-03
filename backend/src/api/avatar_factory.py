@@ -559,6 +559,27 @@ def native_parts(job_id: str, user: UserContext = Depends(get_current_user), fac
     return AvatarNativeParts(factory).get(user.user_id, job_id)
 
 
+class NativeReviewInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    expected_assembly_sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+    decision: Literal['approved', 'changes_requested']
+    appearance_checked: bool
+    motion_checked: bool
+    notes: str = Field(min_length=5, max_length=2000)
+
+
+@router.post('/jobs/{job_id}/native-parts/{version}/review')
+def review_native_parts(job_id: str, version: str, body: NativeReviewInput,
+                        idempotency_key: str = Header(alias='Idempotency-Key'),
+                        user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    if not wardrobe_operator(user):
+        raise PipelineError('operator_only', '조립 검수는 운영자만 기록할 수 있습니다.', 403)
+    from src.services.avatar_native_reviews import AvatarNativeReviews
+    AvatarNativeReviews(factory).submit(user.user_id, job_id, version, idempotency_key, body.model_dump(),
+                                       reviewer_name=user.username)
+    return AvatarNativeParts(factory).get(user.user_id, job_id, version)
+
+
 @router.post('/jobs/{job_id}/native-parts', status_code=202)
 def fit_native_parts(job_id: str, background: BackgroundTasks, canonical_pose: bool = False,
                      user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):

@@ -28,8 +28,13 @@ function anchorsFrom(payload: PartFitProfile): FitAnchor[] {
 function completionMessage(state: NativePartsState) {
   if (state.status === 'accepted' || state.status === 'running') return '피팅 작업 진행 중';
   if (state.incomplete_parts?.length) return `저장 완료 · 미완성 ${state.incomplete_parts.map(item => item.slot).join(', ')}`;
-  if (state.status === 'review_required') return '피팅 버전 저장 완료';
+  if (state.status === 'review_required') return `피팅 버전 저장 완료${reviewLabel(state.review)}`;
   return state.error || state.fit_status || state.status;
+}
+
+function reviewLabel(review: NativePartsState['review']) {
+  if (!review) return '';
+  return ` · ${{ approved: '시각 승인', changes_requested: '수정 필요', stale: '재검수 필요', required: '검수 필요' }[review.status]}`;
 }
 
 export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot }: Props) {
@@ -165,7 +170,7 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
       {native && <p className="part-fitting-state" role="status">{completionMessage(native)}</p>}
       {!!native?.incomplete_parts?.length && <ul className="part-fitting-incomplete">{native.incomplete_parts.map(item => <li key={`${item.slot}:${item.status}`}><strong>{item.slot}</strong> · {item.status}{item.errors.length ? ` · ${item.errors.map(problem => `${problem.code}: ${problem.message}`).join(', ')}` : ''}</li>)}</ul>}
       {foreignPending && <p className="generation-recovery">{foreignPending.input.slot === 'top' ? '상의' : '하의'} 피팅 요청을 먼저 복구해야 합니다. <button type="button" onClick={() => onPendingSlot(foreignPending!.input.slot as 'top' | 'bottom')}>요청한 파츠 열기</button></p>}
-      <label>원본 버전<select value={sourceVersion} disabled={controlsLocked} onChange={event => void loadProfile(event.target.value)}>{versions?.items.map(item => <option key={item.version} value={item.version}>{item.version}{item.version === versions.current ? ' · 현재' : ''}</option>)}</select></label>
+      <label>원본 버전<select value={sourceVersion} disabled={controlsLocked} onChange={event => void loadProfile(event.target.value)}>{versions?.items.map(item => <option key={item.version} value={item.version}>{item.version}{item.version === versions.current ? ' · 현재' : ''}{reviewLabel(item.review)}</option>)}</select></label>
       {!sourceIsCurrent && !ownPending && <p className="part-fitting-version-note">현재 버전이 아니어서 피팅할 수 없습니다.</p>}
       <div className="part-fitting-fields">
         {slot === 'top' && <label>소매<select value={profile.sleeve || 'source'} disabled={controlsLocked} onChange={event => setProfile(current => ({ ...current, sleeve: event.target.value as FitProfile['sleeve'] }))}><option value="source">원본대로</option><option value="none">민소매</option><option value="short">반팔</option><option value="long">긴팔</option></select></label>}
@@ -191,7 +196,7 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
         setNative(result); setNotice(completionMessage(result));
         const saved = await factoryApi.nativePartsVersions(jobId); setVersions(saved); setRestoreVersion(saved.current || result.version || '');
       })}>{busy ? '처리 중' : ownPending ? '같은 피팅 요청 복구' : '새 피팅 버전 저장'}</button></div>
-      {!!versions?.items.length && <div className="part-fitting-restore"><label>저장 버전<select value={restorePending?.input.version || restoreVersion} disabled={busy || !!restorePending || !!pending} onChange={event => setRestoreVersion(event.target.value)}>{versions.items.map(item => <option key={item.version} value={item.version}>{item.version}{item.version === versions.current ? ' · 현재' : ''}</option>)}</select></label><button type="button" disabled={busy || !!pending || !canRestore} onClick={() => void perform(async () => {
+      {!!versions?.items.length && <div className="part-fitting-restore"><label>저장 버전<select value={restorePending?.input.version || restoreVersion} disabled={busy || !!restorePending || !!pending} onChange={event => setRestoreVersion(event.target.value)}>{versions.items.map(item => <option key={item.version} value={item.version}>{item.version}{item.version === versions.current ? ' · 현재' : ''}{reviewLabel(item.review)}</option>)}</select></label><button type="button" disabled={busy || !!pending || !canRestore} onClick={() => void perform(async () => {
         const expected = restorePending?.input.expected_version || versions.current;
         if (!expected) throw new Error('현재 피팅 버전을 확인할 수 없습니다.');
         const result = await factoryApi.selectNativePartsVersion(jobId, restorePending?.input.version || restoreVersion, expected);

@@ -201,7 +201,10 @@ class FittingManagement:
             if record.get('status') != 'review_required':
                 return None
             result = record.get('result', {})
+            from src.services.avatar_native_reviews import AvatarNativeReviews
             return {'version': path.parent.name, 'created_at': record.get('created_at'),
+                    'assembly_sha256': record.get('files', {}).get('model.glb'),
+                    'review': AvatarNativeReviews(self.factory).overlay(self.owner, job, path.parent.name, record),
                     'fitting_revision': result.get('fitting_revision'),
                     'incomplete_parts': result.get('incomplete_parts', []),
                     'url': f'/api/avatar-factory/jobs/{job}/native-parts/{path.parent.name}/front.png'}

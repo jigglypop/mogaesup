@@ -103,6 +103,13 @@ def test_public_paths_support_configuration(monkeypatch):
     assert auth.is_public_path("/api/public/demo") is True
 
 
+def test_gateway_signed_member_name_is_audit_identity_with_fixed_factory_owner(monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'x'*32)
+    ctx = auth.get_current_user(_request_with_auth('Bearer '+_token(name='actual-member', roles=['ADMIN'])))
+    assert ctx.user_id == 1
+    assert ctx.username == 'actual-member'
+
+
 def _token(**claims) -> str:
     return pyjwt.encode({"sub": "1", "exp": 4102444800, "iss": "mogaesup", "aud": "mogaesup-client",
                          "token_type": "access", **claims}, b"x" * 32, algorithm="HS256")

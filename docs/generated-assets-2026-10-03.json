@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-03",
+  "assets": [{
+    "id": "oatmeal-utility-blouson",
+    "kind": "garment-reference",
+    "slot": "top",
+    "path": "frontend/public/character/references/oatmeal-utility-blouson.png",
+    "sha256": "c12d4c3c2643d463e5ec941396db2faccfbe666f46cec4fc4fd194afd40ba623",
+    "bytes": 1214252,
+    "generator": "built-in imagegen",
+    "thirdPartyReferenceImages": [],
+    "prompt": "Use case: stylized-concept. Asset type: one mesh-ready reference image for the Mogaesup SD avatar clothing studio. Primary request: a single oatmeal utility blouson jacket with a short rounded silhouette, a dark chocolate stand collar and zipper, two broad rounded patch pockets, loose sleeves and a soft matte fabric. Contemporary understated autumn casual styling, original unbranded design. The jacket is shaped for a chibi game character with a large head and short torso, sleeves extended horizontally in a clean T pose, seen from a slightly elevated front three-quarter view. Render ONLY the empty jacket, no body, no head, no hands, no mannequin, no trousers. Make the hollow neck and sleeve openings legible, stable solid volumes, simplified details suitable for a low-poly game model. Soft even studio lighting, completely plain white background, full jacket comfortably inside the square frame. No floor, cast shadow, text, logo, watermark, diagram or multiple views.",
+    "inspection": "Original unbranded empty jacket, no person/text/logo. Arms angle downward slightly rather than a strict T pose; design/texture reference, not calibrated orthographic evidence.",
+    "consumer": "SinglePart style preview and existing Meshy texture-reference upload",
+    "threeDGeneration": "not_run_provider_credentials_absent_in_local_workspace"
+  }]
+}

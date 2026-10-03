@@ -19,6 +19,7 @@ use std::{
 use crate::{
     glb::{join, split},
     gltf::{IDENTITY, Matrix, index, pad, walk},
+    looks::PartEdit,
     slim,
 };
 
@@ -743,6 +744,7 @@ fn add_part(
     rig: &Rig,
     hair: Option<[f64; 3]>,
     covered: Option<&HashMap<String, Vec<u8>>>,
+    edit: Option<&PartEdit>,
 ) -> Result<Added, BakeError> {
     let slot = part.slot.as_str();
     let broken = || fail("look_part", format!("{slot} 파츠 파일을 읽지 못했습니다."));
@@ -893,6 +895,9 @@ fn add_part(
         }
         out.push("meshes", mesh);
     }
+    if let Some(edit) = edit {
+        edit_geometry(out, &json, bin, &world, &skinned, meshes, edit)?;
+    }
 
     // Colours: hair takes the chosen hair colour; a garment its chosen region colours.
     let used: BTreeSet<usize> = skinned
@@ -981,6 +986,183 @@ fn add_part(
         }
     }
     Ok(added)
+}
+
+fn direction(matrix: &Matrix, point: [f64; 3]) -> [f64; 3] {
+    [0, 1, 2].map(|row| (0..3).map(|column| matrix[column * 4 + row] * point[column]).sum())
+}
+
+fn point(matrix: &Matrix, value: [f64; 3]) -> [f64; 3] {
+    let linear = direction(matrix, value);
+    [0, 1, 2].map(|axis| linear[axis] + matrix[12 + axis])
+}
+
+fn transpose_direction(matrix: &Matrix, value: [f64; 3]) -> [f64; 3] {
+    [0, 1, 2].map(|column| (0..3).map(|row| matrix[column * 4 + row] * value[row]).sum())
+}
+
+fn inverse_affine(m: &Matrix) -> Option<Matrix> {
+    if m.iter().any(|v| !v.is_finite()) || [m[3], m[7], m[11], m[15] - 1.0].iter().any(|v| v.abs() > 1e-8) {
+        return None;
+    }
+    let (a, b, c, d, e, f, g, h, i) = (m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10]);
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    let mut inverse = IDENTITY;
+    let values = [
+        e * i - f * h,
+        f * g - d * i,
+        d * h - e * g,
+        c * h - b * i,
+        a * i - c * g,
+        b * g - a * h,
+        b * f - c * e,
+        c * d - a * f,
+        a * e - b * d,
+    ];
+    for (at, value) in [0, 1, 2, 4, 5, 6, 8, 9, 10].into_iter().zip(values) {
+        inverse[at] = value / det;
+    }
+    let offset = direction(&inverse, [m[12], m[13], m[14]]);
+    for axis in 0..3 {
+        inverse[12 + axis] = -offset[axis];
+    }
+    Some(inverse)
+}
+
+/// Deform rest vertices, preserving bones and inverse bind matrices. Bounds use original rest positions, exactly as
+/// the browser does; every primitive is rewritten separately so shared/interleaved accessors stay intact.
+fn edit_geometry(
+    out: &mut Out,
+    source: &Value,
+    source_bin: &[u8],
+    worlds: &[Option<Matrix>],
+    nodes: &[usize],
+    mesh_base: usize,
+    edit: &PartEdit,
+) -> Result<(), BakeError> {
+    if edit.identity() {
+        return Ok(());
+    }
+    let broken = || fail("look_part_edit", "파츠의 정점·변환을 읽지 못해 크기를 조정할 수 없습니다.");
+    let mut matrices = BTreeMap::new();
+    for &node in nodes {
+        let mesh = index(&source["nodes"][node]["mesh"]).ok_or_else(broken)? + mesh_base;
+        let matrix = worlds[node].ok_or_else(broken)?;
+        if matrices.insert(mesh, matrix).is_some_and(|previous| previous != matrix) {
+            return Err(broken());
+        }
+    }
+    let mut low = [f64::INFINITY; 3];
+    let mut high = [f64::NEG_INFINITY; 3];
+    for (&mesh, matrix) in &matrices {
+        inverse_affine(matrix).ok_or_else(broken)?;
+        for primitive in source["meshes"][mesh - mesh_base]["primitives"].as_array().into_iter().flatten() {
+            if primitive["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|target| ["POSITION", "NORMAL", "TANGENT"].iter().any(|name| target.get(*name).is_some()))
+            {
+                return Err(fail("look_part_edit", "표정 변형이 있는 파츠는 크기를 조정할 수 없습니다."));
+            }
+            let accessor = index(&primitive["attributes"]["POSITION"]).ok_or_else(broken)?;
+            if source["accessors"][accessor]["type"] != "VEC3" {
+                return Err(broken());
+            }
+            for vertex in read(source, source_bin, accessor).ok_or_else(broken)?.as_chunks::<3>().0 {
+                let world = point(matrix, *vertex);
+                for axis in 0..3 {
+                    if !world[axis].is_finite() {
+                        return Err(broken());
+                    }
+                    low[axis] = low[axis].min(world[axis]);
+                    high[axis] = high[axis].max(world[axis]);
+                }
+            }
+        }
+    }
+    let pivot = [0, 1, 2].map(|axis| (low[axis] + high[axis]) / 2.0);
+    if pivot.iter().any(|v| !v.is_finite()) {
+        return Err(broken());
+    }
+    for (mesh, matrix) in matrices {
+        let inverse = inverse_affine(&matrix).ok_or_else(broken)?;
+        let mut primitives = out.json["meshes"][mesh]["primitives"].as_array().cloned().ok_or_else(broken)?;
+        for primitive in &mut primitives {
+            edit_attributes(out, &mut primitive["attributes"], false, &matrix, &inverse, pivot, edit)?;
+            for target in items_mut(primitive, "targets") {
+                edit_attributes(out, target, true, &matrix, &inverse, pivot, edit)?;
+            }
+        }
+        out.json["meshes"][mesh]["primitives"] = json!(primitives);
+    }
+    Ok(())
+}
+
+fn edit_attributes(
+    out: &mut Out,
+    attributes: &mut Value,
+    morph: bool,
+    matrix: &Matrix,
+    inverse: &Matrix,
+    pivot: [f64; 3],
+    edit: &PartEdit,
+) -> Result<(), BakeError> {
+    let broken = || fail("look_part_edit", "파츠 정점을 읽지 못했습니다.");
+    for name in ["POSITION", "NORMAL", "TANGENT"] {
+        let Some(accessor) = attributes.get(name).and_then(index) else { continue };
+        let width = if name == "TANGENT" && !morph { 4 } else { 3 };
+        let kind = if width == 4 { "VEC4" } else { "VEC3" };
+        if out.json["accessors"][accessor]["type"] != kind {
+            return Err(broken());
+        }
+        let mut values = read(&out.json, &out.bin, accessor).ok_or_else(broken)?;
+        for vertex in values.chunks_exact_mut(width) {
+            let input = [vertex[0], vertex[1], vertex[2]];
+            let normal = name == "NORMAL";
+            let mut output = if name == "POSITION" && !morph {
+                let world = point(matrix, input);
+                point(
+                    inverse,
+                    [0, 1, 2].map(|axis| {
+                        (world[axis] - pivot[axis]) * edit.scale[axis] + pivot[axis] + edit.translation[axis]
+                    }),
+                )
+            } else if normal {
+                let world = transpose_direction(inverse, input);
+                transpose_direction(matrix, [0, 1, 2].map(|axis| world[axis] / edit.scale[axis]))
+            } else {
+                let world = direction(matrix, input);
+                direction(inverse, [0, 1, 2].map(|axis| world[axis] * edit.scale[axis]))
+            };
+            if name != "POSITION" && !morph {
+                let length = output.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if length > 1e-12 {
+                    output = output.map(|v| v / length);
+                }
+            }
+            vertex[..3].copy_from_slice(&output);
+        }
+        if values.iter().any(|v| !v.is_finite() || v.abs() > f64::from(f32::MAX)) {
+            return Err(broken());
+        }
+        let floats: Vec<f32> = values.into_iter().map(|v| v as f32).collect();
+        let new = if name == "POSITION" {
+            out.push_positions(&floats)
+        } else {
+            let bytes: Vec<u8> = floats.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let view = out.push_view(&bytes, Some(34962));
+            out.push(
+                "accessors",
+                json!({"bufferView":view,"componentType":5126,"count":floats.len()/width,"type":kind}),
+            )
+        };
+        attributes[name] = new.into();
+    }
+    Ok(())
 }
 
 fn dangling() -> BakeError {
@@ -1141,7 +1323,24 @@ fn compact(out: &mut Out) -> Result<(), BakeError> {
 }
 
 /// The look: `body` (the wardrobe body's GLB) wearing `parts`, with `hair` (linear) on hair parts.
-pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result<Baked, BakeError> {
+#[cfg(test)]
+pub fn bake(body: &[u8], parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result<Baked, BakeError> {
+    bake_with_edits(body, parts, hair, &BTreeMap::new())
+}
+
+pub fn bake_with_edits(
+    body: &[u8],
+    mut parts: Vec<Part>,
+    hair: Option<[f64; 3]>,
+    edits: &BTreeMap<String, PartEdit>,
+) -> Result<Baked, BakeError> {
+    if edits.iter().any(|(slot, edit)| {
+        !edit.valid()
+            || !["hair", "hairFront", "hairBack", "hat", "glasses"].contains(&slot.as_str())
+            || !parts.iter().any(|part| &part.slot == slot)
+    }) {
+        return Err(fail("invalid_look", "파츠 편집 범위를 벗어났습니다."));
+    }
     let (json, bin) = split(body).ok_or_else(|| fail("look_body", "옷장 몸 파일을 읽지 못했습니다."))?;
     single_buffer(&json, || fail("look_body", "옷장 몸 파일을 읽지 못했습니다."))?;
     let rig = rig(&json)?;
@@ -1161,8 +1360,15 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
         });
     }
     let worn: BTreeSet<String> = parts.iter().map(|part| part.slot.clone()).collect();
-    let by_slot: HashMap<&str, &Coverage> =
-        parts.iter().filter_map(|part| Some((part.slot.as_str(), part.coverage.as_ref()?))).collect();
+    // Coverage was measured on the original part. An edited part cannot prove that it still hides the same skin or
+    // that another garment belongs underneath it; keep skin instead of exposing holes after shrinking/moving it.
+    let covering_worn: BTreeSet<String> =
+        worn.iter().filter(|slot| edits.get(*slot).is_none_or(PartEdit::identity)).cloned().collect();
+    let by_slot: HashMap<&str, &Coverage> = parts
+        .iter()
+        .filter(|part| covering_worn.contains(&part.slot))
+        .filter_map(|part| Some((part.slot.as_str(), part.coverage.as_ref()?)))
+        .collect();
 
     // Where each inner garment tucks: the body the outer garments worn with it cover. Hair tucks only under a top or hat
     // that covers the head.
@@ -1189,12 +1395,12 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
         union(&mut hidden, &coverage.hidden);
     }
     let (hidden_triangles, skipped_hides) = hide_triangles(&mut out, &hidden);
-    let hidden_primitives = hide_covered_materials(&mut out, &worn);
+    let hidden_primitives = hide_covered_materials(&mut out, &covering_worn);
 
     let mut slots = Vec::new();
     let (mut tucked, mut recolored, mut unreadable) = (0, 0, 0);
     for part in &parts {
-        let added = add_part(&mut out, part, &rig, hair, tucked_under.get(&part.slot))?;
+        let added = add_part(&mut out, part, &rig, hair, tucked_under.get(&part.slot), edits.get(&part.slot))?;
         tucked += added.tucked;
         recolored += added.recolored;
         unreadable += added.unreadable_maps;
@@ -1205,6 +1411,8 @@ pub fn bake(body: &[u8], mut parts: Vec<Part>, hair: Option<[f64; 3]>) -> Result
     out.json["asset"]["generator"] = "mogaesup look".into();
     let report = json!({
         "parts": slots,
+        "partEdits": edits,
+        "coverageDisabledForEdits": worn.difference(&covering_worn).collect::<Vec<_>>(),
         "dropped": dropped,
         "hiddenTriangles": hidden_triangles,
         "hiddenPrimitives": hidden_primitives,
@@ -1396,6 +1604,90 @@ pub(crate) mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, "look_part");
+    }
+
+    #[test]
+    fn rest_edits_use_world_bounds_preserve_skin_and_do_not_change_the_source() {
+        let original = part("glasses", 0.5);
+        let (mut source, bin) = split(&original).unwrap();
+        let q = 0.5_f64.sqrt();
+        source["nodes"][3]["rotation"] = json!([0.0, 0.0, q, q]);
+        source["nodes"][3]["translation"] = json!([2.0, 3.0, 4.0]);
+        source["nodes"][3]["scale"] = json!([2.0, 3.0, 1.0]);
+        let bytes = join(&source, bin);
+        let edit = PartEdit { scale: [1.2, 0.8, 1.1], translation: [0.05, -0.02, 0.01] };
+        let edits = BTreeMap::from([("glasses".to_string(), edit.clone())]);
+        let bake_it = || {
+            bake_with_edits(
+                &body(),
+                vec![Part { slot: "glasses".into(), glb: &bytes, coverage: None, palette: None }],
+                None,
+                &edits,
+            )
+            .unwrap()
+        };
+        let baked = bake_it();
+        assert_eq!(baked.glb, bake_it().glb, "repeated edits cannot accumulate");
+        assert_eq!(split(&bytes).unwrap().0, source);
+        let (json, bin) = split(&baked.glb).unwrap();
+        let node =
+            json["nodes"].as_array().unwrap().iter().find(|node| node["extras"]["standard_slot"] == "glasses").unwrap();
+        let mesh = index(&node["mesh"]).unwrap();
+        let primitive = &json["meshes"][mesh]["primitives"][0];
+        let matrix = worlds(&source)[3].unwrap();
+        let source_positions = read(&source, split(&bytes).unwrap().1, 0).unwrap();
+        let source_world: Vec<_> = source_positions.as_chunks::<3>().0.iter().map(|p| point(&matrix, *p)).collect();
+        let pivot = [0, 1, 2].map(|axis| {
+            let low = source_world.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
+            let high = source_world.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max);
+            (low + high) / 2.0
+        });
+        let actual = read(&json, bin, index(&primitive["attributes"]["POSITION"]).unwrap()).unwrap();
+        for (before, after) in source_world.iter().zip(actual.as_chunks::<3>().0) {
+            let world = point(&matrix, *after);
+            for axis in 0..3 {
+                let expected = (before[axis] - pivot[axis]) * edit.scale[axis] + pivot[axis] + edit.translation[axis];
+                assert!((world[axis] - expected).abs() < 1e-5, "{world:?} vs {expected}");
+            }
+        }
+        assert_eq!(json["skins"][index(&node["skin"]).unwrap()]["joints"], json!([1, 2]));
+        let inverse =
+            read(&json, bin, index(&json["skins"][index(&node["skin"]).unwrap()]["inverseBindMatrices"]).unwrap())
+                .unwrap();
+        assert_eq!(inverse, read(&source, split(&bytes).unwrap().1, 3).unwrap());
+        assert_eq!(
+            read(&json, bin, index(&primitive["attributes"]["WEIGHTS_0"]).unwrap()).unwrap(),
+            read(&source, split(&bytes).unwrap().1, 2).unwrap()
+        );
+    }
+
+    #[test]
+    fn morph_parts_refuse_nonidentity_edits_and_keep_basic_wearing() {
+        let original = part("hair", 0.5);
+        let (mut json, bin) = split(&original).unwrap();
+        json["meshes"][0]["primitives"][0]["targets"] = json!([{"POSITION":0}]);
+        let bytes = join(&json, bin);
+        let parts = || vec![Part { slot: "hair".into(), glb: &bytes, coverage: None, palette: None }];
+        let edit = PartEdit { scale: [1.1; 3], translation: [0.0; 3] };
+        let error = bake_with_edits(&body(), parts(), None, &BTreeMap::from([("hair".into(), edit)])).err().unwrap();
+        assert_eq!(error.code, "look_part_edit");
+        assert!(bake(&body(), parts(), None).is_ok());
+    }
+
+    #[test]
+    fn an_edited_hat_keeps_skin_that_its_original_coverage_would_remove() {
+        let hat = part("hat", 0.5);
+        let coverage = Coverage { hidden: BTreeMap::from([("0:0".into(), vec![255])]), ..Default::default() };
+        let edited = bake_with_edits(
+            &body(),
+            vec![Part { slot: "hat".into(), glb: &hat, coverage: Some(coverage), palette: None }],
+            None,
+            &BTreeMap::from([("hat".into(), PartEdit { scale: [0.8; 3], translation: [0.0; 3] })]),
+        )
+        .unwrap();
+        assert_eq!(edited.report["hiddenTriangles"], 0);
+        assert_eq!(edited.report["hiddenPrimitives"], 0);
+        assert_eq!(edited.report["coverageDisabledForEdits"], json!(["hat"]));
     }
 
     #[test]

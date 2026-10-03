@@ -21,8 +21,10 @@ dependencies = [
 asset-api = "src.cli:api"
 asset-editor = "src.editor_cli:main"
 asset-quality = "src.quality_cli:main"
+asset-studio-mcp = "src.studio_mcp:main"
 
 [project.optional-dependencies]
+studio-mcp = ["mcp==1.30.0"]
 blender = [
     "blender-mcp==1.9.1",
     "mcp>=1.9.0,<2",

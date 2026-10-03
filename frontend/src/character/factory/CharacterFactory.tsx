@@ -15,6 +15,7 @@ import { isCatalogJobDeleted, type Catalog } from '../studio/api';
 import './character-factory.css';
 import { MeshyOptionsEditor } from '../studio/MeshyOptionsEditor';
 import { useMeshyOptions, meshyOptionsError, sharedMeshyScope } from '../studio/meshy-options';
+import { PhotoPreparation } from './PhotoPreparation';
 
 const partSlots = ['body', ...characterSlots] as const;
 
@@ -67,6 +68,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
   const meshy = useMeshyOptions(sharedMeshyScope);
   const [meshyUploading, setMeshyUploading] = useState(false);
   const [draggingPhoto, setDraggingPhoto] = useState(false);
+  const [photoDraft, setPhotoDraft] = useState<File | null>(null);
   const [hairLength, setHairLength] = useState<'source' | 'short' | 'long'>('source');
   const [baseId, setBaseId] = useState(new URLSearchParams(location.search).get('photoBase') || '');
   const [useCommonBody, setUseCommonBody] = useState(!new URLSearchParams(location.search).has('photoBase') && new URLSearchParams(location.search).get('photoBody') !== 'new');
@@ -147,12 +149,17 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
       const character = await api.create(file.name.replace(/\.[^.]+$/, ''), null);
       await api.upload(character, file, 'image');
       if (!alive.current) return;
-      remember(character.id); await live.refresh();
+      setPhotoDraft(null); remember(character.id); await live.refresh();
     } catch (e) { if (alive.current) setError((e as Error).message); }
     finally { locked.current = false; if (alive.current) setBusy(false); }
   }
-  const uploadCurrent = useRef(upload);
-  uploadCurrent.current = upload;
+  function selectPhoto(file?: File) {
+    if (!file || locked.current) return;
+    if (!isSupportedImage(file)) { setError('PNG 또는 JPEG 사진을 선택해 주세요.'); return; }
+    setError(''); setPhotoDraft(file);
+  }
+  const uploadCurrent = useRef(selectPhoto);
+  uploadCurrent.current = selectPhoto;
   useEffect(() => {
     const paste = (event: ClipboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -186,7 +193,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
     if (!file) return;
     event.preventDefault();
     event.stopPropagation();
-    void upload(file);
+    selectPhoto(file);
   }
   function enterPhotoDrop(event: ReactDragEvent<HTMLElement>) {
     if (!hasDraggedFiles(event.dataTransfer)) return;
@@ -221,10 +228,10 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
       setError('PNG 또는 JPEG 사진 1개만 놓아 주세요.');
       return;
     }
-    void upload(file);
+    selectPhoto(file);
   }
   async function produce() {
-    if (!source || locked.current || recovery.error || (!pending && !baseReady)) return;
+    if (!source || locked.current || recovery.error || (!pending && (!baseReady || photoDraft))) return;
     locked.current = true; setBusy(true); setError('');
     try {
       let result: FactoryJob;
@@ -257,8 +264,9 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
       <section className="character-input">
         <h1>사진으로 전체 생성</h1>
         {/* The file input is the one control here: Tab reaches it, Space or Enter opens the picker, and a paste or drop
-            anywhere on the label uploads too. */}
-        <label className={`character-upload${draggingPhoto ? ' is-dragging' : ''}${busy ? ' is-disabled' : ''}`} onPaste={pasteUpload} onDragEnter={enterPhotoDrop} onDragLeave={leavePhotoDrop} onDragOver={overPhotoDrop} onDrop={dropPhoto}>{reference ? <img src={reference.url} alt="캐릭터 원본 사진" /> : <span>{live.loading && (characterId || suggested) ? '사진 불러오는 중' : '캐릭터 사진을 클릭하거나 놓거나 Ctrl+V로 붙여넣으세요'}</span>}<b>{reference ? '사진 바꾸기 · 끌어놓기 가능' : '사진 선택 · 끌어놓기 가능'}</b><input aria-label="캐릭터 사진" type="file" accept="image/png,image/jpeg" disabled={busy} onChange={e => { void upload(e.target.files?.[0]); e.target.value = ''; }} /></label>
+            anywhere on the label opens the photo preparation too. */}
+        <label className={`character-upload${draggingPhoto ? ' is-dragging' : ''}${busy ? ' is-disabled' : ''}`} onPaste={pasteUpload} onDragEnter={enterPhotoDrop} onDragLeave={leavePhotoDrop} onDragOver={overPhotoDrop} onDrop={dropPhoto}>{reference ? <img src={reference.url} alt="캐릭터 원본 사진" /> : <span>{live.loading && (characterId || suggested) ? '사진 불러오는 중' : '캐릭터 사진을 클릭하거나 놓거나 Ctrl+V로 붙여넣으세요'}</span>}<b>{reference ? '사진 바꾸기 · 끌어놓기 가능' : '사진 선택 · 끌어놓기 가능'}</b><input aria-label="캐릭터 사진" type="file" accept="image/png,image/jpeg" disabled={busy} onChange={e => { selectPhoto(e.target.files?.[0]); e.target.value = ''; }} /></label>
+        {photoDraft && <PhotoPreparation key={`${photoDraft.name}:${photoDraft.lastModified}:${photoDraft.size}`} file={photoDraft} busy={busy} onUpload={upload} onCancel={() => setPhotoDraft(null)} />}
         {live.characters.length > 0 && <details className="character-history"><summary>작업 선택</summary><select aria-label="작업 선택" disabled={busy} value={source?.id || ''} onChange={e => remember(e.target.value)}><option value="" disabled>선택</option>{live.characters.filter(c => c.artifacts.some(a => a.id === 'reference') || photoJobs.some(j => j.character_id === c.id)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></details>}
         <label className="character-history">기본 몸<select aria-label="기본 몸" value={selectedBaseId} disabled={busy || running || !!pending} onChange={event => { setBaseId(event.target.value); setUseCommonBody(false); }}>
           <option value="">사진에서 새 기본 몸 생성</option>
@@ -272,7 +280,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
         <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'parts' })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
         <MeshyOptionsEditor scope={sharedMeshyScope} value={pending?.input.meshy_options || meshy.options} disabled={busy || running || !!pending} onChange={meshy.setOptions} onUploading={setMeshyUploading} />
         {meshy.storageError && <p role="alert">{meshy.storageError}</p>}
-        <button className="character-create" disabled={busy || meshyUploading || !!recovery.error || (!pending && (running || !reference || !compatible || !canGenerate || !baseReady || creditsShort))} onClick={() => void produce()}>{busy ? '접수 중' : pending ? '요청 복구' : running ? '생성 중' : selectedBaseId ? '선택한 몸에 사진 파츠 생성' : '사진으로 전체 생성'}</button>
+        <button className="character-create" disabled={busy || meshyUploading || !!recovery.error || (!pending && (!!photoDraft || running || !reference || !compatible || !canGenerate || !baseReady || creditsShort))} onClick={() => void produce()}>{busy ? '접수 중' : pending ? '요청 복구' : running ? '생성 중' : selectedBaseId ? '선택한 몸에 사진 파츠 생성' : '사진으로 전체 생성'}</button>
         <small className="character-generation">유료 이미지 {totalImageCount}장 · 3D {providerModelCount}개 · {selectedBaseId ? '기존 몸·리깅·동작 재사용' : '리깅 1회 · 기본 동작'}{capabilities?.meshy_balance != null && ` · Meshy 잔여 크레딧 ${capabilities.meshy_balance.toLocaleString()}`}</small>
         {blockedReason && <p className="character-status" role="status">{blockedReason}</p>}
         {(error || recovery.error || connectionError || catalogError || bodyProfileError) && <p role="alert">{error || recovery.error || connectionError || catalogError || bodyProfileError}</p>}

@@ -12,7 +12,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgRow};
 use std::{collections::BTreeMap, io::Cursor, panic::AssertUnwindSafe};
@@ -81,6 +81,23 @@ pub struct BodyRef {
     version: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartEdit {
+    pub scale: [f64; 3],
+    pub translation: [f64; 3],
+}
+
+impl PartEdit {
+    pub fn identity(&self) -> bool {
+        self.scale == [1.0; 3] && self.translation == [0.0; 3]
+    }
+    pub fn valid(&self) -> bool {
+        self.scale.iter().all(|v| v.is_finite() && (0.8..=1.2).contains(v))
+            && self.translation.iter().all(|v| v.is_finite() && (-0.05..=0.05).contains(v))
+    }
+}
+
 /// `PUT /api/looks/me`: the wardrobe's body, the part worn in each slot, the hair colour and garment region colours.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -88,6 +105,8 @@ pub struct LookBody {
     body: BodyRef,
     #[serde(default)]
     parts: BTreeMap<String, PartRef>,
+    #[serde(default)]
+    part_edits: BTreeMap<String, PartEdit>,
     hair_color: Option<String>,
     #[serde(default)]
     colors: BTreeMap<String, BTreeMap<String, String>>,
@@ -142,9 +161,18 @@ pub fn request(body: LookBody) -> ApiResult<Value> {
             colors.insert(slot.clone(), Value::Object(regions));
         }
     }
+    for (slot, edit) in &body.part_edits {
+        if !parts.contains_key(slot)
+            || !["hair", "hairFront", "hairBack", "hat", "glasses"].contains(&slot.as_str())
+            || !edit.valid()
+        {
+            return Err(INVALID);
+        }
+    }
     Ok(json!({
         "body": {"jobId": body.body.job_id, "version": body.body.version},
         "parts": parts,
+        "partEdits": body.part_edits,
         "hairColor": hair_color,
         "colors": colors,
     }))
@@ -552,6 +580,14 @@ impl Bake {
             files.push((slot.clone(), bytes, coverage, palette));
         }
         let hair = self.look["hairColor"].as_str().and_then(look_bake::linear_color);
+        let edits: BTreeMap<String, PartEdit> = self
+            .look
+            .get("partEdits")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| Failure::from(INVALID))?
+            .unwrap_or_default();
         if !self.current().await? {
             return Ok(None);
         }
@@ -566,7 +602,8 @@ impl Bake {
                     palette: palette.take(),
                 })
                 .collect();
-            let baked = look_bake::bake(&body, parts, hair).map_err(|error| Failure(error.code, error.message))?;
+            let baked = look_bake::bake_with_edits(&body, parts, hair, &edits)
+                .map_err(|error| Failure(error.code, error.message))?;
             let details =
                 glb::details(&baked.glb).ok_or_else(|| Failure("look_part", "모델을 만들지 못했어요.".into()))?;
             let web = slim::slim(&baked.glb).unwrap_or(baked.glb);
@@ -658,6 +695,27 @@ mod tests {
         }
         assert!(look(&["hairFront", "hairBack", "hat"]).is_ok());
         assert!(look(&["hair", "hat"]).is_ok());
+    }
+
+    #[test]
+    fn edits_require_a_worn_editable_part_and_bounded_finite_coordinates() {
+        let base = json!({"body":{"jobId":"b1","version":"v1"},
+            "parts":{"hair":{"jobId":"p1","version":"v1","sha256":sha('a')}}});
+        let edit = json!({"scale":[1.2,0.8,1.0],"translation":[0.05,-0.05,0.0]});
+        let mut valid = base.clone();
+        valid["partEdits"] = json!({"hair":edit});
+        assert_eq!(request(body(valid)).unwrap()["partEdits"]["hair"], edit);
+        for value in [
+            json!({"hat":edit}),
+            json!({"body":edit}),
+            json!({"hair":{"scale":[1.21,1,1],"translation":[0,0,0]}}),
+            json!({"hair":{"scale":[1,1,1],"translation":[0,0.051,0]}}),
+        ] {
+            let mut invalid = base.clone();
+            invalid["partEdits"] = value;
+            assert_eq!(request(body(invalid)).unwrap_err().code, "invalid_look");
+        }
+        assert!(!PartEdit { scale: [f64::NAN, 1.0, 1.0], translation: [0.0; 3] }.valid());
     }
 
     #[test]

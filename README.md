@@ -25,6 +25,8 @@
 
 ## 캐릭터 스튜디오
 
+운영 스튜디오 사진은 자르기·최대 2048px 처리본 확인 뒤 업로드한다. 회원 옷장은 헤어·모자·안경의 크기와 위치를 조정해 실제 착용 GLB로 저장하며, 운영 조립본은 버전·SHA에 묶인 외형·동작 검수를 기록한다. 섬 꾸미기의 **매장 배치**는 설명으로 타일·벽·기물을 미리 보고 한 번에 적용·되돌린다. [구현과 검증](docs/implementation-2026-10-03.md)
+
 캐릭터 스튜디오 화면(`frontend/src/character/`)은 둘로 나뉜다. `/character`(`frontend/src/studio/CharacterPage.tsx`)는 회원 누구나 쓰는 옷장이고, `/admin/studio`(`frontend/src/studio/StudioPage.tsx`, 운영 탭 '캐릭터 공장')는 스튜디오 운영 권한이 있어야 열리며, 만들기 화면(기본몸·파츠·바닥 타일 등 생성을 시작하는 화면)은 모두 유료 작업 권한이 있을 때만 보여서 그 권한이 없는 운영자는 에셋 라이브러리와 프롬프트만 본다. 옛 `/studio` 주소는 이 둘로 넘긴다. 스튜디오 스타일시트는 한 페이지짜리로 쓰였으므로 `.studio-root` 안으로 가둔다(`frontend/vite/studio.ts`). 화면이 부르는 `/api/avatar-factory`·`/api/studio`·`/api/avatar-blueprints`·`/api/characters`는 서버가 받아 권한을 본 뒤 캐릭터 서버로 넘긴다. 회원은 옷장 읽기(`wardrobe/*`, 파츠 GLB)만, 그 밖의 읽기는 스튜디오 보기(운영·카탈로그 편집), 기록 변경은 스튜디오 운영, 비용이 드는 작업은 유료 작업 권한이 있어야 한다(아래 권한). `FACTORY_ACCESS`가 `read`(기본)면 읽기만, `write`면 기록 변경까지, `paid`면 비용이 드는 작업까지 열고, 유료는 `FACTORY_PAID_MONTHLY` 한도 안에서만 통과한다. 알려진 업로드·선택과 이미지만 자르는 `part-batches/split-sheet` 외의 POST는 유료로 본다. 바꾸는 요청은 `factory_requests`에 남고, 월 한도는 동시에 들어온 요청도 넘지 않게 센다. 관리자용 `/api/factory/*`도 같은 `FACTORY_ACCESS`·월 한도·기록을 따른다(읽기는 스튜디오 보기, 바꾸기는 관리자). 요청 경로는 한 번 디코드한 조각마다 검사해서 `.`·`..`·빈 조각·디코드 뒤에도 남은 `%`·`/`·`\`가 있으면 404로 거절하고, 권한 판단과 캐릭터 서버로 보내는 주소에 같은 조각을 쓴다(`%2e%2e`로 옷장 허용 경로를 벗어날 수 없다). 캐릭터 서버와는 연결 10초·응답 대기 600초로 통신하고, JSON 응답은 8 MiB까지 읽는다. 파일 리다이렉트는 `FACTORY_URL`과 같은 출처 또는 표준 HTTPS AWS S3 호스트만 따른다. S3 산출물은 인증된 앱 API가 작은 청크로 전달하며 Range·HEAD·ETag를 보존한다.
 
 ## 캐릭터 가져오기
@@ -64,6 +66,10 @@
 
 `FACTORY_ACCESS`와 월 유료 한도는 권한과 따로 서버 전체의 상한으로 남는다. 관리자는 `/admin/permissions`에서 사람을 찾아 역할과 그룹을 바꾸고(사유를 적어야 하며 `auth_audit`에 남는다), 판단 근거와 역할별 보유자, 변경 기록을 본다. 마지막 관리자는 해제되지 않는다. 이 방식 이전의 관리자(`users.role = 'admin'`)는 마이그레이션으로 관리자 튜플에 연결되고, `users.role`은 이전 바이너리로 되돌릴 때를 위해 관리자 튜플을 따라간다. 기존 이름만으로 bootstrap 관리자에 승격하지 않고 비밀번호로 소유권을 확인한다. 예약된 관리자 이름은 일반 가입으로 선점할 수 없다. 옛 `ydh2244` 이름 기반 승격 마이그레이션이 아직 적용되지 않은 DB에는 기동 전에 소유권 확인을 요구한다.
 
+## 로컬 API 검수 MCP
+
+`uv sync --locked --extra studio-mcp` 후 `uv run --no-sync asset-studio-mcp`로 stdio 서버를 실행한다. 프로세스 환경의 `MOGA_STUDIO_API_URL`에는 Rust API origin을, `MOGA_STUDIO_SESSION`에는 기존 로그인 세션 자격 증명을 전달한다. Rust의 `APP_ORIGIN`과 API origin이 다르면 `MOGA_STUDIO_APP_ORIGIN`도 설정한다. 기본은 조회이며 `MOGA_STUDIO_MCP_WRITE=1`에서만 검사·캐릭터 검수·버전/SHA에 묶인 네이티브 조립 검수 기록이 가능하다. 유료 생성 tool은 없다. 서버의 회원 권한과 소유권 검사를 유지하며 비밀값·임의 URL·코드·파일 경로를 tool 인수로 받지 않는다. 전체 설정과 등록 tool은 [API MCP 명세](docs/studio-api-mcp-spec.md#현재-구현과-실행-설정)에 있다.
+
 ## 검증
 
 - 서버: `cd server && docker compose up -d --wait && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`. 테스트는 실제 PostgreSQL에 임시 DB를 만들어 돌고, 운영자 토큰이 캐릭터 서버의 `auth.py`(`backend/src`)를 통과하는지도 확인한다(`uv`가 있을 때).
@@ -87,7 +93,7 @@ CloudFront(mogaesup.com, www는 경로와 쿼리 그대로 apex로 이동)가 �
 
 `.github/workflows/pipeline.yml`이 위 1~4를 대신한다. 스택(CloudFormation)과 5번은 자동으로 적용하지 않는다.
 
-- 풀 리퀘스트와 `main` 푸시는 바뀐 곳만 점검한다(`.github/`가 바뀌면 모두). 서버는 `cargo fmt --check`·`clippy -D warnings`·`cargo test`(PostgreSQL 17을 55432에 띄움), 캐릭터 서버는 Python 3.11·3.12에서 `uv sync --locked`·`compileall`·`pytest`(같은 PostgreSQL, 없으면 기록 DB 테스트는 건너뛴다), 웹은 `typecheck`·`test`·`build`, 템플릿과 스크립트는 `cfn-lint`·문법 검사·actionlint·변경 감지 회귀 검사다. `npm run smoke`·`test:character`는 브라우저와 GPU가 필요해 돌리지 않는다.
+- 풀 리퀘스트와 `main` 푸시는 바뀐 곳만 점검한다(`.github/`가 바뀌면 모두). 서버는 `cargo fmt --check`·`clippy -D warnings`·`cargo test`(PostgreSQL 17을 55432에 띄움), 캐릭터 서버는 Python 3.11·3.12에서 `uv sync --locked --extra studio-mcp`·`compileall`·`pytest`(같은 PostgreSQL, 없으면 기록 DB 테스트는 건너뛴다), 웹은 `typecheck`·`test`·`build`, 템플릿과 스크립트는 `cfn-lint`·문법 검사·actionlint·변경 감지 회귀 검사다. `npm run smoke`·`test:character`는 브라우저와 GPU가 필요해 돌리지 않는다.
 - `main` 푸시가 점검을 통과하면 마지막으로 성공한 실행 이후 바뀐 곳만 서버 → 웹 → 스튜디오 순서로 배포한다. 점검이 하나라도 실패하면 배포하지 않고, 배포가 실패하면 다음 푸시가 마지막 성공 이후 바뀐 곳을 모두 다시 배포한다. 배포 대상은 실행물에 들어가는 경로와 그 배포 스크립트다(`.github/scripts/changes.sh`). 테스트와 그 밖의 파일(`README.md`, `frontend/infra/`·`server/infra/` 템플릿)만 바뀐 곳은 배포하지 않지만, `frontend/src/` 같은 실행물 폴더 안의 문서(`AGENTS.md`)는 배포 대상이다. `backend/infra/`는 릴리스 묶음에 들어가므로 바뀌면 스튜디오를 다시 배포한다. `.github/workflows/pipeline.yml`이 바뀌면 전체를 다시 배포하고, 그 밖의 `.github/` 변경은 점검만 한다.
 - 서버는 점검과 같은 Rust 1.95.0의 Alpine 이미지로 musl 바이너리를 만들어 `deploy-rust-server.py --skip-provision`으로, 웹은 `deploy-aws.ps1 -SkipBuild -SkipProvision`으로, 스튜디오는 `prepare-aws.ps1 -Upload`와 `deploy-aws.ps1`로 올린다. 서버는 건강 검사에 실패하면 이전 바이너리로 돌아간다. 스튜디오도 후보 컨테이너의 건강 검사에 실패하면 이전 컨테이너를 복구한다. 웹은 되돌리는 커밋을 푸시하면 이전 모습으로 다시 배포된다. 앞 단계 배포가 실패하면 뒤 단계는 실행하지 않는다.
 - 비교할 이전 성공 실행이 없는 첫 `main` 푸시(그 실행의 커밋이 사라진 경우도)는 전체를 점검하고 배포한다. 수동 실행은 Actions의 Run workflow에서 `target`(`all`·`server`·`web`·`studio`)을 고르며, 점검은 모두 돌고 고른 곳만 배포한다. `main` 외의 브랜치와 풀 리퀘스트는 배포하지 않는다.

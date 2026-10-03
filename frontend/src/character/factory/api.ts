@@ -72,6 +72,9 @@ export type NativePartsState = {
   origin?: string;
   rigged?: boolean;
   status: string; version?: string; error?: string; bone_count?: number; visual_review?: string;
+  assembly_sha256?: string;
+  review?: { status: 'required' | 'approved' | 'changes_requested' | 'stale'; decision?: 'approved' | 'changes_requested'; id?: string;
+    assembly_sha256?: string; reviewed_at?: string; reviewer_id?: number; reviewer_name?: string; notes?: string; appearance_checked?: boolean; motion_checked?: boolean; target_fingerprint?: string };
   fitting_revision?: string; fit_update_available?: boolean; expression_pending?: boolean; fit_status?: string;
   refit_request_key?: string | null;
   incomplete_parts?: { slot: string; status: string; errors: { code: string; message: string }[] }[];
@@ -126,7 +129,8 @@ export const wardrobeUrls = {
   colorMask: (part: WardrobePart) => `/api/avatar-factory/wardrobe/colors/${part.job_id}/${part.slot}/mask?${new URLSearchParams({ version: part.version })}`,
 };
 export type PartFitProfile = { slot: 'top' | 'bottom'; source_version: string; source_sha256: string; fit_profile: FitProfile; measurement?: Record<string, unknown>; body_profile?: Record<string, unknown> };
-export type NativePartsVersions = { current: string | null; items: { version: string; created_at?: string; fitting_revision?: string; url?: string }[] };
+export type NativePartsVersions = { current: string | null; items: { version: string; created_at?: string; fitting_revision?: string; url?: string;
+  assembly_sha256?: string; review?: NativePartsState['review']; incomplete_parts?: NativePartsState['incomplete_parts'] }[] };
 export type FactoryStage = 'images' | 'models' | 'rig' | 'assemble' | 'expressions';
 type FactoryStages = {
   busy: boolean; recommended_stage: FactoryStage | null;
@@ -162,6 +166,8 @@ const postRefit = (id: string) => (pending: Pending<RefitInput>) => request<Nati
 export const factoryApi = {
   nativeParts: (id: string, signal?: AbortSignal) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts`, { signal }),
   assemble: (id: string, canonicalPose = false) => request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts?canonical_pose=${canonicalPose}`, { method: 'POST' }),
+  reviewNative: (id: string, version: string, input: { expected_assembly_sha256: string; decision: 'approved' | 'changes_requested'; appearance_checked: boolean; motion_checked: boolean; notes: string }, key: string) =>
+    request<NativePartsState>(`/api/avatar-factory/jobs/${id}/native-parts/${version}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(input) }),
   nativeOutfit: (id: string, version: string, signal?: AbortSignal) => request<NativeOutfit>(`/api/avatar-factory/jobs/${id}/native-outfits/${version}`, { signal }),
   saveNativeOutfit: (id: string, version: string, input: Pick<NativeOutfit, 'body_sha256' | 'slots' | 'hair_color'>, revision: string, key: string) =>
     request<NativeOutfit>(`/api/avatar-factory/jobs/${id}/native-outfits/${version}`, { method: 'PUT',

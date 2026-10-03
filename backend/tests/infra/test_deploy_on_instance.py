@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from shell_harness import LINUX_FILE_COMMANDS, portable_idle_script, replace_host_paths
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'infra' / 'deploy-on-instance.sh'
 UNREADABLE = 'running release health cannot be read'
@@ -308,10 +309,10 @@ def run_host_deploy(bash, tmp_path, *, root=None, **env):
                                                      'containers': containers, 'images': env.pop('FAKE_IMAGES', [])}))
     fixture = root / 'commands.py'
     fixture.write_text(FAKE_HOST)
-    text = SCRIPT.read_text(encoding='utf-8').replace('/opt/asset-studio', (root / 'studio').as_posix())
-    text = text.replace('/etc/asset-studio.env', (root / 'config.env').as_posix())
-    text = text.replace('/var/lock/asset-studio-deploy.lock', (root / 'deploy.lock').as_posix())
-    text = text.replace('/var/log/asset-studio', (root / 'logs').as_posix())
+    text = replace_host_paths(SCRIPT.read_text(encoding='utf-8'), {
+        '/opt/asset-studio': (root/'studio').as_posix(), '/etc/asset-studio.env': (root/'config.env').as_posix(),
+        '/var/lock/asset-studio-deploy.lock': (root/'deploy.lock').as_posix(),
+        '/var/log/asset-studio': (root/'logs').as_posix()})
     script = '\n'.join([
         # The exit status of the fake command, as `docker inspect` of a missing container fails.
         'docker() { local code=0; "$PYTHON_EXE" "$FAKE_COMMANDS" docker "$@" || code=$?; '
@@ -532,15 +533,16 @@ def run_idle_check(bash, tmp_path, **env):
         'containers': [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]}))
     fixture = root / 'commands.py'
     fixture.write_text(FAKE_HOST)
-    text = IDLE_SCRIPT.read_text(encoding='utf-8')
-    for original, target in [('/var/log/asset-studio', 'logs'), ('/var/lib/asset-studio-idle', 'state'),
-        ('/var/lock/asset-studio-deploy.lock', 'deploy.lock'), ('/var/lock/asset-studio-prepare.lock', 'prepare.lock')]:
-        text = text.replace(original, (root / target).as_posix())
+    text = portable_idle_script(replace_host_paths(IDLE_SCRIPT.read_text(encoding='utf-8'), {
+        original: (root/target).as_posix() for original, target in [('/var/log/asset-studio', 'logs'),
+        ('/var/lib/asset-studio-idle', 'state'), ('/var/lock/asset-studio-deploy.lock', 'deploy.lock'),
+        ('/var/lock/asset-studio-prepare.lock', 'prepare.lock')]}))
     script = '\n'.join([
         'docker() { "$PYTHON_EXE" "$FAKE_COMMANDS" docker "$@"; }',
         'curl() { "$PYTHON_EXE" "$FAKE_COMMANDS" curl "$@"; }',
         'systemctl() { "$PYTHON_EXE" "$FAKE_COMMANDS" systemctl "$@"; }',
         'python3() { "$PYTHON_EXE" "$@"; }', 'flock() { :; }',
+        LINUX_FILE_COMMANDS,
         'install() { shift 3; mkdir -p "$@"; }',
         'cut() { echo 20000; }', 'date() { if [[ "$1" == +%s ]]; then echo 2000000000; else echo 1999980000; fi; }',
         text])
@@ -595,11 +597,11 @@ def test_the_activity_log_is_kept_small_even_with_idle_stop_off(bash, tmp_path, 
     log.write_bytes(b''.join(b'%d 200 GET /api/studio/catalog\n' % index for index in range(400_000)))
     assert log.stat().st_size > 8 * 1024 * 1024
     os.utime(log, (1_900_000_000, 1_900_000_000))
-    text = IDLE_SCRIPT.read_text(encoding='utf-8')
-    for original, target in [('/var/log/asset-studio', 'logs'), ('/var/lib/asset-studio-idle', 'state'),
-        ('/var/lock/asset-studio-deploy.lock', 'deploy.lock'), ('/var/lock/asset-studio-prepare.lock', 'prepare.lock')]:
-        text = text.replace(original, (root / target).as_posix())
-    script = '\n'.join(['install() { shift 3; mkdir -p "$@"; }', 'flock() { :; }',
+    text = portable_idle_script(replace_host_paths(IDLE_SCRIPT.read_text(encoding='utf-8'), {
+        original: (root/target).as_posix() for original, target in [('/var/log/asset-studio', 'logs'),
+        ('/var/lib/asset-studio-idle', 'state'), ('/var/lock/asset-studio-deploy.lock', 'deploy.lock'),
+        ('/var/lock/asset-studio-prepare.lock', 'prepare.lock')]}))
+    script = '\n'.join(['install() { shift 3; mkdir -p "$@"; }', 'flock() { :; }', LINUX_FILE_COMMANDS,
                         # Inside the boot grace, so the "on" run stops before it would read the API.
                         'cut() { echo 60; }', text])
     done = run_bash(bash, script, IDLE_STOP=setting)

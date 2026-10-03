@@ -1,4 +1,4 @@
-import { BufferAttribute, Group, Matrix4, MeshStandardMaterial, Skeleton, type Bone, type Object3D, type SkinnedMesh, type Material, type Texture } from 'three';
+import { Box3, BufferAttribute, Group, Matrix4, MeshStandardMaterial, Skeleton, Vector3, type Bone, type Object3D, type SkinnedMesh, type Material, type Texture, type BufferGeometry } from 'three';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { disposeObjectResources } from './assets/gpu-resources';
 import { downloadBytes } from './assets/download';
@@ -7,6 +7,7 @@ import { hairColorControl } from './hair-color';
 import { regionColorControl } from './region-color';
 import { matteCharacter } from './matte-materials';
 import { hasConflictingPartSlots } from './factory/parts';
+import { defaultPartEdit, EDITABLE_PARTS, editGeometry, isDefaultPartEdit, partEditMatrix, restGeometry, validPartEdit, type PartEdit, type RestGeometry } from './part-edit';
 
 export type Wearable = { id: string; slot: string; url: string; sha256: string };
 /** An inner garment's tuck: per "mesh:primitive", the body vertex under each vertex (index into keys
@@ -14,7 +15,7 @@ export type Wearable = { id: string; slot: string; url: string; sha256: string }
 export type Tuck = { anchors: Record<string, Int32Array>; moves: Record<string, Float32Array>; keys: string[] };
 /** Depth bias of outer garment layers (more negative draws in front). */
 const OUTER_LAYERS: Record<string, number> = { top: -2, hat: -2, shoes: -1 };
-type Entry = { spec: Wearable; group: Group; source: GLTF; skeletons: Set<Skeleton>; touched: number; keys: Map<SkinnedMesh, string> };
+type Entry = { spec: Wearable; group: Group; source: GLTF; skeletons: Set<Skeleton>; touched: number; keys: Map<SkinnedMesh, string>; pivot: Vector3; rest: Map<SkinnedMesh, RestGeometry>; originalGeometries: Set<BufferGeometry>; editProblem?: string };
 type RestBone = { bone: Bone; matrix: Matrix4; parent: string | null };
 
 function standardSlot(object: Object3D): unknown {
@@ -28,11 +29,14 @@ function standardSlot(object: Object3D): unknown {
 
 function disposeEntry(entry: Entry) {
   entry.group.removeFromParent();
-  disposeObjectResources([entry.group, ...entry.source.scenes], entry.skeletons);
+  const roots = [entry.group, ...entry.source.scenes], owned = new Set<BufferGeometry>();
+  for (const root of roots) root.traverse(object => { if ((object as SkinnedMesh).isMesh) owned.add((object as SkinnedMesh).geometry); });
+  disposeObjectResources(roots, entry.skeletons);
+  for (const geometry of entry.originalGeometries) if (!owned.has(geometry)) geometry.dispose();
 }
 
 /** Variant meshes share the loaded body's actual bone objects and mixer.
- * Source bytes, bone order, bind matrices, geometry, UVs and weights stay intact.
+ * Source bytes, bone order, bind matrices, UVs and weights stay intact. Edits change owned rest geometry buffers.
  */
 export class NativeWardrobe {
   private bones = new Map<string, RestBone>();
@@ -57,6 +61,8 @@ export class NativeWardrobe {
 
   private originalIndex = new Map<SkinnedMesh, BufferAttribute | null>();
   private partPositions = new WeakMap<SkinnedMesh, Float32Array>();
+  private tuckedPositions = new WeakMap<SkinnedMesh, Float32Array>();
+  private edits = new Map<string, PartEdit>();
   private regionControls = new Map<Material, { mask: Texture; update: (colors: (string | null)[]) => void }>();
 
   /** Region colours of the part worn in a slot; null entries keep the original colour.
@@ -144,8 +150,40 @@ export class NativeWardrobe {
           for (let k = 0; k < 3; k++) values[3*v+k] = (values[3*v+k] ?? 0) + (move[3*v+k] ?? 0);
         }
       }
+      this.tuckedPositions.set(mesh, values);
       position.array.set(values); position.needsUpdate = true;
     });
+    this.applyEdit(entry);
+  }
+
+  setPartEdit(slot: string, edit: PartEdit | null) {
+    if (!(EDITABLE_PARTS as readonly string[]).includes(slot) || (edit && !validPartEdit(edit))) throw new Error('파츠 크기와 위치 범위를 확인해 주세요.');
+    const entry = this.active.get(slot);
+    if (entry?.editProblem && edit && !isDefaultPartEdit(edit)) throw new Error(entry.editProblem);
+    if (entry && edit && !isDefaultPartEdit(edit) && [...entry.rest.keys()].some(mesh => Object.values(mesh.geometry.morphAttributes).some(attributes => attributes.length))) throw new Error('이 파츠의 표정 변형을 유지하려면 원래 크기와 위치로 되돌려 주세요.');
+    if (edit) this.edits.set(slot, { scale: [...edit.scale], translation: [...edit.translation] }); else this.edits.delete(slot);
+    if (entry) this.applyEdit(entry);
+    this.updateBodyVisibility();
+  }
+
+  private updateBodyVisibility() {
+    this.baseMaterials.forEach((visible, material) => {
+      const value: unknown = material.userData.hidden_by_slots;
+      const slots = typeof value === 'string' ? value.split('+') : Array.isArray(value) ? value : [];
+      // Source material coverage cannot hide skin after its covering part has moved or changed size.
+      material.visible = visible && !slots.some(slot => slot !== 'hair' && slot !== 'head'
+        && slot !== 'hairFront' && slot !== 'hairBack' && this.active.has(slot)
+        && (!this.edits.has(slot) || isDefaultPartEdit(this.edits.get(slot)!)));
+    });
+  }
+
+  private applyEdit(entry: Entry) {
+    if (!(EDITABLE_PARTS as readonly string[]).includes(entry.spec.slot)) return;
+    const edit = this.edits.get(entry.spec.slot) || defaultPartEdit(), common = partEditMatrix(entry.pivot, edit);
+    for (const [mesh, rest] of entry.rest) {
+      const local = isDefaultPartEdit(edit) ? new Matrix4() : mesh.matrix.clone().invert().multiply(common).multiply(mesh.matrix);
+      editGeometry(mesh.geometry, rest, this.tuckedPositions.get(mesh) || rest.position, local);
+    }
   }
 
   constructor(private body: Object3D, private primitiveKeys: Map<Object3D, string> = new Map()) {
@@ -188,7 +226,7 @@ export class NativeWardrobe {
       if (digest !== spec.sha256) throw new Error('의상 파일이 검수한 버전과 다릅니다.');
       const source = await new GLTFLoader().parseAsync(bytes, '');
       matteCharacter(source.scene);
-      const entry: Entry = { spec, source, group: new Group(), skeletons: new Set(), touched: performance.now(), keys: new Map() };
+      const entry: Entry = { spec, source, group: new Group(), skeletons: new Set(), touched: performance.now(), keys: new Map(), pivot: new Vector3(), rest: new Map(), originalGeometries: new Set() };
       try {
         if (this.disposed) throw new Error('옷장 화면이 닫혔습니다.');
         source.scene.updateMatrixWorld(true);
@@ -235,11 +273,31 @@ export class NativeWardrobe {
           // the verified equal-rest-pose bone objects, never recompute inverse binds.
           mesh.skeleton = new Skeleton(targets, native.boneInverses.map(matrix => matrix.clone()));
           entry.skeletons.add(mesh.skeleton);
-          mesh.removeFromParent(); transform.decompose(mesh.position, mesh.quaternion, mesh.scale); mesh.updateMatrix();
+          mesh.removeFromParent(); transform.decompose(mesh.position, mesh.quaternion, mesh.scale);
+          // A nonuniformly scaled parent and rotated child can produce shear; keep the full affine matrix for bake parity.
+          mesh.matrixAutoUpdate = false; mesh.matrix.copy(transform);
           mesh.name = `wardrobe-${spec.id}-${entry.group.children.length}`;
           mesh.userData.standard_slot = spec.slot;
           mesh.userData.wardrobePartId = spec.id; entry.group.add(mesh);
+          if ((EDITABLE_PARTS as readonly string[]).includes(spec.slot)) {
+            // Each loaded primitive needs its own buffers: glTF instances can share one geometry.
+            entry.originalGeometries.add(mesh.geometry); mesh.geometry = mesh.geometry.clone(); const rest = restGeometry(mesh.geometry);
+            entry.rest.set(mesh, rest); this.partPositions.set(mesh, rest.position);
+          }
         }
+        const bounds = new Box3(), point = new Vector3();
+        const matrices = new Map<number, Matrix4>();
+        for (const mesh of entry.rest.keys()) {
+          const matrix = mesh.matrix, values = matrix.elements;
+          if (values.some(value => !Number.isFinite(value)) || Math.abs(matrix.determinant()) < 1e-12 || [values[3]!, values[7]!, values[11]!, values[15]! - 1].some(value => Math.abs(value) > 1e-8)) entry.editProblem = '파츠의 변환을 읽지 못해 크기를 조정할 수 없습니다.';
+          const association = source.parser.associations.get(mesh) as { meshes?: number } | undefined;
+          if (association?.meshes === undefined) continue;
+          const previous = matrices.get(association.meshes);
+          if (previous && !previous.equals(matrix)) entry.editProblem = '서로 다른 위치에서 공유하는 파츠 메시의 크기를 조정할 수 없습니다.';
+          matrices.set(association.meshes, matrix);
+        }
+        for (const [mesh, rest] of entry.rest) for (let index = 0; index < rest.position.length; index += 3) bounds.expandByPoint(point.fromArray(rest.position, index).applyMatrix4(mesh.matrix));
+        if (!bounds.isEmpty()) bounds.getCenter(entry.pivot);
         this.loaded.set(spec.id, entry); return entry;
       } catch (error) { disposeEntry(entry); throw error; }
     })();
@@ -261,17 +319,14 @@ export class NativeWardrobe {
       if (this.disposed || generation !== this.generation) return false;
       // Commit all slots together after every file passed. Failed loads retain
       // the previous outfit and the existing animation keeps advancing.
+      for (const slot of this.edits.keys()) {
+        const next = entries.find(entry => entry.spec.slot === slot);
+        if (!next || this.active.get(slot)?.spec.id !== next.spec.id) this.edits.delete(slot);
+      }
       this.active.forEach(entry => entry.group.removeFromParent());
       this.active = new Map(entries.map(entry => [entry.spec.slot, entry]));
-      entries.forEach(entry => { entry.touched = performance.now(); this.body.add(entry.group); });
-      this.baseMaterials.forEach((visible, material) => {
-        const value: unknown = material.userData.hidden_by_slots;
-        const slots = typeof value === 'string' ? value.split('+') : Array.isArray(value) ? value : [];
-        // Older assemblies tagged the whole upper scalp as covered by hair.
-        // A hairstyle is open between strands; hiding skin creates rear holes.
-        material.visible = visible && !slots.some(slot => slot !== 'hair' && slot !== 'head'
-          && slot !== 'hairFront' && slot !== 'hairBack' && this.active.has(slot));
-      });
+      entries.forEach(entry => { entry.touched = performance.now(); this.body.add(entry.group); this.applyEdit(entry); });
+      this.updateBodyVisibility();
       this.body.updateMatrixWorld(true); return true;
     } finally {
       parts.forEach(part => { const count = (this.references.get(part.id) || 1)-1; if (count) this.references.set(part.id, count); else this.references.delete(part.id); });

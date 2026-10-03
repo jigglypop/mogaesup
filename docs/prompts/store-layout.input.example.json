@@ -1,0 +1,180 @@
+{
+  "contract": "store-layout-input-v1",
+  "request": {
+    "description": "12m × 12m 카페. 나무 바닥, 서쪽 2인 좌석, 북동쪽 카운터 역할의 가판대, 남동쪽 조명. 남쪽 중앙 입구부터 카운터와 좌석까지 통로를 둔다. 현재 카탈로그 범위에서 배치한다.",
+    "storeType": "cafe",
+    "widthM": 12,
+    "depthM": 12
+  },
+  "baseline": {
+    "worldId": "example-store-v1",
+    "revision": 0,
+    "source": "illustrative_fixture"
+  },
+  "grid": {
+    "originM": [
+      0,
+      0,
+      0
+    ],
+    "originAlignment": "cell_center",
+    "tileSizeM": 4,
+    "objectSnapM": 1,
+    "heightStepM": 1
+  },
+  "region": {
+    "minXZ": [
+      -2,
+      -2
+    ],
+    "maxXZ": [
+      10,
+      10
+    ],
+    "layoutAnchorCell": {
+      "x": 0,
+      "z": 0
+    }
+  },
+  "existing": {
+    "tiles": [],
+    "walls": [],
+    "objects": [],
+    "protectedIds": [],
+    "externalApproach": "not_verified"
+  },
+  "catalog": [
+    {
+      "id": "chair-basic",
+      "label": "의자",
+      "modelUrl": "gltf/props/chair.glb",
+      "defaultScale": 0.65,
+      "localBoundsM": {
+        "min": [
+          -0.8165926672518253,
+          -0.008801235746315153,
+          -0.6943612457823803
+        ],
+        "max": [
+          0.8213608525693417,
+          1.3513462390120436,
+          0.7439514845766136
+        ]
+      },
+      "geometryEvidence": {
+        "kind": "vendored_glb_vertices_with_scene_transforms",
+        "path": "frontend/vendor/gaesup-world-1.7.0-mogaesup.2.tgz::package/public/gltf/props/chair.glb",
+        "sourceAssetSha256": "9c78e4ba5b7e16247038641a6d2c0b3f6fc031dbd6a48f04598132011f16762d",
+        "deliveredAssetSha256": null,
+        "boundsStage": "source_uncompressed",
+        "deliveredBoundsM": null
+      }
+    },
+    {
+      "id": "table-basic",
+      "label": "탁자",
+      "modelUrl": "gltf/props/table.glb",
+      "defaultScale": 0.9,
+      "localBoundsM": {
+        "min": [
+          -0.7091507781296968,
+          0.0008580348978159992,
+          -1.390112813535286
+        ],
+        "max": [
+          0.7091507781296968,
+          0.8252870945404752,
+          1.3901126037270577
+        ]
+      },
+      "geometryEvidence": {
+        "kind": "vendored_glb_vertices_with_scene_transforms",
+        "path": "frontend/vendor/gaesup-world-1.7.0-mogaesup.2.tgz::package/public/gltf/props/table.glb",
+        "sourceAssetSha256": "230ac925ef408b64f3b215eb64c9999e2cd81a82c6d114b2cd50ea6d6d5e0cbe",
+        "deliveredAssetSha256": null,
+        "boundsStage": "source_uncompressed",
+        "deliveredBoundsM": null
+      }
+    },
+    {
+      "id": "lamp-basic",
+      "label": "조명",
+      "modelUrl": "gltf/props/lamp.glb",
+      "defaultScale": 1.5,
+      "localBoundsM": {
+        "min": [
+          -0.15664412640035152,
+          -6.681802805237352e-09,
+          -0.16470662668373767
+        ],
+        "max": [
+          0.15664412640035152,
+          0.7566991492022346,
+          0.16470413574297543
+        ]
+      },
+      "geometryEvidence": {
+        "kind": "vendored_glb_vertices_with_scene_transforms",
+        "path": "frontend/vendor/gaesup-world-1.7.0-mogaesup.2.tgz::package/public/gltf/props/lamp.glb",
+        "sourceAssetSha256": "f08dad2fe7711ebb650c4a2427980b25be5abb2652f9f12903988311762651a8",
+        "deliveredAssetSha256": null,
+        "boundsStage": "source_uncompressed",
+        "deliveredBoundsM": null
+      }
+    },
+    {
+      "id": "shop-stall-basic",
+      "label": "가판대",
+      "modelUrl": "gltf/props/shop-stall.glb",
+      "defaultScale": 2,
+      "localBoundsM": {
+        "min": [
+          -0.30137812718749046,
+          -0.0028769812604491564,
+          -0.5771173872788912
+        ],
+        "max": [
+          0.21579386666417122,
+          1.0392723987869095,
+          0.5771172504913687
+        ]
+      },
+      "geometryEvidence": {
+        "kind": "vendored_glb_vertices_with_scene_transforms",
+        "path": "frontend/vendor/gaesup-world-1.7.0-mogaesup.2.tgz::package/public/gltf/props/shop-stall.glb",
+        "sourceAssetSha256": "8f3aadd10a1392e5dcc9890d8c331b53cadbb9afc0ebab935256b2905a3e0487",
+        "deliveredAssetSha256": null,
+        "boundsStage": "source_uncompressed",
+        "deliveredBoundsM": null
+      }
+    }
+  ],
+  "allowedFloorPresetIds": [
+    "oak-planks"
+  ],
+  "allowedWallPresetIds": [
+    "shopfront"
+  ],
+  "allowedWallKinds": [
+    "solid",
+    "window",
+    "door",
+    "arch"
+  ],
+  "circulation": {
+    "minClearWidthM": 1.5,
+    "safetyMarginM": 0.15,
+    "avatarCapsuleDiameterM": 0.6,
+    "targetReachM": 1.5
+  },
+  "limits": {
+    "maxTiles": 196,
+    "maxObjects": 100,
+    "maxSaveBytes": 2097152
+  },
+  "execution": {
+    "mode": "plan_only",
+    "paidGeneration": false,
+    "saveAllowed": false
+  }
+}

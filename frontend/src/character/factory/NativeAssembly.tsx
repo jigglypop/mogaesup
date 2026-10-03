@@ -11,6 +11,7 @@ import { Expressions } from '../studio/Expressions';
 import { ImportedGlbPreview } from './ImportedGlbPreview';
 import { NativePartRefit } from './NativePartRefit';
 import { PipelineQuality } from './PipelineQuality';
+import { NativeReview } from './NativeReview';
 import { compatiblePartSlots, hasConflictingPartSlots, partLabels as labels, selectPartSlot } from './parts';
 
 const views = [['front', '정면'], ['side', '왼쪽'], ['back', '후면'], ['opposite', '오른쪽']] as const;
@@ -48,6 +49,7 @@ export function NativeAssembly({ jobId, simple = false, flow }: { jobId: string;
     {(error || polling.error) && <p role="alert">{error || polling.error}</p>}
     {displayed?.quality && <PipelineQuality state={displayed} />}
     {displayed && (imported ? <ImportedGlbPreview key={`${jobId}:${displayed.version}`} state={displayed} /> : <NativeCharacter key={`${jobId}:${preview ? 'preview:' : ''}${displayed.version}`} jobId={jobId} state={displayed} paid={paid} />)}
+    {state && available && !state.expression_pending && (state.assembly_sha256 || state.artifacts.some(item => item.name === 'model.glb')) && <NativeReview key={`review:${jobId}:${state.version}:${state.assembly_sha256 || state.artifacts.find(item => item.name === 'model.glb')?.sha256}`} jobId={jobId} state={state} onChange={polling.setValue} />}
     {!available && <>
       <div className="meshy-motion">
       <h2>{simple ? flow?.busy ? '캐릭터 제작 중' : state?.status === 'qc_failed' ? '조립 재개' : state?.status === 'failed' ? '조립 중단' : '캐릭터' : '파츠 조립'}</h2>

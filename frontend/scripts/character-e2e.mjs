@@ -267,7 +267,8 @@ try {
   );
   await setup(`web dev server at ${WEB}`, () => answers(WEB, vite, 'the web dev server'));
 
-  browser = await chromium.launch({ channel: 'chrome', args: ['--enable-unsafe-webgpu', '--use-angle=d3d11', '--enable-gpu'] });
+  browser = await chromium.launch({ channel: 'chrome', args: ['--enable-unsafe-webgpu', '--enable-gpu',
+    ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : [])] });
   cleanups.push(() => browser.close());
 } catch (error) {
   problems.push(`setup: ${firstLine(error)}`);
@@ -573,8 +574,8 @@ if (browser) {
       if (await member.getByRole('link', { name: '캐릭터 공장' }).count()) throw new Error('a member sees the factory tab');
       await shoot(member, 'member-wardrobe');
       for (const path of ['/admin/studio/library', '/admin/studio/make/photo', '/studio/library']) {
-        await member.goto(`${WEB}${path}`);
-        await member.waitForURL(`${WEB}/character`);
+        await member.goto(`${WEB}${path}`, { waitUntil: 'commit' });
+        await member.waitForURL(`${WEB}/character`, { waitUntil: 'domcontentloaded' });
         if (await member.locator('.studio-shell, .asset-gallery').count()) throw new Error(`${path} opened for a member`);
       }
       const direct = await member.request.get(`${WEB}/api/avatar-factory/jobs`);
@@ -753,6 +754,13 @@ if (browser) {
       await member.locator('.wardrobe-worn li', { hasText: HAT }).waitFor();
       // The hat's one colour region, repainted blue.
       await member.locator('.wardrobe-colors input[type=color]').first().fill(HAT_COLOR);
+      // Rest geometry edits must survive server baking and a browser reload.
+      const width = member.getByRole('slider', { name: /가로 크기$/ });
+      await width.focus();
+      for (let i = 0; i < 10; i++) await width.press('ArrowRight');
+      const height = member.getByRole('slider', { name: /상하 위치$/ });
+      await height.focus();
+      for (let i = 0; i < 10; i++) await height.press('ArrowRight');
       const wear = member.getByRole('button', { name: '내 캐릭터로 입기' });
       await wear.and(member.locator(':enabled')).waitFor({ timeout: 60_000 });
       const queued = member.waitForResponse(
@@ -767,9 +775,17 @@ if (browser) {
         throw new Error(`look ${JSON.stringify({ status: look.status, worn: look.worn, modelUrl: look.modelUrl, error: look.error })}`);
       if (Object.keys(look.request.parts).join() !== 'hat') throw new Error(`the look wears ${Object.keys(look.request.parts)}`);
       if (look.request.colors.hat?.['0'] !== HAT_COLOR) throw new Error(`the look's colours ${JSON.stringify(look.request.colors)}`);
+      if (look.request.partEdits?.hat?.scale[0] !== 1.1 || look.request.partEdits?.hat?.translation[1] !== 0.01)
+        throw new Error(`part edit was lost: ${JSON.stringify(look.request.partEdits)}`);
+      if (JSON.stringify(look.report?.partEdits) !== JSON.stringify(look.request.partEdits))
+        throw new Error('the saved edit was not included in the bake');
       if (look.report?.recoloredMaterials !== 1) throw new Error(`the look was baked with ${JSON.stringify(look.report)}`);
       lookUrl = look.modelUrl;
       await shoot(member, 'member-look-wardrobe');
+      await member.reload();
+      await member.getByRole('slider', { name: /가로 크기$/ }).waitFor({ timeout: 60_000 });
+      if (await member.getByRole('slider', { name: /가로 크기$/ }).inputValue() !== '1.1')
+        throw new Error('reloaded wardrobe lost the saved scale');
       return lookUrl;
     },
     ['member'],

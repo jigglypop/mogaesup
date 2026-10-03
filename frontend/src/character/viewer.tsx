@@ -10,6 +10,7 @@ import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { captureRestPose } from './model-pose';
 import { NativeWardrobe, type Tuck, type Wearable } from './native-wardrobe';
+import type { PartEdit } from './part-edit';
 import { TextureExpressions } from './texture-expressions';
 import { matteCharacter } from './matte-materials';
 import { disposeObjectResources } from './assets/gpu-resources';
@@ -479,6 +480,7 @@ export class ModelViewer {
     return this.wardrobe.equip(parts).then(applied => { if (applied) this.render(); return applied; });
   }
   setHairColor(color: string | null) { this.wardrobe?.setHairColor(color); this.render(); }
+  setPartEdit(slot: string, edit: PartEdit | null) { this.wardrobe?.setPartEdit(slot, edit); this.render(); }
   setHiddenBodyTriangles(hidden: Record<string, Uint8Array> | null) { this.wardrobe?.hideTriangles(hidden); this.render(); }
   setTucked(slot: string, tuck: Tuck | null, outer: Record<string, Uint8Array> | null) { this.wardrobe?.tuckUnder(slot, tuck, outer); this.render(); }
   setPartColors(slot: string, material: number, mask: THREE.Texture, lights: number[], colors: (string | null)[]) { this.wardrobe?.setRegionColors(slot, material, mask, lights, colors); this.render(); }

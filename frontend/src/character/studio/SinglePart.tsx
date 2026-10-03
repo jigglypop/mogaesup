@@ -13,6 +13,7 @@ import { useMeshyOptions, meshyOptionsError } from './meshy-options';
 import { HairBatch } from './HairBatch';
 import { GlbAssetLibrary } from './GlbAssetLibrary';
 import garmentStyles from './garment-styles.json';
+import { request } from '../api';
 
 const methodOptions: Partial<Record<string, [PartMethod, string][]>> = {
   top: [['worn', '입힌 채 3D 생성'], ['body_shell', '몸에 맞춰 만들기'], ['isolated', '단독 3D 생성']],
@@ -51,6 +52,8 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const [meshyUploading, setMeshyUploading] = useState(false);
   const [error, setError] = useState('');
   const locked = useRef(false);
+  const referenceController = useRef<AbortController | null>(null), referenceAssets = useRef(new Map<string, string>());
+  const [referenceApplied, setReferenceApplied] = useState('');
   const recovery = studioApi.singlePartRecovery();
   const pending = recovery.pending;
   const differentPending = !!pending && pending.input.slot !== slot;
@@ -59,6 +62,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const askFit = fitsByPrompt(pending?.input.part_method || partMethod);
   // Designed garments for this slot: picking one fills its name, brief and lower-garment kind.
   const styles = garmentStyles.garments.filter(item => item.slot === slot);
+  const styleReference = styles.find(item => item.name === partName)?.reference;
   const chooseStyle = (styleName: string) => {
     const style = styles.find(item => item.name === styleName);
     setPartName(style?.name || '');
@@ -66,6 +70,28 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
     if (style && 'bottom_kind' in style) setBottomKind(style.bottom_kind as 'pants' | 'skirt');
   };
   const batchMode = slot === 'hair' && inputMode === 'batch' && !pending;
+
+  useEffect(() => {
+    setMeshyUploading(false); setReferenceApplied('');
+    return () => referenceController.current?.abort();
+  }, [slot]);
+  async function useStyleReference() {
+    if (!styleReference || inputLocked) return;
+    referenceController.current?.abort(); const controller = new AbortController(); referenceController.current = controller;
+    const reference = styleReference; setMeshyUploading(true); setError('');
+    try {
+      let id = referenceAssets.current.get(reference);
+      if (!id) {
+        const response = await fetch(reference, { signal: controller.signal });
+        if (!response.ok) throw new Error('스타일 참조 그림을 불러오지 못했습니다.');
+        const blob = await response.blob();
+        const asset = await request<{ id: string }>('/api/avatar-factory/meshy-options/texture-assets', { method: 'POST', body: blob, headers: { 'Content-Type': blob.type || 'image/png' }, signal: controller.signal, timeoutMs: 60000 });
+        id = asset.id; referenceAssets.current.set(reference, id);
+      }
+      if (!controller.signal.aborted) { meshy.setOptions({ ...meshy.options, should_texture: true, texture_mode: 'image', texture_image_assets: [id] }); setReferenceApplied(reference); }
+    } catch (reason) { if (!controller.signal.aborted) setError((reason as Error).message); }
+    finally { if (!controller.signal.aborted) setMeshyUploading(false); }
+  }
 
   useEffect(() => { setInputMode(slot === 'hair' ? 'batch' : 'generate'); setPartMethod(methodOptions[slot]?.[0]?.[0] || 'isolated'); }, [slot]);
   useEffect(() => {
@@ -154,6 +180,9 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
       {!batchMode && partMethod !== 'body_shell' && (capabilities?.model_providers?.length || 0) > 1 && <label>3D 제공자<select value={pending?.input.model_provider || provider} disabled={inputLocked} onChange={event => setProvider(event.target.value as 'meshy' | 'tripo')}>{capabilities!.model_providers!.map(value => <option key={value} value={value}>{value === 'tripo' ? 'Tripo' : 'Meshy'}</option>)}</select></label>}
       {!batchMode && styles.length > 0 && <label>스타일<select value={styles.find(item => item.name === partName)?.name || ''} disabled={inputLocked} onChange={event => chooseStyle(event.target.value)}>
         <option value="">직접 입력</option>{styles.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label>}
+      {!batchMode && styleReference && <div className="garment-style-reference"><img src={styleReference} alt={`${partName} 참조 그림`} />
+        {partMethod !== 'body_shell' && (pending?.input.model_provider || provider) === 'meshy' && <button type="button" disabled={inputLocked} onClick={() => void useStyleReference()}>{meshyUploading ? '참조 등록 중' : referenceApplied === styleReference && meshy.options.texture_mode === 'image' ? '텍스처 참조 다시 적용' : '텍스처 참조로 사용'}</button>}
+      </div>}
       {!batchMode && <label>이름<input value={pending?.input.part_name ?? partName} maxLength={100} disabled={inputLocked} onChange={event => setPartName(event.target.value)} /></label>}
       {!batchMode && <label>디자인<textarea value={pending?.input.description ?? brief} maxLength={2000} rows={5} disabled={inputLocked} onChange={event => setBrief(event.target.value)} /></label>}
       {!batchMode && <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'parts' })} target="_blank" rel="noreferrer">프롬프트 관리</a>}

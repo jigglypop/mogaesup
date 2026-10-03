@@ -19,6 +19,8 @@ import { createHeldLoads } from './held-loads';
 import { PartPreview } from './PartPreview';
 import { fitReason, reshapable, unfittedParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
+import { EDITABLE_PARTS, isDefaultPartEdit, type PartEdit } from '../part-edit';
+import { PartEditControls } from './PartEditControls';
 import './wardrobe.css';
 
 const hairSlots: readonly string[] = ['hair', 'hairFront', 'hairBack'];
@@ -60,10 +62,12 @@ function unionBits(target: Record<string, Uint8Array>, hidden: Record<string, st
 type PendingSave = { id: string; key: string; revision: string; input: WardrobeOutfit };
 /** How often a look being assembled is asked about. */
 const LOOK_POLL_MS = 1500;
-const outfitOfLook = (request: LookRequest): WardrobeOutfit => ({
+type PreviewOutfit = WardrobeOutfit & { partEdits?: Record<string, PartEdit> };
+const outfitOfLook = (request: LookRequest): PreviewOutfit => ({
   name: '', body: { job_id: request.body.jobId, version: request.body.version }, hair_color: request.hairColor,
   parts: Object.fromEntries(Object.entries(request.parts).map(([slot, part]) => [slot, { job_id: part.jobId, version: part.version, sha256: part.sha256 }])),
   colors: request.colors,
+  partEdits: request.partEdits,
 });
 
 export default function Wardrobe() {
@@ -108,6 +112,7 @@ export default function Wardrobe() {
   // Colour regions and chosen colours, both keyed by part (a new part starts from its own colours).
   const [palettes, setPalettes] = useState<Record<string, Palette>>({});
   const [colors, setColors] = useState<Record<string, Record<string, string>>>({});
+  const [partEdits, setPartEdits] = useState<Record<string, PartEdit>>({}), [editError, setEditError] = useState('');
   // One colour mask per worn garment: loaded once, let go when the garment comes off or is replaced.
   const maskLoads = useRef<ReturnType<typeof createHeldLoads<WardrobePart, Palette>> | null>(null);
   useEffect(() => {
@@ -124,7 +129,7 @@ export default function Wardrobe() {
   const [hairColor, setHairColor] = useState<string | null>(null);
   const [outfitName, setOutfitName] = useState(''), [loadedId, setLoadedId] = useState('');
   const [busy, setBusy] = useState(false), [saveError, setSaveError] = useState('');
-  const pendingSave = useRef<PendingSave | null>(null), pendingOutfit = useRef<WardrobeOutfit | null>(null);
+  const pendingSave = useRef<PendingSave | null>(null), pendingOutfit = useRef<PreviewOutfit | null>(null);
   // The member's own character: saved here, assembled by the server, worn on their island.
   const [look, setLook] = useState<Look | null>(null), [lookBusy, setLookBusy] = useState(false), [lookError, setLookError] = useState('');
   const [lookReady, setLookReady] = useState(false), [lookAttempt, setLookAttempt] = useState(0);
@@ -171,7 +176,7 @@ export default function Wardrobe() {
   }, [baking, lookBusy, user?.id]);
 
   useEffect(() => {
-    setViewer(null); setModelError(''); setClips([]); applied.current = {}; setWorn({}); setAppliedKey(''); setNotice('');
+    setViewer(null); setModelError(''); setClips([]); applied.current = {}; setWorn({}); setAppliedKey(''); setNotice(''); setPartEdits({}); setEditError('');
     if (!body || !mount.current) return;
     let active = true;
     const instance = new ModelViewer(mount.current, 'studio');
@@ -233,8 +238,13 @@ export default function Wardrobe() {
       setNotice('상의가 하의 구간까지 덮어 하의를 벗겼습니다.'); takeOff('bottom'); return;
     }
     const union: Record<string, Uint8Array> = {};
+    const originalCoverage = (part: WardrobePart) => {
+      const edit = partEdits[keyOf(part, part.slot)];
+      return !edit || isDefaultPartEdit(edit) ? coverages[coverageKey(part)] : undefined;
+    };
     for (const part of Object.values(applied.current)) {
-      const coverage = coverages[coverageKey(part)];
+      // Source coverage no longer proves that moved or resized geometry covers the same skin.
+      const coverage = originalCoverage(part);
       if (coverage) unionBits(union, coverage.hidden);
     }
     viewer.setHiddenBodyTriangles(Object.keys(union).length ? union : null);
@@ -248,16 +258,16 @@ export default function Wardrobe() {
       if (!tuck) continue;
       const outer: Record<string, Uint8Array> = {};
       for (const over of coverage.under || []) {
-        const covering = applied.current[over] && coverages[coverageKey(applied.current[over])];
+        const covering = applied.current[over] && originalCoverage(applied.current[over]);
         if (!covering) continue;
         if (slotName !== 'hair') unionBits(outer, covering.over || covering.hidden);
         else if (covering.covers_head) unionBits(outer, covering.over || covering.hidden);
       }
       viewer.setTucked(slotName, tuck, Object.keys(outer).length ? outer : null);
     }
-  }, [appliedKey, coverages, viewer]);
+  }, [appliedKey, coverages, partEdits, viewer]);
 
-  function applyOutfit(outfit: WardrobeOutfit, listed: WardrobePart[]) {
+  function applyOutfit(outfit: PreviewOutfit, listed: WardrobePart[]) {
     const next: Worn = {};
     const slots = compatiblePartSlots(Object.keys(outfit.parts));
     for (const [slotName, ref] of Object.entries(outfit.parts)) {
@@ -269,6 +279,10 @@ export default function Wardrobe() {
       next[slotName] = part;
     }
     setWearError(''); setWorn(next); setHairColor(outfit.hair_color || null);
+    setPartEdits(Object.fromEntries(Object.entries(next).flatMap(([slotName, part]) => {
+      const edit = outfit.partEdits?.[slotName], ref = outfit.parts[slotName];
+      return edit && ref && part.version === ref.version && part.sha256 === ref.sha256 ? [[keyOf(part, slotName), edit]] : [];
+    })));
     const removed = Object.keys(outfit.parts).filter(slot => !slots.includes(slot));
     setNotice(removed.length ? `겹치는 머리 파츠를 벗겼습니다: ${removed.map(slot => labels[slot] || slot).join(', ')}` : '');
     setColors(current => {
@@ -297,6 +311,13 @@ export default function Wardrobe() {
       viewer.setPartColors(part.slot, palette.material, palette.mask, palette.regions.map(region => region.light), [0, 1, 2, 3].map(index => chosen[String(index)] || null));
     }
   }, [appliedKey, palettes, colors, viewer]);
+  useEffect(() => {
+    if (!viewer) return;
+    try {
+      for (const [slotName, part] of Object.entries(applied.current)) if ((EDITABLE_PARTS as readonly string[]).includes(slotName)) viewer.setPartEdit(slotName, partEdits[keyOf(part, slotName)] || null);
+      setEditError('');
+    } catch (reason) { setEditError((reason as Error).message); }
+  }, [appliedKey, partEdits, coverages, viewer]);
   // An outfit on another body is worn once that body and its parts have loaded. Restoring the saved look ends there, and
   // also when the bodies, the body's model or its parts fail to load: the screen opens and shows the error, and the
   // saved look still goes on once a retry brings what was missing.
@@ -370,6 +391,10 @@ export default function Wardrobe() {
   function currentLook(): LookRequest | null {
     if (!body) return null;
     const worn = Object.entries(applied.current);
+    const edits = Object.fromEntries(worn.flatMap(([slotName, part]) => {
+      const edit = partEdits[keyOf(part, slotName)];
+      return edit && !isDefaultPartEdit(edit) ? [[slotName, edit]] : [];
+    }));
     return {
       body: { jobId: body.job_id, version: body.version },
       parts: Object.fromEntries(worn.map(([slotName, part]) => [slotName, { jobId: part.job_id, version: part.version, sha256: part.sha256 }])),
@@ -377,6 +402,7 @@ export default function Wardrobe() {
       colors: Object.fromEntries(worn
         .filter(([slotName, part]) => !hairSlots.includes(slotName) && Object.keys(colors[keyOf(part, slotName)] || {}).length)
         .map(([slotName, part]) => [slotName, colors[keyOf(part, slotName)] || {}])),
+      ...(Object.keys(edits).length ? { partEdits: edits } : {}),
     };
   }
   async function saveLook() {
@@ -486,9 +512,15 @@ export default function Wardrobe() {
             <WardrobeShape key={slotName} part={part} label={labels[slotName] || slotName} reload={reloadParts}
               replace={next => setWorn(current => ({ ...current, [slotName]: next }))} />)}</ul>
         </div>}
+        {Object.keys(worn).some(slotName => (EDITABLE_PARTS as readonly string[]).includes(slotName)) && <div className="wardrobe-part-edits"><h2>크기와 위치</h2>
+          {EDITABLE_PARTS.filter(slotName => worn[slotName]).map(slotName => <PartEditControls key={keyOf(worn[slotName]!, slotName)} label={labels[slotName] || slotName}
+            value={partEdits[keyOf(worn[slotName]!, slotName)]} disabled={!settled || !lookReady || lookBusy || baking}
+            onChange={edit => setPartEdits(current => { const next = { ...current }, key = keyOf(worn[slotName]!, slotName); if (edit) next[key] = edit; else delete next[key]; return next; })} />)}
+          {editError && <p role="alert">{editError}</p>}
+        </div>}
         <div className="wardrobe-look"><h2>내 캐릭터</h2>
           <div className="wardrobe-look-row">
-            <button type="button" className="is-primary" disabled={!lookReady || lookBusy || baking || !settled || !!wearError} onClick={() => void saveLook()}>{baking ? '입히는 중' : '내 캐릭터로 입기'}</button>
+            <button type="button" className="is-primary" disabled={!lookReady || lookBusy || baking || !settled || !!wearError || !!editError} onClick={() => void saveLook()}>{baking ? '입히는 중' : '내 캐릭터로 입기'}</button>
             {look?.status === 'ready' && (look.worn
               ? <><span role="status">섬에서 입고 있어요</span>{user && <Link to={`/@${user.username}`}>내 섬으로</Link>}</>
               : <button type="button" disabled={lookBusy} onClick={() => void wearLook()}>섬에서 입기</button>)}

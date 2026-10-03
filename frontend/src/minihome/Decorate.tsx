@@ -24,6 +24,7 @@ import { FURNITURE, ISLAND_FLOORS, LIVING, NATURE, SHELVES, type ModelPiece, typ
 import { useEditState } from './edit/context';
 import { EditIcon, PieceIcon } from './edit/icons';
 import { EIGHTHS, SelectionInspector, Stepper, Turns } from './edit/Inspector';
+import { LayoutComposer } from './edit/LayoutComposer';
 import { degreesOf } from './edit/objects';
 import type { EditPart, EditSession, EditTool } from './edit/session';
 import type { ResidentStore } from './residents';
@@ -113,13 +114,14 @@ type DecorateProps = {
   residents: ResidentStore;
   npcItems: CatalogItem[];
   onReset: () => void;
+  ownerId: string;
 };
 
 /**
  * 꾸미기: the island's decorating tools over gaesup-world's building store. 선택 picks placed objects to move, turn,
  * copy or remove; 놓기, 칠하기 and 지우기 are the engine's tools, working on the drawer's objects, floors or walls.
  */
-export function Decorate({ session, studioItems, residents, npcItems, onReset }: DecorateProps) {
+export function Decorate({ session, studioItems, residents, npcItems, onReset, ownerId }: DecorateProps) {
   const store = useBuildingStoreApi();
   const tool = useEditState(session, (state) => state.tool);
   const part = useEditState(session, (state) => state.part);
@@ -449,6 +451,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset }:
 
       <section className={`mg-drawer mg-glass${tool === 'select' && selected ? ' is-behind' : ''}`} aria-label="놓을 것">
         <div className="mg-drawer-head">
+          <LayoutComposer session={session} residents={residents} studioItems={studioItems} ownerId={ownerId} />
           <div className="mg-tabs is-fit" role="tablist" aria-label="종류">
             {SHELVES.map((item) => (
               <button key={item.id} role="tab" aria-selected={shelf === item.id} onClick={() => chooseShelf(item.id)}>

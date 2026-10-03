@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { homeApi, homesPath } from '../endpoints';
+import { homeApi, homesPath, layoutApi } from '../endpoints';
 
 describe('섬 목록 주소', () => {
   it('정한 것만 붙인다', () => {
@@ -33,6 +33,18 @@ describe('섬 목록 주소', () => {
       fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ homes: [] }), { status: 200 }));
       await homeApi.list({ limit: 24, q: '모개' });
       expect(String(fetchMock.mock.calls[0]?.[0])).toBe(`/api${homesPath({ limit: 24, q: '모개' })}`);
+    });
+
+    it('AI 배치의 재시도는 같은 요청키를 전달한다', async () => {
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ kind: 'cafe' }), { status: 200 }));
+      const body = { description: '12m 카페', mode: 'ai' as const, requestId: 'layout-request-123' };
+      await layoutApi.interpret(body);
+      await layoutApi.interpret(body);
+      for (const [url, options] of fetchMock.mock.calls) {
+        expect(url).toBe('/api/studio/layouts/interpret');
+        expect(options?.headers).toMatchObject({ 'Idempotency-Key': body.requestId, 'content-type': 'application/json' });
+        expect(JSON.parse(options?.body as string)).toEqual(body);
+      }
     });
 
     it('섬 저장은 다른 요청보다 오래, 60초를 기다린다', async () => {

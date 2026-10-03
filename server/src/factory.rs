@@ -274,11 +274,12 @@ enum Need {
 /// other POST is treated as paid: the character server starts generation, rigging, retries and resumes with POSTs, and
 /// a new one must not slip through as free. Rig transfer stays paid although its own step is local: the assembly after
 /// it requests the job's default faces from the image provider when they were never made.
-const FREE_POSTS: [&[&str]; 19] = [
+const FREE_POSTS: [&[&str]; 23] = [
     &["avatar-factory", "jobs", "*", "native-parts", "select"],
     // Fitting the generated parts to the body, and fitting one again, without a provider request.
     &["avatar-factory", "jobs", "*", "native-parts"],
     &["avatar-factory", "jobs", "*", "native-parts", "refit"],
+    &["avatar-factory", "jobs", "*", "native-parts", "*", "review"],
     &["avatar-factory", "base-bodies", "glb-assets"],
     &["avatar-factory", "meshy-options", "texture-assets"],
     &["avatar-factory", "part-batches", "split-sheet"],
@@ -296,12 +297,17 @@ const FREE_POSTS: [&[&str]; 19] = [
     &["studio", "bodies", "*", "*", "expression-generations", "*", "bake"],
     &["characters"],
     &["characters", "*", "sources"],
+    &["characters", "*", "actions", "inspect_model"],
+    &["characters", "*", "actions", "organize_parts"],
+    &["characters", "*", "actions", "record_review"],
 ];
 
 /// Paid POSTs for which the character server requires an `Idempotency-Key` and keeps one piece of work per key: a
 /// request sent again with the same key gets the work already started. Only on these does the monthly budget count a
 /// key once. The other paid POSTs ignore the header, so each of their requests counts.
-const KEYED_POSTS: [&[&str]; 15] = [
+const KEYED_POSTS: [&[&str]; 17] = [
+    &["studio", "layouts", "interpret"],
+    &["avatar-factory", "jobs", "*", "native-parts", "*", "review"],
     &["avatar-factory", "base-bodies"],
     &["avatar-factory", "base-bodies", "glb"],
     &["avatar-factory", "image-jobs"],
@@ -912,6 +918,10 @@ mod tests {
             "avatar-factory/jobs/j1/native-parts/select",
             "avatar-factory/jobs/j1/native-parts",
             "avatar-factory/jobs/j1/native-parts/refit",
+            "avatar-factory/jobs/j1/native-parts/v2/review",
+            "characters/c1/actions/inspect_model",
+            "characters/c1/actions/organize_parts",
+            "characters/c1/actions/record_review",
             "studio/glb-assets/upload",
             "studio/textures",
             "studio/generations/g1/vector",
@@ -934,6 +944,9 @@ mod tests {
             "studio/bodies/j1/v1/expression-generations/e1/resume",
             "avatar-factory/jobs/j1/meshy/rig",
             "avatar-factory/jobs/j1/native-parts/v2",
+            "characters/c1/actions/generate_mesh",
+            "characters/c1/actions/inspect_model/extra",
+            "studio/layouts/interpret",
             // Its assembly can request the job's default faces from the image provider.
             "avatar-factory/jobs/j1/rig-transfer",
         ] {

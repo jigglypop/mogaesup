@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -71,6 +71,9 @@ blender = [
     { name = "blender-mcp" },
     { name = "mcp" },
 ]
+studio-mcp = [
+    { name = "mcp" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -84,6 +87,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.109.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", marker = "extra == 'blender'", specifier = ">=1.9.0,<2" },
+    { name = "mcp", marker = "extra == 'studio-mcp'", specifier = "==1.30.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "psutil", specifier = ">=7.2,<8" },
@@ -93,7 +97,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.27.0" },
     { name = "vtracer", specifier = ">=0.6.15" },
 ]
-provides-extras = ["blender"]
+provides-extras = ["studio-mcp", "blender"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0.0" }]
@@ -482,6 +486,9 @@ dependencies = [
 blender = [
     { name = "asset-3d-api", extra = ["blender"] },
 ]
+studio-mcp = [
+    { name = "asset-3d-api", extra = ["studio-mcp"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -492,8 +499,9 @@ dev = [
 requires-dist = [
     { name = "asset-3d-api", editable = "backend" },
     { name = "asset-3d-api", extras = ["blender"], marker = "extra == 'blender'", editable = "backend" },
+    { name = "asset-3d-api", extras = ["studio-mcp"], marker = "extra == 'studio-mcp'", editable = "backend" },
 ]
-provides-extras = ["blender"]
+provides-extras = ["studio-mcp", "blender"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0.0" }]

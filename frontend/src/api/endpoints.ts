@@ -22,6 +22,9 @@ import type {
   IlchonStatus,
   Look,
   LookRequest,
+  LayoutInterpretInput,
+  LayoutInterpretation,
+  LayoutCapabilities,
   ProfileChanges,
   RealtimeTicket,
   Registration,
@@ -135,4 +138,13 @@ export const lookApi = {
   /** Saves it and starts assembling it; poll `mine` until it is no longer `baking`. */
   save: (body: LookRequest) => api<{ look: Look }>('/looks/me', { method: 'PUT', body }),
   wear: (worn: boolean) => api<{ look: Look }>('/looks/me', { method: 'PATCH', body: { worn } }),
+};
+
+export const layoutApi = {
+  capabilities: (signal?: AbortSignal) => api<LayoutCapabilities>('/studio/layouts/capabilities', { signal }),
+  interpret: (body: LayoutInterpretInput, signal?: AbortSignal) =>
+    api<LayoutInterpretation>('/studio/layouts/interpret', {
+      method: 'POST', body, signal, timeoutMs: 60_000,
+      headers: body.requestId ? { 'Idempotency-Key': body.requestId } : undefined,
+    }),
 };

@@ -1,0 +1,655 @@
+{
+  "contract": "store-layout-v1",
+  "delivery": "proposed_plan",
+  "planId": "cafe-example-01",
+  "title": "12m 카페 배치 초안",
+  "status": "blocked",
+  "baseline": {
+    "worldId": "example-store-v1",
+    "revision": 0,
+    "source": "illustrative_fixture"
+  },
+  "grid": {
+    "originM": [
+      0,
+      0,
+      0
+    ],
+    "originAlignment": "cell_center",
+    "tileSizeM": 4,
+    "objectSnapM": 1,
+    "heightStepM": 1
+  },
+  "region": {
+    "minXZ": [
+      -2,
+      -2
+    ],
+    "maxXZ": [
+      10,
+      10
+    ],
+    "layoutAnchorCell": {
+      "x": 0,
+      "z": 0
+    }
+  },
+  "tiles": [
+    {
+      "tileId": "cafe-floor-0-0",
+      "action": "install",
+      "cell": {
+        "x": 0,
+        "z": 0,
+        "level": 0
+      },
+      "centerM": [
+        0,
+        0,
+        0
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-1-0",
+      "action": "install",
+      "cell": {
+        "x": 1,
+        "z": 0,
+        "level": 0
+      },
+      "centerM": [
+        4,
+        0,
+        0
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-2-0",
+      "action": "install",
+      "cell": {
+        "x": 2,
+        "z": 0,
+        "level": 0
+      },
+      "centerM": [
+        8,
+        0,
+        0
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-0-1",
+      "action": "install",
+      "cell": {
+        "x": 0,
+        "z": 1,
+        "level": 0
+      },
+      "centerM": [
+        0,
+        0,
+        4
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-1-1",
+      "action": "install",
+      "cell": {
+        "x": 1,
+        "z": 1,
+        "level": 0
+      },
+      "centerM": [
+        4,
+        0,
+        4
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-2-1",
+      "action": "install",
+      "cell": {
+        "x": 2,
+        "z": 1,
+        "level": 0
+      },
+      "centerM": [
+        8,
+        0,
+        4
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-0-2",
+      "action": "install",
+      "cell": {
+        "x": 0,
+        "z": 2,
+        "level": 0
+      },
+      "centerM": [
+        0,
+        0,
+        8
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-1-2",
+      "action": "install",
+      "cell": {
+        "x": 1,
+        "z": 2,
+        "level": 0
+      },
+      "centerM": [
+        4,
+        0,
+        8
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    },
+    {
+      "tileId": "cafe-floor-2-2",
+      "action": "install",
+      "cell": {
+        "x": 2,
+        "z": 2,
+        "level": 0
+      },
+      "centerM": [
+        8,
+        0,
+        8
+      ],
+      "sizeCells": 1,
+      "shape": "box",
+      "surfaceMode": "engine_base",
+      "topY": 0,
+      "baseY": -0.04,
+      "thicknessM": 0.04,
+      "floorPresetId": "oak-planks"
+    }
+  ],
+  "walls": [
+    {
+      "wallId": "cafe-north-0",
+      "tileId": "cafe-floor-0-0",
+      "edge": "north",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-south-0",
+      "tileId": "cafe-floor-0-2",
+      "edge": "south",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-north-1",
+      "tileId": "cafe-floor-1-0",
+      "edge": "north",
+      "kind": "window",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-south-1",
+      "tileId": "cafe-floor-1-2",
+      "edge": "south",
+      "kind": "door",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-north-2",
+      "tileId": "cafe-floor-2-0",
+      "edge": "north",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-south-2",
+      "tileId": "cafe-floor-2-2",
+      "edge": "south",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-west-0",
+      "tileId": "cafe-floor-0-0",
+      "edge": "west",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-east-0",
+      "tileId": "cafe-floor-2-0",
+      "edge": "east",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-west-1",
+      "tileId": "cafe-floor-0-1",
+      "edge": "west",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-east-1",
+      "tileId": "cafe-floor-2-1",
+      "edge": "east",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-west-2",
+      "tileId": "cafe-floor-0-2",
+      "edge": "west",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    },
+    {
+      "wallId": "cafe-east-2",
+      "tileId": "cafe-floor-2-2",
+      "edge": "east",
+      "kind": "solid",
+      "wallPresetId": "shopfront",
+      "heightM": 4,
+      "thicknessM": 0.5
+    }
+  ],
+  "objects": [
+    {
+      "objectId": "cafe-table",
+      "catalogId": "table-basic",
+      "tileId": "cafe-floor-0-0",
+      "positionM": [
+        0,
+        0,
+        2
+      ],
+      "rotationDeg": 90,
+      "sizeFactor": 1,
+      "footprintM": [
+        [
+          -1.251102,
+          2.638236
+        ],
+        [
+          -1.251102,
+          1.361764
+        ],
+        [
+          1.251101,
+          1.361764
+        ],
+        [
+          1.251101,
+          2.638236
+        ]
+      ],
+      "placementRole": "좌석 테이블"
+    },
+    {
+      "objectId": "cafe-chair-north",
+      "catalogId": "chair-basic",
+      "tileId": "cafe-floor-0-0",
+      "positionM": [
+        0,
+        0,
+        0
+      ],
+      "rotationDeg": 0,
+      "sizeFactor": 1,
+      "footprintM": [
+        [
+          -0.530785,
+          -0.451335
+        ],
+        [
+          0.533885,
+          -0.451335
+        ],
+        [
+          0.533885,
+          0.483568
+        ],
+        [
+          -0.530785,
+          0.483568
+        ]
+      ],
+      "placementRole": "북쪽 좌석"
+    },
+    {
+      "objectId": "cafe-chair-south",
+      "catalogId": "chair-basic",
+      "tileId": "cafe-floor-0-1",
+      "positionM": [
+        0,
+        0,
+        4
+      ],
+      "rotationDeg": 180,
+      "sizeFactor": 1,
+      "footprintM": [
+        [
+          0.530785,
+          4.451335
+        ],
+        [
+          -0.533885,
+          4.451335
+        ],
+        [
+          -0.533885,
+          3.516432
+        ],
+        [
+          0.530785,
+          3.516432
+        ]
+      ],
+      "placementRole": "남쪽 좌석"
+    },
+    {
+      "objectId": "cafe-counter",
+      "catalogId": "shop-stall-basic",
+      "tileId": "cafe-floor-2-0",
+      "positionM": [
+        8,
+        0,
+        0
+      ],
+      "rotationDeg": 90,
+      "sizeFactor": 1,
+      "footprintM": [
+        [
+          6.845765,
+          0.602756
+        ],
+        [
+          6.845765,
+          -0.431588
+        ],
+        [
+          9.154235,
+          -0.431588
+        ],
+        [
+          9.154235,
+          0.602756
+        ]
+      ],
+      "placementRole": "카운터 역할 가판대"
+    },
+    {
+      "objectId": "cafe-lamp",
+      "catalogId": "lamp-basic",
+      "tileId": "cafe-floor-2-2",
+      "positionM": [
+        8,
+        0,
+        8
+      ],
+      "rotationDeg": 0,
+      "sizeFactor": 1,
+      "footprintM": [
+        [
+          7.765034,
+          7.75294
+        ],
+        [
+          8.234966,
+          7.75294
+        ],
+        [
+          8.234966,
+          8.247056
+        ],
+        [
+          7.765034,
+          8.247056
+        ]
+      ],
+      "placementRole": "조명"
+    }
+  ],
+  "entrances": [
+    {
+      "entranceId": "cafe-entry",
+      "wallId": "cafe-south-1",
+      "clearOpeningWidthM": 2.08,
+      "outsidePointXZ": [
+        4,
+        11
+      ],
+      "insidePointXZ": [
+        4,
+        8
+      ]
+    }
+  ],
+  "circulation": {
+    "minClearWidthM": 1.5,
+    "safetyMarginM": 0.15,
+    "avatarCapsuleDiameterM": 0.6,
+    "paths": [
+      {
+        "pathId": "entry-main",
+        "entranceId": "cafe-entry",
+        "targetObjectIds": [
+          "cafe-counter"
+        ],
+        "pointsXZ": [
+          [
+            4,
+            10
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            6,
+            0
+          ]
+        ],
+        "clearWidthM": 1.5,
+        "cap": "butt"
+      },
+      {
+        "pathId": "north-seat-access",
+        "entranceId": "cafe-entry",
+        "targetObjectIds": [
+          "cafe-chair-north"
+        ],
+        "pointsXZ": [
+          [
+            4,
+            0
+          ],
+          [
+            2,
+            0
+          ]
+        ],
+        "clearWidthM": 1.5,
+        "cap": "butt"
+      },
+      {
+        "pathId": "south-seat-access",
+        "entranceId": "cafe-entry",
+        "targetObjectIds": [
+          "cafe-chair-south"
+        ],
+        "pointsXZ": [
+          [
+            4,
+            4
+          ],
+          [
+            2,
+            4
+          ]
+        ],
+        "clearWidthM": 1.5,
+        "cap": "butt"
+      }
+    ],
+    "targetReachM": 1.5
+  },
+  "assumptions": [
+    "입력은 빈 공간의 illustrative_fixture이며 실제 회원의 섬을 읽은 결과가 아니다.",
+    "가판대를 카운터 배치로 사용하며 판매 기능은 포함하지 않는다."
+  ],
+  "missingAssets": [],
+  "blockers": [
+    {
+      "code": "actual_world_snapshot_required",
+      "message": "현재 섬의 snapshot·revision·기존 객체를 읽고 다시 검수해야 적용할 수 있다."
+    },
+    {
+      "code": "external_approach_unverified",
+      "message": "입구 바깥 바닥과 접근 경로는 적용 전 확인해야 한다."
+    },
+    {
+      "code": "delivered_geometry_unverified",
+      "message": "Sample bounds measure vendor source only; inspect delivered GLB hash and bounds after build quantization or public overrides before application."
+    }
+  ],
+  "qualityChecks": [
+    {
+      "id": "schema",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "catalog_and_asset_hashes",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "baseline_revision",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "references_and_unique_ids",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "grid_heights_and_thickness",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "floor_and_region_bounds",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "measured_footprints",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "object_and_wall_collisions",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "interior_circulation",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "external_approach",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "id": "save_envelope_size",
+      "status": "pending",
+      "evidence": null
+    }
+  ]
+}

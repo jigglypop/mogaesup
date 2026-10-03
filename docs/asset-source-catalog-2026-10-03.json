@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "asset-source-candidates-v1",
+  "verifiedAt": "2026-10-03",
+  "status": "metadata_and_design_candidates_only",
+  "sources": [
+    {
+      "id": "existing-prop-manifest",
+      "kind": "existing_production_briefs",
+      "sourcePath": "scripts/props/manifest.json",
+      "itemCount": 69,
+      "categories": {"furniture": 32, "tree": 23, "prop": 14},
+      "status": "local_source_verified",
+      "assetAvailability": "not_inferred_from_brief_count"
+    },
+    {
+      "id": "existing-garment-briefs",
+      "kind": "existing_design_briefs",
+      "sourcePath": "frontend/src/character/studio/garment-styles.json",
+      "itemCount": 27,
+      "categories": {"top": 12, "bottom": 6, "shoes": 5, "hat": 4},
+      "status": "local_source_verified",
+      "assetAvailability": "not_inferred_from_brief_count"
+    },
+    {
+      "id": "kenney-furniture-kit",
+      "kind": "external_model_pack",
+      "sourceUrl": "https://kenney.nl/assets/furniture-kit",
+      "author": "Kenney",
+      "license": "CC0-1.0",
+      "reportedFiles": 140,
+      "releaseYear": 2018,
+      "roles": ["table", "chair", "storage", "lamp"],
+      "status": "source_verified",
+      "downloaded": false,
+      "technicalStatus": "not_inspected",
+      "visualReview": "not_reviewed"
+    },
+    {
+      "id": "kenney-building-kit",
+      "kind": "external_model_pack",
+      "sourceUrl": "https://kenney.nl/assets/building-kit",
+      "author": "Kenney",
+      "license": "CC0-1.0",
+      "reportedFiles": 80,
+      "releaseYear": 2024,
+      "roles": ["door", "window", "building_detail"],
+      "status": "source_verified",
+      "downloaded": false,
+      "technicalStatus": "not_inspected",
+      "visualReview": "not_reviewed"
+    },
+    {
+      "id": "polyhaven",
+      "kind": "external_asset_library",
+      "sourceUrl": "https://polyhaven.com/",
+      "licenseUrl": "https://polyhaven.com/license",
+      "license": "CC0-1.0",
+      "apiDocumentationUrl": "https://polyhaven.com/our-api",
+      "apiPolicyAnnouncedAt": "2026-07-18",
+      "apiUsage": {"commercialUse": "free_as_of_verified_date", "uniqueUserAgentRequired": true, "visibleSourceCreditRequired": true},
+      "roles": ["floor_material", "wood_material", "stone_material", "prop"],
+      "status": "source_verified",
+      "downloaded": false,
+      "technicalStatus": "not_inspected",
+      "visualReview": "not_reviewed"
+    },
+    {
+      "id": "uniqlo-u-2026-fw-reference",
+      "kind": "style_reference_only",
+      "sourceUrl": "https://www.uniqlo.com/jp/ja/women/special-collaboration/uniqlo-u",
+      "releaseNoticeUrl": "https://faq.uniqlo.com/articles/Knowledge/100015686/?l=ja",
+      "collection": "2026 autumn winter",
+      "market": "Japan",
+      "releaseDate": "2026-09-11",
+      "observedFamilies": ["fleece_short_jacket", "utility_jacket", "wool_blend_short_coat"],
+      "status": "source_verified",
+      "downloaded": false,
+      "redistributableAsset": false,
+      "trendRankingVerified": false
+    }
+  ],
+  "designCandidates": [
+    {"id": "oatmeal-short-fleece", "slot": "top", "name": "오트밀 짧은 플리스 집업", "referenceSources": ["existing-garment-briefs", "uniqlo-u-2026-fw-reference"], "brief": "Short oatmeal fleece zip jacket for the shared chibi body. Rounded collar, one large zipper, relaxed sleeves, matte surface. No logos, text or fine fur strands.", "status": "proposed", "produced": false},
+    {"id": "khaki-utility-shacket", "slot": "top", "name": "카키 유틸리티 셔켓", "referenceSources": ["existing-garment-briefs", "uniqlo-u-2026-fw-reference"], "brief": "Matte khaki utility shirt-jacket with two large front patch pockets and a simple straight hem for the shared chibi body. Keep neck and sleeve openings, no logos or tiny hardware.", "status": "proposed", "produced": false},
+    {"id": "cocoa-short-coat", "slot": "top", "name": "코코아 짧은 코트", "referenceSources": ["uniqlo-u-2026-fw-reference"], "brief": "Cocoa short coat with broad rounded lapels and two large buttons for the shared chibi body. Matte cloth, simple silhouette, clear neck and wrist openings, no text or branding.", "status": "proposed", "produced": false},
+    {"id": "navy-wide-straight-pants", "slot": "bottom", "name": "네이비 와이드 스트레이트 팬츠", "referenceSources": ["existing-garment-briefs"], "brief": "Navy wide straight-leg pants for the shared chibi body. Simplified matte fabric, open waist and ankle cuffs, no cargo pockets, logos or fine seams.", "status": "proposed", "produced": false},
+    {"id": "cream-low-profile-sneakers", "slot": "shoes", "name": "크림 로우 프로파일 운동화", "referenceSources": ["existing-garment-briefs"], "brief": "Cream low-profile sneakers with a tan sole for the shared chibi body. Rounded toes, simplified broad lace shapes, no logos, separate correct left and right feet.", "status": "proposed", "produced": false},
+    {"id": "cocoa-round-loafers", "slot": "shoes", "name": "코코아 둥근 로퍼와 크림 양말", "referenceSources": ["existing-garment-briefs"], "brief": "Cocoa rounded penny loafers with cream socks for the shared chibi body. Matte surface, no logos or small ornaments, preserve ankle openings and correct paired feet.", "status": "proposed", "produced": false}
+  ]
+}

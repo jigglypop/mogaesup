@@ -298,10 +298,27 @@ export type CatalogVersion = {
 /** A wardrobe part a look wears: the very file the wardrobe listed. */
 export type LookPartRef = { jobId: string; version: string; sha256: string };
 
+/** Rest geometry adjustment in the body's metre coordinates, around the part's bounds centre. */
+export type LookPartEdit = { scale: [number, number, number]; translation: [number, number, number] };
+
+export type LayoutInterpretInput = { description: string; mode: 'rules' | 'ai'; requestId?: string };
+export type LayoutCapabilities = { rules: boolean; ai: boolean };
+export type LayoutInterpretation = {
+  kind: 'cafe' | 'shop' | 'office';
+  widthCells: number;
+  depthCells: number;
+  seats: number;
+  floorPresetId: string;
+  wallPresetId: string;
+  interpretation: 'rules' | 'ai';
+  warnings: string[];
+};
+
 /** What a member dressed their character in: a wardrobe body, a part per slot, hair and garment region colours. */
 export type LookRequest = {
   body: { jobId: string; version: string };
   parts: Record<string, LookPartRef>;
+  partEdits?: Record<string, LookPartEdit>;
   hairColor: string | null;
   /** Per garment slot, region index ("0"–"3") to `#rrggbb`. */
   colors: Record<string, Record<string, string>>;

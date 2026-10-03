@@ -89,4 +89,17 @@ describe('실제 조립 검수 수치', () => {
     expect(mounted.container.textContent).toContain('시각 검수 필요');
     await mounted.unmount();
   });
+
+  it.each([['approved', '시각 승인 완료'], ['stale', '변경됨 · 재검수 필요']] as const)('sealed 품질은 유지하고 %s 시각 승인 기록을 표시한다', async (status, label) => {
+    const value = state();
+    value.quality = { revision: 'assembly-quality-v1', status: 'review_required', visual_review: 'required', production_spec_sha256: 'spec', artifacts: {}, delivery: {}, checks: [], parts: {}, runtime: {} };
+    value.review = { status, reviewer_name: '검수자', reviewed_at: '2026-10-03T00:00:00Z', notes: '네 방향과 동작을 확인했습니다.' };
+    const quality = JSON.stringify(value.quality);
+    const mounted = await mount(<PipelineQuality state={value} />);
+    expect(mounted.container.querySelector('summary')?.textContent).toContain(label);
+    expect(mounted.container.textContent).toContain('검수자');
+    expect(mounted.container.textContent).toContain(value.review.notes);
+    expect(JSON.stringify(value.quality)).toBe(quality);
+    await mounted.unmount();
+  });
 });

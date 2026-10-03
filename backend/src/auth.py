@@ -224,7 +224,9 @@ def get_current_user(request: Request) -> UserContext:
     token = _bearer_token(request)
     claims = _decode_claims(token)
     user_id = _extract_user_id(claims)
-    username = str(claims.get("sub") or "")
+    # The gateway uses a fixed factory owner for storage and signs the actual
+    # member username in name. It is audit identity, never an ownership override.
+    username = str(claims.get("name") or claims.get("sub") or "")
     user = UserContext(user_id=user_id, username=username, roles=_extract_roles(claims))
     if user.level != _ADMIN_LEVEL:
         raise HTTPException(status_code=403, detail="Studio operator access required")

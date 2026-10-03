@@ -3,6 +3,12 @@
   "garments": [
     {
       "slot": "top",
+      "name": "오트밀 유틸리티 블루종",
+      "brief": "Original unbranded oatmeal utility blouson for a chibi character in T pose. Dark chocolate stand collar and zipper, two broad rounded patch pockets, loose sleeves, soft matte fabric, clear collar and cuff openings. No text or logos.",
+      "reference": "/character/references/oatmeal-utility-blouson.png"
+    },
+    {
+      "slot": "top",
       "name": "버터 옐로 오버핏 후드티",
       "brief": "Oversized pullover hoodie in soft butter yellow with the hood DOWN, lying flat on the upper back and shoulders, never worn on the head. Front kangaroo pocket, white drawstrings, ribbed cuffs and hem, relaxed dropped shoulders, long sleeves."
     },

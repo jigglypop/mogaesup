@@ -180,6 +180,9 @@ class AvatarNativeParts:
                         'artifacts': [{'name': name, 'sha256': value,
                             'url': f'/api/avatar-factory/jobs/{job}/native-parts/{source_version}/{name}'}
                             for name, value in source_record.get('files', {}).items()]}
+        from src.services.avatar_native_reviews import AvatarNativeReviews
+        state['assembly_sha256'] = record.get('files', {}).get('model.glb')
+        state['review'] = AvatarNativeReviews(self.factory).overlay(owner, job, version, record)
         return state
 
     def start_refit(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None):

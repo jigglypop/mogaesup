@@ -13,7 +13,9 @@ export function PipelineQuality({ state }: { state: NativePartsState }) {
   const model = quality.delivery.model;
   const report = state.artifacts.find(item => item.name === 'quality.json');
   return <details className="assembly-quality">
-    <summary>조립 검수 · {quality.visual_review === 'approved' ? '시각 승인 완료' : '시각 검수 필요'}</summary>
+    <summary>조립 검수 · {state.review?.status === 'approved' ? '시각 승인 완료' : state.review?.status === 'changes_requested' ? '수정 필요' : state.review?.status === 'stale' ? '변경됨 · 재검수 필요' : '시각 검수 필요'}</summary>
+    {state.review?.notes && <p>{state.review.notes}</p>}
+    {state.review?.reviewed_at && <p>검수 기록 {state.review.reviewer_name && `${state.review.reviewer_name} · `}{new Date(state.review.reviewed_at).toLocaleString('ko-KR')}</p>}
     <dl>
       <dt>후면 헤어 가림</dt><dd>{rear?.rays ? `${percent(rear.ratio)} · ${number(rear.covered)}/${number(rear.rays)} 지점` : '미측정'}</dd>
       {rear?.rays ? <><dt>후면 형상 가림</dt><dd>{percent(rear.geometric_ratio)}</dd></> : null}
@@ -25,6 +27,6 @@ export function PipelineQuality({ state }: { state: NativePartsState }) {
       <p key={`${check.code}:${check.slot}`}>{partLabels[check.slot || ''] || check.slot} 삼각형 {number(check.actual || 0)} / 기준 {number(check.target || 0)}</p>)}
     {Object.entries(quality.parts).filter(([, part]) => part.penetration).map(([slot, part]) =>
       <p key={slot}>{partLabels[slot] || slot} 몸 침투 {percent(part.penetration!.ratio)} · {number(part.penetration!.inside)}/{number(part.penetration!.vertices)} 정점</p>)}
-    {report && <a href={report.url} download>검수 기록 JSON</a>}
+    {report && <a href={report.url} download>기술 검수 JSON</a>}
   </details>;
 }

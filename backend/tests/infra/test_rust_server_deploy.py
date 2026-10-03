@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from shell_harness import replace_host_paths
 
 SCRIPTS = Path(__file__).resolve().parents[3] / 'server' / 'scripts'
 GATEWAY_KEY = 'gateway-key-from-the-secret-0123456789'
@@ -225,7 +226,8 @@ def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', **faults):
     if old is not None:
         (tmp_path / 'opt/mogaesup/mogaesup-server').write_text(old)
         (tmp_path / 'state/running').write_text(old)
-    script = '\n'.join(install_script(deploy)).replace('/opt/mogaesup', f'{sandbox}/opt/mogaesup').replace('/var/', f'{sandbox}/var/')
+    script = replace_host_paths('\n'.join(install_script(deploy)), {
+        '/opt/mogaesup': f'{sandbox}/opt/mogaesup', '/var/': f'{sandbox}/var/'})
     # Two tries of each health wait instead of thirty: starting a command costs far more here than the wait it stands for.
     script = script.replace('$(seq 1 30)', '$(seq 1 2)')
     done = subprocess.run([bash], input=(STUBS + script + '\n').encode(), capture_output=True, timeout=120, cwd=tmp_path,
