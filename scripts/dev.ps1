@@ -35,15 +35,46 @@ function Read-Started {
   if (-not (Test-Path -LiteralPath $pidFile)) { return @{} }
   $saved = Get-Content -Raw -LiteralPath $pidFile | ConvertFrom-Json
   $map = @{}
-  foreach ($property in $saved.PSObject.Properties) { $map[$property.Name] = [int]$property.Value }
+  foreach ($property in $saved.PSObject.Properties) {
+    $value = $property.Value
+    # Entries written before process names and start times were kept are the bare PID.
+    $map[$property.Name] = if ($value -is [System.Management.Automation.PSCustomObject]) {
+      @{ pid = [int]$value.pid; name = $value.name; started = $value.started }
+    } else {
+      @{ pid = [int]$value; name = $null; started = $null }
+    }
+  }
   return $map
 }
 
 if ($Stop) {
+  # A PID is reused once its process ends (after a reboot, say): only a process with the recorded name and start time is
+  # ended. A bare-PID entry must be the program that service is started with, running since before the file was written.
+  $written = if (Test-Path -LiteralPath $pidFile) { (Get-Item -LiteralPath $pidFile).LastWriteTimeUtc } else { [datetime]::MinValue }
+  $launchers = @{ server = 'powershell'; frontend = 'cmd'; character = 'uv' }
   foreach ($entry in (Read-Started).GetEnumerator()) {
-    # taskkill /T also ends the children (cargo's server, vite's esbuild, uvicorn's worker).
-    & taskkill.exe /PID $entry.Value /T /F 2>$null | Out-Null
-    Write-Host "stopped $($entry.Key) ($($entry.Value))"
+    $record = $entry.Value
+    $process = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+    $since = $null
+    if ($process) { try { $since = $process.StartTime.ToUniversalTime() } catch { $since = $null } }
+    $ours = $false
+    if ($since -and $record.started) {
+      $ours = $process.ProcessName -eq $record.name -and [math]::Abs($since.Ticks - [long]$record.started) -lt [TimeSpan]::TicksPerSecond
+    } elseif ($since) {
+      $ours = $process.ProcessName -eq $launchers[$entry.Key] -and $since -le $written
+    }
+    if (-not $process) {
+      Write-Host "$($entry.Key) ($($record.pid)) is not running"
+    } elseif (-not $ours) {
+      Write-Host "$($entry.Key): pid $($record.pid) is now $($process.ProcessName), not the process this script started; left running"
+    } else {
+      # taskkill /T also ends the children (cargo's server, vite's esbuild, uvicorn's worker). Its complaints about
+      # children that are already gone go to stderr, which Windows PowerShell 5.1 would turn into a stop.
+      $ErrorActionPreference = 'Continue'
+      & taskkill.exe /PID $record.pid /T /F 2>$null | Out-Null
+      $ErrorActionPreference = 'Stop'
+      Write-Host "stopped $($entry.Key) ($($record.pid))"
+    }
   }
   Remove-Item -LiteralPath $pidFile -ErrorAction SilentlyContinue
   return
@@ -70,7 +101,15 @@ function Start-DevProcess([string]$Name, [int]$Port, [string]$File, [string[]]$A
   $log = Join-Path $runtime "$Name.log"
   $process = Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $root -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-  $started[$Name] = $process.Id
+  # Name and start time (UTC ticks) let -Stop tell this process from a later one that gets the same PID.
+  $entry = @{ pid = $process.Id; name = $null; started = $null }
+  try {
+    $entry.name = $process.ProcessName
+    $entry.started = $process.StartTime.ToUniversalTime().Ticks
+  } catch {
+    # It has exited already; -Stop finds nothing of it to end.
+  }
+  $started[$Name] = $entry
   $started | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding UTF8
   Write-Host "$Name`: started (pid $($process.Id)), log $log"
 }
@@ -79,6 +118,9 @@ $factoryKeys = @('FACTORY_URL', 'FACTORY_API_KEY', 'FACTORY_JWT_SECRET', 'FACTOR
 $saved = @{}
 foreach ($key in $factoryKeys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }
 $savedRecords = [Environment]::GetEnvironmentVariable('CHARACTER_DATABASE_URL', 'Process')
+# uv finds the workspace from the working directory: run from the repository root wherever this was started, and give
+# the caller's location back afterwards.
+Push-Location -LiteralPath $root
 try {
   $serverArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'server\scripts\start-rust-server.ps1'))
   if ($Character) {
@@ -116,6 +158,7 @@ try {
   Start-DevProcess 'server' 8080 'powershell.exe' $serverArguments
   Start-DevProcess 'frontend' 5180 'npm.cmd' @('run', 'dev', '--workspace', 'frontend')
 } finally {
+  Pop-Location
   # The children have their copies; this shell does not keep the secrets.
   foreach ($key in $factoryKeys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
   [Environment]::SetEnvironmentVariable('CHARACTER_DATABASE_URL', $savedRecords, 'Process')

@@ -17,8 +17,8 @@
 
 ## 로컬 실행
 
-1. 설치: 루트에서 `npm install`과 `uv sync`.
-2. 기동: `npm run dev`(= `scripts/dev.ps1`). Docker PostgreSQL(127.0.0.1:55432)과 Rust 서버(`127.0.0.1:8080`), 웹(`http://127.0.0.1:5180`, `/api`와 WebSocket을 8080으로 넘긴다)을 숨은 프로세스로 띄우고 로그는 `.data/dev/`에 둔다. 이미 떠 있는 포트는 그대로 쓴다. `npm run dev:stop`이 이 스크립트가 띄운 것을 끈다.
+1. 설치: 루트에서 `npm install`과 `uv sync`. 필요한 도구는 Node 22.12 이상(`.nvmrc`), Rust 1.95 이상(cargo), uv, Docker(compose)다.
+2. 기동: `npm run dev`(= `scripts/dev.ps1`). Docker PostgreSQL(127.0.0.1:55432)과 Rust 서버(`127.0.0.1:8080`), 웹(`http://127.0.0.1:5180`, `/api`와 WebSocket을 8080으로 넘긴다)을 숨은 프로세스로 띄우고 로그는 `.data/dev/`에 둔다. 이미 떠 있는 포트는 그대로 쓴다. `npm run dev:stop`이 이 스크립트가 띄운 것을 끈다(기록한 프로세스 이름과 시작 시각이 맞는 것만). `npm run dev`·`dev:character`·`dev:stop`은 Windows PowerShell 스크립트라 Windows에서만 돈다. 다른 OS에서는 `server/scripts/start-rust-server.ps1`이 하는 대로 PostgreSQL·환경 변수·`cargo build`를 맞추고 `npm run dev -w frontend`를 따로 띄운다.
 3. 캐릭터 파이프라인까지: `npm run dev:character`. 캐릭터 서버를 루트 `.venv`로 `127.0.0.1:8016`에 띄우고(멈춘 유료 단계 자동 재개는 끈다), `backend/.env`(`backend/.env.example`에서 만든다)의 API 키와 JWT 설정을 Rust 서버의 스튜디오 게이트웨이에 넘겨 `/admin` 가져오기와 `/admin/studio`·`/character`가 끝까지 돈다. 관리자는 기록을 바꿀 수 있고(`FACTORY_ACCESS=write`), 비용이 드는 작업은 `scripts/dev.ps1 -Character -Paid`(월 `-PaidMonthly`건)일 때만 열린다. `.env`는 운영 키이니 필요할 때만 쓴다.
 4. 관리자: 서버를 `BOOTSTRAP_ADMIN_USERNAME`·`BOOTSTRAP_ADMIN_PASSWORD`와 함께 띄우면 그 계정을 만들거나(있으면 비밀번호는 그대로) 관리자 권한을 준다. 그 밖의 역할은 `/admin/permissions`에서 준다. 설정 목록은 `server/.env.example`에 있다.
 5. 섬 기물 다시 만들기(유료): `uv run python scripts/props/generate.py --only <id>`로 하나씩 확인한 뒤 `--all`, 그다음 `node frontend/scripts/props-normalize.mjs`가 크기·방향·무광 재질을 섬에 맞춰 `frontend/public/gltf/`에 넣는다(패키지의 같은 경로 모델을 대신한다).
@@ -70,29 +70,29 @@
 - 캐릭터 서버: `uv run python -m compileall -q backend/src`. 테스트(`uv run pytest`)는 외부 API·Blender·DB를 대체한 것만 돈다.
 - 웹: `npm run typecheck && npm test && npm run build`(루트). 서버와 `npm run dev`가 떠 있으면 `npm run smoke`가 Chromium으로 가입부터 꾸미기 저장·방문·실시간 방·방명록·이웃까지 확인한다.
 - 캐릭터: `npm run test:character`(루트)가 `server/`를 빌드해 임시 DB와 가짜 캐릭터 서버(`frontend/scripts/e2e/`)로 띄우고 웹 개발 서버와 함께 빈 포트에서 Chrome(WebGPU)으로 확인한다: 관리자가 완성 캐릭터를 가져와 검사·공개하고 스튜디오 화면을 열며, 새 회원이 그 미니미로 섬을 걷고 옷장만 보고, 다시 가져오면 공개 그대로 새 버전이 되며, `walk`가 없는 캐릭터는 이유와 함께 실패한다. 그 캐릭터를 주민으로 가져와 회원이 인사말과 함께 섬에 두면 방문자가 상호작용 버튼으로 인사말을 읽고, 회원이 옷장에서 모자를 씌워 저장한 모습으로 섬을 걷고 실시간 방에 알리며, 없어진 figure를 고른 섬은 기본 미니미로 걷는다. 로컬 PostgreSQL(55432)과 cargo만 있으면 되고 비용이 들지 않으며, 끝나면 띄운 것과 DB를 지운다. 스크린샷은 인자로 준 폴더(기본 `.data/character-e2e`)에 남긴다.
-- 성능: 서버와 `npx vite preview`(빌드본)가 떠 있으면 `npm run perf`가 이 PC의 GPU(Chrome, WebGPU, vsync 끔)로 섬 로딩 시간·전송량·서 있을 때와 걸을 때의 프레임·메인 스레드 상위 함수를 잰다. 대상 서버에 측정용 계정을 하나 만든다.
+- 성능: 서버와 빌드본(`npm run build` 뒤 `npm run preview -w frontend`, `http://127.0.0.1:4173`, `/api`는 8080으로 넘긴다)이 떠 있으면 `npm run perf -w frontend -- http://127.0.0.1:4173`이 이 PC의 GPU(Chrome, WebGPU, vsync 끔)로 섬 로딩 시간·전송량·서 있을 때와 걸을 때의 프레임·메인 스레드 상위 함수를 잰다(주소를 빼면 개발 서버 5180을 잰다). 대상 서버에 측정용 계정을 하나 만들고, loopback이 아닌 주소는 `--allow-remote` 없이 거절한다.
 - 빌드는 패키지의 캐릭터 GLB(`gltf/*.glb`) 텍스처를 섬 카메라에 맞게 줄인다(색상 1024px, 그 밖 512px, WebP). 원본은 패키지에 그대로 있다.
 
 ## 배포 (AWS 서울 리전)
 
-CloudFront(mogaesup.com, www는 apex로 이동)가 정적 파일은 비공개 S3에서, `/api/*`(WebSocket 포함)는 VPC origin으로 EC2의 Rust 서버에서 받는다. 서버는 비공개 RDS PostgreSQL 17을 쓰고 인터넷에 직접 열려 있지 않다.
+CloudFront(mogaesup.com, www는 경로와 쿼리 그대로 apex로 이동)가 정적 파일은 비공개 S3에서, `/api/*`(WebSocket 포함)는 VPC origin으로 EC2의 Rust 서버에서 받는다. 서버는 비공개 RDS PostgreSQL 17을 쓰고 인터넷에 직접 열려 있지 않다.
 
 1. 리눅스 바이너리: `server`에서 `docker run --rm -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/src/target -v ${PWD}:/src -w /src rust:1-alpine sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"`
 2. 서버: `python server/scripts/deploy-rust-server.py --factory-url <캐릭터 서버 주소> --factory-access write`. 스택(`mogaesup-server`)을 맞추고, S3와 SSM으로 바이너리를 올려 체크섬을 확인한 뒤 systemd로 띄운다. 주지 않은 `--factory-*`·`--studio-instance-id`는 서버에 있는 값을 그대로 유지하고(끝에 `Studio gateway:` 한 줄로 적용된 값을 보여 준다), 스택 변경이 있으면 변경 세트만 보여 주고 멈추므로 확인한 뒤 `--yes`로 다시 실행한다. 새 바이너리가 시작하지 않거나 건강 검사에 실패하면 이전 바이너리(`mogaesup-server.prev`)로 돌아가 non-zero로 끝난다. 비밀값은 개발 PC로 가져오지 않는다. 스택의 `FactoryGatewaySecret`이 `FACTORY_GATEWAY_KEY`로 들어가 캐릭터 서버 요청마다 `x-gateway-key`로 실린다. 캐릭터 서버 인스턴스는 쉬면 스스로 꺼지므로, 처음 한 번 `--studio-instance-id <인스턴스 ID>`를 주면 스택(`StudioInstanceId`)이 기억하고 서버 역할에 그 인스턴스만 켤 권한(`ec2:StartInstances`)을 준다. 서버는 닿지 않는 스튜디오 요청에 인스턴스를 켜고 켜질 때까지 503 `studio_waking`으로 답하며, 관리자는 `/api/catalog/admin/studio-power`로 상태를 보고 켠다.
-3. 웹: `frontend/scripts/deploy-aws.ps1`. 스택(`mogaesup-web`)을 맞추고 빌드·업로드·무효화한 뒤 운영 주소의 `index.html`과 `/api/health`를 확인한다.
-4. 캐릭터 서버: `backend/infra/prepare-aws.ps1 -Upload` 뒤 `backend/infra/deploy-aws.ps1`(자세한 것은 `backend/README.md`). 컨테이너는 API만 낸다.
+3. 웹: `frontend/scripts/deploy-aws.ps1`. 스택(`mogaesup-web`)을 맞추고 빌드·업로드·무효화한 뒤 운영 주소의 `index.html`과 `/api/health`를 확인한다. 스택의 응답 헤더 정책(`frontend/infra/aws-static.yaml`)은 CSP에 `frontend/index.html` 인라인 스크립트의 sha256을 담는다. 그 스크립트를 바꾸면 템플릿의 해시도 바꾸고 `-ProvisionOnly`로 스택을 맞춘다(자동 배포는 스택을 적용하지 않으며, 그동안 브라우저는 그 스크립트를 건너뛴다).
+4. 캐릭터 서버: `backend/infra/prepare-aws.ps1 -Upload` 뒤 `backend/infra/deploy-aws.ps1`(자세한 것은 `backend/README.md`). 컨테이너는 API만 낸다. 스튜디오 스택(`gaesup-asset-studio`, `backend/infra/ec2.yaml`)을 갱신할 때는 `ReleaseKey`에 지금 설치된 릴리스(인스턴스의 `/opt/asset-studio/current.json`이나 `backend/dist/aws/deployment-receipt.json`의 `release_key`)를 준다. SSM 배포(`deploy-aws.ps1`과 자동 배포)는 이 파라미터를 바꾸지 않으므로 예전 값으로 갱신하면 교체된 인스턴스가 첫 부팅에 옛 릴리스를 설치한다. 값이 바뀌면 사용자 데이터가 바뀌어 교체되지 않는 갱신에서도 인스턴스가 한 번 멈췄다 켜지므로 진행 중인 작업이 없을 때 적용한다.
 5. 스튜디오 잠금: `python server/scripts/lock-studio.py --allow-ip <주인 IP>`. 캐릭터 스튜디오의 CloudFront에 함수를 붙여 게이트웨이 키를 가진 이 서버와 적은 IP만 통과시킨다(`--unlock`으로 뗀다). 스튜디오 스택(`gaesup-asset-studio`)을 다시 배포하면 떨어지니 그 뒤에 다시 돌린다.
 
 ### 자동 배포 (GitHub Actions)
 
 `.github/workflows/pipeline.yml`이 위 1~4를 대신한다. 스택(CloudFormation)과 5번은 자동으로 적용하지 않는다.
 
-- 풀 리퀘스트와 `main` 푸시는 바뀐 곳만 점검한다. 서버는 `cargo fmt --check`·`clippy -D warnings`·`cargo test`(PostgreSQL 17을 55432에 띄움), 캐릭터 서버는 `uv sync --locked`·`compileall`·`pytest`(같은 PostgreSQL, 없으면 32개가 건너뛰어짐), 웹은 `typecheck`·`test`·`build`, 템플릿과 스크립트는 `cfn-lint`·문법 검사·actionlint·변경 감지 회귀 검사다. `npm run smoke`·`test:character`는 브라우저와 GPU가 필요해 돌리지 않는다.
-- `main` 푸시가 점검을 통과하면 마지막으로 성공한 실행 이후 바뀐 곳만 서버 → 웹 → 스튜디오 순서로 배포한다. 점검이 하나라도 실패하면 배포하지 않고, 배포가 실패하면 다음 푸시가 그 곳을 다시 시도한다. 테스트·문서만 바뀐 곳은 배포하지 않는다. 배포 스크립트 변경도 대상 서비스를 다시 배포하고, 워크플로 변경은 전체를 다시 배포한다.
+- 풀 리퀘스트와 `main` 푸시는 바뀐 곳만 점검한다(`.github/`가 바뀌면 모두). 서버는 `cargo fmt --check`·`clippy -D warnings`·`cargo test`(PostgreSQL 17을 55432에 띄움), 캐릭터 서버는 Python 3.11·3.12에서 `uv sync --locked`·`compileall`·`pytest`(같은 PostgreSQL, 없으면 기록 DB 테스트는 건너뛴다), 웹은 `typecheck`·`test`·`build`, 템플릿과 스크립트는 `cfn-lint`·문법 검사·actionlint·변경 감지 회귀 검사다. `npm run smoke`·`test:character`는 브라우저와 GPU가 필요해 돌리지 않는다.
+- `main` 푸시가 점검을 통과하면 마지막으로 성공한 실행 이후 바뀐 곳만 서버 → 웹 → 스튜디오 순서로 배포한다. 점검이 하나라도 실패하면 배포하지 않고, 배포가 실패하면 다음 푸시가 마지막 성공 이후 바뀐 곳을 모두 다시 배포한다. 배포 대상은 실행물에 들어가는 경로와 그 배포 스크립트다(`.github/scripts/changes.sh`). 테스트와 그 밖의 파일(`README.md`, `frontend/infra/`·`server/infra/` 템플릿)만 바뀐 곳은 배포하지 않지만, `frontend/src/` 같은 실행물 폴더 안의 문서(`AGENTS.md`)는 배포 대상이다. `backend/infra/`는 릴리스 묶음에 들어가므로 바뀌면 스튜디오를 다시 배포한다. `.github/workflows/pipeline.yml`이 바뀌면 전체를 다시 배포하고, 그 밖의 `.github/` 변경은 점검만 한다.
 - 서버는 점검과 같은 Rust 1.95.0의 Alpine 이미지로 musl 바이너리를 만들어 `deploy-rust-server.py --skip-provision`으로, 웹은 `deploy-aws.ps1 -SkipBuild -SkipProvision`으로, 스튜디오는 `prepare-aws.ps1 -Upload`와 `deploy-aws.ps1`로 올린다. 서버는 건강 검사에 실패하면 이전 바이너리로 돌아간다. 스튜디오도 후보 컨테이너의 건강 검사에 실패하면 이전 컨테이너를 복구한다. 웹은 되돌리는 커밋을 푸시하면 이전 모습으로 다시 배포된다. 앞 단계 배포가 실패하면 뒤 단계는 실행하지 않는다.
-- 비교할 이전 성공 실행이 없는 첫 `main` 푸시는 전체를 점검하고 배포한다. 수동 실행은 Actions의 Run workflow에서 `target`(`all`·`server`·`web`·`studio`)을 고른다. `main` 외의 브랜치와 풀 리퀘스트는 배포하지 않는다.
+- 비교할 이전 성공 실행이 없는 첫 `main` 푸시(그 실행의 커밋이 사라진 경우도)는 전체를 점검하고 배포한다. 수동 실행은 Actions의 Run workflow에서 `target`(`all`·`server`·`web`·`studio`)을 고르며, 점검은 모두 돌고 고른 곳만 배포한다. `main` 외의 브랜치와 풀 리퀘스트는 배포하지 않는다.
 - 스튜디오 인스턴스가 꺼져 있으면 배포가 멈추고 켜지 않는다. 켠 뒤 `target=studio`로 다시 돌린다. 실행 중인 런타임의 신규 작업 접수를 먼저 닫고 기존 API·CLI·Blender 작업이 끝나야 교체한다. 시간이 지나도 비지 않으면 종료 코드 4, 활동·DB·수락 차단을 확인할 수 없으면 5로 중지하고 기존 서비스를 유지한다. 후보 실패·배포 중단 시 이전 설정과 컨테이너를 복구하고 접수를 다시 연다. drain을 지원하지 않는 구버전의 최초 교체는 [백엔드 배포 절차](backend/README.md#aws-배포)에 따라 접수를 닫고 작업 종료를 확인하는 점검 시간이 필요하다.
-- AWS에는 비밀값 없이 OIDC로 들어간다. 역할 `mogaesup-github-deploy`(`.github/aws/deploy-role.yaml`)는 `main` 브랜치의 이 저장소만 맡을 수 있고, 릴리스 파일 올리기·CloudFront 무효화·SSM 설치 명령·스택 읽기만 허용한다. CloudFormation 변경과 IAM은 못 한다. 한 번 만든다.
+- AWS에는 비밀값 없이 OIDC로 들어간다. 역할 `mogaesup-github-deploy`(`.github/aws/deploy-role.yaml`)는 `main` 브랜치의 이 저장소만 맡을 수 있고, 릴리스 파일 올리기·CloudFront 무효화·SSM 설치 명령·스택과 인스턴스 상태 읽기·템플릿 검사만 허용한다. CloudFormation 변경과 IAM은 못 한다. 한 번 만든다.
   ```bash
   aws cloudformation deploy --region ap-northeast-2 --stack-name mogaesup-github-deploy --template-file .github/aws/deploy-role.yaml --capabilities CAPABILITY_NAMED_IAM --tags application=mogaesup
   ```

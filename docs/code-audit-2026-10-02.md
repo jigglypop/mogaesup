@@ -45,7 +45,7 @@
 | 스튜디오의 옛 루트 query 링크·선택 유실 | 중앙 경로 helper, 생성 job·version·body·part 선택 보존. 제작 화면 열기가 실제 React Router 주소를 바꿈. history monkeypatch·click 가로채기 제거 |
 | 모델 파일이 S3 redirect와 브라우저 CORS에 의존 | 인증된 같은-origin API의 256KiB streaming. Range·HEAD·ETag·Last-Modified 보존, 연결 종료·전송 오류 시 S3 body 정리 |
 
-엔진 변경은 gaesup-world 레포에서 했고 앱은 [로컬 npm 패키지](../frontend/vendor/gaesup-world-1.7.0-mogaesup.1.tgz)로 받는다. 설치돼 있던 npm 1.7.0의 정확한 sourceCommit을 복구해 변경분만 빌드했다. 오래된 현재 엔진 checkout 버전으로 내려 빌드하지 않았다. [소스 패치·출처·검증 기록](../frontend/vendor/gaesup-world-1.7.0-mogaesup.1.md)과 파일별 자산 해시를 함께 남겼다. 필수 WASM 두 개와 원본·웹용 기본 GLB의 해시는 교체 전후 동일하다.
+엔진 변경은 gaesup-world 레포에서 했고 앱은 [로컬 npm 패키지](../frontend/vendor/gaesup-world-1.7.0-mogaesup.2.tgz)로 받는다(10월 3일 원격 이동 수정을 더한 mogaesup.2로 교체). 설치돼 있던 npm 1.7.0의 정확한 sourceCommit을 복구해 변경분만 빌드했다. 오래된 현재 엔진 checkout 버전으로 내려 빌드하지 않았다. [소스 패치·출처·검증 기록](../frontend/vendor/gaesup-world-1.7.0-mogaesup.2.md)과 파일별 자산 해시를 함께 남겼다. 필수 WASM 두 개와 원본·웹용 기본 GLB의 해시는 교체 전후 동일하다.
 
 운영 브라우저에서는 기존 카탈로그 모델 미리보기와 생성 완료 작업·산출물이 존재하는 것을 읽기로 확인했다. S3 CORS와 studio 인스턴스 running도 확인했다. 그러므로 현재 전체 스튜디오 장애를 CORS 문제로 단정하지 않는다. 실패한 사용자의 기기·브라우저·접속 화면 정보는 아직 없고, 수정 버전의 실제 두 사용자 화면·WebGPU/GPU 검증은 수행하지 않았다.
 
