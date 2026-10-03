@@ -3,6 +3,7 @@ import hashlib
 import pytest
 
 from src.services import avatar_fitting_management, avatar_variants
+from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
 from src.services.avatar_variants import AvatarVariants
 from src.services.character_pipeline import PipelineError, read_json
@@ -106,4 +107,40 @@ def test_a_base_that_cannot_be_parsed_is_reported_by_the_checks_not_by_the_warm_
     assert error.value.code == 'body_changed'
     with pytest.raises(PipelineError) as error:
         AvatarVariants(factory).create_single_part(1, 'variant-key-0002', {**payload, 'base_version': '0'*24})
+    assert error.value.code == 'base_changed'
+
+
+UNFITTED_TOP = {'slot': 'top', 'objects': [], 'available': False, 'unavailable_reason': 'fit_exception',
+                'fit_status': 'failed', 'errors': [{'code': 'fit_exception', 'message': 'ValueError: no sleeve'}]}
+
+
+def test_a_part_is_made_on_a_base_whose_other_slot_could_not_be_fitted(base):
+    # The base has no top file: its top is carried over as unavailable, as a refit does, not refused.
+    factory, directory, payload = base
+    version = directory/'native-parts'/payload['base_version']
+    record = read_json(version/'record.json')
+    record['files'].pop('top.glb')
+    record['result']['parts'] = [UNFITTED_TOP if part['slot'] == 'top' else part for part in record['result']['parts']]
+    _write_json(version/'record.json', record)
+    (version/'top.glb').unlink()
+    job, created = AvatarVariants(factory).create_single_part(1, KEY, payload)
+    assert created
+    reused = read_json(factory.directory(1, job['id'])/'pipeline.json')['native_part_reuse']['parts']
+    assert reused['top'] == {'available': False, 'report': UNFITTED_TOP}
+    assert reused['shoes']['file'] == 'shoes.glb' and 'hair' not in reused
+
+
+def test_a_part_is_made_on_the_sealed_version_the_wardrobe_offers_while_a_newer_one_is_assembled(base):
+    factory, directory, payload = base
+    root = directory/'native-parts'
+    newer = '9'*24
+    (root/newer).mkdir()
+    _write_json(root/newer/'record.json', {'status': 'running', 'files': {}, 'result': {}})
+    _write_json(root/'current.json', {'version': newer})
+    _write_json(root/'ready.json', {'version': payload['base_version']})
+    job, created = AvatarVariants(factory).create_single_part(1, KEY, payload)
+    assert created and job['base_version'] == payload['base_version']
+    # The version being assembled is not a base yet.
+    with pytest.raises(PipelineError) as error:
+        AvatarVariants(factory).create_single_part(1, 'variant-key-0002', {**payload, 'base_version': newer})
     assert error.value.code == 'base_changed'

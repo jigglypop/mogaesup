@@ -159,7 +159,7 @@ async def upload_body_glb(request: Request, user: UserContext = Depends(get_curr
     from starlette.concurrency import run_in_threadpool
     from src.services.avatar_glb_bodies import AvatarGlbBodies, MAX_GLB_BYTES
     async with GLB_UPLOADS.slot():
-        content = await read_glb(request, MAX_GLB_BYTES, PipelineError('glb_too_large', 'GLB는 256MB 이하로 올려 주세요.', 422))
+        content = await read_glb(request, MAX_GLB_BYTES, PipelineError('glb_too_large', 'GLB는 256MB 이하로 올려 주세요.', 413))
         return await run_in_threadpool(AvatarGlbBodies(factory).upload, user.user_id, content)
 
 
@@ -418,10 +418,16 @@ def unregister_wardrobe_body(job_id: str, if_match: str = Header(alias='If-Match
     return Wardrobe(factory, user.user_id).unregister(job_id, if_match)
 
 
+def wardrobe_operator(user: UserContext) -> bool:
+    """False for a wardrobe member: the app's gateway signs a member's wardrobe reads with the MEMBER role beside
+    ADMIN. A member is listed only the parts it can wear and loads only their files."""
+    return not any(str(role).upper() == 'MEMBER' for role in user.roles)
+
+
 @router.get('/wardrobe/bodies/{job_id}/parts')
 def wardrobe_parts(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
-    return Wardrobe(factory, user.user_id).parts(job_id)
+    return Wardrobe(factory, user.user_id).parts(job_id, operator=wardrobe_operator(user))
 
 
 @router.get('/wardrobe/bodies/{body_job_id}/coverage/{job_id}/{slot}')
@@ -568,6 +574,9 @@ def fit_native_parts(job_id: str, background: BackgroundTasks, canonical_pose: b
 @router.get('/jobs/{job_id}/native-parts/{version}/{name}')
 @router.head('/jobs/{job_id}/native-parts/{version}/{name}', include_in_schema=False)
 def native_parts_artifact(job_id: str, version: str, name: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+    if not wardrobe_operator(user):
+        from src.services.avatar_wardrobe import Wardrobe
+        return FileResponse(Wardrobe(factory, user.user_id).member_file(job_id, version, name))
     return FileResponse(AvatarNativeParts(factory).artifact(user.user_id, job_id, version, name))
 
 

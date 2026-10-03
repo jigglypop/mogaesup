@@ -1,12 +1,14 @@
 """Owner-scoped S3 library metadata and reproducible tile maps."""
+from contextlib import contextmanager
 import hashlib
 import io
 import json
 import math
 import random
 import re
-from array import array
+from threading import Lock
 
+import numpy as np
 from PIL import Image
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
@@ -17,76 +19,89 @@ SURFACES = {'snow': (224, 234, 244), 'sand': (202, 174, 119),
             'wood': (142, 92, 48), 'bark': (92, 61, 39), 'brick': (151, 70, 51)}
 
 
+def _columns(values):
+    return np.array(values, dtype=np.float64)[None, :]
+
+
+def _rows(values):
+    return np.array(values, dtype=np.float64)[:, None]
+
+
 def _pattern_maps(surface, n, seed):
-    """Return periodic height and colour modifiers for authored surface families."""
+    """Return periodic height and colour modifiers (float32, n×n) for authored surface families.
+
+    The sines are taken per row and per column with `math`, and the per-texel arithmetic runs in numpy in the order the
+    original per-texel loop used, so the maps stay identical to the bytes that loop produced."""
     rng = random.Random(seed)
-    heights, colours = array('f'), array('f')
     tau = math.tau
     phase = rng.random()*tau
     if surface == 'wood':
         grain_count = rng.randint(8, 13)
-        grain_s = [math.sin(tau*grain_count*x/n) for x in range(n)]
-        grain_c = [math.cos(tau*grain_count*x/n) for x in range(n)]
-        pore_s = [math.sin(tau*grain_count*3*x/n) for x in range(n)]
-        pore_c = [math.cos(tau*grain_count*3*x/n) for x in range(n)]
+        grain_s = _columns([math.sin(tau*grain_count*x/n) for x in range(n)])
+        grain_c = _columns([math.cos(tau*grain_count*x/n) for x in range(n)])
+        pore_s = _columns([math.sin(tau*grain_count*3*x/n) for x in range(n)])
+        pore_c = _columns([math.cos(tau*grain_count*3*x/n) for x in range(n)])
+        warp_s, warp_c, pore_phase_s, pore_phase_c = [], [], [], []
         for y in range(n):
             v = y/n
             warp = .38*math.sin(tau*2*v+phase)+.14*math.sin(tau*5*v-phase*.7)
-            warp_s, warp_c = math.sin(warp), math.cos(warp)
+            warp_s.append(math.sin(warp)); warp_c.append(math.cos(warp))
             pore_phase = tau*2*v+phase
-            pore_phase_s, pore_phase_c = math.sin(pore_phase), math.cos(pore_phase)
-            for x in range(n):
-                grain = grain_s[x]*warp_c+grain_c[x]*warp_s
-                pore = (pore_s[x]*pore_phase_c+pore_c[x]*pore_phase_s)*.18
-                value = grain*.72+pore
-                heights.append(value*.58)
-                colours.append(value)
+            pore_phase_s.append(math.sin(pore_phase)); pore_phase_c.append(math.cos(pore_phase))
+        grain = grain_s*_rows(warp_c)+grain_c*_rows(warp_s)
+        pore = (pore_s*_rows(pore_phase_c)+pore_c*_rows(pore_phase_s))*.18
+        value = grain*.72+pore
+        heights, colours = value*.58, value
     elif surface == 'bark':
         ridge_count = rng.randint(7, 11)
-        ridge_s = [math.sin(tau*ridge_count*x/n) for x in range(n)]
-        ridge_c = [math.cos(tau*ridge_count*x/n) for x in range(n)]
-        split_s = [math.sin(tau*ridge_count*2*x/n) for x in range(n)]
-        split_c = [math.cos(tau*ridge_count*2*x/n) for x in range(n)]
-        knot_s = [math.sin(tau*2*x/n) for x in range(n)]
-        knot_c = [math.cos(tau*2*x/n) for x in range(n)]
+        ridge_s = _columns([math.sin(tau*ridge_count*x/n) for x in range(n)])
+        ridge_c = _columns([math.cos(tau*ridge_count*x/n) for x in range(n)])
+        split_s = _columns([math.sin(tau*ridge_count*2*x/n) for x in range(n)])
+        split_c = _columns([math.cos(tau*ridge_count*2*x/n) for x in range(n)])
+        knot_s = _columns([math.sin(tau*2*x/n) for x in range(n)])
+        knot_c = _columns([math.cos(tau*2*x/n) for x in range(n)])
+        rows = {name: [] for name in ('twist_s', 'twist_c', 'split_s', 'split_c', 'knot_s', 'knot_c')}
         for y in range(n):
             v = y/n
             twist = .45*math.sin(tau*2*v+phase)+.2*math.sin(tau*5*v)
-            twist_s, twist_c = math.sin(twist), math.cos(twist)
             split_phase = tau*3*v+phase
-            split_phase_s, split_phase_c = math.sin(split_phase), math.cos(split_phase)
             knot_phase = phase-tau*3*v
-            knot_phase_s, knot_phase_c = math.sin(knot_phase), math.cos(knot_phase)
-            for x in range(n):
-                ridge = ridge_s[x]*twist_c+ridge_c[x]*twist_s
-                split = (split_s[x]*split_phase_c+split_c[x]*split_phase_s)*.28
-                knots = (knot_s[x]*knot_phase_c+knot_c[x]*knot_phase_s)*.14
-                value = ridge*.68+split+knots
-                heights.append(value*.82)
-                colours.append(value)
+            for name, angle in (('twist', twist), ('split', split_phase), ('knot', knot_phase)):
+                rows[name+'_s'].append(math.sin(angle)); rows[name+'_c'].append(math.cos(angle))
+        ridge = ridge_s*_rows(rows['twist_c'])+ridge_c*_rows(rows['twist_s'])
+        split = (split_s*_rows(rows['split_c'])+split_c*_rows(rows['split_s']))*.28
+        knots = (knot_s*_rows(rows['knot_c'])+knot_c*_rows(rows['knot_s']))*.14
+        value = ridge*.68+split+knots
+        heights, colours = value*.82, value
     else:
         rows, columns = 8, 6
         mortar = .075
-        joint_s = [math.sin(math.pi*columns*x/n) for x in range(n)]
-        joint_c = [math.cos(math.pi*columns*x/n) for x in range(n)]
-        pit_s = [math.sin(tau*11*x/n) for x in range(n)]
-        pit_c = [math.cos(tau*11*x/n) for x in range(n)]
+        joint_s = _columns([math.sin(math.pi*columns*x/n) for x in range(n)])
+        joint_c = _columns([math.cos(math.pi*columns*x/n) for x in range(n)])
+        pit_s = _columns([math.sin(tau*11*x/n) for x in range(n)])
+        pit_c = _columns([math.cos(tau*11*x/n) for x in range(n)])
+        row_wave, joint_phase_s, joint_phase_c, pit_phase_s, pit_phase_c = [], [], [], [], []
         for y in range(n):
             v = y/n
-            row_wave = abs(math.sin(math.pi*rows*v))
+            row_wave.append(abs(math.sin(math.pi*rows*v)))
             row_phase = .5*(1-math.cos(tau*rows*v))
             joint_phase = math.pi*row_phase
-            joint_phase_s, joint_phase_c = math.sin(joint_phase), math.cos(joint_phase)
+            joint_phase_s.append(math.sin(joint_phase)); joint_phase_c.append(math.cos(joint_phase))
             pit_phase = tau*7*v+phase
-            pit_phase_s, pit_phase_c = math.sin(pit_phase), math.cos(pit_phase)
-            for x in range(n):
-                joint_wave = abs(joint_s[x]*joint_phase_c+joint_c[x]*joint_phase_s)
-                joint_mask = min(1., row_wave/(mortar*math.pi))
-                brick_face = min(1., row_wave/(mortar*math.pi), joint_wave/(mortar*math.pi))
-                pitting = .08*(pit_s[x]*pit_phase_c+pit_c[x]*pit_phase_s)
-                heights.append((brick_face-.5)*.7+pitting*joint_mask)
-                colours.append((brick_face-.5)*.8+pitting)
-    return heights, colours
+            pit_phase_s.append(math.sin(pit_phase)); pit_phase_c.append(math.cos(pit_phase))
+        joint_wave = np.abs(joint_s*_rows(joint_phase_c)+joint_c*_rows(joint_phase_s))
+        row_wave = _rows(row_wave)
+        joint_mask = np.minimum(1., row_wave/(mortar*math.pi))
+        brick_face = np.minimum(np.minimum(1., row_wave/(mortar*math.pi)), joint_wave/(mortar*math.pi))
+        pitting = .08*(pit_s*_rows(pit_phase_c)+pit_c*_rows(pit_phase_s))
+        heights = (brick_face-.5)*.7+pitting*joint_mask
+        colours = (brick_face-.5)*.8+pitting
+    return heights.astype(np.float32), np.broadcast_to(colours, (n, n)).astype(np.float32)
+
+
+def _channel(values):
+    """Bytes of one 8-bit channel: rounded half to even like round(), then clamped."""
+    return np.clip(np.rint(values), 0, 255).astype(np.uint8)
 
 
 def _tile_maps(surface, n, seed):
@@ -101,32 +116,53 @@ def _tile_maps(surface, n, seed):
         # normal derivatives. Each tile samples [0, 1), so texels aren't duplicated.
         waves = [(rng.randint(1, 24), rng.randint(-24, 24), rng.random()*math.tau,
                   .6**octave) for octave in range(7)]
-        xs = [[math.sin(math.tau*fx*x/n+phase) for x in range(n)] for fx, _, phase, _ in waves]
-        xc = [[math.cos(math.tau*fx*x/n+phase) for x in range(n)] for fx, _, phase, _ in waves]
-        ys = [[math.sin(math.tau*fy*y/n) for y in range(n)] for _, fy, _, _ in waves]
-        yc = [[math.cos(math.tau*fy*y/n) for y in range(n)] for _, fy, _, _ in waves]
         weight = sum(w[3] for w in waves)
-        heights = array('f', (sum(a*(xs[i][x]*yc[i][y]+xc[i][x]*ys[i][y])
-            for i, (_, _, _, a) in enumerate(waves))/weight for y in range(n) for x in range(n)))
+        total = np.zeros((n, n))
+        for fx, fy, phase, amplitude in waves:
+            xs = _columns([math.sin(math.tau*fx*x/n+phase) for x in range(n)])
+            xc = _columns([math.cos(math.tau*fx*x/n+phase) for x in range(n)])
+            ys = _rows([math.sin(math.tau*fy*y/n) for y in range(n)])
+            yc = _rows([math.cos(math.tau*fy*y/n) for y in range(n)])
+            total = total+amplitude*(xs*yc+xc*ys)
+        heights = (total/weight).astype(np.float32)
         colour_modifiers = heights
-    base = SURFACES[surface]; albedo, normals, orm = bytearray(), bytearray(), bytearray()
-    clamp = lambda v: max(0, min(255, round(v)))
-    for y in range(n):
-        for x in range(n):
-            h = heights[y*n+x]
-            colour = colour_modifiers[y*n+x]
-            albedo.extend(clamp(c+(10 if surface == 'snow' else 24)*colour) for c in base)
-            dx = (heights[y*n+(x+1)%n]-heights[y*n+(x-1)%n])*n*.025
-            dy = (heights[((y+1)%n)*n+x]-heights[((y-1)%n)*n+x])*n*.025
-            length = math.sqrt(dx*dx+dy*dy+1)
-            normals.extend((clamp(127.5-dx/length*127.5), clamp(127.5+dy/length*127.5), clamp(127.5+127.5/length)))
-            orm.extend((255, clamp(220+15*h), 0))
+    # The float32 maps are read back as doubles, as the original per-texel loop read them from array('f').
+    h, colour = heights.astype(np.float64), colour_modifiers.astype(np.float64)
+    base = SURFACES[surface]
+    albedo = np.stack([_channel(c+(10 if surface == 'snow' else 24)*colour) for c in base], axis=-1)
+    dx = (np.roll(h, -1, axis=1)-np.roll(h, 1, axis=1))*n*.025
+    dy = (np.roll(h, -1, axis=0)-np.roll(h, 1, axis=0))*n*.025
+    length = np.sqrt(dx*dx+dy*dy+1)
+    normals = np.stack([_channel(127.5-dx/length*127.5), _channel(127.5+dy/length*127.5),
+                        _channel(127.5+127.5/length)], axis=-1)
+    orm = np.stack([np.full((n, n), 255, np.uint8), _channel(220+15*h), np.zeros((n, n), np.uint8)], axis=-1)
     maps = {}
     for name, raw in (('albedo', albedo), ('normal', normals), ('orm', orm)):
         output = io.BytesIO()
-        Image.frombytes('RGB', (n, n), bytes(raw)).save(output, format='WEBP', lossless=True, method=4)
+        Image.frombytes('RGB', (n, n), raw.tobytes()).save(output, format='WEBP', lossless=True, method=4)
         maps[name+'.webp'] = output.getvalue()
     return maps
+
+
+TEXTURE_RUNS_PER_OWNER = 2
+_texture_runs = {}   # owner -> texture maps being computed now
+_texture_guard = Lock()
+
+
+@contextmanager
+def _texture_slot(owner):
+    """A few texture computations per owner at a time; each holds a CPU core while it runs."""
+    with _texture_guard:
+        if _texture_runs.get(owner, 0) >= TEXTURE_RUNS_PER_OWNER:
+            raise PipelineError('texture_busy', '다른 텍스쳐를 만드는 중입니다. 끝난 뒤 다시 요청하세요.', 429)
+        _texture_runs[owner] = _texture_runs.get(owner, 0) + 1
+    try:
+        yield
+    finally:
+        with _texture_guard:
+            _texture_runs[owner] -= 1
+            if not _texture_runs[owner]:
+                del _texture_runs[owner]
 
 
 class StudioLibrary:
@@ -240,7 +276,8 @@ class StudioLibrary:
             return self.texture(texture_id)
         # The maps depend only on the identity, so concurrent requests compute and store identical bytes.
         # The shared factory lock guards only the record commit, never this CPU-bound work.
-        maps = _tile_maps(payload['surface'], payload['size'], payload['seed'])
+        with _texture_slot(int(self.owner)):
+            maps = _tile_maps(payload['surface'], payload['size'], payload['seed'])
         directory.mkdir(parents=True, exist_ok=True)
         files = {}
         for filename, data in maps.items():

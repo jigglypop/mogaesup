@@ -118,19 +118,27 @@ def server_lease():
             raise RuntimeUncertain('같은 데이터 루트에서 API worker가 이미 실행 중입니다.') from exc
         with _guard():
             previous = _drain()
+            if previous and previous.get('boot_id') and _boot_id() and previous['boot_id'] != _boot_id():
+                # A requested instance poweroff ended this kernel's work. A process/container restart is not a reboot.
+                # Checked first: a drain of an earlier boot never blocks the startup token below.
+                (_root() / 'drain.json').unlink(missing_ok=True)
+                previous = None
             startup_token = os.getenv('ASSET_START_DRAIN_TOKEN', '')
             if startup_token and not re.fullmatch(r'[a-f0-9]{32}', startup_token):
                 raise RuntimeUncertain('Invalid startup admission token')
-            applied = _root() / 'startups' / (startup_token + '.json')
+            # The deployment that started this container closes admission with its token once, on the container's first
+            # start; a restart keeps whatever drain is current. A token reused by a later deployment (one that resumes
+            # the drain an earlier, failed one left) comes with a new start id and is applied again.
+            start_id = os.getenv('ASSET_START_DRAIN_ID', '') or startup_token
+            if startup_token and not re.fullmatch(r'[a-f0-9]{32}', start_id):
+                raise RuntimeUncertain('Invalid startup admission id')
+            applied = _root() / 'startups' / (start_id + '.json')
             if startup_token and not applied.exists():
                 if previous and previous['token'] != startup_token:
                     raise RuntimeUncertain('Another operation owns runtime admission')
                 _write_drain({'version': 1, 'token': startup_token, 'boot_id': _boot_id()})
                 applied.parent.mkdir(parents=True, exist_ok=True)
                 applied.write_text('{"version":1}', encoding='utf-8')
-            elif previous and previous.get('boot_id') and _boot_id() and previous['boot_id'] != _boot_id():
-                # A requested instance poweroff ended this kernel's work. A process/container restart is not a reboot.
-                (_root() / 'drain.json').unlink(missing_ok=True)
         yield
     finally:
         stream.close()

@@ -27,21 +27,33 @@ from src.services.object_storage import StoredPath, child_names, local_workspace
 ADMIN = 'host=127.0.0.1 port=55432 user=postgres password=postgres-dev connect_timeout=3'
 
 
+def s3_error(code, status, operation):
+    return ClientError({'Error': {'Code': code}, 'ResponseMetadata': {'HTTPStatusCode': status}}, operation)
+
+
 class FakeS3:
-    """The S3 calls object_storage makes, kept in memory and counted."""
+    """The S3 calls object_storage makes, kept in memory and counted.
+
+    Failure modes of the real service: `denied_deletes` (keys, or '*') answer AccessDenied as for a role without
+    s3:DeleteObject, `forbidden_heads` makes a HEAD of a missing key 403 as for a role that may not list it,
+    `conditional_writes` are keys another conditional PUT is writing (409), and `page_size` splits listings into pages."""
 
     def __init__(self):
         self.objects = {}
         self.calls = {}
         self.clock = datetime(2026, 9, 1, tzinfo=timezone.utc)
         self.lock = threading.Lock()
+        self.denied_deletes = set()
+        self.forbidden_heads = False
+        self.conditional_writes = set()
+        self.page_size = 1000
 
     def _count(self, name):
         with self.lock:
             self.calls[name] = self.calls.get(name, 0) + 1
 
     def _missing(self, operation):
-        return ClientError({'Error': {'Code': 'NoSuchKey'}}, operation)
+        return s3_error('NoSuchKey', 404, operation)
 
     def tick(self):
         self.clock += timedelta(seconds=1)
@@ -53,8 +65,10 @@ class FakeS3:
 
     def put_object(self, *, Bucket, Key, Body, ContentType, Metadata, ChecksumSHA256, ServerSideEncryption, IfNoneMatch=None):
         self._count('put_object')
+        if IfNoneMatch == '*' and Key in self.conditional_writes:
+            raise s3_error('ConditionalRequestConflict', 409, 'PutObject')
         if IfNoneMatch == '*' and Key in self.objects:
-            raise ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
+            raise s3_error('PreconditionFailed', 412, 'PutObject')
         self.put(Key, Body)
         self.objects[Key].update(ContentType=ContentType, Metadata=Metadata, ChecksumSHA256=ChecksumSHA256)
 
@@ -62,7 +76,7 @@ class FakeS3:
         self._count('head_object')
         item = self.objects.get(Key)
         if item is None:
-            raise ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+            raise (s3_error('403', 403, 'HeadObject') if self.forbidden_heads else s3_error('404', 404, 'HeadObject'))
         return {'ContentLength': len(item['Body']), 'LastModified': item['LastModified'],
                 'ChecksumSHA256': item.get('ChecksumSHA256'), 'Metadata': item['Metadata']}
 
@@ -73,8 +87,13 @@ class FakeS3:
             raise self._missing('GetObject')
         body = item['Body']
         response = {'Metadata': item['Metadata'], 'ETag': '"%s"' % hashlib.md5(body).hexdigest()}
+        if IfMatch and IfMatch != response['ETag']:
+            raise s3_error('PreconditionFailed', 412, 'GetObject')
         if Range:
             start, end = (int(value) for value in Range.removeprefix('bytes=').split('-'))
+            if start >= len(body):
+                raise s3_error('InvalidRange', 416, 'GetObject')
+            end = min(end, len(body) - 1)
             response['ContentRange'] = f'bytes {start}-{end}/{len(body)}'
             body = body[start:end + 1]
         response['Body'] = io.BytesIO(body)
@@ -82,6 +101,8 @@ class FakeS3:
 
     def delete_object(self, *, Bucket, Key):
         self._count('delete_object')
+        if Key in self.denied_deletes or '*' in self.denied_deletes:
+            raise s3_error('AccessDenied', 403, 'DeleteObject')
         self.objects.pop(Key, None)
 
     def copy_object(self, *, Bucket, Key, CopySource, **_):
@@ -96,7 +117,12 @@ class FakeS3:
                                for key in keys if Delimiter in key[len(Prefix):]})
             keys = [key for key in keys if Delimiter not in key[len(Prefix):]]
             return {'Contents': [self._item(key) for key in keys], 'CommonPrefixes': [{'Prefix': p} for p in prefixes]}
-        return {'Contents': [self._item(key) for key in keys[:MaxKeys]]}
+        start = int(ContinuationToken or 0)
+        page = keys[start:start + min(MaxKeys, self.page_size)]
+        response = {'Contents': [self._item(key) for key in page], 'IsTruncated': start + len(page) < len(keys)}
+        if response['IsTruncated']:
+            response['NextContinuationToken'] = str(start + len(page))
+        return response
 
     def _item(self, key):
         item = self.objects[key]
@@ -108,7 +134,13 @@ class FakeS3:
 
         class Paginator:
             def paginate(self, **kwargs):
-                yield s3.list_objects_v2(**kwargs)
+                token = None
+                while True:
+                    page = s3.list_objects_v2(**kwargs, **({'ContinuationToken': token} if token else {}))
+                    yield page
+                    if not page.get('IsTruncated'):
+                        return
+                    token = page['NextContinuationToken']
         return Paginator()
 
     def generate_presigned_url(self, operation, Params, ExpiresIn):
@@ -817,3 +849,78 @@ def test_the_marker_follows_the_records_through_import_and_rollback(importing, s
     monkeypatch.setenv('ASSET_S3_PREFIX', prefix)
     records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lambda line: None)
     object_storage.assert_records_mode()
+
+
+# --- rollback safety of export, migrations that changed, and S3 failure modes ------------------------------------
+
+def test_export_keeps_the_marker_while_s3_holds_json_of_deleted_records(importing, s3, database):
+    conn, prefix = importing
+    records.import_prefix(conn, s3, 'fixture-bucket', prefix)
+    # Deleted in the database while it held the records: a server on S3 would read the old JSON again.
+    conn.execute('DELETE FROM character_records.records WHERE prefix = %s AND path = %s', (prefix, 'characters/batch.json'))
+    lines = []
+    with pytest.raises(SystemExit, match='marker kept'):
+        records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lines.append)
+    assert _marker(prefix) in s3.objects
+    assert any(line.strip() == 'characters/batch.json' for line in lines) and any('--ignore-stale' in line for line in lines)
+    records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lines.append, ignore_stale=True)
+    assert _marker(prefix) not in s3.objects
+
+
+def test_a_marker_the_role_may_not_delete_keeps_servers_refusing_and_says_so(importing, s3, database):
+    conn, prefix = importing
+    records.import_prefix(conn, s3, 'fixture-bucket', prefix)
+    s3.denied_deletes.add(_marker(prefix))
+    lines = []
+    with pytest.raises(SystemExit, match='s3:DeleteObject was denied'):
+        records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lines.append)
+    assert _marker(prefix) in s3.objects
+    assert any('keep refusing to start' in line and 's3:DeleteObject was denied' in line for line in lines)
+
+
+def test_a_migration_that_changed_after_it_was_applied_is_refused(database, tmp_path, monkeypatch):
+    folder = tmp_path / 'migrations'
+    folder.mkdir()
+    for path in records.MIGRATIONS.glob('*.sql'):
+        (folder / path.name).write_bytes(path.read_bytes())
+    monkeypatch.setattr(records, 'MIGRATIONS', folder)
+    with psycopg.connect(database, autocommit=True) as conn:
+        applied = dict(conn.execute('SELECT name, sha256 FROM character_records.migrations').fetchall())
+        name = sorted(applied)[0]
+        original = (folder / name).read_bytes()
+        (folder / name).write_bytes(original + b'\n-- an edit after it was applied\n')
+        with pytest.raises(SystemExit, match='new numbered migration'):
+            records.migrate(conn, out=lambda line: None)
+        assert dict(conn.execute('SELECT name, sha256 FROM character_records.migrations').fetchall()) == applied
+        # The change goes into a new numbered file, applied once.
+        (folder / name).write_bytes(original)
+        (folder / '999_test_extra.up.sql').write_text('CREATE TABLE IF NOT EXISTS character_records.test_extra (id int)')
+        lines = []
+        records.migrate(conn, out=lines.append)
+        records.migrate(conn, out=lines.append)
+        assert lines.count('applied 999_test_extra.up.sql') == 1
+        conn.execute('DROP TABLE character_records.test_extra')
+        conn.execute("DELETE FROM character_records.migrations WHERE name = '999_test_extra.up.sql'")
+
+
+def test_import_reads_every_page_of_a_listing(importing, s3, database):
+    conn, prefix = importing
+    s3.page_size = 2
+    report = records.import_prefix(conn, s3, 'fixture-bucket', prefix)
+    assert (report.listed, report.inserted) == (5, 5)
+
+
+def test_an_attempt_whose_input_delete_is_refused_keeps_its_receipt_in_the_database(cloud, s3, database):
+    from src.services import character_jobs
+    root, prefix = cloud
+    run = StoredPath(root) / 'avatar-factory' / '1' / ('r' * 24) / 'meshy'
+    object_storage.write_json(run / 'character.json', {'stage': 'rigging', 'status': 'FAILED', 'task_id': 'task-1'})
+    (run / 'rig-input.glb').write_bytes(b'glTF input')
+    s3.denied_deletes.add(f'{prefix}/avatar-factory/1/{"r" * 24}/meshy/rig-input.glb')
+    with pytest.raises(ClientError):
+        character_jobs.archive_attempt(run, 'retry')
+    # The database row goes last, so the refused S3 delete leaves the attempt whole and retryable.
+    assert character_jobs.state(run)['status'] == 'FAILED' and (run / 'rig-input.glb').is_file()
+    s3.denied_deletes.clear()
+    character_jobs.archive_attempt(run, 'retry')
+    assert not (run / 'character.json').is_file() and not (run / 'rig-input.glb').is_file()

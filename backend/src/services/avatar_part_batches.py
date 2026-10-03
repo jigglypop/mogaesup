@@ -1,5 +1,4 @@
 """Uploaded three-view hair batches with durable, independently resumable jobs."""
-from collections import deque
 from concurrent.futures import as_completed
 from src.services.runtime_activity import ContextThreadPoolExecutor as ThreadPoolExecutor
 from contextlib import contextmanager
@@ -22,11 +21,12 @@ from src.services.avatar_variants import AvatarVariants
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.meshy_options import freeze_options
 from src.services.process_identity import identity, lease_guard, state as process_state
+from src.services.run_lock import WorkerLocks
 from src.services.studio_library import StudioLibrary
 from src.services.studio_prompts import StudioPrompts
 
 
-_RUNS = {}
+_RUNS = WorkerLocks()
 _PART_WORKERS = Semaphore(4)
 _ASSET_ID = re.compile(r'[a-f0-9]{64}')
 _EXPECTED_BUDGET = {'image_tasks': 0, 'reference_tasks': 0, 'expression_tasks': 0,
@@ -55,6 +55,55 @@ def _batch_lease(directory):
         guard.__exit__(None, None, None)
 
 
+SPECK_PIXELS = 12   # isolate_hair drops a marked region smaller than this
+
+
+def small_regions(marked, minimum):
+    """The marked pixels whose 4-connected region has fewer than `minimum` pixels.
+
+    Regions are found on horizontal runs of marked pixels: a run joins the runs of the next row whose columns
+    overlap it, and runs are merged by union-find with pointer jumping in numpy. The work follows the number of
+    runs, not of pixels, with no per-pixel Python loop."""
+    h, w = marked.shape
+    padded = np.zeros((h, w+2), np.int8); padded[:, 1:-1] = marked
+    change = np.diff(padded, axis=1)
+    rows, starts = np.nonzero(change == 1)
+    _, ends = np.nonzero(change == -1)   # the same runs in the same order, each ending before this column
+    small = np.zeros((h, w), bool)
+    if not len(starts):
+        return small
+    stride = np.int64(w+2)
+    start_keys, end_keys = rows*stride + starts, rows*stride + ends
+    # The runs of the next row that overlap each run: they end after its start and start before its end.
+    first = np.searchsorted(end_keys, start_keys + stride, side='right')
+    last = np.searchsorted(start_keys, end_keys + stride, side='left')
+    links = np.maximum(last - first, 0)
+    a = np.repeat(np.arange(len(starts)), links)
+    b = first[a] + np.arange(len(a)) - np.repeat(np.cumsum(links) - links, links)
+    parent = np.arange(len(starts))
+    while len(a):
+        ra, rb = parent[a], parent[b]
+        joined = ra != rb
+        if not joined.any():
+            break
+        a, b, ra, rb = a[joined], b[joined], ra[joined], rb[joined]
+        # Each root hooks under the smallest root it touches, so parents only ever point to smaller runs.
+        np.minimum.at(parent, np.maximum(ra, rb), np.minimum(ra, rb))
+        while True:
+            jumped = parent[parent]
+            if np.array_equal(jumped, parent):
+                break
+            parent = jumped
+    lengths = ends - starts
+    sizes = np.bincount(parent, weights=lengths, minlength=len(starts))
+    specks = np.flatnonzero(sizes[parent] < minimum)
+    if len(specks):
+        counts = lengths[specks]
+        offsets = np.arange(counts.sum()) - np.repeat(np.cumsum(counts) - counts, counts)
+        small.reshape(-1)[np.repeat(rows[specks]*w + starts[specks], counts) + offsets] = True
+    return small
+
+
 def isolate_hair(tile):
     """Opt-in chroma filter for monochrome sheets; it cannot identify skin.
 
@@ -64,7 +113,7 @@ def isolate_hair(tile):
     tile = tile.convert('RGBA'); w, h = tile.size
     pixels = np.asarray(tile)
     # A tile of 32 MP as Python tuples takes gigabytes: the rule runs on bands of rows, in integers.
-    marked = np.empty((h, w), np.uint8)
+    marked = np.empty((h, w), bool)
     for top in range(0, h, 256):
         band = pixels[top:top+256].astype(np.int16)
         r, g, b, a = band[..., 0], band[..., 1], band[..., 2], band[..., 3]
@@ -72,26 +121,8 @@ def isolate_hair(tile):
         skin = (r-b > 12) & (r-g > 4) & (g-b > -6)
         matte = high-low > 100
         marked[top:top+256] = (a > 24) & ~skin & ~matte & (low <= 245)
-    mask = bytearray(marked.tobytes())
-    kept = bytearray(w*h)
-    start = mask.find(1)
-    while start >= 0:
-        mask[start] = 0; queue = deque([start]); size = 0; first = []
-        while queue:
-            index = queue.popleft(); x, y = index % w, index // w
-            kept[index] = 1; size += 1
-            if size < 12:
-                first.append(index)
-            for other in (index-1 if x else -1, index+1 if x+1 < w else -1,
-                          index-w if y else -1, index+w if y+1 < h else -1):
-                if other >= 0 and mask[other]:
-                    mask[other] = 0; queue.append(other)
-        if size < 12:
-            # A speck: only its few pixels were marked, so they are all in `first`.
-            for index in first:
-                kept[index] = 0
-        start = mask.find(1, start+1)
-    keep = np.frombuffer(kept, np.uint8).reshape(h, w).astype(bool)
+    # A speck (a region of fewer than SPECK_PIXELS marked pixels) is cleared with the unmarked pixels.
+    keep = marked & ~small_regions(marked, SPECK_PIXELS)
     tile.putalpha(Image.fromarray(np.where(keep, pixels[..., 3], np.uint8(0))))
     return tile
 
@@ -252,19 +283,25 @@ class PartBatches:
         return {'job_id': payload['base_job_id'], 'version': payload['base_version'],
                 'body_sha256': artifact['sha256']}
 
-    def _child_snapshot(self, owner, item):
+    def _child_snapshot(self, owner, item, *, verify=True):
+        """One child's state. `verify` checks the saved model and hair GLBs against their receipts (a HEAD each in S3
+        mode), as the worker needs before it skips a child; a listing trusts the receipts."""
         job_id = item['job_id']; directory = self.factory.directory(owner, job_id)
-        if not (directory/'job.json').is_file():
+        try:
+            # job.json is read once, by the factory: a missing one means the child was never created.
+            child = self.factory.get(owner, job_id)
+        except PipelineError as exc:
+            if exc.code != 'not_found':
+                raise
             if any(item.get(field) for field in ('task_id', 'model_receipt', 'native_receipt')):
                 return {**item, 'state_error': '저장된 하위 작업을 일시적으로 조회할 수 없습니다.'}
             return {**item, 'status': 'queued', 'child_status': 'not_created',
                     'progress': {}, 'error': item.get('error')}
-        child = self.factory.get(owner, job_id)
         task = read_json(directory/'parts'/'hair'/'character.json')
         generated = read_json(directory/'parts'/'hair'/'generation-artifacts.json').get('generated', {})
         task_id = task.get('task_id') if isinstance(task.get('task_id'), str) else None
         generated_sha = generated.get('sha256') if _ASSET_ID.fullmatch(str(generated.get('sha256', ''))) else None
-        if generated_sha:
+        if generated_sha and verify:
             model = directory/'parts'/'hair'/'generated.glb'
             if not model.is_file() or digest(model) != generated_sha:
                 generated_sha = None
@@ -275,7 +312,8 @@ class PartBatches:
         if (native.get('status') == 'review_required' and artifact
                 and not native.get('expression_pending') and not native.get('incomplete_parts')):
             try:
-                AvatarNativeParts(self.factory).artifact(owner, job_id, native['version'], 'hair.glb')
+                if verify:
+                    AvatarNativeParts(self.factory).artifact(owner, job_id, native['version'], 'hair.glb')
                 complete = True
             except PipelineError:
                 artifact = None
@@ -305,14 +343,15 @@ class PartBatches:
                                         'sha256': artifact['sha256'], 'url': artifact.get('url')}
         return result
 
-    def _public(self, owner, record):
-        items = []
-        for saved in record['items']:
+    def _public(self, owner, record, *, verify=True, pool=None):
+        """`pool`: an executor that reads the children in parallel (a listing); `verify` as in _child_snapshot."""
+        def snapshot(saved):
             try:
-                items.append(self._child_snapshot(owner, saved))
+                return self._child_snapshot(owner, saved, verify=verify)
             except Exception as exc:
-                items.append({**saved, 'state_error': exc.message if isinstance(exc, PipelineError)
-                              else '저장된 하위 작업 상태를 확인할 수 없습니다.'})
+                return {**saved, 'state_error': exc.message if isinstance(exc, PipelineError)
+                        else '저장된 하위 작업 상태를 확인할 수 없습니다.'}
+        items = list(pool.map(snapshot, record['items']) if pool else map(snapshot, record['items']))
         complete = all(item['status'] == 'complete' for item in items)
         running = any(item['status'] == 'running' for item in items)
         owner_running = record.get('status') == 'running' and process_state(record.get('process')) != 'exited'
@@ -380,17 +419,27 @@ class PartBatches:
         record = read_json(self._path(owner, batch))
         if not record:
             raise PipelineError('not_found', '일괄 작업을 찾을 수 없습니다.', 404)
+        return self._public(owner, self._settled(owner, batch, record))
+
+    def _settled(self, owner, batch, record):
+        """The record, paused first when the process running it has exited."""
         if record.get('status') == 'running' and process_state(record.get('process')) == 'exited':
             with _LOCK, _batch_lease(self.root(owner, batch)):
                 current = read_json(self._path(owner, batch))
                 if current.get('status') == 'running' and process_state(current.get('process')) == 'exited':
                     current.update(status='paused', error='서버가 중단되었습니다. 저장된 하위 작업으로 이어가세요.')
                     self._save(owner, current); record = current
-        return self._public(owner, record)
+        return record
 
     def list(self, owner):
+        # Each batch and child record is read once, the children in parallel, trusting their saved receipts: a
+        # serial listing of many batches in S3 mode outlasted the proxy timeouts.
         root = self.factory.root/str(int(owner))/'part-batches'
-        items = [self.get(owner, path.parent.name) for path in root.glob('*/batch.json')]
+        paths = list(root.glob('*/batch.json'))
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix='part-batch-listing') as pool:
+            records = [(path.parent.name, record) for path, record in zip(paths, pool.map(read_json, paths)) if record]
+            items = [self._public(owner, self._settled(owner, batch, record), verify=False, pool=pool)
+                     for batch, record in records]
         return {'items': sorted(items, key=lambda value: value['created_at'], reverse=True)}
 
     def resume(self, owner, batch):
@@ -408,9 +457,7 @@ class PartBatches:
         return self.get(owner, batch), True
 
     def execute(self, owner, batch):
-        with _LOCK:
-            lock = _RUNS.setdefault((int(owner), batch), Lock())
-        if not lock.acquire(False):
+        if not _RUNS.acquire((int(owner), batch)):
             return
         path = self._path(owner, batch)
         try:
@@ -493,4 +540,4 @@ class PartBatches:
             except PipelineError:
                 pass
         finally:
-            lock.release()
+            _RUNS.release((int(owner), batch))

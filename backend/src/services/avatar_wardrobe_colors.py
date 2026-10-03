@@ -16,19 +16,22 @@ from src.services.glb import parse_glb
 
 MAX_REGIONS = 4
 MASK_EDGE = 1024
+# Texels are clustered at the mask's resolution: a 4096 px texture would otherwise take gigabytes as float arrays.
+TEXTURE_EDGE = MASK_EDGE
 LIGHTNESS_WEIGHT = .35
 MERGE_DISTANCE = 14.     # Lab units (lightness weighted) below which two regions are one colour
 MIN_SHARE = .03
+_XYZ = np.array([[.4124, .3576, .1805], [.2126, .7152, .0722], [.0193, .1192, .9505]], np.float32).T
+_WHITE = np.array([.95047, 1., 1.08883], np.float32)
 
 
 def _linear(srgb):
-    return np.where(srgb <= .04045, srgb/12.92, ((srgb + .055)/1.055)**2.4)
+    return np.where(srgb <= .04045, srgb/12.92, ((srgb + .055)/1.055)**2.4).astype(srgb.dtype, copy=False)
 
 
 def _lab(srgb):
     linear = _linear(srgb)
-    xyz = linear @ np.array([[.4124, .3576, .1805], [.2126, .7152, .0722], [.0193, .1192, .9505]]).T
-    xyz /= np.array([.95047, 1., 1.08883])
+    xyz = (linear @ _XYZ.astype(linear.dtype, copy=False))/_WHITE.astype(linear.dtype, copy=False)
     f = np.where(xyz > .008856, np.cbrt(xyz), 7.787*xyz + 16/116)
     return np.stack([116*f[:, 1] - 16, 500*(f[:, 0] - f[:, 1]), 200*(f[:, 1] - f[:, 2])], axis=1)
 
@@ -60,7 +63,8 @@ def _nearest(points, centers, chunk=200_000):
 
 
 def _texture(doc, binary):
-    """(material index, texCoord set, RGB image) of the first material with a base colour texture."""
+    """(material index, texCoord set, RGB image) of the first material with a base colour texture, reduced to at most
+    TEXTURE_EDGE pixels a side (UVs are fractions, so the layout is the same at any size)."""
     for index, material in enumerate(doc.get('materials', [])):
         reference = (material.get('pbrMetallicRoughness') or {}).get('baseColorTexture')
         if not reference:
@@ -71,7 +75,12 @@ def _texture(doc, binary):
         view = doc['bufferViews'][image['bufferView']]
         start = view.get('byteOffset', 0)
         with Image.open(io.BytesIO(binary[start:start + view['byteLength']])) as picture:
-            return index, reference.get('texCoord', 0), picture.convert('RGB')
+            # A JPEG decodes straight at a fraction of its size; any other image is reduced after decoding.
+            picture.draft('RGB', (TEXTURE_EDGE, TEXTURE_EDGE))
+            picture = picture.convert('RGB')
+        if max(picture.size) > TEXTURE_EDGE:
+            picture.thumbnail((TEXTURE_EDGE, TEXTURE_EDGE), Image.Resampling.BOX)
+        return index, reference.get('texCoord', 0), picture
     return None
 
 
@@ -97,12 +106,13 @@ def color_regions(part_content):
             for triangle in uv[triangles]:
                 draw.polygon([tuple(point) for point in triangle], fill=255)
     used = np.asarray(used) > 0
-    pixels = np.asarray(picture, dtype=np.float64)/255.
+    pixels = np.asarray(picture, dtype=np.float32)/np.float32(255.)
     if used.sum() < 100:
         used = np.ones(used.shape, bool)
     colors = pixels[used]
-    features = _lab(colors)*np.array([LIGHTNESS_WEIGHT, 1, 1])
-    sample = features[np.random.default_rng(0).choice(len(features), min(len(features), 30000), replace=False)]
+    features = _lab(colors)*np.array([LIGHTNESS_WEIGHT, 1, 1], np.float32)
+    # The clustering runs on a sample, in double precision: its seeding draws by normalized distances.
+    sample = features[np.random.default_rng(0).choice(len(features), min(len(features), 30000), replace=False)].astype(np.float64)
     centers = _kmeans(sample, min(MAX_REGIONS, max(1, len(sample)//50)))
     # Merge near-identical colours, then fold tiny regions into their nearest neighbour.
     merged = []

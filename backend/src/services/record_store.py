@@ -10,9 +10,11 @@ This module is the database half: queries, a small connection pool, and the cach
 for the S3 key index (2 s per job-sized scope, written through on every local write).
 """
 
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+import itertools
 import os
 from threading import Condition, RLock
 import time
@@ -24,8 +26,52 @@ INLINE_LIMIT = 1024 * 1024
 # Same horizons as the S3 caches: another process's write shows up within INDEX_SECONDS.
 INDEX_SECONDS = 2
 CONTENT_CACHE_LIMIT = 256_000
+# All cached record bytes together; object_storage keeps a cache of the same size for S3 JSON.
+CONTENT_CACHE_BYTES = 32 * 1024 * 1024
 POOL_SIZE = 8
 _IDLE_CHECK_SECONDS = 30
+# A write mark outlives every query that began before the write: the statement timeout is 30 s, a pool wait 15 s.
+_WRITE_MEMORY = 120
+_WRITE_TABLE_LIMIT = 4096
+
+
+class ByteBoundedCache(OrderedDict):
+    """Least recently stored first. Values are (tag, bytes) pairs, and the bytes of all of them together stay within
+    `budget`: the oldest go first."""
+
+    def __init__(self, budget):
+        super().__init__()
+        self.budget, self.size = budget, 0
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.pop(key)
+        super().__setitem__(key, value)
+        self.size += len(value[1])
+        while self.size > self.budget and len(self) > 1:
+            self.popitem(last=False)
+
+    def __delitem__(self, key):
+        self.size -= len(self[key][1])
+        super().__delitem__(key)
+
+    def pop(self, key, *default):
+        if key not in self:
+            if default:
+                return default[0]
+            raise KeyError(key)
+        value = super().pop(key)
+        self.size -= len(value[1])
+        return value
+
+    def popitem(self, last=True):
+        key, value = super().popitem(last=last)
+        self.size -= len(value[1])
+        return key, value
+
+    def clear(self):
+        super().clear()
+        self.size = 0
 
 
 class RecordStoreUnavailable(RuntimeError):
@@ -231,8 +277,27 @@ def _not_imported(prefix):
 
 _indexes = {}     # (prefix, scope) -> (monotonic, {path: Meta})
 _heads = {}       # (prefix, path) -> (monotonic, Meta | None), for paths outside a scope
-_contents = {}    # (prefix, path) -> (sha256, bytes); a digest match is a content match
-_writes = {}      # (prefix, scope or path) -> local write count
+_contents = ByteBoundedCache(CONTENT_CACHE_BYTES)  # (prefix, path) -> (sha256, bytes); a digest match is a content match
+_writes = OrderedDict()   # (prefix, scope or path) -> (number of the last local write, monotonic time), oldest first
+_write_numbers = itertools.count(1)
+
+
+def _write_number(key):
+    """Compared before and after a query: a different number means a local write landed meanwhile (hold _lock)."""
+    entry = _writes.get(key)
+    return entry[0] if entry else 0
+
+
+def _mark_write(key):
+    """Hold _lock. The table forgets marks old enough that no query begun before them can still be running."""
+    _writes.pop(key, None)
+    _writes[key] = next(_write_numbers), time.monotonic()
+    now = time.monotonic()
+    while len(_writes) > _WRITE_TABLE_LIMIT:
+        oldest = next(iter(_writes))
+        if now - _writes[oldest][1] < _WRITE_MEMORY:
+            break
+        del _writes[oldest]
 
 
 def scope_of(path):
@@ -260,7 +325,7 @@ def _scope_index(prefix, scope):
             cached = _indexes.get(key)
             if cached and time.monotonic() - cached[0] < INDEX_SECONDS:
                 return cached[1]
-            writes = _writes.get(key, 0)
+            writes = _write_number(key)
         started = time.monotonic()
         with connection() as conn:
             rows = conn.execute(
@@ -269,7 +334,7 @@ def _scope_index(prefix, scope):
         index = {row[0]: _meta(row[1:]) for row in rows}
         with _lock:
             # A local write that landed while this query ran may be missing from its result.
-            if _writes.get(key, 0) == writes:
+            if _write_number(key) == writes:
                 if len(_indexes) > 4096:
                     _indexes.clear()
                 _indexes[key] = started, index
@@ -287,14 +352,14 @@ def head(prefix, path):
         cached = _heads.get(key)
         if cached and time.monotonic() - cached[0] < INDEX_SECONDS:
             return cached[1]
-        writes = _writes.get(key, 0)
+        writes = _write_number(key)
     started = time.monotonic()
     with connection() as conn:
         row = conn.execute(f'SELECT {_META} FROM {SCHEMA}.records WHERE prefix = %s AND path = %s',
                            (prefix, path)).fetchone()
     meta = _meta(row) if row else None
     with _lock:
-        if _writes.get(key, 0) == writes:
+        if _write_number(key) == writes:
             if len(_heads) > 4096:
                 _heads.clear()
             _heads[key] = started, meta
@@ -319,8 +384,6 @@ def fetch(prefix, path):
     meta, content = _meta(row[:5]), (bytes(row[5]) if row[5] is not None else None)
     if content is not None and len(content) < CONTENT_CACHE_LIMIT:
         with _lock:
-            if len(_contents) > 512:
-                _contents.clear()
             _contents[prefix, path] = meta.sha256, content
     return meta, content
 
@@ -330,7 +393,7 @@ def _written(prefix, path, meta, content=None):
     scope = scope_of(path)
     with _lock:
         if scope:
-            _writes[prefix, scope] = _writes.get((prefix, scope), 0) + 1
+            _mark_write((prefix, scope))
             cached = _indexes.get((prefix, scope))
             if cached:
                 # Copy on write: readers iterate the previous dict without holding the lock.
@@ -341,12 +404,12 @@ def _written(prefix, path, meta, content=None):
                     index[path] = meta
                 _indexes[prefix, scope] = cached[0], index
         else:
-            _writes[prefix, path] = _writes.get((prefix, path), 0) + 1
+            _mark_write((prefix, path))
             if (prefix, path) in _heads:
                 _heads[prefix, path] = time.monotonic(), meta
         _contents.pop((prefix, path), None)
         if meta is not None and content is not None and len(content) < CONTENT_CACHE_LIMIT:
-            _contents[prefix, path] = meta.sha256, content
+            _contents[prefix, path] = meta.sha256, bytes(content)
 
 
 def put(prefix, path, *, content=None, blob_key=None, size, sha256, exclusive=False, expected_version=None):

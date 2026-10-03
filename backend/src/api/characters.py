@@ -1,5 +1,6 @@
 """Authenticated character control API; existing world responses stay unchanged."""
 
+import json
 import os
 from functools import lru_cache
 from typing import Literal
@@ -7,7 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from src.services.object_storage import artifact_response as FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from src.auth import UserContext, get_current_user
@@ -17,6 +18,9 @@ from src.services.character_pipeline import CharacterPipeline, PipelineError
 
 
 router = APIRouter(prefix="/characters", tags=["characters"])
+# An action's input is stored with its receipt (operation.json): face selections are bounded in total, not per part only.
+MAX_SELECTED_FACES = 300_000
+MAX_STORED_INPUT_BYTES = 4 * 1024 * 1024
 
 
 class StrictModel(BaseModel):
@@ -47,6 +51,12 @@ class SegmentationInput(StrictModel):
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_artifact_id: Literal["local_fallback", "imported", "rigged", "generated", "animated", "parts_model"] | None = None
     selections: list[FaceSelection] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def bounded(self):
+        if sum(len(selection.faces) for selection in self.selections) > MAX_SELECTED_FACES:
+            raise ValueError("too many selected faces")
+        return self
 
 
 class MotionActions(StrictModel):
@@ -160,6 +170,8 @@ def action(character_id: str, action_id: str, background: BackgroundTasks,
         payload = ACTION_INPUTS[action_id].model_validate(body).model_dump()
     except ValidationError as exc:
         raise PipelineError("invalid_input", "작업 입력을 확인해 주세요.", 422) from exc
+    if len(json.dumps(payload, separators=(",", ":"))) > MAX_STORED_INPUT_BYTES:
+        raise PipelineError("input_too_large", "작업 입력이 너무 큽니다. 선택한 면을 줄여 주세요.", 413)
     operation, created = pipeline.accept(character_id, user.user_id, action_id, idempotency_key, if_match.strip('"'), payload)
     if created:
         background.add_task(execute, pipeline, character_id, user.user_id, operation["id"])

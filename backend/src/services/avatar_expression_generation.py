@@ -5,7 +5,6 @@ import json
 import os
 import re
 from contextlib import contextmanager, ExitStack
-from threading import Lock
 
 import httpx
 from PIL import Image
@@ -22,7 +21,8 @@ from src.services.avatar_openai_images import (
 )
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.object_storage import copy_file
-from src.services.process_identity import identity, lease_guard, state as process_state
+from src.services.process_identity import identity, lease_guard
+from src.services.run_lock import WorkerLocks, final_write, worker_alive
 
 
 NAMES = ('neutral', 'smile', 'cry', 'angry', 'surprise', 'blink')
@@ -32,7 +32,7 @@ from src.services.studio_prompts import DEFAULTS, StudioPrompts
 
 DEFAULT_PROMPTS = DEFAULTS['expression']
 
-_WORKERS = {}
+_WORKERS = WorkerLocks()
 
 
 @contextmanager
@@ -124,8 +124,9 @@ class AvatarExpressionGeneration:
 
     def get(self, generation_id):
         directory = self.directory(generation_id)
+        held = _WORKERS.busy(str(directory))
         record = self._record(generation_id)
-        alive = record['status'] in ('accepted', 'running') and process_state(record.get('process')) != 'exited'
+        alive = worker_alive(record, held or _WORKERS.busy(str(directory)))
         resumable, reason = self._resume_reason(directory, record)
         status = record['status']
         if not alive and status in ('accepted', 'running'):
@@ -300,9 +301,7 @@ class AvatarExpressionGeneration:
 
     def execute(self, generation_id):
         directory = self.directory(generation_id)
-        with _LOCK:
-            lock = _WORKERS.setdefault(str(directory), Lock())
-        if not lock.acquire(blocking=False):
+        if not _WORKERS.acquire(str(directory)):
             return
         try:
             with expression_lease(directory):
@@ -361,9 +360,9 @@ class AvatarExpressionGeneration:
                     message = '표정 텍스처 저장 중 오류가 발생했습니다.'
                 record.update(status='paused' if resumable else 'blocked', error=reason or message,
                               error_type=type(exc).__name__)
-                self._save(directory, record)
+                final_write(lambda: self._save(directory, record), 'expression generation record')
         finally:
-            lock.release()
+            _WORKERS.release(str(directory))
 
     def artifact(self, generation_id, name):
         record = self._record(generation_id)

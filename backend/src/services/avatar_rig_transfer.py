@@ -23,15 +23,18 @@ class AvatarRigTransfer:
         return self.factory.directory(owner, job_id)/'meshy/rig-transfer'
 
     def sources(self, owner):
-        # List immutable body deliveries, without opening their GLBs or calling Meshy.
+        # List immutable body deliveries, without opening their GLBs or calling Meshy. A body offers the sealed
+        # version the wardrobe offers (ready_version): while a newer one is assembled or failed, the one it replaced.
+        from src.services.avatar_production_progress import ready_version
         items = []
         library = StudioLibrary(self.factory, owner)
         catalog = library.metadata()
         for path in (self.factory.root/str(int(owner))).glob('*/native-parts/current.json'):
-            version = read_json(path).get('version')
-            if not version:
+            pointer = read_json(path)
+            if not pointer.get('version'):
                 continue
-            native = read_json(path.parent/version/'record.json')
+            version = ready_version(path.parent, pointer, read_json(path.parent/pointer['version']/'record.json'))
+            native = read_json(path.parent/version/'record.json') if version else {}
             if native.get('status') != 'review_required' or 'body.glb' not in native.get('files', {}):
                 continue
             job = read_json(path.parent.parent/'job.json')

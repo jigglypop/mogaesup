@@ -148,3 +148,73 @@ def test_parts_do_not_follow_a_body_whose_geometry_changed(library, monkeypatch)
     library.wardrobe.register(BODY, NEXT_VERSION, library.wardrobe.bodies()['revision'])
     assert 'aliases' not in library.wardrobe._stored()['bodies'][0]
     assert library.listed(BODY) == []
+
+
+THIRD_VERSION = '5' * 24
+
+
+def shapes(monkeypatch, geometries):
+    """body_entry answering each version with its own geometry: {version: geometry name}."""
+    def body_entry(management, job, version):
+        return ({**entry(job, version), 'geometry_sha256': sha(geometries[version])},
+                {'character_name': '몸', 'base_body': {'body_type': 'male'}})
+    monkeypatch.setattr(FittingManagement, 'body_entry', body_entry)
+
+
+def registered(library):
+    return [(body['version'], body.get('aliases')) for body in library.wardrobe._stored()['bodies']]
+
+
+def test_a_body_whose_geometry_changes_keeps_none_of_the_versions_before_it(library, monkeypatch):
+    # V1 and V2 share one shape; V3 has another. Parts made on V1 must not be offered on V3.
+    part_on_the_first_version(library)
+    library.assembly(BODY, THIRD_VERSION, slots=())
+    shapes(monkeypatch, {VERSION: 'first shape', NEXT_VERSION: 'first shape', THIRD_VERSION: 'second shape'})
+    library.wardrobe.register(BODY, VERSION, '0')
+    library.wardrobe.register(BODY, NEXT_VERSION, library.wardrobe.bodies()['revision'])
+    assert registered(library) == [(NEXT_VERSION, [VERSION])]
+    library.wardrobe.register(BODY, THIRD_VERSION, library.wardrobe.bodies()['revision'])
+    assert registered(library) == [(THIRD_VERSION, None)]
+    assert library.listed(BODY) == []
+
+
+def test_versions_with_the_same_geometry_all_stay_aliases(library, monkeypatch):
+    part_on_the_first_version(library)
+    library.assembly(BODY, THIRD_VERSION, slots=())
+    shapes(monkeypatch, {VERSION: 'one shape', NEXT_VERSION: 'one shape', THIRD_VERSION: 'one shape'})
+    library.wardrobe.register(BODY, VERSION, '0')
+    library.wardrobe.register(BODY, NEXT_VERSION, library.wardrobe.bodies()['revision'])
+    library.wardrobe.register(BODY, THIRD_VERSION, library.wardrobe.bodies()['revision'])
+    assert registered(library) == [(THIRD_VERSION, [VERSION, NEXT_VERSION])]
+    assert [part[:3] for part in library.listed(BODY)] == [(PART, PART_VERSION, 'hair')]
+
+
+def test_an_alias_kept_across_a_geometry_change_before_the_check_is_dropped(library, monkeypatch):
+    # A list written by the old rule: V2 (second shape) still carries V1 (first shape) as an alias.
+    part_on_the_first_version(library)
+    library.assembly(BODY, THIRD_VERSION, slots=())
+    _write_json(library.wardrobe.path, {'revision': 'old', 'updated_at': 'then', 'bodies': [
+        {**entry(BODY, NEXT_VERSION), 'geometry_sha256': sha('second shape'), 'aliases': [VERSION],
+         'name': '몸', 'body_type': 'male', 'registered_at': 'then'}]})
+    shapes(monkeypatch, {VERSION: 'first shape', NEXT_VERSION: 'second shape', THIRD_VERSION: 'second shape'})
+    library.wardrobe.register(BODY, THIRD_VERSION, 'old')
+    assert registered(library) == [(THIRD_VERSION, [NEXT_VERSION])]
+    assert library.listed(BODY) == []
+
+
+def test_an_alias_whose_body_cannot_be_read_is_dropped(library, monkeypatch):
+    part_on_the_first_version(library)
+    library.assembly(BODY, THIRD_VERSION, slots=())
+    geometries = {VERSION: 'one shape', NEXT_VERSION: 'one shape', THIRD_VERSION: 'one shape'}
+    shapes(monkeypatch, geometries)
+    library.wardrobe.register(BODY, VERSION, '0')
+    library.wardrobe.register(BODY, NEXT_VERSION, library.wardrobe.bodies()['revision'])
+    real = FittingManagement.body_entry
+
+    def body_entry(management, job, version):
+        if version == VERSION:
+            raise PipelineError('body_incomplete', '저장된 조립 몸을 선택하세요.', 409)
+        return real(management, job, version)
+    monkeypatch.setattr(FittingManagement, 'body_entry', body_entry)
+    library.wardrobe.register(BODY, THIRD_VERSION, library.wardrobe.bodies()['revision'])
+    assert registered(library) == [(THIRD_VERSION, [NEXT_VERSION])]

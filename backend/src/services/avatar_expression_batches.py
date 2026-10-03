@@ -2,17 +2,17 @@
 import hashlib
 import json
 import re
-from threading import Lock
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
 from src.services.avatar_expression_generation import expression_lease
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
-from src.services.process_identity import identity, state as process_state
+from src.services.process_identity import identity
+from src.services.run_lock import WorkerLocks, final_write, worker_alive
 from src.services.studio_prompts import StudioPrompts
 
 NAMES = ('neutral', 'smile', 'cry', 'angry', 'surprise')
-_WORKERS = {}
+_WORKERS = WorkerLocks()
 
 
 class AvatarExpressionBatches:
@@ -41,8 +41,10 @@ class AvatarExpressionBatches:
         return sorted(items, key=lambda item: item['created_at'], reverse=True)
 
     def get(self, batch_id):
+        key = str(self.directory(batch_id))
+        held = _WORKERS.busy(key)
         record = self._record(batch_id)
-        alive = record['status'] in ('accepted', 'running') and process_state(record.get('process')) != 'exited'
+        alive = worker_alive(record, held or _WORKERS.busy(key))
         items, resumable = [], False
         for name in record['names']:
             generation_id = record.get('generations', {}).get(name)
@@ -99,9 +101,8 @@ class AvatarExpressionBatches:
         return self.get(batch_id), True
 
     def execute(self, batch_id):
-        with _LOCK:
-            lock = _WORKERS.setdefault(str(self.directory(batch_id)), Lock())
-        if not lock.acquire(blocking=False):
+        key = str(self.directory(batch_id))
+        if not _WORKERS.acquire(key):
             return
         try:
             with expression_lease(self.directory(batch_id)):
@@ -133,12 +134,16 @@ class AvatarExpressionBatches:
                 except Exception as exc:
                     errors.append(exc.message if isinstance(exc, PipelineError) else f'{name}: 표정 생성 처리 중단')
             record.update(status='paused' if errors else 'complete', error=' / '.join(errors) or None)
-            self._save(record)
+            final_write(lambda: self._save(record), 'expression batch record')
         except Exception as exc:
             if isinstance(exc, PipelineError) and exc.code == 'worker_active':
                 return
-            record = self._record(batch_id)
-            record.update(status='paused', error=exc.message if isinstance(exc, PipelineError) else '표정 일괄 처리 중단')
-            self._save(record)
+            error = exc.message if isinstance(exc, PipelineError) else '표정 일괄 처리 중단'
+
+            def pause():
+                record = self._record(batch_id)
+                record.update(status='paused', error=error)
+                self._save(record)
+            final_write(pause, 'expression batch record')
         finally:
-            lock.release()
+            _WORKERS.release(key)

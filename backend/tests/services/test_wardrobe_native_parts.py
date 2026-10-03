@@ -165,3 +165,30 @@ def test_the_drawings_of_a_worn_hat_are_inputs_of_the_blender_workspace():
     assert inputs == ['job/native-parts/v0/body.glb', 'job/output/generated-hat.glb', 'job/output/generated-hair.glb',
                       'job/prefit-parts/top.glb', 'job/output/hair-front.png', 'job/output/hair-back.png',
                       'job/output/hat-front.png', 'job/output/hat-side.png', 'job/native-parts/v0/hair.glb']
+
+
+def test_the_assembly_answer_names_files_never_where_the_worker_kept_them(refit):
+    """Records sealed before the worker cut its paths still answer without them; the artifact URLs keep theirs."""
+    import json
+    library, native, root = refit
+    path = root/VERSION/'record.json'
+    record = read_json(path)
+    failed = {'slot': 'hat', 'available': False, 'fit_status': 'failed', 'objects': [],
+              'errors': [{'code': 'fit_exception',
+                          'message': r'ValueError: C:\Users\someone\AppData\Local\Temp\tmp1\hat.glb broke at /srv/data/jobs/x/hat.blend'}],
+              'measurement': {'silhouette_registration': {'views': {
+                  'front': {'source': '/srv/data/avatar-factory/1/job/output/hat-front.png', 'error': r'OSError: \\nas\share\hat.png'}}}}}
+    record['result']['parts'] = [failed if part['slot'] == 'hat' else part for part in record['result']['parts']]
+    record['result']['incomplete_parts'] = [{'slot': 'hat', 'status': 'failed', 'errors': failed['errors'], 'available': False}]
+    _write_json(path, record)
+    state = native.get(OWNER, JOB)
+    text = json.dumps(state, ensure_ascii=False)
+    for leaked in ('Users', 'someone', 'Temp', '/srv/', 'nas', 'share'):
+        assert leaked not in text, leaked
+    hat = next(part for part in state['parts'] if part['slot'] == 'hat')
+    assert hat['errors'][0]['message'] == 'ValueError: hat.glb broke at hat.blend'
+    assert hat['measurement']['silhouette_registration']['views']['front'] == {'source': 'hat-front.png', 'error': 'OSError: hat.png'}
+    assert state['incomplete_parts'][0]['errors'][0]['message'] == 'ValueError: hat.glb broke at hat.blend'
+    assert all(item['url'].startswith(f'/api/avatar-factory/jobs/{JOB}/native-parts/{VERSION}/') for item in state['artifacts'])
+    # The record itself is left as it was sealed.
+    assert read_json(path)['result']['parts'] == record['result']['parts']

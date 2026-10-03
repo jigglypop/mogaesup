@@ -57,7 +57,11 @@ def archive_attempt(directory: Path, reason: str) -> int:
         "reason": reason, "status": value.get("status"), "http_status": value.get("http_status"),
         "task_id": value.get("task_id"), "stage": value.get("stage"),
         "archived_at": datetime.now(timezone.utc).isoformat()})
-    for name in ATTEMPT_FILES:
+    # Artifacts first and character.json last: a refused delete (an S3 role without s3:DeleteObject) then leaves the
+    # attempt as it was, retryable once the delete is allowed, never a run without its receipt whose leftover input
+    # refuses every new submission as an "Existing run".
+    order = sorted(ATTEMPT_FILES, key=lambda name: (name == "character.json", name.endswith(".json")))
+    for name in order:
         source = directory / name
         if source.is_file():
             source.unlink()
@@ -279,7 +283,12 @@ def rig_model(directory: Path, model: Path, height: float, client: httpx.Client,
 
 def refresh(directory: Path, client: httpx.Client, task_id: str | None = None) -> dict:
     value = state(directory)
-    task_id = task_id or value.get("task_id", "")
+    saved = value.get("task_id")
+    if task_id and task_id != saved and (saved or value.get("status") != "submission_uncertain"):
+        # A task ID given by hand recovers only a submission whose outcome is unknown and that has none yet; a typo
+        # must never detach a saved, accepted (paid) task from its receipt.
+        raise ValueError("A different task ID can only recover an uncertain submission that has no task ID")
+    task_id = task_id or saved or ""
     if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id):
         raise ValueError("Recover the existing Meshy task ID first")
     return record_task(directory, value, task_id, fetch_task(client, value, task_id))

@@ -175,6 +175,47 @@ def test_local_identity_requires_a_positive_integer(value):
     assert auth._local_dev_user(request) is None
 
 
-def test_a_local_operator_is_accepted():
-    request = Request({'type': 'http', 'headers': [(b'x-user-id', b'1')], 'client': ('127.0.0.1', 8000)})
-    assert auth._local_dev_user(request).level == 2
+def _local(*headers, peer='127.0.0.1'):
+    return Request({'type': 'http', 'headers': [(b'x-user-id', b'1'), *headers], 'client': (peer, 8000)})
+
+
+@pytest.mark.parametrize('host', [b'127.0.0.1:8016', b'127.0.0.1', b'localhost:8000', b'LOCALHOST', b'[::1]:8000', b'[::1]'])
+def test_a_local_operator_is_accepted(host):
+    assert auth._local_dev_user(_local((b'host', host))).level == 2
+    assert auth.trusted_loopback(_local((b'host', host), peer='::1'))
+
+
+@pytest.mark.parametrize('host', [None, b'', b'evil.example:8016', b'evil.example', b'127.0.0.1.evil.example:8016',
+                                  b'localhost.evil.example', b'127.0.0.1:80:80', b'localhost:port', b'[::1]x', b'0.0.0.0:8016'])
+def test_a_page_rebound_to_the_loopback_address_is_not_the_operator(host):
+    # DNS rebinding: the browser connects to 127.0.0.1 but names its own site in Host.
+    request = _local(*([(b'host', host)] if host is not None else []))
+    assert auth.trusted_loopback(request) is False and auth._local_dev_user(request) is None
+
+
+@pytest.mark.parametrize('origin', [b'https://evil.example', b'http://evil.example:8016', b'null', b'http://127.0.0.1:99999',
+                                    b'file://', b'http://127.0.0.1.evil.example'])
+def test_a_cross_site_page_cannot_use_the_loopback_operator(origin):
+    # A page elsewhere posting to the operator's port forward or a local server sends its own Origin.
+    request = _local((b'host', b'127.0.0.1:8080'), (b'origin', origin))
+    assert auth.trusted_loopback(request) is False and auth._local_dev_user(request) is None
+
+
+@pytest.mark.parametrize('origin', [b'http://127.0.0.1:5180', b'http://localhost:5173', b'https://localhost', b'http://[::1]:8000'])
+def test_a_loopback_origin_is_still_local(origin):
+    assert auth._local_dev_user(_local((b'host', b'127.0.0.1:8016'), (b'origin', origin))).level == 2
+
+
+def test_a_missing_jwt_secret_is_a_server_fault_not_a_caller_error(monkeypatch):
+    monkeypatch.delenv('JWT_SECRET', raising=False)
+    with pytest.raises(HTTPException) as exc:
+        auth.get_current_user(_request_with_auth('Bearer ' + _token(roles=['ADMIN'])))
+    assert exc.value.status_code == 503 and 'JWT_SECRET' in exc.value.detail
+    monkeypatch.setenv('JWT_SECRET', 'replace-this-secret-value-for-real-use')
+    with pytest.raises(HTTPException) as exc:
+        auth.get_current_user(_request_with_auth('Bearer ' + _token(roles=['ADMIN'])))
+    assert exc.value.status_code == 503
+    # Without any token the caller is told so first.
+    with pytest.raises(HTTPException) as exc:
+        auth.get_current_user(_request_with_auth())
+    assert exc.value.status_code == 401

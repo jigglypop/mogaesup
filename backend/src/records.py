@@ -2,7 +2,7 @@
 
     uv run python -m src.records migrate
     uv run python -m src.records import --prefix assets --prefix mogaesup-props [--dry-run] [--delete-missing]
-    uv run python -m src.records export --prefix assets [--dry-run]
+    uv run python -m src.records export --prefix assets [--dry-run] [--ignore-stale]
     uv run python -m src.records status [--prefix assets]
 
 `import` copies the JSON records of the S3-mapped namespaces from ASSET_S3_BUCKET into the database. It
@@ -14,7 +14,12 @@ without CHARACTER_DATABASE_URL refuses to start while the marker exists, instead
 that is stale from now on.
 
 `export` is the rollback aid: it writes the records created or changed in the database since their import
-back to their S3 keys and removes the marker, so the server can run without CHARACTER_DATABASE_URL again.
+back to their S3 keys and removes the marker, so the server can run without CHARACTER_DATABASE_URL again. JSON
+that S3 still holds for records deleted in the database would be read again by such a server, so while any is
+left the marker stays (delete those objects, or pass --ignore-stale to accept them).
+
+`migrate` applies each numbered file once. A file that changed after it was applied is refused: the change goes
+into a new numbered file.
 """
 
 import argparse
@@ -63,13 +68,14 @@ def migrate(conn, out=print):
         for path in sorted(MIGRATIONS.glob('[0-9][0-9][0-9]_*.up.sql')):
             sql = path.read_bytes()
             digest = hashlib.sha256(sql).hexdigest()
-            if applied.get(path.name) == digest:
+            if path.name in applied:
+                if applied[path.name] != digest:
+                    # Running it again would not apply the change: CREATE ... IF NOT EXISTS keeps the old table.
+                    raise SystemExit(f'{path.name} changed after it was applied to this database; nothing was changed. '
+                                     f'Restore the applied file and put the change in a new numbered migration.')
                 continue
-            # Every migration is idempotent, so a changed file is applied again as a whole.
             conn.execute(sql.decode('utf-8'))
-            conn.execute(f'INSERT INTO {schema}.migrations (name, sha256) VALUES (%s, %s) '
-                         'ON CONFLICT (name) DO UPDATE SET sha256 = excluded.sha256, applied_at = now()',
-                         (path.name, digest))
+            conn.execute(f'INSERT INTO {schema}.migrations (name, sha256) VALUES (%s, %s)', (path.name, digest))
             out(f'applied {path.name}')
     out('record schema ready')
 
@@ -231,8 +237,10 @@ def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=Fal
     return report
 
 
-def export_prefix(conn, s3, bucket, prefix, *, dry_run=False, out=print):
-    """Write the records created or changed in the database since their import back to their S3 keys."""
+def export_prefix(conn, s3, bucket, prefix, *, dry_run=False, out=print, ignore_stale=False):
+    """Write the records created or changed in the database since their import back to their S3 keys, then remove the
+    marker unless S3 still holds JSON of records deleted in the database (`ignore_stale` accepts them)."""
+    from botocore.exceptions import ClientError
     from src.services.object_storage import _content_type, _upload, records_marker_key
     schema = _schema()
     rows = conn.execute(f'SELECT path, content, blob_key, sha256 FROM {schema}.records '
@@ -258,9 +266,25 @@ def export_prefix(conn, s3, bucket, prefix, *, dry_run=False, out=print):
         out(f'  JSON in S3 without a record (left in place): {len(stale)}')
         for path in stale[:20]:
             out(f'    {path}')
-    if not dry_run:
+        if len(stale) > 20:
+            out(f'    ... {len(stale) - 20} more')
+    marker = records_marker_key(prefix)
+    if dry_run:
+        return written
+    if stale and not ignore_stale:
+        # A server reading S3 again would bring those records back (an archived character.json, a deleted job).
+        out(f'  The marker {marker} stays, so servers without CHARACTER_DATABASE_URL keep refusing to start: delete '
+            f'that JSON from S3, or run export again with --ignore-stale to let servers read it.')
+        raise SystemExit(f'{prefix or "(no prefix)"}: records written back, marker kept because of stale JSON in S3')
+    try:
         # S3 holds the records again, so a server without CHARACTER_DATABASE_URL may start.
-        s3.delete_object(Bucket=bucket, Key=records_marker_key(prefix))
+        s3.delete_object(Bucket=bucket, Key=marker)
+    except ClientError as exc:
+        code = str(exc.response.get('Error', {}).get('Code', ''))
+        reason = 's3:DeleteObject was denied' if code in ('AccessDenied', '403') else f'S3 answered {code or type(exc).__name__}'
+        out(f'  The marker {marker} could not be deleted ({reason}). The records are back in S3, but servers without '
+            f'CHARACTER_DATABASE_URL keep refusing to start until a role that may delete it removes the marker.')
+        raise SystemExit(f'{prefix or "(no prefix)"}: records written back, marker not deleted ({reason})')
     return written
 
 
@@ -304,6 +328,9 @@ def main(argv=None):
         if name == 'import':
             command.add_argument('--delete-missing', action='store_true',
                                  help='remove rows whose S3 object was deleted since their import and that the database never changed')
+        if name == 'export':
+            command.add_argument('--ignore-stale', action='store_true',
+                                 help='remove the marker although S3 still holds JSON of records deleted in the database')
     args = parser.parse_args(argv)
     load_environment()
     from src.services import record_store
@@ -341,7 +368,7 @@ def _execute(args, prefixes, record_store):
                     for line in report.lines(args.dry_run):
                         print(line)
                 else:
-                    export_prefix(conn, s3, bucket, prefix, dry_run=args.dry_run)
+                    export_prefix(conn, s3, bucket, prefix, dry_run=args.dry_run, ignore_stale=args.ignore_stale)
 
 
 if __name__ == '__main__':

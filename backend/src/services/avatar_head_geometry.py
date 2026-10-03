@@ -14,8 +14,10 @@ def face_samples(meshes):
         uv = obj.data.uv_layers.active
         if uv is None:
             continue
+        materials = obj.data.materials
         for face in obj.data.polygons:
-            material = obj.data.materials[face.material_index]
+            # A face may point past the material slots (a provider mesh with fewer slots than indices).
+            material = materials[face.material_index] if face.material_index < len(materials) else None
             if not material or not material.use_nodes:
                 continue
             shader = next((n for n in material.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
@@ -49,8 +51,9 @@ def underlayer_faces(meshes):
     lo, hi = bounds(meshes)
     neck_limit = lo.z+(hi.z-lo.z)*.48
     for obj in meshes:
+        materials = obj.data.materials
         for face in obj.data.polygons:
-            material = obj.data.materials[face.material_index] if obj.data.materials else None
+            material = materials[face.material_index] if face.material_index < len(materials) else None
             if material and material.get('base_underlayer'):
                 result.setdefault(obj, set()).add(face.index)
     for obj, index, point, color, _, _ in face_samples(meshes):

@@ -1,6 +1,6 @@
 import pytest
 
-from src.services.character_pipeline import PipelineError
+from src.services.character_pipeline import PipelineError, read_json
 from wardrobe_fixture import Library, put, sha
 
 BODY, BODY_VERSION = 'b' * 24, '1' * 24
@@ -51,7 +51,7 @@ def cached_coverage(library, job, slot='hair'):
     root = library.wardrobe.library.root/'wardrobe-coverage'
     root.mkdir(parents=True, exist_ok=True)
     body_sha = library.file_sha(BODY, BODY_VERSION, 'body')
-    put(root/f'{body_sha[:20]}-{library.file_sha(job, V1, slot)[:20]}-v10.json', {'slot': slot, 'covers_bottom': False})
+    put(root/f'{body_sha[:20]}-{library.file_sha(job, V1, slot)[:20]}-v11.json', {'slot': slot, 'covers_bottom': False})
 
 
 def not_found(call):
@@ -128,3 +128,74 @@ def test_part_jobs_counts_only_jobs_the_wardrobe_lists_parts_of(library):
     assert body['part_jobs'] == 3   # MEMBER, the re-assembling job and the job with one slot left
     listed = {job for job, _, _, _ in library.listed(BODY)}
     assert listed == {BODY, MEMBER, reassembling, two_slots}
+
+
+# What a member's browser loads: the registered body and the part files the listing names, nothing else.
+
+def test_a_member_loads_the_body_and_the_part_files_the_wardrobe_lists(library):
+    library.assembly(BODY, BODY_VERSION, slots=('hair',), contents={'body': b'body', 'hair': b'own hair'})
+    library.assembly(MEMBER, V1, contents={'hair': b'member hair'})
+    assert library.wardrobe.member_file(BODY, BODY_VERSION, 'body.glb').read_bytes() == b'body'
+    assert library.wardrobe.member_file(BODY, BODY_VERSION, 'hair.glb').read_bytes() == b'own hair'
+    assert library.wardrobe.member_file(MEMBER, V1, 'hair.glb').read_bytes() == b'member hair'
+    listed = {(part['job_id'], part['version'], part['slot']) for part in library.wardrobe.parts(BODY, operator=False)['parts']}
+    assert {(BODY, BODY_VERSION, 'hair'), (MEMBER, V1, 'hair')} <= listed
+
+
+@pytest.mark.parametrize('job', [STRAY, UNREGISTERED, DELETED, ARCHIVED, TOMBSTONED, HIDDEN_CHARACTER])
+def test_a_member_cannot_load_a_part_the_wardrobe_does_not_list(library, job):
+    library.assembly(job, V1, contents={'hair': b'hair', 'body': b'body'})
+    not_found(lambda: library.wardrobe.member_file(job, V1, 'hair.glb'))
+    not_found(lambda: library.wardrobe.member_file(job, V1, 'body.glb'))
+
+
+def test_a_member_cannot_load_other_files_of_a_listed_job(library):
+    library.assembly(MEMBER, V1, slots=('hair', 'hat'), contents={'hair': b'hair', 'body': b'body', 'model': b'model'})
+    record = library.directory(MEMBER)/'native-parts'/V1/'record.json'
+    for name in ('body.glb', 'model.glb', 'front.png', 'hair.json', '../hair.glb', 'hat.glb'):
+        not_found(lambda: library.wardrobe.member_file(MEMBER, V1, name))
+    # A part the job could not fit, though its file is there.
+    value = read_json(record)
+    value['result']['parts'] = [{**part, 'available': False} if part['slot'] == 'hair' else part
+                                for part in value['result']['parts']]
+    put(record, value)
+    import src.services.avatar_wardrobe as wardrobe_module
+    wardrobe_module._records.clear()
+    not_found(lambda: library.wardrobe.member_file(MEMBER, V1, 'hair.glb'))
+
+
+def test_a_member_loads_only_the_version_a_job_offers(library):
+    later = '6' * 24
+    library.assembly(MEMBER, V1, contents={'hair': b'old hair'})
+    library.assembly(MEMBER, later, contents={'hair': b'new hair'})
+    library.current(MEMBER, later)
+    assert library.wardrobe.member_file(MEMBER, later, 'hair.glb').read_bytes() == b'new hair'
+    not_found(lambda: library.wardrobe.member_file(MEMBER, V1, 'hair.glb'))
+    # The body loads at its registered version only.
+    library.assembly(BODY, later, slots=(), contents={'body': b'newer body'})
+    not_found(lambda: library.wardrobe.member_file(BODY, later, 'body.glb'))
+
+
+def test_a_members_listing_has_no_unfitted_parts_or_fit_messages(library):
+    record = library.directory(MEMBER)/'native-parts'/V1/'record.json'
+    value = read_json(record)
+    value['result']['parts'] = [{**part, 'limb_fit': {'check': {'status': 'fail', 'failures': [{'message': 'sleeve 2 cm off'}]}}}
+                                if part['slot'] == 'hair' else part for part in value['result']['parts']]
+    value['result']['parts'].append({'slot': 'top', 'available': False, 'unavailable_reason': 'fit_exception'})
+    put(record, value)
+    library.job(MEMBER, base=(BODY, BODY_VERSION), requested=['hair', 'top'])
+    library.refresh()
+    operator = library.wardrobe.parts(BODY)
+    member = library.wardrobe.parts(BODY, operator=False)
+    assert [row['slot'] for row in operator['unavailable'] if row['job_id'] == MEMBER] == ['top']
+    assert next(part for part in operator['parts'] if part['job_id'] == MEMBER)['fit_check'] == {
+        'status': 'fail', 'failures': ['sleeve 2 cm off']}
+    assert member['unavailable'] == [] and all(part['fit_check'] is None for part in member['parts'])
+    assert [part['job_id'] for part in member['parts']] == [part['job_id'] for part in operator['parts']]
+
+
+def test_the_gateway_marks_a_members_wardrobe_reads_with_the_member_role():
+    from src.api.avatar_factory import wardrobe_operator
+    from src.auth import UserContext
+    assert wardrobe_operator(UserContext(7, '7', ['ADMIN']))
+    assert not wardrobe_operator(UserContext(7, '7', ['ADMIN', 'member']))

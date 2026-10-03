@@ -115,3 +115,25 @@ def test_unavailable_parts_are_listed_newest_first(library):
     fail(library, MAKER)
     fail(library, OTHER)
     assert [(part['job_id'], part['name']) for part in listed(library)['unavailable']] == [(OTHER, '새 옷'), (MAKER, '오래된 옷')]
+
+
+def test_a_job_whose_record_cannot_be_read_is_left_out_and_the_others_listed(library):
+    from src.services import avatar_wardrobe
+    maker(library, MAKER)
+    maker(library, OTHER, created_at='2026-09-22T00:00:00+00:00')
+    assert {part['job_id'] for part in listed(library)['parts']} == {MAKER, OTHER}
+    # Damaged after the job listing read it: the listing still names the job, its record no longer parses.
+    (library.directory(OTHER)/'native-parts'/V1/'record.json').write_text('{"status": "review_req', encoding='utf-8')
+    avatar_wardrobe._records.clear()
+    value = library.wardrobe.parts(BODY)
+    assert {part['job_id'] for part in value['parts']} == {MAKER}
+
+
+def test_a_job_whose_record_has_malformed_parts_is_left_out(library):
+    maker(library, MAKER)
+    maker(library, OTHER, created_at='2026-09-22T00:00:00+00:00')
+    path = library.directory(OTHER)/'native-parts'/V1/'record.json'
+    record = read_json(path)
+    record['result']['parts'].append('not a part')
+    put(path, record)
+    assert {part['job_id'] for part in listed(library)['parts']} == {MAKER}

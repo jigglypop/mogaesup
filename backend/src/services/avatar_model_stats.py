@@ -110,5 +110,7 @@ def model_stats(factory, owner, job_id, name, version=None):
             if len(_cache) > 256:
                 _cache.popitem(last=False)
         return deepcopy(result)
+    except FileNotFoundError as exc:
+        raise PipelineError('not_found', 'GLB 파일을 찾을 수 없습니다.', 404) from exc
     except (ValueError, TypeError, KeyError, IndexError, struct.error, RecursionError) as exc:
         raise PipelineError('model_stats_unavailable', 'GLB 구조 정보를 읽을 수 없습니다.', 422) from exc

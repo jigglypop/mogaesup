@@ -208,11 +208,11 @@ def test_an_upload_reaches_the_service_as_it_was_read_not_as_a_second_copy(clien
     assert received == [bytearray]
 
 
-@pytest.mark.parametrize('url, status', [(UPLOADS[0], 422), (UPLOADS[1], 413)])
-def test_a_file_over_the_limit_is_refused(client, monkeypatch, url, status):
+@pytest.mark.parametrize('url', UPLOADS)
+def test_a_file_over_the_limit_is_refused(client, monkeypatch, url):
     monkeypatch.setattr(avatar_glb_bodies, 'MAX_GLB_BYTES', 100)
     response = client.post(url, content=b'x'*101)
-    assert response.status_code == status and response.json()['error']['code'] == 'glb_too_large'
+    assert response.status_code == 413 and response.json()['error']['code'] == 'glb_too_large'
 
 
 @pytest.mark.parametrize('url', UPLOADS)
@@ -228,7 +228,8 @@ def test_at_most_two_uploads_are_in_flight_and_the_rest_wait_for_a_slot(client, 
     slots = factory_api.UploadSlots(2, 20)
     monkeypatch.setattr(factory_api, 'GLB_UPLOADS', slots)
     monkeypatch.setattr(studio_api, 'GLB_UPLOADS', slots)
-    inside = Overlap()
+    # Generous: the first two wait for each other however slowly a loaded machine starts the threads.
+    inside = Overlap(wait=30)
 
     def slow(self, owner, content):
         with inside:
@@ -242,18 +243,22 @@ def test_at_most_two_uploads_are_in_flight_and_the_rest_wait_for_a_slot(client, 
 def test_the_slots_are_given_back_and_a_waiter_gives_up_after_its_wait():
     async def scenario():
         slots = factory_api.UploadSlots(2, .1)
-        order = []
+        order, release = [], asyncio.Event()
 
-        async def hold(name, seconds):
+        async def hold(name, until=None):
             async with slots.slot():
                 order.append(name)
-                await asyncio.sleep(seconds)
-        first, second = asyncio.create_task(hold('first', .4)), asyncio.create_task(hold('second', .4))
-        await asyncio.sleep(.05)
+                if until:
+                    await until.wait()
+        # The first two keep their slots until the third has given up, however slow the machine is.
+        first, second = asyncio.create_task(hold('first', release)), asyncio.create_task(hold('second', release))
+        while len(order) < 2:
+            await asyncio.sleep(0)
         with pytest.raises(PipelineError) as refused:
-            await hold('third', 0)
+            await hold('third')
         assert refused.value.status == 503 and refused.value.code == 'upload_busy'
+        release.set()
         await asyncio.gather(first, second)
-        await hold('fourth', 0)
+        await hold('fourth')
         return order
     assert asyncio.run(scenario()) == ['first', 'second', 'fourth']

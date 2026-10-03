@@ -22,16 +22,23 @@ def fit_sleeves(meshes, rig, spec):
         cuff = [p for p in points if sign*p.x >= extent-.035]
         center = sum(cuff, Vector())/len(cuff)
         source_axis, target_axis = center-shoulder, wrist-shoulder
+        if source_axis.length <= 1e-6 or target_axis.length <= 1e-6:
+            raise ValueError(f'The {side.lower()} sleeve has no direction to the wrist')
         rotation = source_axis.normalized().rotation_difference(target_axis.normalized()).to_matrix()
         direction = source_axis.normalized()
         longitudinal = target_axis.length/source_axis.length
+        # The ramps run outward from the torso side; a garment that hardly passes it still gets a forward ramp
+        # (at least 1 cm), never one that turns round and moves the body's middle.
+        sleeve_span = max(extent*.72-torso, .01)
+        outer_span = max(extent*.22, .01)
+        height_span = max((hi.z-lo.z)*.25, 1e-6)
         for obj in meshes:
             inverse = obj.matrix_world.inverted()
             for vertex in obj.data.vertices:
                 point = obj.matrix_world @ vertex.co
-                t = smooth((sign*point.x-torso)/(extent*.72-torso))
-                upper = smooth((point.z-(lo.z+(hi.z-lo.z)*.25))/((hi.z-lo.z)*.25))
-                outer = smooth((sign*point.x-extent*.5)/(extent*.22))
+                t = smooth((sign*point.x-torso)/sleeve_span)
+                upper = smooth((point.z-(lo.z+(hi.z-lo.z)*.25))/height_span)
+                outer = smooth((sign*point.x-extent*.5)/outer_span)
                 t *= max(upper, outer)
                 if not t:
                     continue

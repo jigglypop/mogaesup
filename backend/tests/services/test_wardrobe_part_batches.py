@@ -149,3 +149,18 @@ def test_the_base_is_checked_under_the_lock_and_its_messages_do_not_name_a_sex(b
     with pytest.raises(PipelineError) as incomplete:
         service._base_receipt(1, request)
     assert incomplete.value.code == 'base_incomplete' and '여성' not in incomplete.value.message and '기준 몸' in incomplete.value.message
+
+
+def test_a_listing_reads_each_child_once_and_trusts_the_saved_receipts(batches, monkeypatch):
+    factory, _, service = batches
+    for index, color in enumerate(((40, 40, 60, 255), (60, 40, 40, 255))):
+        service.create(1, f'part-batch-list-{index:04}', payload(factory, ('헤어', three(color))))
+    gets, real_get = [], factory.get
+    monkeypatch.setattr(factory, 'get', lambda owner, job: (gets.append(job), real_get(owner, job))[1])
+    monkeypatch.setattr(avatar_part_batches, 'digest', lambda path: pytest.fail('a listing must not hash the saved models'))
+    listing = service.list(1)
+    assert len(listing['items']) == 2
+    assert all(item['status'] == 'queued' and item['child_status'] == 'not_created'
+               for batch in listing['items'] for item in batch['items'])
+    # One factory read per child; a child that was never created is not looked up twice.
+    assert sorted(gets) == sorted(item['job_id'] for batch in listing['items'] for item in batch['items'])

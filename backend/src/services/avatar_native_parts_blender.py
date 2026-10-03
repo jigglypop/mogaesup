@@ -4,15 +4,17 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
+import traceback
 
 import bpy
 from mathutils import Matrix, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.services.avatar_blender_common import (
-    load, skeleton, body_meshes, bounds, bind, export, sha,
+    load, skeleton, body_meshes, bounds, bind, export, sha, blender_to_gltf,
     camera_setup, render, matte_materials, soft_lighting,
 )
 from src.services.glb import parse_glb
@@ -20,12 +22,14 @@ from src.services.avatar_fit_geometry import measured_fit, normalize_body, body_
 from src.services.avatar_shoe_geometry import fit_shoes_rigid, bind_shoes_rigid, finish_shoes_after_pose
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT
 from src.services.avatar_body_layers import (
-    mark_body_coverage, hide_covered_materials, restore_covered_materials, strip_covered_primitives,
+    crop_regions, mark_body_coverage, hide_covered_materials, restore_covered_materials, strip_covered_primitives,
 )
 from src.services.avatar_head_geometry import headwear_palette, prepare_rear_hair, fit_hat, fit_reference_frame, hat_target_over_hair, fit_hair, fit_hair_length, fit_hair_scalp, fit_hair_scalp_bounded, head_preview_body, whiten_base_body, seat_legacy_hair_roots
 from src.services.avatar_hair_geometry import add_scalp_cap, fit_hair_cavity, repair_hair_backing
 from src.services.avatar_arm_geometry import fit_sleeves, bind_top_regions, t_rest_pose
 from src.services.avatar_render_budget import optimize_part
+from src.services.avatar_pipeline_quality import REVISION as QUALITY_REVISION, seal_quality
+from src.services.avatar_quality_blender import measure_assembly
 from src.services.avatar_expression_uv_blender import prepare_expression_uv
 from src.services.avatar_garment_geometry import (
     bind_garment_regions, fit_profiled_garment, measure_body_profile,
@@ -45,13 +49,79 @@ def discard_objects(objects):
             pass  # Removed already together with its parent.
 
 
+# Absolute paths in worker text (C:\..., \\host\..., /srv/...): a receipt keeps only the file name.
+_ABSOLUTE_PATH = re.compile(r'(?:\b[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/]|(?<![\w.:/~-])/(?=[^\s/]+/))'
+                            r'(?:[^\s\'"<>|*?\\/]+[\\/])*([^\s\'"<>|*?\\/]*)')
+
+
+def public_message(exc):
+    """`Type: message` of an exception for a part receipt, which the job's API answer carries: absolute paths cut to
+    their file names, at most 300 characters. The full traceback goes to the worker log."""
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+    text = f'{type(exc).__name__}: {exc}'
+    return _ABSOLUTE_PATH.sub(lambda match: match.group(1) or 'path', text)[:300]
+
+
 def fit_failure(part, exc):
     """The receipt of a slot whose fitting raised: no mesh, not offered, and the other slots still assemble."""
     return {'slot': part['slot'], 'source_sha256': part['sha256'], 'objects': [], 'anchors': [],
             'available': False, 'unavailable_reason': 'fit_exception', 'fit_status': 'failed',
-            'errors': [{'code': 'fit_exception', 'message': f'{type(exc).__name__}: {exc}'[:300]}],
+            'errors': [{'code': 'fit_exception', 'message': public_message(exc)}],
             'runtime_budget': {'preserved': True, 'optimization': 'not_applied'},
             'clearance': {'method': 'not_applied'}}
+
+
+def object_mode():
+    """Leave an edit or sculpt mode an exception was raised in, so the next step starts in object mode."""
+    try:
+        if bpy.context.object is not None and bpy.context.object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+    except Exception:
+        pass
+
+
+def withdraw(slot, report, exc, code, fitted, *, prefit_paths=None):
+    """A slot that fitted but failed a later step of the assembly (the shoes' final pose, the body crop, the export
+    check): its meshes leave the scene, its receipt says why it is not offered, and the other slots still assemble.
+    `fitted` loses the slot's meshes in place."""
+    object_mode()
+    dropped = [obj for obj in fitted if obj['part_role'] == slot]
+    fitted[:] = [obj for obj in fitted if obj['part_role'] != slot]
+    discard_objects(dropped)
+    if prefit_paths is not None:
+        prefit_paths.pop(slot, None)
+    report.update(objects=[], anchors=[], nodes=[], available=False, unavailable_reason=code, fit_status='failed',
+                  errors=[{'code': code, 'message': public_message(exc)}])
+
+
+def check_crop_region(slot, meshes, rig, spec, coverage_profiles):
+    """The body crop one garment asks for, measured alone: a garment whose region cannot be measured, or comes out
+    not finite, is withdrawn before the body is cut for the others."""
+    regions, lines = crop_regions({slot: meshes}, rig, spec, coverage_profiles)
+    values = [value for _, point, normal in lines for value in (*point, *normal)]
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError(f'The body crop of {slot} is not finite')
+    return regions
+
+
+def seal_part(output, doc, part):
+    """Exported geometry of one slot: its runtime budget from its own file, its nodes in the composed model. A slot
+    without a skinned node there raises."""
+    exported, _ = parse_glb((output/f'{part["slot"]}.glb').read_bytes(), strict=True)
+    primitives = [primitive for node in exported.get('nodes', []) if 'mesh' in node
+                  for primitive in exported['meshes'][node['mesh']]['primitives']]
+    # Coverage cuts can add vertices after simplification. Report the actual
+    # exported geometry rather than presenting the requested cap as achieved.
+    triangles = sum(exported['accessors'][p.get('indices', p['attributes']['POSITION'])]['count']//3
+                    for p in primitives if p.get('mode', 4) == 4)
+    budget = part['runtime_budget']
+    budget.update(runtime_triangles=triangles, runtime_draws=len(primitives),
+                  runtime_materials=len({p.get('material') for p in primitives}))
+    if 'target_triangles' in budget:
+        budget['budget_met'] = triangles <= budget['target_triangles']
+    part['nodes'] = [i for i, n in enumerate(doc['nodes']) if n.get('name') in part['objects'] and 'mesh' in n]
+    if not part['nodes'] or any('skin' not in doc['nodes'][i] for i in part['nodes']):
+        raise ValueError('Missing skinned part')
 
 
 def build_body_shell_part(part, body, rig, spec):
@@ -137,7 +207,7 @@ def pressed_under(fitted, body, rig):
     import numpy as np
     from src.services.avatar_shell_garment import body_arrays
     from src.services.avatar_wardrobe_coverage import (ANCHOR_M, BOOT_SHIN_SHARE, HAIR_ANCHOR_M, HEAD_OUTSIDE_M,
-                                                       HEAD_SHARE, UNDER, _covered, nearest, press)
+                                                       HEAD_SHARE, UNDER, _covered, bone_keys, nearest, press)
     # The coverage helpers chunk along glTF Y (up): hand them Blender Z as Y.
     gltf = lambda a: np.stack([a[:, 0], a[:, 2], -a[:, 1]], axis=1)
     blender = lambda a: np.stack([a[:, 0], -a[:, 2], a[:, 1]], axis=1)
@@ -154,7 +224,8 @@ def pressed_under(fitted, body, rig):
         return (lambda: None), (lambda: None)
     data = body_arrays(body, rig)
     skin, normals, triangles = gltf(data['positions']), gltf(data['normals']), data['triangles']
-    dominant = np.char.lower(np.array(data['bones'])[data['weights'].argmax(axis=1)])
+    # As the wardrobe reads them: 'mixamorig:LeftLeg' is a shin like 'LeftLeg'.
+    dominant = bone_keys(np.array(data['bones'])[data['weights'].argmax(axis=1)])
     head = np.char.find(dominant, 'head') >= 0
     shins = np.isin(dominant, ('leftleg', 'rightleg'))
     upper = head & (skin[:, 1] >= np.median(skin[head, 1])) if head.any() else head
@@ -438,11 +509,15 @@ def run(payload):
                     'fit_method': 'uploaded-native-hair-v1', 'available': True,
                     'clearance': {'method': 'preserved_uploaded_source'}}}
                 meshes, report = load_prefit_part(frozen_part, rig, body_source=payload['source'])
+                # Where the hair sits on the body: the wardrobe crops its preview from the front render there.
+                a, b = bounds(meshes)
+                report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
                 imported[part['slot']] = meshes
                 prefit_paths[part['slot']] = part['path']
                 reports.append(report)
                 fitted += meshes
             except Exception:
+                traceback.print_exc()
                 discard_objects([bpy.data.objects[name] for name in set(bpy.data.objects.keys())-known_objects])
                 rejected[part['slot']] = ValueError('Uploaded native hair could not be attached to the frozen body')
             continue
@@ -679,11 +754,7 @@ def run(payload):
             raise
         except Exception as exc:
             # One part that cannot be fitted must not take the others down with it: it is reported as not offered.
-            try:
-                if bpy.context.object is not None and bpy.context.object.mode != 'OBJECT':
-                    bpy.ops.object.mode_set(mode='OBJECT')
-            except Exception:
-                pass
+            object_mode()
             strays = [bpy.data.objects[name] for name in set(bpy.data.objects.keys()) - known_objects]
             discard_objects([*imported_additions.get(slot, []), *imported.get(slot, []), *strays])
             imported[slot] = []
@@ -718,14 +789,25 @@ def run(payload):
     shoes = [obj for obj in fitted if obj['part_role'] == 'shoes'] if 'shoes' in selected_slots else []
     if shoes:
         shoe_report = next(report for report in reports if report['slot'] == 'shoes')
-        shoe_report['final_pose_fitting'] = finish_shoes_after_pose(shoes, rig)
-        a, b = bounds(shoes)
-        shoe_report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+        try:
+            shoe_report['final_pose_fitting'] = finish_shoes_after_pose(shoes, rig)
+            a, b = bounds(shoes)
+            shoe_report['fitted_bounds_gltf'] = [[a.x, a.z, -b.y], [b.x, b.z, -a.y]]
+        except Exception as exc:
+            withdraw('shoes', shoe_report, exc, 'post_fit_exception', fitted, prefit_paths=prefit_paths)
     garment_meshes = {part['slot']: [obj for obj in fitted if obj['part_role'] == part['slot']]
                      for part in reports if part.get('fit_status') not in ('needs_anchors', 'failed')
                      and part['slot'] not in shell_coverage}
     coverage_profiles = {report['slot']: report.get('coverage') for report in reports
                          if report.get('coverage')}
+    for slot in [slot for slot in ('top', 'bottom', 'shoes') if garment_meshes.get(slot)]:
+        try:
+            check_crop_region(slot, garment_meshes[slot], rig, spec, coverage_profiles)
+        except Exception as exc:
+            report = next(report for report in reports if report['slot'] == slot and report.get('available', True))
+            withdraw(slot, report, exc, 'body_crop_failed', fitted, prefit_paths=prefit_paths)
+            garment_meshes.pop(slot)
+            coverage_profiles.pop(slot, None)
     for slot, covered in shell_coverage.items():
         mark_shell_coverage(body, slot, covered)
     covered_materials, coverage, crop_lines = mark_body_coverage(
@@ -734,6 +816,9 @@ def run(payload):
     press_bottom, release_bottom = pressed_under(fitted, body, rig)
     press_bottom()
     camera, view_center = camera_setup(spec['body_height_m'])
+    # How the product renders frame the body: the wardrobe crops part previews from the front render with it.
+    render_frame = {'ortho_scale_m': float(camera.data.ortho_scale),
+                    'center_gltf_m': [float(value) for value in blender_to_gltf(view_center)]}
     soft_lighting(bpy.context.scene)
     directions = [('front', (0, -1, 0)), ('side', (1, 0, 0)), ('back', (0, 1, 0)), ('opposite', (-1, 0, 0))]
     # Product screens show the front; the other views are receipts: smaller and not denoised.
@@ -798,6 +883,36 @@ def run(payload):
             shutil.copyfile(prefit_paths[role], output/f'{role}.glb')
         else:
             export(output/f'{role}.glb', [metric_frame, rig, *meshes])
+    parts = [{'slot': 'body', 'objects': body_names, 'runtime_budget': body_budget}, *reports]
+    # Every offered slot is skinned in the composed model. One that is not is withdrawn alone: the body is cut again
+    # for the slots left and exported again with the composed model. A body without its skin ends the assembly.
+    while True:
+        doc, _ = parse_glb((output/'model.glb').read_bytes(), strict=True)
+        broken = []
+        for part in parts:
+            if not part.get('available', True):
+                part['nodes'] = []
+                continue
+            try:
+                seal_part(output, doc, part)
+            except Exception as exc:
+                if part['slot'] == 'body':
+                    raise
+                broken.append((part, exc))
+        if not broken:
+            break
+        for part, exc in broken:
+            withdraw(part['slot'], part, exc, 'export_check_failed', fitted, prefit_paths=prefit_paths)
+            shell_coverage.pop(part['slot'], None)
+            garment_meshes.pop(part['slot'], None)
+            coverage_profiles.pop(part['slot'], None)
+            (output/f'{part["slot"]}.glb').unlink(missing_ok=True)
+        covered_materials, coverage, crop_lines = mark_body_coverage(
+            body, garment_meshes, rig, spec, coverage_profiles, shell_slots=tuple(shell_coverage))
+        export(output/'body.glb', [metric_frame, rig, *body])
+        export(output/'model.glb', [metric_frame, rig, *body, *fitted])
+        strip_covered_primitives(output/'model.glb')
+        press_bottom, release_bottom = pressed_under(fitted, body, rig)
     animation = rig.animation_data
     motion = None
     for track in animation.nla_tracks if animation else []:
@@ -820,30 +935,11 @@ def run(payload):
     saved_blend = os.getenv('ASSET_SAVE_MASTER_BLEND') == '1'
     if saved_blend:
         bpy.ops.wm.save_as_mainfile(filepath=str(output/'master.blend'))
-    doc, _ = parse_glb((output/'model.glb').read_bytes(), strict=True)
-    parts = [{'slot': 'body', 'objects': body_names, 'runtime_budget': body_budget}, *reports]
-    for part in parts:
-        if not part.get('available', True):
-            part['nodes'] = []
-            continue
-        exported, _ = parse_glb((output/f'{part["slot"]}.glb').read_bytes(), strict=True)
-        primitives = [primitive for node in exported.get('nodes', []) if 'mesh' in node
-                      for primitive in exported['meshes'][node['mesh']]['primitives']]
-        # Coverage cuts can add vertices after simplification. Report the actual
-        # exported geometry rather than presenting the requested cap as achieved.
-        triangles = sum(exported['accessors'][p.get('indices', p['attributes']['POSITION'])]['count']//3
-                        for p in primitives if p.get('mode', 4) == 4)
-        budget = part['runtime_budget']
-        budget.update(runtime_triangles=triangles, runtime_draws=len(primitives),
-                      runtime_materials=len({p.get('material') for p in primitives}))
-        if 'target_triangles' in budget:
-            budget['budget_met'] = triangles <= budget['target_triangles']
-        part['nodes'] = [i for i, n in enumerate(doc['nodes']) if n.get('name') in part['objects'] and 'mesh' in n]
-        if not part['nodes'] or any('skin' not in doc['nodes'][i] for i in part['nodes']):
-            raise ValueError('Missing skinned part')
     incomplete_parts = []
     for part in reports:
-        attempted = part.get('attempted_fit') or part
+        # A preserved fallback reports the fit it could not make; any other receipt reports itself.
+        attempted = part.get('attempted_fit') if part.get('fit_status') == 'fallback_preserved' else part
+        attempted = attempted or part
         if attempted.get('fit_status') in ('needs_anchors', 'failed'):
             incomplete_parts.append({'slot': part['slot'], 'status': attempted['fit_status'],
                 'errors': attempted.get('errors', []),
@@ -852,6 +948,7 @@ def run(payload):
     result = {'parts': parts, 'bone_count': len(rig.data.bones),
               'production_spec_sha256': spec['sha256'], 'normalization': normalization,
               'fitting_revision': fitting['revision'], 'fitting_targets': targets,
+              'render_frame': render_frame,
               'body_coverage_faces': coverage,
               'body_crop_lines': crop_lines,
               'body_profile': body_profile,
@@ -867,6 +964,13 @@ def run(payload):
                               'Independently generated parts are not a segmentation of the original image or mesh.']}
     files = (['model.glb', *(['master.blend'] if saved_blend else []), 'front.png', 'side.png', 'back.png', 'opposite.png', 'motion.png']
              + [f'{p["slot"]}.glb' for p in parts if p.get('available', True)] + detail_files)
+    if payload.get('contract', {}).get('pipeline_quality_revision') == QUALITY_REVISION:
+        groups = {part['slot']: [obj for obj in fitted if obj['part_role'] == part['slot']]
+                  for part in reports if part.get('available', True)}
+        measured = measure_assembly(body, rig, groups)
+        quality, delivery_files = seal_quality(output, files, parts, spec, measured)
+        result.update(quality=quality, delivery=quality['delivery'])
+        files += delivery_files
     (output/'complete.json').write_text(json.dumps({'input_sha256': sha(output/'input.json'),
         'files': {name: sha(output/name) for name in files}, 'result': result}), encoding='utf8')
 

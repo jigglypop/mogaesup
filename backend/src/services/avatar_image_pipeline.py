@@ -14,7 +14,6 @@ import re
 from src.services.object_storage import copy_file, copy_tree
 import uuid
 from src.services.object_storage import StoredPath as Path
-from threading import Lock
 import time
 
 import httpx
@@ -32,6 +31,7 @@ from src.services.model_providers import base_url, failure_text, uncertain_text
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.process_identity import identity, state as process_state
 from src.services.provider_http import transient
+from src.services.run_lock import WorkerLocks, final_write
 from src.services.avatar_production_spec import (
     IMAGE_INTAKE_POLICY, production_spec, public_spec,
 )
@@ -72,7 +72,7 @@ WARDROBE_BODY_PROMPT = (
 )
 WHOLE_BODY_PROMPT += AXIS_LOCK
 WARDROBE_BODY_PROMPT += AXIS_LOCK
-_RUN_LOCKS = {}
+_RUN_LOCKS = WorkerLocks()
 AUTO_RESUBMIT_LIMIT = 3
 
 
@@ -825,9 +825,7 @@ class AvatarImagePipeline:
 
     def execute(self, owner, job_id, *, poll_seconds=8, deadline_seconds=3600):
         directory = self.factory.directory(owner, job_id); output = directory/'output'
-        with _LOCK:
-            lock = _RUN_LOCKS.setdefault(str(directory), Lock())
-        if not lock.acquire(blocking=False):
+        if not _RUN_LOCKS.acquire(str(directory)):
             return
         try:
             job = read_json(directory/'job.json')
@@ -958,11 +956,15 @@ class AvatarImagePipeline:
             except Exception as detail:
                 # The details are best effort. A job left running here would answer every resume with invalid_state until a restart.
                 LOGGER.error('Avatar production %s: failure details not saved: job=%s type=%s', failure_id, job_id, type(detail).__name__)
-            job = read_json(directory/'job.json')
-            job.update(status='pipeline_paused', error=_pause_message(exc, failure_id, state.get('model_provider', 'meshy')),
-                       updated_at=now())
-            if code in CONTINUABLE_STOPS:
-                job['interrupted'] = {'stage': 'models', 'at': now()}
-            _write_json(directory/'job.json', job)
+            error = _pause_message(exc, failure_id, state.get('model_provider', 'meshy'))
+
+            def pause():
+                job = read_json(directory/'job.json')
+                job.update(status='pipeline_paused', error=error, updated_at=now())
+                if code in CONTINUABLE_STOPS:
+                    job['interrupted'] = {'stage': 'models', 'at': now()}
+                _write_json(directory/'job.json', job)
+            # A storage blip that stopped the run must not also leave it `pipeline_running` until a restart.
+            final_write(pause, 'production job')
         finally:
-            lock.release()
+            _RUN_LOCKS.release(str(directory))

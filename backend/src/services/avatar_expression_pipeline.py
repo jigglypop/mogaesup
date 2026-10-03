@@ -1,13 +1,11 @@
 """The five frozen expression requests belonging to a character production job."""
-from threading import Lock
-
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, now, read_json
-from src.services.process_identity import identity, state as process_state
+from src.services.process_identity import identity
 from src.services.object_storage import sha256
+from src.services.run_lock import WorkerLocks, final_write, worker_alive
 
-_WORKERS = {}
-_GUARD = Lock()
+_WORKERS = WorkerLocks()
 
 
 def default_contract(prompts=None):
@@ -18,7 +16,9 @@ def default_contract(prompts=None):
             'revision': 'default-expressions-v2-managed-ko'}
 
 
-def saved_expression_valid(directory, expression_id):
+def saved_expression_valid(directory, expression_id, *, verify=True):
+    """The saved expression's record names every file it needs. With `verify` each file is also checked against its
+    hash (5-6 HEADs per expression in S3 mode): what serving and baking do. A status listing trusts the record."""
     if not expression_id:
         return False
     root = directory/'expressions'/expression_id
@@ -30,6 +30,8 @@ def saved_expression_valid(directory, expression_id):
         required.add('face.png')
     if not record.get('materials') or not required <= files.keys():
         return False
+    if not verify:
+        return True
     try:
         return all((root/name).is_file() and sha256(root/name) == files[name] for name in required)
     except (FileNotFoundError, ValueError):
@@ -44,6 +46,7 @@ def summary(directory, version=None):
     contract = pipeline.get('default_expressions')
     if not contract:
         return None
+    held = _WORKERS.busy(str(directory))
     record = read_json(directory/'default-expressions.json')
     if version is None:
         version = read_json(directory/'native-parts/current.json').get('version')
@@ -54,12 +57,12 @@ def summary(directory, version=None):
         saved = (read_json(directory/'native-parts'/record['source_version']/'expression-generations'/generation/'record.json')
                  if generation else {})
         expression = baked.get(name)
-        complete = bool(version and saved_expression_valid(directory/'native-parts'/version, expression))
+        complete = bool(version and saved_expression_valid(directory/'native-parts'/version, expression, verify=False))
         items.append({'name': name, 'generation_id': generation, 'expression_id': expression,
                       'status': 'complete' if complete else saved.get('status', 'pending'),
                       'applied': complete, 'error': saved.get('error')})
     complete = sum(item['applied'] for item in items)
-    busy = record.get('status') == 'running' and process_state(record.get('process')) != 'exited'
+    busy = record.get('status') == 'running' and worker_alive(record, held or _WORKERS.busy(str(directory)))
     selection = read_json(directory/'native-parts'/version/'expressions/selection.json') if version else {}
     selected = selection.get('expression_id')
     return {'items': items, 'completed': complete, 'total': len(items), 'busy': busy,
@@ -87,9 +90,7 @@ def execute(factory, owner, job, version, *, retry_blocked=False):
     contract = pipeline.get('default_expressions')
     if not contract:
         return
-    with _GUARD:
-        lock = _WORKERS.setdefault(str(directory), Lock())
-    if not lock.acquire(blocking=False):
+    if not _WORKERS.acquire(str(directory)):
         return
     path = directory/'default-expressions.json'
     try:
@@ -148,10 +149,14 @@ def execute(factory, owner, job, version, *, retry_blocked=False):
                 # Finished expressions remain usable while the other requests are attempted.
         # The same local failure for several expressions is reported once.
         record.update(status='paused' if errors else 'complete', error=' / '.join(dict.fromkeys(errors)) or None, updated_at=now())
-        _write_json(path, record)
+        final_write(lambda: _write_json(path, record), 'default expressions record')
     except Exception as exc:
-        record = read_json(path)
-        record.update(status='paused', error=exc.message if isinstance(exc, PipelineError) else '기본 표정 처리 중단', updated_at=now())
-        _write_json(path, record)
+        error = exc.message if isinstance(exc, PipelineError) else '기본 표정 처리 중단'
+
+        def pause():
+            record = read_json(path)
+            record.update(status='paused', error=error, updated_at=now())
+            _write_json(path, record)
+        final_write(pause, 'default expressions record')
     finally:
-        lock.release()
+        _WORKERS.release(str(directory))

@@ -126,7 +126,8 @@ def test_the_body_glb_is_parsed_once_for_parts_asked_for_together(library, monke
 
 
 def test_only_a_few_derived_files_are_computed_at_a_time(library, monkeypatch):
-    inside = Overlap()
+    # Generous: the first two wait for each other however slowly a loaded machine starts the threads.
+    inside = Overlap(wait=30)
 
     def fake(content):
         with inside:

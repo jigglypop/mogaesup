@@ -141,8 +141,13 @@ class API:
         if fault == 'before':
             raise httpx.ReadTimeout('private upstream key must not escape', request=request)
         if isinstance(fault, int):
-            return httpx.Response(fault, headers={'location': 'https://foreign.example/secret'},
-                                  json={'error': 'private raw error must not escape'})
+            # The character server's own refusal: its JSON error body and the request id it puts on every answer.
+            return httpx.Response(fault, headers={'location': 'https://foreign.example/secret', 'x-request-id': 'fixture-id'},
+                                  json={'error': {'code': 'refused', 'message': 'private raw error must not escape'}})
+        if fault in ('gate', 'gate-json'):
+            # The CloudFront function or nginx: the request never reached the API.
+            return (httpx.Response(403, headers={'content-type': 'text/html'}, text='<html>403 Forbidden</html>')
+                    if fault == 'gate' else httpx.Response(404, json={'message': 'Not Found'}))
         if phase == 'upload':
             assert request.headers['content-type'] == 'model/gltf-binary'
             assert request.content == Path(self.args.file).read_bytes()
@@ -252,6 +257,22 @@ def test_auth_conflict_redirect_and_upstream_errors_never_try_fallback(args, sta
         with pytest.raises(studio_import.ImportStopped, match='definitively refused'):
             studio_import.run(args, api.client)
         assert len(api.requests) == before
+
+
+@pytest.mark.parametrize('phase', studio_import.PHASES)
+@pytest.mark.parametrize('fault', ['gate', 'gate-json'])
+def test_a_refusal_from_the_gate_in_front_of_the_api_stays_resumable(args, phase, fault):
+    api = API(args, fault_phase=phase, fault=fault)
+    with pytest.raises(studio_import.ImportStopped, match='uncertain'):
+        studio_import.run(args, api.client)
+    saved = receipt(args)
+    assert saved['phases'][phase]['state'] == 'uncertain' and saved['phases'][phase]['http_status'] in (403, 404)
+    key = saved['phases'][phase]['key']
+    args.resume = True
+    recovered = studio_import.run(args, api.client)
+    assert all(item['state'] == 'accepted' for item in recovered['phases'].values())
+    # The same request, with its key, is what reaches the API once the gate lets it through.
+    assert [k for p, k, _ in api.posts if p == phase] == [key, key]
 
 
 @pytest.mark.parametrize('fault', ['invalid', 'paid', 'scope'])

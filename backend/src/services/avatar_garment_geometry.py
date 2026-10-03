@@ -1,8 +1,10 @@
 """Anatomical garment fitting that preserves generated topology and UVs."""
 import hashlib
 import math
+from pathlib import Path
 
 from mathutils import Matrix, Vector
+import numpy as np
 
 from src.services.avatar_blender_common import blender_to_gltf, bounds, fit_matrix, gltf_to_blender
 
@@ -337,85 +339,102 @@ def _target_landmarks(body_profile, slot, profile):
 
 
 def _image_mask(path):
+    """(width, height, xs, ys) of the pixels a drawing covers (alpha > .05), y counted from the top, as numpy
+    arrays; None for an empty or nearly full frame. The pixels are read into one float32 buffer: a 2048 px RGBA
+    image as a Python list takes gigabytes."""
     import bpy
     image = bpy.data.images.load(str(path), check_existing=True)
-    width, height = image.size; pixels = list(image.pixels)
-    occupied = [(index % width, height-1-index//width) for index in range(width*height)
-                if pixels[index*4+3] > .05]
-    if not occupied or len(occupied) > width*height*.95:
+    width, height = image.size; channels = image.channels
+    if channels < 4 or not width or not height:
+        return None   # No alpha: the whole frame is the drawing.
+    pixels = np.empty(width*height*channels, np.float32)
+    image.pixels.foreach_get(pixels)
+    # Blender stores rows from the bottom up.
+    occupied = np.flipud(pixels[channels-1::channels].reshape(height, width) > .05)
+    count = int(occupied.sum())
+    if not count or count > width*height*.95:
         return None
-    return width, height, occupied
+    ys, xs = np.nonzero(occupied)
+    return width, height, xs.astype(np.int32), ys.astype(np.int32)
+
+
+def _histogram_profile(horizontal, vertical, bins=24):
+    """Occupancy of `bins` columns and rows of a point set, each scaled to its fullest, and its aspect ratio."""
+    horizontal, vertical = np.asarray(horizontal, np.float64), np.asarray(vertical, np.float64)
+    hlo, hhi, vlo, vhi = horizontal.min(), horizontal.max(), vertical.min(), vertical.max()
+    def normalized(values, low, high):
+        row = np.bincount(np.minimum(bins-1, ((values-low)/max(high-low, 1e-8)*bins).astype(np.int64)), minlength=bins)
+        return (row/(row.max() or 1)).tolist()
+    return (normalized(horizontal, hlo, hhi), normalized(vertical, vlo, vhi),
+            float((hhi-hlo)/max(vhi-vlo, 1e-8)))
 
 
 def _normalized_profile(points, horizontal_axis, bins=24):
-    horizontal = [point[horizontal_axis] for point in points]; vertical = [point[2] for point in points]
-    hlo, hhi, vlo, vhi = min(horizontal), max(horizontal), min(vertical), max(vertical)
-    hs, vs = [0]*bins, [0]*bins
-    for h, v in zip(horizontal, vertical):
-        hs[min(bins-1, int((h-hlo)/max(hhi-hlo, 1e-8)*bins))] += 1
-        vs[min(bins-1, int((v-vlo)/max(vhi-vlo, 1e-8)*bins))] += 1
-    def normalized(row):
-        maximum = max(row) or 1
-        return [value/maximum for value in row]
-    return normalized(hs), normalized(vs), (hhi-hlo)/max(vhi-vlo, 1e-8)
+    return _histogram_profile([point[horizontal_axis] for point in points], [point[2] for point in points], bins)
 
 
 def _image_profile(mask):
-    _, _, occupied = mask
-    return _normalized_profile([Vector((x, 0, -y)) for x, y in occupied], 0)
+    _, _, xs, ys = mask
+    return _histogram_profile(xs, -ys)
 
 
 def _silhouette_registration(meshes, image_paths, canvas, slot):
     """Choose yaw from normalized silhouettes and recover fixed-canvas heights."""
     if not image_paths or not canvas:
         return None, Matrix.Identity(4)
-    raw_points = [row[2] for row in _world_rows(meshes)]; masks, views = {}, {}
+    raw_points = [row[2] for row in _world_rows(meshes)]; masks, views, profiles = {}, {}, {}
     for view in ('front', 'side', 'back'):
         path = image_paths.get(view)
         if not path:
             continue
+        # The receipt names the drawing, never where the worker kept it.
+        source = Path(str(path)).name
         try:
             mask = _image_mask(path)
             if mask is None:
-                views[view] = {'source': str(path), 'error': 'alpha_silhouette_unavailable'}
+                views[view] = {'source': source, 'error': 'alpha_silhouette_unavailable'}
                 continue
-            masks[view] = mask
-            width, height, occupied = mask; xs = [p[0] for p in occupied]; ys = [p[1] for p in occupied]
-            views[view] = {'source': str(path), 'alpha_bounds_px': [min(xs), min(ys), max(xs), max(ys)],
+            # Each drawing's profile is measured once; only the front and back keep their pixels, for the heights.
+            profiles[view] = _image_profile(mask)
+            _, _, xs, ys = mask
+            views[view] = {'source': source, 'alpha_bounds_px': [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
                            'orientation': {'front': '-Z', 'side': '+X', 'back': '+Z'}[view]}
+            if view in ('front', 'back'):
+                masks[view] = mask
         except Exception as exc:
-            views[view] = {'source': str(path), 'error': str(exc)}
+            views[view] = {'source': source, 'error': type(exc).__name__}
     candidates = []
     for degrees in (0, 90, 180, 270):
         rotation = Matrix.Rotation(math.radians(degrees), 4, 'Z'); points = [rotation @ point for point in raw_points]
         score, evidence = 0., []
-        for view, mask in masks.items():
+        for view, (image_h, image_v, image_aspect) in profiles.items():
             mesh_h, mesh_v, mesh_aspect = _normalized_profile(points, 0 if view in ('front', 'back') else 1)
-            image_h, image_v, image_aspect = _image_profile(mask)
             mismatch = abs(math.log(max(mesh_aspect, 1e-8)/max(image_aspect, 1e-8)))
             mismatch += sum(abs(a-b) for a, b in zip(mesh_h, image_h))/len(mesh_h)
             mismatch += sum(abs(a-b) for a, b in zip(mesh_v, image_v))/len(mesh_v)
             score += mismatch; evidence.append({'view': view, 'mismatch': mismatch})
         candidates.append({'yaw_degrees': degrees, 'score': score, 'views': evidence})
-    best = min(candidates, key=lambda row: (row['score'], row['yaw_degrees'])) if masks else candidates[0]
+    best = min(candidates, key=lambda row: (row['score'], row['yaw_degrees'])) if profiles else candidates[0]
     zero = next(row for row in candidates if row['yaw_degrees'] == 0)
     ambiguity_tolerance = max(.03, abs(zero['score'])*.03)
     selected = zero if zero['score'] <= best['score']+ambiguity_tolerance else best
     image_landmarks = {}; primary = masks.get('front') or masks.get('back')
     if primary:
-        width, _, occupied = primary; band = [p for p in occupied if abs(p[0]-canvas['center_x']) <= width*.08]
-        ys = [p[1] for p in band or occupied]; ppm = float(canvas['pixels_per_metre'])
-        upper = (canvas['sole_y']-min(ys))/ppm; lower = (canvas['sole_y']-max(ys))/ppm
-        span = max(max(ys)-min(ys), 1)
+        width, _, xs, ys = primary
+        central = abs(xs-canvas['center_x']) <= width*.08
+        band = ys[central] if central.any() else ys
+        top_y, bottom_y = int(band.min()), int(band.max()); ppm = float(canvas['pixels_per_metre'])
+        upper = (canvas['sole_y']-top_y)/ppm; lower = (canvas['sole_y']-bottom_y)/ppm
+        span = max(bottom_y-top_y, 1)
         if slot == 'top':
-            rows = {}
-            for x, y in occupied:
-                rows.setdefault(y, []).append(x)
-            shoulder_y = min(rows, key=lambda y: (-max(rows[y])+min(rows[y]), y))
+            # The widest row; rows come from the top, so a tie goes to the highest. Each row's pixels are in x order.
+            rows, starts = np.unique(ys, return_index=True)
+            ends = np.append(starts[1:], len(ys))-1
+            shoulder_y = int(rows[np.argmax(xs[ends]-xs[starts])])
             shoulder = (canvas['sole_y']-shoulder_y)/ppm
             image_landmarks = {'neck_height_m': upper, 'shoulder_height_m': shoulder,
                                'hem_height_m': lower,
-                               'relative_y': {'neck': 0., 'shoulder': (shoulder_y-min(ys))/span, 'hem': 1.}}
+                               'relative_y': {'neck': 0., 'shoulder': (shoulder_y-top_y)/span, 'hem': 1.}}
         else:
             image_landmarks = {'waist_height_m': upper, 'hem_height_m': lower,
                                'relative_y': {'waist': 0., 'hem': 1.}}

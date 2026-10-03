@@ -240,3 +240,48 @@ def test_invalid_drain_receipt_is_never_idle(tmp_path):
     with pytest.raises(activity.RuntimeUncertain):
         with activity.running_task():
             pass
+
+
+def test_a_token_a_later_deployment_reuses_closes_the_new_candidate_again(monkeypatch):
+    # A failed deployment left its drain (no runtime answered its reopen); the next one resumes it with the same
+    # token in a new container, which must start closed even though the token was applied once before.
+    monkeypatch.setattr(activity, '_boot_id', lambda: 'boot-one')
+    monkeypatch.setenv('ASSET_START_DRAIN_TOKEN', TOKEN)
+    monkeypatch.setenv('ASSET_START_DRAIN_ID', 'c' * 32)
+    with activity.server_lease():
+        assert activity.state()['admission']['draining']
+        activity.resume(TOKEN)
+    monkeypatch.setenv('ASSET_START_DRAIN_ID', 'd' * 32)
+    with activity.server_lease():
+        assert activity.state()['admission']['draining']
+    # A restart of that container keeps whatever drain is current.
+    activity.resume(TOKEN)
+    with activity.server_lease():
+        assert not activity.state()['admission']['draining']
+
+
+def test_a_drain_of_an_earlier_boot_never_blocks_the_startup_token(monkeypatch):
+    monkeypatch.setattr(activity, '_boot_id', lambda: 'boot-one')
+    with activity.server_lease():
+        activity.begin_drain('b' * 32)   # e.g. the idle stop's drain before its poweroff
+    monkeypatch.setattr(activity, '_boot_id', lambda: 'boot-two')
+    monkeypatch.setenv('ASSET_START_DRAIN_TOKEN', TOKEN)
+    monkeypatch.setenv('ASSET_START_DRAIN_ID', 'e' * 32)
+    with activity.server_lease():
+        assert activity.state()['admission']['draining']
+        assert not activity.resume(TOKEN)['admission']['draining']
+
+
+def test_a_drain_of_this_boot_owned_by_another_token_still_refuses_the_candidate(monkeypatch):
+    monkeypatch.setattr(activity, '_boot_id', lambda: 'boot-one')
+    with activity.server_lease():
+        activity.begin_drain('b' * 32)
+    monkeypatch.setenv('ASSET_START_DRAIN_TOKEN', TOKEN)
+    monkeypatch.setenv('ASSET_START_DRAIN_ID', 'f' * 32)
+    with pytest.raises(activity.RuntimeUncertain, match='Another operation'):
+        with activity.server_lease():
+            pass
+    monkeypatch.setenv('ASSET_START_DRAIN_ID', 'not-hex')
+    with pytest.raises(activity.RuntimeUncertain, match='startup admission id'):
+        with activity.server_lease():
+            pass

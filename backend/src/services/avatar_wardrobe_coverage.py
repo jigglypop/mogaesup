@@ -171,9 +171,15 @@ def press(points, skin, normals, index, allowed=None, rounds=3):
     return target - points
 
 
+def bone_keys(names):
+    """Bone names compared across skeletons: lower case, without a rig prefix ('mixamorig:LeftLeg' is 'leftleg')."""
+    names = np.char.lower(np.asarray(names).astype(str))
+    return np.char.rpartition(names, ':')[..., 2] if names.size else names
+
+
 def _driven(primitive, *names):
     """Body vertices whose dominant bone name contains one of `names`."""
-    joints = np.char.lower(primitive['joints'].astype(str))
+    joints = bone_keys(primitive['joints'])
     return np.any([np.char.find(joints, name) >= 0 for name in names], axis=0)
 
 
@@ -190,7 +196,7 @@ def tuck_region(slot, primitive):
 
 
 def _shins(primitive):
-    return np.isin(np.char.lower(primitive['joints'].astype(str)), ('leftleg', 'rightleg'))
+    return np.isin(bone_keys(primitive['joints']), ('leftleg', 'rightleg'))
 
 
 def tucks(body, part, slot):
@@ -246,7 +252,7 @@ def coverage(body, part_content, slot):
         faces = covered[triangles].all(axis=1) & (slot != 'hair') & ~head[triangles].all(axis=1)
         counts[primitive['key']] = int(len(triangles))
         hidden[primitive['key']] = base64.b64encode(np.packbits(faces, bitorder='little').tobytes()).decode()
-        legs = np.isin(np.char.lower(primitive['joints'].astype(str)), ('leftupleg', 'rightupleg'))
+        legs = np.isin(bone_keys(primitive['joints']), ('leftupleg', 'rightupleg'))
         thighs.append((positions[legs, 1], covered[legs]))
         # Over the head a hat's crown or a hood's peak stands well off the scalp: a longer reach
         # decides what hair tucks under, never which skin is hidden.

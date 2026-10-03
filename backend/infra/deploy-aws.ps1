@@ -32,6 +32,9 @@ if ($head.Metadata.sha256 -ne $releaseSha) { throw 'S3 release metadata does not
 
 $remote = @"
 set -Eeuo pipefail
+# The SSM execution timeout ends this script without its EXIT trap; deploy-on-instance.sh plans its drain, replacement
+# and rollback within this deadline (the instance's clock, with a margin for the SSM agent).
+export ASSET_DEPLOY_DEADLINE=`$(( `$(date +%s) + $TimeoutSeconds - 30 ))
 release_key='$ReleaseKey'
 release_sha='$releaseSha'
 exec 8>/var/lock/asset-studio-prepare.lock

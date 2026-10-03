@@ -209,3 +209,53 @@ def test_character_endpoints_require_authentication(setup):
     client, _, app = setup
     del app.dependency_overrides[get_current_user]
     assert client.get('/api/characters').status_code == 401
+
+
+def test_an_operation_whose_last_save_failed_does_not_stay_running(setup, monkeypatch):
+    from src.services import run_lock
+    from src.services.character_pipeline import OPERATIONS
+    client, pipeline, _ = setup
+    value = with_model(client)
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    write = character_actions._write_json
+
+    def storage_down_after_start(path, record):
+        if path.name == 'operation.json' and record.get('status') != 'running':
+            raise OSError('storage unavailable')
+        return write(path, record)
+
+    monkeypatch.setattr(character_actions, '_write_json', storage_down_after_start)
+    operation, _ = pipeline.accept(value['id'], 1, 'inspect_model', 'lost-final-save-1', value['revision'], {})
+    with pytest.raises(OSError):
+        character_actions.execute(pipeline, value['id'], 1, operation['id'])
+    _, run, _ = pipeline.entry(value['id'], 1)
+    assert json.loads((run / 'operations' / operation['id'] / 'operation.json').read_text())['status'] == 'running'
+    # Nothing runs it any more: it reads as ended, and the character takes new actions again.
+    public = pipeline.operation(value['id'], 1, operation['id'])
+    assert public['status'] == 'failed' and public['error']['code'] == 'executor_interrupted'
+    assert any(action['enabled'] for action in pipeline.detail(value['id'], 1)['next_actions'])
+    # While a worker of this process holds it, the same record is running.
+    assert OPERATIONS.acquire(operation['id'])
+    try:
+        assert pipeline.operation(value['id'], 1, operation['id'])['status'] == 'running'
+    finally:
+        OPERATIONS.release(operation['id'])
+
+
+def test_a_face_selection_is_bounded_in_total_before_it_is_stored(setup, monkeypatch):
+    from src.api import characters as api
+    client, pipeline, _ = setup
+    value = with_model(client)
+    url = f"/api/characters/{value['id']}/actions/separate_parts"
+    selection = {'source_sha256': 'a' * 64,
+                 'selections': [{'node_index': 0, 'role': 'top', 'primitive_index': 0, 'faces': list(range(40))}] * 2}
+    headers = {"If-Match": value['revision'], "Idempotency-Key": 'bounded-selection-1'}
+    monkeypatch.setattr(api, 'MAX_SELECTED_FACES', 79)
+    refused = client.post(url, json=selection, headers=headers)
+    assert refused.status_code == 422 and refused.json()['error']['code'] == 'invalid_input'
+    monkeypatch.setattr(api, 'MAX_SELECTED_FACES', 80)
+    monkeypatch.setattr(api, 'MAX_STORED_INPUT_BYTES', 200)
+    too_large = client.post(url, json=selection, headers=headers)
+    assert too_large.status_code == 413 and too_large.json()['error']['code'] == 'input_too_large'
+    _, run, _ = pipeline.entry(value['id'], 1)
+    assert not (run / 'operations').exists()

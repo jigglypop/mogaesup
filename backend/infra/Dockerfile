@@ -5,11 +5,17 @@ RUN curl --fail --location --retry 2 https://download.blender.org/release/Blende
 # Fails the build when a system library Blender links against is missing.
 RUN blender --background --factory-startup --version
 WORKDIR /app
-COPY backend/ ./backend/
+RUN pip install --no-cache-dir uv==0.11.9
+# The locked dependencies first, from the workspace manifests alone: a release that changes only backend/ reuses this
+# layer. --locked fails the build when uv.lock no longer matches the manifests.
 COPY pyproject.toml uv.lock ./
-RUN pip install --no-cache-dir uv==0.11.9 && uv sync --frozen --no-dev
+COPY backend/pyproject.toml ./backend/pyproject.toml
+RUN uv sync --locked --no-dev --no-install-workspace
+COPY backend/ ./backend/
+RUN uv sync --locked --no-dev
 COPY infra/nginx.conf /etc/nginx/nginx.conf
-COPY infra/entrypoint.py /app/entrypoint.py
+# release.json (the git commit, written by prepare-aws.ps1) is optional: the glob matches nothing in older archives.
+COPY infra/entrypoint.py release.jso[n] /app/
 ENV PYTHONPATH=/app/backend ASSET_DATA_ROOT=/app/data BLENDER_EXECUTABLE=/usr/local/bin/blender
 ENV PATH="/app/.venv/bin:${PATH}"
 CMD ["python", "/app/entrypoint.py"]

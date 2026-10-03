@@ -27,6 +27,7 @@ from src.services.character_pipeline import PipelineError, now, read_json, reque
 from src.services.model_providers import client as provider_client
 from src.services.object_storage import StoredPath as Path, local_workspace, provider_image
 from src.services.process_identity import identity, state as process_state
+from src.services.run_lock import WorkerLocks, final_write, worker_alive
 
 LOGGER = logging.getLogger(__name__)
 VIEWS = ('front', 'left', 'back', 'right')
@@ -71,6 +72,8 @@ RIG_FAILED = '표준 골격을 씌우지 못했습니다.'
 RIG_ERRORS = {'mesh_missing': '3D 모델에서 메시를 찾지 못했습니다.', 'mesh_degenerate': '3D 모델의 크기를 읽지 못했습니다.',
               'paws_not_found': '네 발의 위치를 찾지 못했습니다.', 'head_not_found': '머리 위치를 찾지 못했습니다.'}
 LEGS = {'fore_L': '왼쪽 앞다리', 'fore_R': '오른쪽 앞다리', 'hind_L': '왼쪽 뒷다리', 'hind_R': '오른쪽 뒷다리'}
+# Jobs whose worker runs in this process, by job directory.
+_JOBS = WorkerLocks()
 
 
 class StepPaused(Exception):
@@ -187,12 +190,13 @@ class AnimalProduction:
             if not record:
                 raise PipelineError('not_found', '동물을 찾을 수 없습니다.', 404)
             job_path = self._jobs(animal_id)/job_id/'job.json'
+            held = _JOBS.busy(str(job_path.parent))
             job = read_json(job_path)
             if job:
                 if job['request'] != request:
                     raise PipelineError('idempotency_conflict', '같은 요청에 다른 설정이 있습니다.', 409)
                 paused = job['status'] == 'paused' or (job['status'] in ('accepted', 'running')
-                                                       and process_state(job.get('process')) == 'exited')
+                                                       and not worker_alive(job, held or _JOBS.busy(str(job_path.parent))))
                 if paused and record.get('production') != job_id:
                     raise PipelineError('job_replaced', '이 작업은 새 요청으로 대체됐습니다.', 409)
                 if paused:
@@ -201,9 +205,11 @@ class AnimalProduction:
                 return self.library.get(animal_id), paused
             current = record.get('production')
             if current:
-                active = read_json(self._jobs(animal_id)/current/'job.json')
-                # Only a job whose process is still alive blocks a new request; a stopped one is replaced.
-                if active.get('status') in ('accepted', 'running') and process_state(active.get('process')) != 'exited':
+                work = self._jobs(animal_id)/current
+                held = _JOBS.busy(str(work))
+                active = read_json(work/'job.json')
+                # Only a job whose worker still runs blocks a new request; a stopped one is replaced.
+                if worker_alive(active, held or _JOBS.busy(str(work))):
                     raise PipelineError('animal_busy', '진행 중인 작업이 끝난 뒤 요청하세요.', 409)
             self._require_inputs(record, views, model, rig)
             _write_json(job_path, {'id': job_id, 'request_key': key, 'request': request, 'steps': steps, 'done': [],
@@ -226,6 +232,14 @@ class AnimalProduction:
 
     def execute(self, animal_id, job_id):
         job_path = self._jobs(animal_id)/job_id/'job.json'
+        if not _JOBS.acquire(str(job_path.parent)):
+            return
+        try:
+            self._execute(job_id, animal_id, job_path)
+        finally:
+            _JOBS.release(str(job_path.parent))
+
+    def _execute(self, job_id, animal_id, job_path):
         job = read_json(job_path)
         if job.get('status') != 'accepted':
             return
@@ -252,7 +266,7 @@ class AnimalProduction:
             LOGGER.exception('Animal job %s stopped at %s', job_id, job.get('step'))
             job.update(status='paused', error='처리 중 중단됐습니다. 같은 요청으로 이어서 실행할 수 있습니다.')
         job['updated_at'] = now()
-        _write_json(job_path, job)
+        final_write(lambda: _write_json(job_path, job), 'animal job')
 
     def _update_record(self, animal_id, change):
         directory = self.library.directory(animal_id)

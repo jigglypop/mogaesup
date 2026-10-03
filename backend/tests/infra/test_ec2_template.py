@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 
 TEMPLATE = Path(__file__).resolve().parents[2] / 'infra' / 'ec2.yaml'
-# The user data the template rendered before the records database parameters existed. Changing it is an update of the
-# instance (CloudFormation stops and starts it, or replaces it), so it only changes on purpose: update this with it.
+# The user data the template renders without a records database. Changing it is an update of the instance
+# (CloudFormation stops and starts it, or replaces it), so it only changes on purpose: update this with it. The
+# PUBLIC_SITE_ORIGIN line left with the unused PublicSiteOrigin parameter.
 USER_DATA_BEFORE = r'''#!/bin/bash
 set -euo pipefail
 # curl-minimal already provides curl; installing the full package conflicts with it.
@@ -16,7 +17,6 @@ cat > /etc/asset-studio.env <<'CONFIG'
 ASSET_S3_BUCKET='${AssetBucket}'
 AWS_REGION='${AWS::Region}'
 PROVIDER_SECRET_ARN='${ProviderSecretArn}'
-PUBLIC_SITE_ORIGIN='${PublicSiteOrigin}'
 PUBLIC_STUDIO='${PublicStudio}'
 CONFIG
 chmod 600 /etc/asset-studio.env
@@ -115,4 +115,16 @@ def test_the_gateway_key_is_part_of_the_cache_key(template):
 
 def test_the_template_does_not_promise_a_static_site(template):
     assert 'static' not in re.search(r'^Description: (.*)$', template, re.M).group(1)
-    assert 'static' not in parameter(template, 'PublicSiteOrigin') and 'SEO' not in parameter(template, 'PublicSiteOrigin')
+    assert 'PublicSiteOrigin' not in template and 'PUBLIC_SITE_ORIGIN' not in template
+
+
+def test_port_80_is_open_to_cloudfront_only(template):
+    ingress = re.findall(r'\n  (\w+):\n    Type: AWS::EC2::SecurityGroupIngress\n((?:    .*\n)+)', template)
+    assert [name for name, _ in ingress] == ['CloudFrontHttpIngress']
+    assert 'SourcePrefixListId: !Ref CloudFrontPrefixListId' in ingress[0][1] and 'CidrIp' not in ingress[0][1]
+    assert 'Condition: HasPublicStudio' in ingress[0][1]
+
+
+def test_the_template_says_a_stack_update_must_pass_the_current_release(template):
+    head = template[:template.index('Parameters:')]
+    assert 'ReleaseKey' in head and 'current.json' in head

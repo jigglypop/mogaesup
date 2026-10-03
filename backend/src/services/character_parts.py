@@ -9,7 +9,7 @@ import json
 
 from src.services.asset_delivery import DeliveryPolicy, inspect_glb
 from src.services.asset_editor import _write_json
-from src.services.object_storage import publish_checkpoint, sha256 as _digest
+from src.services.object_storage import copy_file, local_workspace, publish_checkpoint, sha256 as _digest
 from src.services.process_identity import identity
 from src.services.worker_env import worker_environment
 from src.services.runtime_activity import running_task, worker_environment as admitted_environment
@@ -79,6 +79,12 @@ def separate_materials(model: Path, output: Path, selections: list[dict] | None 
     if source["errors"] or not source["metrics"]["skins"]:
         raise ValueError("A valid rigged source is required")
     output.mkdir(parents=True, exist_ok=False)
+    # With S3 storage the worker still needs real files: its log is a process handle and it reads input.json from disk.
+    with local_workspace(output, inputs=[model]):
+        return _separate(executable, model, output, selections, source_sha256)
+
+
+def _separate(executable, model, output, selections, source_sha256):
     worker_model = model
     if selections is not None:
         from src.services.character_segmentation import split_faces
@@ -133,7 +139,7 @@ def finalize(model: Path, output: Path) -> dict:
         if selection.get("source_sha256") != _digest(model):
             raise ValueError("Part selection source changed")
         # The GLB retains exact source buffers; Blender produces the editable .blend and render.
-        shutil.copyfile(worker_model, output / "character.glb")
+        copy_file(worker_model, output / "character.glb")
     policy = DeliveryPolicy(required_joints=source["metrics"]["joints"],
                             required_animations=source["metrics"]["animations"])
     quality = inspect_glb((output / "character.glb").read_bytes(), policy)

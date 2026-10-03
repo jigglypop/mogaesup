@@ -118,6 +118,15 @@ def _pg_connect(conninfo="", **kwargs):
 psycopg.connect = _pg_connect
 
 
+def pytest_terminal_summary(terminalreporter):
+    """The record database tests skip without the compose PostgreSQL; a green run says how many did not run."""
+    skipped = [report for report in terminalreporter.stats.get("skipped", [])
+               if "127.0.0.1:55432 is not running" in str(getattr(report, "longrepr", ""))]
+    if skipped:
+        terminalreporter.write_sep("=", f"{len(skipped)} record database tests SKIPPED: PostgreSQL at 127.0.0.1:55432 "
+                                        "is not running (docker compose up -d postgres in server/)", yellow=True, bold=True)
+
+
 @pytest.fixture
 def storage_configured(monkeypatch):
     """Services that refuse to run without private storage see a bucket; objects stay local."""

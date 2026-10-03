@@ -240,3 +240,46 @@ def test_material_split_still_kills_a_worker_that_outlives_its_time(split, blend
     with pytest.raises(ValueError, match='timed out'):
         character_parts.separate_materials(model, output)
     assert blender.processes[0].calls == ['kill']
+
+
+@pytest.fixture
+def s3_split(tmp_path, monkeypatch, blender):
+    """The material split with S3 storage: the model and the outputs are objects of the bucket."""
+    from test_record_store import FakeS3, _clear_s3_caches
+    from src.services import object_storage
+    fake = FakeS3()
+    monkeypatch.setattr(object_storage, '_s3', lambda: fake)
+    monkeypatch.delenv('ASSET_STORAGE_WORKER_LOCAL', raising=False)
+    monkeypatch.setenv('ASSET_S3_BUCKET', 'fixture-bucket')
+    monkeypatch.setenv('ASSET_S3_PREFIX', 'assets')
+    monkeypatch.setenv('ASSET_DATA_ROOT', str(tmp_path / 'cloud'))
+    monkeypatch.setenv('CHARACTER_DATABASE_URL', '')  # JSON goes to S3 as well
+    _clear_s3_caches()
+    monkeypatch.setattr(character_parts, 'blender_executable', lambda: 'blender')
+    run = StoredPath(tmp_path / 'cloud') / 'characters' / 'char-1'
+    (run / 'rigged.glb').write_bytes(rigged_glb())
+    yield run / 'rigged.glb', run / 'operations' / ('e' * 32) / 'blender', fake, LocalPath(tmp_path / 'cloud')
+    _clear_s3_caches()
+
+
+def test_material_split_with_s3_storage_gives_the_worker_real_files_and_stores_its_output(s3_split, blender, monkeypatch):
+    model, output, s3, cloud = s3_split
+    assert not LocalPath(model).exists() and 'assets/characters/char-1/rigged.glb' in s3.objects
+    seen = {}
+    start = subprocess.Popen
+
+    def checking(command, **kwargs):
+        # A BytesIO standing in for an S3 object has no file descriptor, and Blender reads input.json from disk.
+        seen.update(log=kwargs['stdout'].fileno() >= 0, input=LocalPath(command[-1]).is_file(),
+                    model=LocalPath(model).is_file())
+        return start(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'Popen', checking)
+    blender.exit_code = 1
+    with pytest.raises(ValueError, match='separation failed'):
+        character_parts.separate_materials(model, output)
+    assert seen == {'log': True, 'input': True, 'model': True}
+    stored = 'assets/characters/char-1/operations/' + 'e' * 32 + '/blender/'
+    assert {stored + name for name in ('input.json', 'runner.json', 'blender.log')} <= set(s3.objects)
+    # Nothing stays on the local disk: the outputs went up and the model copy was the workspace's own.
+    assert not [path for path in (cloud / 'characters').rglob('*') if path.is_file()]

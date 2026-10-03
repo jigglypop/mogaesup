@@ -38,7 +38,7 @@ Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다. `backend/.en
 
 `npm run dev:character`가 이 서버(`127.0.0.1:8016`)를 Rust 서버·앱과 함께 띄우고 `backend/.env`의 API 키와 JWT 설정을 게이트웨이에 넘깁니다. 이 서버만 띄울 때는 루트에서 `uv run asset-api`(기본 `API_PORT=8000`)입니다. 로컬 서버는 loopback 전용이고 제어 서버는 단일 worker로 실행합니다. 상태 확인 경로는 `/health`와 `/api/health`입니다.
 
-API는 JWT(`Authorization: Bearer`, 발급자 `mogaesup`, 대상 `mogaesup-client`, `token_type=access`, `roles=[ADMIN]`)로 인증합니다. 실제 loopback socket이며 Forwarded·X-Forwarded-For·X-Real-IP가 없는 로컬 요청만 양수 `X-User-Id`를 운영자로 받아들입니다(로컬 개발, `scripts/props/generate.py`). Uvicorn은 proxy header를 신뢰하지 않습니다. AWS 컨테이너 nginx는 gateway key를 먼저 검사하고 위 세 헤더를 제거한 뒤 `X-User-Id: 1`로 내부 API에 전달합니다. `/internal/*`은 nginx에서 전달하지 않습니다.
+API는 JWT(`Authorization: Bearer`, 발급자 `mogaesup`, 대상 `mogaesup-client`, `token_type=access`, `roles=[ADMIN]`)로 인증합니다. 실제 loopback socket이며 Forwarded·X-Forwarded-For·X-Real-IP가 없고, Host가 `127.0.0.1`·`localhost`·`[::1]`(포트 허용)이며 loopback이 아닌 Origin이 없는 로컬 요청만 양수 `X-User-Id`를 운영자로 받아들입니다(로컬 개발, `scripts/props/generate.py`). 127.0.0.1로 풀리게 만든 이름(DNS rebinding)이나 다른 사이트의 페이지는 자기 Host·Origin을 보내므로 운영자가 되지 못합니다. Uvicorn은 proxy header를 신뢰하지 않습니다. AWS 컨테이너 nginx는 gateway key를 먼저 검사하고 위 세 헤더를 제거한 뒤 Host를 `127.0.0.1`로 바꿔 `X-User-Id: 1`로 내부 API에 전달합니다(Origin은 그대로 전달). SSM 포트(8080)는 Host가 `127.0.0.1`·`localhost`인 요청에만 답하고 나머지는 연결을 끊습니다(444). `/internal/*`은 nginx에서 전달하지 않습니다.
 
 ## API 범위
 
@@ -76,7 +76,9 @@ uv run python -m src.records import --prefix assets
 uv run python -m src.records status
 ```
 
-되돌릴 때는 서버를 멈추고 `uv run python -m src.records export --prefix assets`로 전환 뒤 생기거나 바뀐 기록을 S3에 다시 쓴 다음 `CHARACTER_DATABASE_URL`을 비웁니다. 운영 컨테이너는 이 값을 provider secret(JSON)과 같은 형식의 `/run/studio-secrets.json`으로 받습니다. `deploy-on-instance.sh`가 `/etc/asset-studio.env`의 `CHARACTER_DB_SECRET_ARN`·`CHARACTER_DB_HOST`로 배포마다 URL을 만들어 넣고, 스택 파라미터 `CharacterDbSecretArn`·`CharacterDbHost`(서버 스택의 `CharacterDatabaseSecretArn`·`DatabaseEndpoint` 출력)가 그 두 줄을 씁니다. 둘 다 비우면(기본) 기록은 S3에 남습니다. `backend/infra/records-to-postgres.py`가 옮긴 뒤에는 스택에도 같은 두 값을 넣어 두어야 인스턴스가 교체돼도 데이터베이스로 올라옵니다. `scripts/dev.ps1 -Character`는 compose PostgreSQL(127.0.0.1:55432)에 `mogaesup_character`를 만들고 스키마를 적용해 이 서버에만 넘깁니다.
+`migrate`는 번호 붙은 파일을 한 번씩만 적용하고, 적용한 뒤 바뀐 파일은 거부합니다(바꿀 내용은 새 번호 파일로 넣습니다).
+
+되돌릴 때는 서버를 멈추고 `uv run python -m src.records export --prefix assets`로 전환 뒤 생기거나 바뀐 기록을 S3에 다시 쓴 다음 `CHARACTER_DATABASE_URL`을 비웁니다. 데이터베이스에서 지워졌는데 S3에 JSON이 남은 기록이 있으면 S3로 돌아간 서버가 그것을 다시 읽으므로 표식을 남기고 멈춥니다. 그 JSON을 지우거나, 그대로 읽혀도 되면 `--ignore-stale`로 다시 실행합니다. 표식을 지울 권한(`s3:DeleteObject`)이 없으면 그렇게 출력하고 멈추며, 표식이 남아 있는 동안 데이터베이스 없는 서버는 계속 시작을 거부합니다. 운영 컨테이너는 이 값을 provider secret(JSON)과 같은 형식의 `/run/studio-secrets.json`으로 받습니다. `deploy-on-instance.sh`가 `/etc/asset-studio.env`의 `CHARACTER_DB_SECRET_ARN`·`CHARACTER_DB_HOST`로 배포마다 URL을 만들어 넣고, 스택 파라미터 `CharacterDbSecretArn`·`CharacterDbHost`(서버 스택의 `CharacterDatabaseSecretArn`·`DatabaseEndpoint` 출력)가 그 두 줄을 씁니다. 둘 다 비우면(기본) 기록은 S3에 남습니다. `backend/infra/records-to-postgres.py`가 옮긴 뒤에는 스택에도 같은 두 값을 넣어 두어야 인스턴스가 교체돼도 데이터베이스로 올라옵니다. `scripts/dev.ps1 -Character`는 compose PostgreSQL(127.0.0.1:55432)에 `mogaesup_character`를 만들고 스키마를 적용해 이 서버에만 넘깁니다.
 
 ## 빌드
 
@@ -106,16 +108,18 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
    ```
 3. 스택 파라미터 `PublicStudio=true`, `CloudFrontPrefixListId=<위 값>`, `InstanceType=c7i.xlarge`로 배포합니다.
 
+git 체크아웃에서는 릴리스에 들어가는 파일(`backend/`, 루트의 uv 워크스페이스 파일)에 커밋하지 않은 변경이나 추적하지 않는 파일이 있으면 묶지 않고, 묶은 커밋을 `receipt.json`과 릴리스의 `release.json`에 남깁니다. 컨테이너는 그 커밋을 `version.json`의 `git_commit`으로 냅니다.
+
 `StudioUrl` 출력(`https://….cloudfront.net`)이 Rust 서버의 `FACTORY_URL`입니다. 80 포트의 보안 그룹은 CloudFront 관리형 prefix list 전체를 받으므로 어느 계정의 CloudFront 배포든 닿을 수 있고, nginx는 닿은 `/api` 요청을 운영자(user 1)로 처리합니다. 막는 것은 둘입니다.
 
 - CloudFront Function(`server/scripts/lock-studio.py`)은 서버가 보내는 `x-gateway-key`나 주인 IP만 통과시킵니다. 스택 밖에서 붙이므로 스택을 다시 배포하면 떨어지고, 그때마다 스크립트를 다시 실행합니다.
-- `STUDIO_GATEWAY_KEY`: provider secret(JSON)에 서버 스택 `FactoryGatewaySecret`의 값(서버의 `FACTORY_GATEWAY_KEY`와 같은 값)을 넣으면 컨테이너가 80 포트의 `/api`를 `x-gateway-key`가 같은 요청에만 열고 나머지는 403으로 답합니다. 함수가 떨어져도 남는 검사입니다. `PublicStudio=true`일 때 키가 없거나 `A-Z a-z 0-9 . _ ~ -` 16자 이상이 아니면 컨테이너가 시작하지 않습니다. 키는 로그에 남기지 않습니다. SSM 포트 포워딩(8080)은 키를 묻지 않습니다. 키가 있으면 `lock-studio.py --allow-ip`의 주인 IP로 CloudFront 주소를 직접 부르는 요청도 nginx에서 403이 되므로 그때는 8080을 씁니다.
+- `STUDIO_GATEWAY_KEY`: provider secret(JSON)에 서버 스택 `FactoryGatewaySecret`의 값(서버의 `FACTORY_GATEWAY_KEY`와 같은 값)을 넣으면 컨테이너가 80 포트의 `/api`를 `x-gateway-key`가 같은 요청에만 열고 나머지는 403으로 답합니다. 함수가 떨어져도 남는 검사입니다. `PublicStudio=true`일 때 키가 없거나 `A-Z a-z 0-9 . _ ~ -` 16자 이상이 아니면 컨테이너가 시작하지 않습니다. 키는 로그에 남기지 않습니다. 키를 바꿀 때는 provider secret에 새 키를 `STUDIO_GATEWAY_KEY`로, 이전 키를 `STUDIO_GATEWAY_KEY_PREVIOUS`로 넣고 배포해 둘 다 받게 한 뒤 서버의 `FACTORY_GATEWAY_KEY`를 바꾸고, 마지막에 `STUDIO_GATEWAY_KEY_PREVIOUS`를 지우고 다시 배포합니다. SSM 포트 포워딩(8080)은 키를 묻지 않습니다. 키가 있으면 `lock-studio.py --allow-ip`의 주인 IP로 CloudFront 주소를 직접 부르는 요청도 nginx에서 403이 되므로 그때는 8080을 씁니다.
 
 실행 중인 컨테이너는 다음 배포 때 secret을 다시 읽습니다.
 
 ### 배포와 갱신
 
-`deploy-on-instance.sh`는 실제 loopback의 `POST /internal/drain`에 점검별 32자리 hex token을 보내 새 작업 수락을 먼저 닫습니다. API·CLI·Blender는 데이터 루트 `.runtime`의 동일한 잠금과 실제 OS work lease를 쓰며, 이미 수락한 작업은 병렬 공급자 단계와 Blender 실행을 끝낼 수 있습니다. mutation은 drain 중 503으로 답하고 GET·HEAD 상태/산출물 조회는 열어 둡니다. `health.admission`의 `version=1`, `draining=true`, `verified=true`와 정확한 음수 없는 정수 activity를 확인한 뒤 두 count가 모두 0일 때만 이전 컨테이너를 멈춥니다. `ASSET_DEPLOY_DRAIN_SECONDS`(기본 420)초 안에 비지 않으면 종료 코드 4, 확인할 수 없거나 구버전에 drain 제어가 없으면 종료 코드 5로 멈추고 이전 컨테이너를 유지합니다. 강제 통과 옵션은 없습니다. 실패·SIGTERM은 같은 token으로 수락을 다시 열고, 후보 실패 시 이전 provider 설정과 컨테이너를 함께 복원합니다.
+`deploy-on-instance.sh`는 실제 loopback의 `POST /internal/drain`에 점검별 32자리 hex token을 보내 새 작업 수락을 먼저 닫습니다. API·CLI·Blender는 데이터 루트 `.runtime`의 동일한 잠금과 실제 OS work lease를 쓰며, 이미 수락한 작업은 병렬 공급자 단계와 Blender 실행을 끝낼 수 있습니다. mutation은 drain 중 503으로 답하고 GET·HEAD 상태/산출물 조회는 열어 둡니다. `health.admission`의 `version=1`, `draining=true`, `verified=true`와 정확한 음수 없는 정수 activity를 확인한 뒤 두 count가 모두 0일 때만 이전 컨테이너를 멈춥니다. `ASSET_DEPLOY_DRAIN_SECONDS`(기본 420)초 안에 비지 않으면 종료 코드 4, 확인할 수 없거나 구버전에 drain 제어가 없으면 종료 코드 5, 다른 작업(idle stop·점검)의 token이 수락을 닫아 두었으면 종료 코드 6으로 멈추고 이전 컨테이너를 유지합니다. 강제 통과 옵션은 없습니다. 실패·SIGTERM은 같은 token으로 수락을 다시 열고, 후보 실패 시 이전 provider 설정과 컨테이너를 함께 복원합니다. 복원한 컨테이너가 응답할 때까지 같은 token으로 최대 `ASSET_DEPLOY_REOPEN_SECONDS`(기본 60)초 다시 엽니다. 그래도 열지 못했거나(응답 없음, 실행 중인 런타임 없음) 처음부터 런타임이 없었던 배포의 token은 `/opt/asset-studio/drain-token`에 남고, 다음 배포가 그 token을 그대로 써서 이어서 엽니다. `deploy-aws.ps1`은 SSM 실행 제한 시각을 `ASSET_DEPLOY_DEADLINE`으로 넘기고, 남은 시간이 drain·교체·rollback을 다 담지 못하면 수락을 닫기 전에 종료 코드 7로 멈춥니다(이미지는 만들어져 있어 다시 배포하면 됩니다). drain 대기도 남은 시간에 맞춰 줄입니다. 배포가 끝나면 최근 릴리스 3개(`ASSET_KEEP_RELEASES`)의 이미지와 폴더만 남깁니다.
 
 최초 구버전에서 이 계약으로 넘어갈 때는 운영자가 작업 접수를 닫는 점검 시간을 잡아야 합니다. 앱 게이트웨이·공개 nginx·직접 API 접수와 CLI를 모두 막고, 기존 공급자 요청의 영수증/상태 및 Blender runner와 실제 프로세스가 종료된 것을 확인한 뒤 drain 지원 런타임을 설치합니다. 불확실한 유료 요청은 재제출하지 않고 복구 대상으로 남깁니다. 자동 파이프라인은 이 확인을 대신하거나 실행 중인 구버전을 강제 종료하지 않습니다. 이후 배포는 위 drain 계약으로 진행합니다.
 
@@ -123,9 +127,9 @@ uv run asset-quality <조립 폴더> [<조립 폴더> ...] [--images views.json 
 
 점검 진행과 복구 정보는 `/opt/asset-studio/legacy-maintenance.json`(0600)에 남습니다. TERM 전 실패는 접수와 기존 idle timer를 복원합니다. 종료 확인이 불확실하면 idle timer를 계속 막고 기존 프로세스를 관찰해야 합니다. 성공하면 접수 차단 규칙을 제거하되 컨테이너는 멈춘 채로 두고, 즉시 정상 `deploy-on-instance.sh`를 실행합니다. 정상 배포가 새 idle timer를 설치합니다. 배포 준비나 배포가 실패하면 receipt의 기존 container ID와 이미지가 그대로인지, 다른 후보가 실행 중이지 않은지 확인하고 그 컨테이너를 다시 시작한 뒤 기존 `unless-stopped` 정책을 복원합니다. 구버전 idle timer는 꺼 둔 채로 유지하며 새 안전한 idle 스크립트가 설치된 뒤에만 켭니다. 종료가 불확실한 runtime이나 미확인 유료 요청을 다시 제출하지 않습니다.
 
-후보는 `ASSET_START_DRAIN_TOKEN`으로 새 작업 수락을 닫은 상태로 시작합니다. `status=healthy`, 검증 가능한 닫힌 admission과 유효 activity를 만족해야 하며 DB가 설정되어 있으면 해당 prefix의 import 완료·record schema 조회까지 성공(`ok=true`)할 때까지 기다립니다. 확인 중(`ok=null`)과 degraded는 통과하지 않습니다. 건강·버전 확인 및 release commit이 모두 끝나야 수락을 열며, 열린 뒤 응답이 불확실해도 새 작업을 끊는 강제 rollback은 하지 않습니다. 실행 중인 leftover candidate/rollback은 지우지 않고 복구를 요구합니다. 프로세스/컨테이너 재시작은 진행 중 drain을 유지하고 실제 instance reboot만 이전 boot의 drain을 해제합니다. DB URL이 없을 때 S3 marker 조회가 실패/timeout이면 stale JSON 사용을 막기 위해 시작을 거절합니다. 산출물은 S3를 256KiB씩 읽어 인증된 같은-origin API로 보내고 Content-Type·Length·ETag, 단일 Range·HEAD를 지원하며 연결 종료/오류에도 S3 body를 닫습니다. 컨테이너 로그는 `json-file` 50 MB 3개로 돌립니다.
+후보는 `ASSET_START_DRAIN_TOKEN`으로 새 작업 수락을 닫은 상태로 시작합니다. 컨테이너마다 새 `ASSET_START_DRAIN_ID`가 붙어, 남은 token을 다시 쓰는 배포의 후보도 닫힌 채 시작하고 같은 컨테이너의 재시작은 다시 닫지 않습니다. 이전 boot의 drain은 token을 비교하기 전에 해제합니다. `status=healthy`, 검증 가능한 닫힌 admission과 유효 activity를 만족해야 하며 DB가 설정되어 있으면 해당 prefix의 import 완료·record schema 조회까지 성공(`ok=true`)할 때까지 기다립니다. 확인 중(`ok=null`)과 degraded는 통과하지 않습니다. 건강·버전 확인 및 release commit이 모두 끝나야 수락을 열며, 열린 뒤 응답이 불확실해도 새 작업을 끊는 강제 rollback은 하지 않습니다. 실행 중인 leftover candidate/rollback은 지우지 않고 복구를 요구합니다. 프로세스/컨테이너 재시작은 진행 중 drain을 유지하고 실제 instance reboot만 이전 boot의 drain을 해제합니다. DB URL이 없을 때 S3 marker 조회가 실패/timeout이면 stale JSON 사용을 막기 위해 시작을 거절합니다. 산출물은 S3를 256KiB씩 읽어 인증된 같은-origin API로 보내고 Content-Type·Length·ETag, 단일 Range·HEAD를 지원하며 연결 종료/오류에도 S3 body를 닫습니다. 컨테이너 로그는 `json-file` 50 MB 3개로 돌립니다.
 
-스택(`ec2.yaml`)을 갱신하기 전에 변경 세트에서 `Instance`가 교체(Replacement `True`)되지 않는지 봅니다. `ImageId`는 갱신할 때마다 최신 AL2023으로 다시 풀려, 새 이미지가 나왔으면 인스턴스가 교체됩니다(고정하는 방법은 템플릿의 `ImageId` 주석). 교체된 인스턴스는 `CharacterDbSecretArn`·`CharacterDbHost`가 비어 있으면 S3 기록으로 올라옵니다. 역할은 `assets/*`에서 읽기·쓰기·삭제를 합니다(버킷은 버전 관리).
+스택(`ec2.yaml`)을 갱신할 때 `ReleaseKey`에는 인스턴스가 지금 돌리는 릴리스(`/opt/asset-studio/current.json` 또는 `dist/aws/deployment-receipt.json`의 키)를 넣습니다. SSM 배포는 스택 값을 바꾸지 않으므로 옛 키를 그대로 넘기면 교체된 인스턴스가 옛 릴리스로 뜹니다. 더 쓰지 않는 `PublicSiteOrigin` 파라미터와 0.0.0.0/0의 80 포트 규칙은 템플릿에서 뺐습니다. 갱신할 때 이 파라미터를 넘기지 않으며(없는 파라미터는 거부됩니다), user data의 `PUBLIC_SITE_ORIGIN` 줄도 빠져 다음 스택 갱신은 인스턴스를 멈췄다 켭니다. 갱신하기 전에 변경 세트에서 `Instance`가 교체(Replacement `True`)되지 않는지 봅니다. `ImageId`는 갱신할 때마다 최신 AL2023으로 다시 풀려, 새 이미지가 나왔으면 인스턴스가 교체됩니다(고정하는 방법은 템플릿의 `ImageId` 주석). 교체된 인스턴스는 `CharacterDbSecretArn`·`CharacterDbHost`가 비어 있으면 S3 기록으로 올라옵니다. 역할은 `assets/*`에서 읽기·쓰기·삭제를 합니다(버킷은 버전 관리).
 
 ### 쉬면 끄기
 

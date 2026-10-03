@@ -23,6 +23,7 @@ class Library:
         self.wardrobe = avatar_wardrobe.Wardrobe(self.factory, OWNER)
         # Sealed records are remembered by (owner, job, version) for the whole process; tests reuse those names.
         avatar_wardrobe._records.clear()
+        avatar_wardrobe._geometries.clear()
         # Object storage has no directories to make; a local disk needs this one for the wardrobe's own files.
         self.wardrobe.library.root.mkdir(parents=True, exist_ok=True)
 

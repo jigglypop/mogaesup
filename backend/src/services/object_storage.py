@@ -35,7 +35,7 @@ _TABLE_LIMIT = 4096
 
 _working = ContextVar('asset_workspaces', default=())
 _cache = {}
-_content_cache = {}
+_content_cache = record_store.ByteBoundedCache(record_store.CONTENT_CACHE_BYTES)  # (bucket, key) -> (monotonic, bytes)
 _key_index = {}
 _written_keys = {}          # bucket -> {key: monotonic time of the write}
 _generations = OrderedDict()  # (bucket, key) -> (change number, monotonic time); a read stores only if it did not change
@@ -203,6 +203,12 @@ def _s3():
                    os.getenv('ASSET_AWS_PROFILE', os.getenv('AWS_PROFILE', '')))
 
 
+def _s3_error(exc):
+    """(error code, HTTP status) of a botocore ClientError."""
+    response = getattr(exc, 'response', None) or {}
+    return str((response.get('Error') or {}).get('Code', '')), (response.get('ResponseMetadata') or {}).get('HTTPStatusCode')
+
+
 def _index(bucket, prefix):
     """Cached key set of one prefix. Callers only test membership; writers add under _cache_lock."""
     with _cache_lock:
@@ -296,17 +302,27 @@ def _put(path, content, *, exclusive=False):
 
 
 def _upload(bucket, key, content, mime, *, exclusive=False):
+    from botocore.exceptions import ClientError
     digest = hashlib.sha256(content).digest()
-    _s3().put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime,
-                     Metadata={'sha256': digest.hex()}, ChecksumSHA256=base64.b64encode(digest).decode('ascii'),
-                     ServerSideEncryption='AES256', **({'IfNoneMatch': '*'} if exclusive else {}))
+    try:
+        _s3().put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime,
+                         Metadata={'sha256': digest.hex()}, ChecksumSHA256=base64.b64encode(digest).decode('ascii'),
+                         ServerSideEncryption='AES256', **({'IfNoneMatch': '*'} if exclusive else {}))
+    except ClientError as exc:
+        code, status = _s3_error(exc)
+        # An exclusive create that lost the race: the object exists (412) or another conditional write of it is in
+        # progress (409). Callers handle the same FileExistsError as for a local file or a record.
+        if exclusive and (code in ('PreconditionFailed', 'ConditionalRequestConflict') or status in (409, 412)):
+            raise FileExistsError(key) from None
+        raise
 
 
 def _put_record(record, content, *, exclusive=False, expected_version=None):
     prefix, path = record
     digest = hashlib.sha256(content).hexdigest()
     if len(content) <= record_store.INLINE_LIMIT:
-        record_store.put(prefix, path, content=content, size=len(content), sha256=digest, exclusive=exclusive,
+        # Inline records are cached; a caller's bytearray must not change under the cache.
+        record_store.put(prefix, path, content=bytes(content), size=len(content), sha256=digest, exclusive=exclusive,
                          expected_version=expected_version)
         return
     record_store.require(prefix)
@@ -486,14 +502,13 @@ class StoredPath(type(LocalPath())):
             content = body.read()
         if self.suffix == '.json' and len(content) < 256_000:
             with _cache_lock:
-                if len(_content_cache) > 512:
-                    _content_cache.clear()
                 if _generations.get((bucket, key)) == generation:
                     _content_cache[bucket, key] = time.monotonic(), content
         return content
 
     def write_bytes(self, data):
-        content = bytes(data)
+        # A downloaded model arrives as one bytearray of up to 256 MiB: it is uploaded as it is, never copied.
+        content = data if isinstance(data, (bytes, bytearray)) else bytes(data)
         if not _location(self) or _is_working(self):
             mark_changed(self)
             try:
@@ -725,8 +740,19 @@ def read_byte_range(path, start, length, *, etag=None):
         content = StoredPath(path).read_bytes()[start:start + length]
         total, checksum = meta.size, meta.sha256
     elif location and not _is_working(path) and not record:
-        response = _s3().get_object(Bucket=location[0], Key=location[1],
-            Range=f'bytes={start}-{start + length - 1}', **({'IfMatch': etag} if etag else {}))
+        from botocore.exceptions import ClientError
+        try:
+            response = _s3().get_object(Bucket=location[0], Key=location[1],
+                Range=f'bytes={start}-{start + length - 1}', **({'IfMatch': etag} if etag else {}))
+        except ClientError as exc:
+            code, status = _s3_error(exc)
+            if code in ('NoSuchKey', 'NotFound', '404') or status == 404:
+                raise FileNotFoundError(str(path)) from None
+            if code == 'PreconditionFailed' or status == 412:
+                raise ValueError('Model changed during metadata read') from None
+            if code == 'InvalidRange' or status == 416:
+                raise ValueError('Incomplete model metadata') from None
+            raise
         with response['Body'] as body:
             content = body.read(length + 1)
         total = int(response['ContentRange'].rsplit('/', 1)[1])
@@ -909,6 +935,27 @@ def _upload_error(local, failed):
     return error
 
 
+def _materialize(target, content):
+    """Write one workspace input. A copy already there must hold the same bytes; workspaces that share the input write
+    the same stored bytes, each through its own temporary file and an atomic replace."""
+    if target.is_file():
+        if target.read_bytes() != content:
+            raise ValueError('Existing local input differs from the saved assembly input')
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f'{target.name}.{os.getpid()}-{id(content):x}-{time.monotonic_ns()}.tmp')
+    try:
+        temporary.write_bytes(content)
+        try:
+            os.replace(temporary, target)
+        except OSError:
+            # Windows refuses to replace a file another workspace has open: the same input is already in place.
+            if not target.is_file() or target.read_bytes() != content:
+                raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _release_inputs(held, original):
     """Explicit Blender inputs may live outside the output directory. Remove a shared input only when the last
     workspace that materialized it is done."""
@@ -968,19 +1015,16 @@ def local_workspace(directory, *, inputs=()):
                     downloaded[target.resolve()] = hashlib.sha256(content).digest()
             for path, target in zip(input_paths, input_locals):
                 content = path.read_bytes()
-                with _workspace_lock:
-                    # Another workspace may be using the same shared input right now.
-                    entry = _materialized.get(target) if target in shared else None
-                    if target.is_file() and target.read_bytes() != content:
-                        raise ValueError('Existing local input differs from the saved assembly input')
-                    if target in shared:
+                if target in shared:
+                    # Another workspace may be using the same shared input right now: count this one in first, so the
+                    # file is not removed under it, then compare or write it outside the lock that every workspace uses.
+                    with _workspace_lock:
+                        entry = _materialized.get(target)
                         if entry is None:
                             entry = _materialized[target] = [0, not target.is_file()]
                         entry[0] += 1
-                        held.append(target)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if not target.is_file():
-                        target.write_bytes(content)
+                    held.append(target)
+                _materialize(target, content)
                 if target.is_relative_to(local) and target not in unstored:
                     downloaded.setdefault(target, hashlib.sha256(content).digest())
             token = _working.set((*_working.get(), local, *input_locals))

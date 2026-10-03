@@ -111,11 +111,17 @@ def bind(meshes, body, rig, contract, *, transform=None):
         fitting = 'shared_frame_axis_alignment'
     tree, points, triangles, weights = weight_surface(body, rig)
     distances, inside = [], 0
-    rigid_bone = contract['bone']
-    if contract['binding'] == 'rigid' and rigid_bone not in rig.data.bones:
-        # A skeleton may prefix its bone names ('mixamorig:Head'); the worn parts already look them up this way.
-        wanted = rigid_bone.lower().split(':')[-1]
-        rigid_bone = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] == wanted), rigid_bone)
+    # Only a rigid binding names its bone: a transferred one (a garment, the rig-transfer body) has none.
+    rigid_bone = contract.get('bone') if contract['binding'] == 'rigid' else None
+    if contract['binding'] == 'rigid':
+        if not rigid_bone:
+            raise ValueError('A rigid binding needs a bone')
+        if rigid_bone not in rig.data.bones:
+            # A skeleton may prefix its bone names ('mixamorig:Head'); the worn parts already look them up this way.
+            wanted = rigid_bone.lower().split(':')[-1]
+            rigid_bone = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] == wanted), None)
+            if rigid_bone is None:
+                raise ValueError(f'The skeleton has no {wanted} bone for a rigid binding')
     for obj in meshes:
         # Unrigged source only: do not silently discard an independently authored skin.
         if any(mod.type == 'ARMATURE' for mod in obj.modifiers):

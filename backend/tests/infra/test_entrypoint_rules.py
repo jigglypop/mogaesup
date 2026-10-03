@@ -5,10 +5,10 @@ import pytest
 
 ENTRYPOINT = Path(__file__).resolve().parents[2] / 'infra' / 'entrypoint.py'
 KEY = 'Kq3VzX9mTt7RbN2wLp4HyC8sDf6JgA1uEoWi5xMhY0cB'
-PROXY = ['  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id 1;', '  proxy_set_header Host $host;',
+PROXY = ['  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id 1;', '  proxy_set_header Host 127.0.0.1;',
          '  proxy_set_header Forwarded "";', '  proxy_set_header X-Forwarded-For "";', '  proxy_set_header X-Real-IP "";',
          '  proxy_read_timeout 65s;', '  proxy_buffering off;']
-# What the container wrote to /etc/nginx/studio-public.conf before the gateway key existed.
+# What the container writes to /etc/nginx/studio-public.conf around the gateway check.
 OPEN = ['location /api/ {', *PROXY, '}',
         'location ~ ^/api/(avatar-factory/base-bodies/glb-assets|studio/glb-assets/upload)$ {',
         '  client_max_body_size 256m;', *PROXY, '}',
@@ -112,3 +112,62 @@ def test_a_closed_studio_needs_no_warning_and_a_bad_key_writes_nothing(entrypoin
     with pytest.raises(SystemExit):
         entrypoint.write_public_rules(refused, True, 'a' * 16 + '"')
     assert not refused.exists()
+
+
+PREVIOUS = 'Zz9YyXx8WwVv7UuTt6SsRr5QqPp4OoNn3MmLl2KkJj1I'
+
+
+def test_a_rotation_accepts_the_current_and_the_previous_key_and_nothing_else(entrypoint):
+    rules = entrypoint.public_rules(True, KEY, PREVIOUS)
+    gate = ['  set $studio_gateway 0;', f'  if ($http_x_gateway_key = "{KEY}") {{ set $studio_gateway 1; }}',
+            f'  if ($http_x_gateway_key = "{PREVIOUS}") {{ set $studio_gateway 1; }}',
+            '  if ($studio_gateway = 0) { return 403; }']
+    for opening in ('location /api/ {', 'location ~ ^/api/(avatar-factory/base-bodies/glb-assets|studio/glb-assets/upload)$ {'):
+        start = rules.index(opening)
+        proxy = rules.index('  proxy_pass http://127.0.0.1:8000;', start)
+        assert [line for line in rules[start:proxy] if line in gate] == gate
+    assert [line for line in rules if line not in gate] == OPEN
+    assert GATE not in rules
+
+
+@pytest.mark.parametrize('previous', [KEY, 'short', 'a' * 16 + '"', 'a' * 16 + '$host'])
+def test_a_previous_key_that_is_the_current_one_or_invalid_stops_the_start(entrypoint, previous):
+    with pytest.raises(SystemExit, match='STUDIO_GATEWAY_KEY_PREVIOUS') as stopped:
+        entrypoint.public_rules(True, KEY, previous)
+    assert previous not in str(stopped.value)
+
+
+def test_a_closed_studio_ignores_the_previous_key(entrypoint):
+    assert entrypoint.public_rules(False, KEY, PREVIOUS) == CLOSED
+
+
+def test_the_previous_key_is_an_allowed_secret_and_never_printed(entrypoint, tmp_path, capsys):
+    assert 'STUDIO_GATEWAY_KEY_PREVIOUS' in entrypoint.allowed
+    target = tmp_path / 'studio-public.conf'
+    entrypoint.write_public_rules(target, True, KEY, PREVIOUS)
+    text = target.read_text(encoding='utf-8')
+    assert text.count(KEY) == 2 and text.count(PREVIOUS) == 2
+    assert capsys.readouterr() == ('', '')
+
+
+def test_the_release_stamp_names_the_git_commit_only_when_it_is_one(entrypoint, tmp_path):
+    release = tmp_path / 'release.json'
+    sha = 'b' * 64
+    assert entrypoint.release_stamp(sha, release) == {'release_sha': sha}
+    release.write_text('{"git_commit": "' + 'c' * 40 + '"}', encoding='utf-8')
+    assert entrypoint.release_stamp(sha, release) == {'release_sha': sha, 'git_commit': 'c' * 40}
+    for value in ('null', '"main"', '"' + 'C' * 40 + '"', '[]'):
+        release.write_text('{"git_commit": ' + value + '}', encoding='utf-8')
+        assert entrypoint.release_stamp(sha, release) == {'release_sha': sha}
+    release.write_text('not json', encoding='utf-8')
+    assert entrypoint.release_stamp(sha, release) == {'release_sha': sha}
+
+
+def test_nginx_answers_only_requests_that_name_the_loopback_on_the_ssm_port():
+    text = ENTRYPOINT.with_name('nginx.conf').read_text(encoding='utf-8')
+    servers = text.split('  server {')[1:]
+    default, studio = servers[0], servers[1]
+    assert 'listen 127.0.0.1:8080 default_server;' in default and 'return 444;' in default and 'access_log off;' in default
+    assert 'listen 127.0.0.1:8080;' in studio and 'server_name 127.0.0.1 localhost;' in studio
+    assert studio.count('proxy_set_header Host 127.0.0.1;') == 2 and '$host' not in studio
+    assert 'Origin' not in studio.replace('foreign Origin', '')

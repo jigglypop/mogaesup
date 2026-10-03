@@ -79,7 +79,7 @@ def describe(library, text):
 def reaching_the_legs(library):
     """The coverage a long top has once computed: it reaches the lower thighs, so it would take the bottom off."""
     body_sha = library.file_sha(BODY, BODY_VERSION, 'body')
-    put(library.wardrobe.library.root/'wardrobe-coverage'/f"{body_sha[:20]}-{library.file_sha(PART, V1, 'top')[:20]}-v10.json",
+    put(library.wardrobe.library.root/'wardrobe-coverage'/f"{body_sha[:20]}-{library.file_sha(PART, V1, 'top')[:20]}-v11.json",
         {'slot': 'top', 'covers_bottom': True})
 
 
@@ -103,3 +103,25 @@ def test_a_long_hooded_zip_up_stays_over_the_bottom_but_a_jumper_skirt_takes_it_
     assert closet.wardrobe.coverage(BODY, PART, 'top', V1)['covers_bottom'] is False
     describe(closet, '체크 점퍼스커트')
     assert closet.wardrobe.coverage(BODY, PART, 'top', V1)['covers_bottom'] is True
+
+
+@pytest.mark.parametrize('prefix', ['', 'mixamorig:'])
+def test_boots_are_found_on_the_shins_of_a_prefixed_skeleton(monkeypatch, prefix):
+    shin, shin_faces = sphere(.08, (0, .3, 0))
+    body = [primitive('0:0', shin, shin_faces, prefix + 'LeftLeg')]
+    boot, _ = sphere(.095, (0, .3, 0))
+    monkeypatch.setattr(cov, 'skinned_primitives', lambda content: [primitive('1:0', boot, np.zeros((0, 3), np.int64), 'LeftFoot')])
+    assert cov.coverage(body, b'', 'shoes')['boot'] is True
+
+
+def test_a_dress_is_found_over_the_thighs_of_a_prefixed_skeleton(monkeypatch):
+    thigh, thigh_faces = sphere(.12, (0, .6, 0))
+    body = [primitive('0:0', thigh, thigh_faces, 'mixamorig:LeftUpLeg')]
+    dress, _ = sphere(.135, (0, .6, 0))
+    monkeypatch.setattr(cov, 'skinned_primitives', lambda content: [primitive('1:0', dress, np.zeros((0, 3), np.int64), 'Spine')])
+    assert cov.coverage(body, b'', 'top')['covers_bottom'] is True
+
+
+def test_bone_names_are_compared_without_their_rig_prefix():
+    assert list(cov.bone_keys(['mixamorig:LeftLeg', 'LeftUpLeg', 'a:b:Head'])) == ['leftleg', 'leftupleg', 'head']
+    assert list(cov.bone_keys([])) == []

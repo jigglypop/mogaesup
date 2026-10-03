@@ -4,11 +4,11 @@ A prop's 3D provider (Meshy or Tripo) is frozen on the record when the job is ac
 `<provider>/character.json`. Only while no 3D task was accepted or left uncertain may a resume send the 3D step
 to a provider again, keeping the paid image.
 """
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
 import re
-from threading import Lock
 import time
 
 import httpx
@@ -25,8 +25,9 @@ from src.services.illustration_rig import build_rig
 from src.services.illustration_vector import VECTOR_REVISION, trace_illustration
 from src.services.model_providers import (LABELS, PROVIDERS, base_url, client as provider_client,
                                           configured as provider_keys, model_problem, resolve_provider)
-from src.services.process_identity import identity, state as process_state
+from src.services.process_identity import identity
 from src.services.object_storage import copy_file, provider_image
+from src.services.run_lock import WorkerLocks, final_write, worker_alive
 from src.services.studio_materials import texture_maps, prop_model
 
 from src.services.studio_prompts import DEFAULTS as PROMPT_DEFAULTS, StudioPrompts
@@ -36,7 +37,9 @@ ILLUSTRATION_PROMPT_REVISION = 'illustration-character-v1'
 PROP_FACE_LIMIT = 8000  # Tripo face_limit for one island prop.
 # The provider answered these with a definite refusal or never received them: nothing was accepted or paid.
 UNSENT = ('submission_rejected', 'submission_not_sent')
-_WORKERS = {}
+_WORKERS = WorkerLocks()
+# A listing reads every record and its receipts; in S3 mode one at a time it can outlast the proxy timeouts.
+_LISTING_READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='generation-listing')
 
 
 class StudioGenerations:
@@ -60,8 +63,14 @@ class StudioGenerations:
         return result
 
     def listing(self, kind):
-        items = [self.get(path.parent.name) for path in self.root.glob('*/record.json')
-                 if read_json(path).get('kind') == kind]
+        def item(path):
+            # One read of each record, its receipts read once, all of them in parallel.
+            held = _WORKERS.busy(str(path.parent))
+            record = read_json(path)
+            if record.get('kind') != kind:
+                return None
+            return self._public(path.parent.name, record, held)
+        items = [value for value in _LISTING_READERS.map(item, list(self.root.glob('*/record.json'))) if value]
         return {'items': sorted(items, key=lambda item: item['created_at'], reverse=True),
                 'capabilities': self.capabilities(kind), 'defaults': StudioPrompts(self.factory, self.owner).values(kind)}
 
@@ -89,13 +98,14 @@ class StudioGenerations:
                 return False, '이미지 응답을 확인하지 못했습니다. 저장된 요청을 유지하며 유료 요청을 반복하지 않습니다.'
         return True, None
 
-    def _resume_reason(self, directory, record):
+    def _resume_reason(self, directory, record, task=None, image=None):
+        """`task` (the prop's 3D receipt) and `image` (_image_reason) when the caller has read them already."""
         if record['status'] == 'complete':
             return False, None
-        resumable, reason = self._image_reason(directory, record)
+        resumable, reason = image or self._image_reason(directory, record)
         if resumable and record['kind'] == 'prop':
             run = self._run(directory, record)
-            problem = model_problem(read_json(run/'character.json'), run)
+            problem = model_problem(read_json(run/'character.json') if task is None else task, run)
             if problem:
                 return False, problem['message']
         return resumable, reason
@@ -107,21 +117,27 @@ class StudioGenerations:
         return all(not task or (task.get('status') in UNSENT and not task.get('task_id')) for task in tasks)
 
     def get(self, job_id):
-        directory = self.directory(job_id); record = self._record(job_id)
-        alive = record['status'] in ('accepted', 'running') and process_state(record.get('process')) != 'exited'
-        resumable, reason = self._resume_reason(directory, record)
+        directory = self.directory(job_id)
+        held = _WORKERS.busy(str(directory))
+        return self._public(job_id, self._record(job_id), held)
+
+    def _public(self, job_id, record, held):
+        """`held`: whether this generation's worker held its lock before the record was read."""
+        directory = self.directory(job_id)
+        alive = worker_alive(record, held or _WORKERS.busy(str(directory)))
+        prop = record['kind'] == 'prop'
+        task = read_json(self._run(directory, record)/'character.json') if prop else {}
+        image = None if record['status'] == 'complete' else self._image_reason(directory, record)
+        resumable, reason = self._resume_reason(directory, record, task, image)
         status = record['status']
         if not alive and status in ('accepted', 'running'):
             status = 'paused' if resumable else 'blocked'
-        prop = record['kind'] == 'prop'
-        task = read_json(self._run(directory, record)/'character.json') if prop else {}
         return {**{key: record.get(key) for key in ('id', 'request_key', 'kind', 'category', 'name', 'prompt',
                     'size', 'stage', 'created_at', 'gpu', 'reference_id', 'vector', 'rig', 'motions')}, 'status': status,
                 'provider': (record.get('provider') or 'meshy') if prop else None,
                 'model_attempts': record.get('model_attempts', []) if prop else None,
                 'can_resume': bool(resumable and (not alive or status == 'accepted')),
-                'can_change_provider': bool(prop and status in ('paused', 'blocked')
-                                            and self._image_reason(directory, record)[0]
+                'can_change_provider': bool(prop and status in ('paused', 'blocked') and image and image[0]
                                             and self._model_unstarted(directory)),
                 'error': record.get('error') or (reason if not alive else None),
                 'task_id': task.get('task_id'), 'progress': task.get('progress'),
@@ -267,9 +283,7 @@ class StudioGenerations:
 
     def execute(self, job_id):
         directory = self.directory(job_id)
-        with _LOCK:
-            lock = _WORKERS.setdefault(str(directory), Lock())
-        if not lock.acquire(blocking=False):
+        if not _WORKERS.acquire(str(directory)):
             return
         try:
             record = self._record(job_id)
@@ -326,9 +340,9 @@ class StudioGenerations:
                     message = '산출물 저장·변환이 중단됐습니다. 수신한 이미지와 모델은 유지됩니다.'
                 record.update(status='paused' if resumable else 'blocked', error=reason or message,
                               error_type=type(exc).__name__)
-                self._save(directory, record)
+                final_write(lambda: self._save(directory, record), 'generation record')
         finally:
-            lock.release()
+            _WORKERS.release(str(directory))
 
     def _model(self, directory, record, image):
         provider = record.get('provider') or 'meshy'; run = self._run(directory, record)
@@ -366,12 +380,12 @@ class StudioGenerations:
         record['files']['model.glb'] = digest(directory/'model.glb')
 
     def _local_work(self, job_id):
-        """The generation's worker lock, for local steps that must not overlap on one illustration."""
-        with _LOCK:
-            lock = _WORKERS.setdefault(str(self.directory(job_id)), Lock())
-        if not lock.acquire(blocking=False):
+        """The generation's worker lock, for local steps that must not overlap on one illustration; call the result to
+        give it back."""
+        key = str(self.directory(job_id))
+        if not _WORKERS.acquire(key):
             raise PipelineError('illustration_busy', '이 원화의 다른 작업을 처리하는 중입니다. 잠시 후 다시 불러오세요.', 409)
-        return lock
+        return lambda: _WORKERS.release(key)
 
     def _finished_illustration(self, job_id, action):
         record = self._record(job_id)
@@ -393,7 +407,7 @@ class StudioGenerations:
 
     def rig(self, job_id, joints=None, revision=None):
         """Save the 2D rig of a finished illustration: proposed joints when none are given."""
-        lock = self._local_work(job_id)
+        release = self._local_work(job_id)
         try:
             record = self._finished_illustration(job_id, '리깅')
             saved = record.get('rig') or {}
@@ -412,11 +426,11 @@ class StudioGenerations:
                           lambda current: current.update(rig={**summary, 'sha256': sha256, 'created_at': now()}))
             return self.get(job_id)
         finally:
-            lock.release()
+            release()
 
     def motion(self, job_id, template, strength, speed, fps, size):
         """Render one looping motion of a rigged illustration as GIF, animated WebP and APNG."""
-        lock = self._local_work(job_id)
+        release = self._local_work(job_id)
         try:
             record = self._finished_illustration(job_id, '모션으로')
             rig = record.get('rig')
@@ -441,11 +455,11 @@ class StudioGenerations:
                           lambda current: current.setdefault('motions', {}).update({template: entry}))
             return self.get(job_id)
         finally:
-            lock.release()
+            release()
 
     def vectorize(self, job_id, colors):
         """Trace a finished illustration into `image.svg`; local, free and deterministic per colour count."""
-        lock = self._local_work(job_id)
+        release = self._local_work(job_id)
         try:
             record = self._finished_illustration(job_id, 'SVG로 변환')
             source_sha256 = record['files']['image.png']
@@ -458,7 +472,7 @@ class StudioGenerations:
             self._publish(job_id, {'image.svg': svg.encode()}, lambda current: current.update(vector=vector))
             return self.get(job_id)
         finally:
-            lock.release()
+            release()
 
     def artifact(self, job_id, name):
         record = self._record(job_id)

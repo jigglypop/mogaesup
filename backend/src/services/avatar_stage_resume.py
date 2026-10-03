@@ -1,6 +1,5 @@
 """Resume a selected factory stage from its saved inputs, with durable admission."""
 import hashlib
-from threading import Lock
 
 from src.services.asset_editor import _write_json, update_json
 from src.services.avatar_factory import _LOCK, digest
@@ -8,11 +7,12 @@ from src.services.character_jobs import RETRYABLE
 from src.services.character_pipeline import PipelineError, now, read_json, valid_request_key
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity, state as process_state
+from src.services.run_lock import WorkerLocks, final_write, this_process, worker_alive
 from src.services.avatar_equipment import is_native_part_set
 from src.services.meshy_status import saved_problem
 
 STAGES = ('images', 'models', 'rig', 'assemble', 'expressions')
-_WORKERS = {}
+_WORKERS = WorkerLocks()
 
 
 def current_run(directory):
@@ -24,9 +24,17 @@ def active_run(record):
     return record.get('status') in ('accepted', 'running') and process_state(record.get('process')) != 'exited'
 
 
+def stage_run_active(directory):
+    """(current stage run, whether it still runs). A run this process started runs only while its worker holds the lock:
+    when its last save failed, the record still says running and nothing runs it any more."""
+    held = _WORKERS.busy(str(directory))
+    record = current_run(directory)
+    return record, worker_alive(record, held or _WORKERS.busy(str(directory)))
+
+
 def ensure_stage_idle(factory, owner, job_id):
     factory.get(owner, job_id)
-    if active_run(current_run(factory.directory(owner, job_id))):
+    if stage_run_active(factory.directory(owner, job_id))[1]:
         raise PipelineError('stage_running', '선택한 단계가 실행 중입니다. 저장된 실행 결과를 기다려 주세요.', 409)
 
 
@@ -113,8 +121,8 @@ class AvatarStageResume:
         pipeline = read_json(directory/'pipeline.json')
         parts = pipeline.get('parts', [])
         valid = is_native_part_set(p['slot'] for p in parts)
-        operation = current_run(directory)
-        busy = active_run(operation) or job.get('character_flow', {}).get('busy', False)
+        operation, running = stage_run_active(directory)
+        busy = running or job.get('character_flow', {}).get('busy', False)
         native_pointer = read_json(directory/'native-parts/current.json')
         native = read_json(directory/'native-parts'/native_pointer['version']/'record.json') if native_pointer else {}
         rig_worker = read_json(directory/'meshy/worker.json')
@@ -197,8 +205,10 @@ class AvatarStageResume:
                 action['warning'] = '접수 불명 리깅 요청 재전송 · 중복 과금 가능'
         recommended = next((a['stage'] for a in reversed(actions) if a['enabled']), None)
         public_operation = {k: operation.get(k) for k in ('id', 'stage', 'status', 'error', 'created_at', 'updated_at')} if operation else None
-        if public_operation and operation['status'] in ('accepted', 'running') and not active_run(operation):
-            public_operation.update(status='paused', error='서버가 중단되었습니다. 저장된 단계에서 다시 실행할 수 있습니다.')
+        if public_operation and operation['status'] in ('accepted', 'running') and not running:
+            public_operation.update(status='paused', error=(
+                '단계 실행이 결과를 저장하지 못한 채 끝났습니다. 저장된 단계에서 다시 실행할 수 있습니다.'
+                if this_process(operation.get('process')) else '서버가 중단되었습니다. 저장된 단계에서 다시 실행할 수 있습니다.'))
         elif public_operation and operation['status'] == 'paused' and rig_problem and models_ready:
             public_operation['error'] = rig_problem['message']
         elif public_operation and operation['status'] == 'paused' and rig_ready and rig_worker.get('origin') == 'rig_transfer':
@@ -261,16 +271,21 @@ class AvatarStageResume:
     def execute(self, owner, job_id, request_id):
         directory = self.factory.directory(owner, job_id)
         path = directory/'stage-runs'/f'{request_id}.json'
-        with _LOCK:
-            lock = _WORKERS.setdefault(str(directory), Lock())
-        if not lock.acquire(blocking=False):
+        if not _WORKERS.acquire(str(directory)):
             return
         try:
             record = read_json(path)
             if record.get('status') != 'accepted':
                 return
             record.update(status='running', process=identity(), updated_at=now())
-            _write_json(path, record)
+            try:
+                _write_json(path, record)
+            except Exception:
+                # An admitted run left `accepted` by a failed write would keep every stage busy until a restart.
+                record.update(status='paused', error='단계 실행을 시작하지 못했습니다. 저장된 단계에서 다시 실행할 수 있습니다.',
+                              updated_at=now())
+                final_write(lambda: _write_json(path, record), 'stage run record')
+                raise
             try:
                 stage = record['stage']
                 explicit = record.get('explicit', True)
@@ -317,6 +332,6 @@ class AvatarStageResume:
                 record.update(status='paused', error=exc.message if isinstance(exc, PipelineError)
                               else '단계 실행이 중단되었습니다. 저장된 결과는 보존했습니다.')
             record['updated_at'] = now()
-            _write_json(path, record)
+            final_write(lambda: _write_json(path, record), 'stage run record')
         finally:
-            lock.release()
+            _WORKERS.release(str(directory))

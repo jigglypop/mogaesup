@@ -8,6 +8,8 @@ config_file=/etc/asset-studio.env
 service_name=gaesup-asset-studio
 rollback_name=gaesup-asset-studio-rollback
 expected_source="/opt/asset-studio/incoming/$release_sha/source"
+# The admission token of a deployment that may have left admission closed (see save_token).
+token_file=/opt/asset-studio/drain-token
 
 [[ "$release_key" =~ ^releases/studio/[0-9a-f]{64}\.tar\.gz$ ]] || { echo 'invalid release key' >&2; exit 2; }
 [[ "$release_sha" =~ ^[0-9a-f]{64}$ ]] || { echo 'invalid release sha256' >&2; exit 2; }
@@ -23,8 +25,17 @@ source "$config_file"
 : "${ASSET_S3_BUCKET:?ASSET_S3_BUCKET is required}"
 : "${AWS_REGION:?AWS_REGION is required}"
 : "${PROVIDER_SECRET_ARN:?PROVIDER_SECRET_ARN is required}"
-PUBLIC_SITE_ORIGIN="${PUBLIC_SITE_ORIGIN:-}"
 PUBLIC_STUDIO="${PUBLIC_STUDIO:-false}"
+
+# deploy-aws.ps1 passes the end of its SSM execution timeout (epoch seconds). That timeout kills this script without its
+# EXIT trap, so admission is closed only while draining, replacing and a rollback all still fit before it.
+deploy_deadline="${ASSET_DEPLOY_DEADLINE:-}"
+[[ -z "$deploy_deadline" || "$deploy_deadline" =~ ^[0-9]+$ ]] || { echo 'invalid ASSET_DEPLOY_DEADLINE' >&2; exit 2; }
+budget_left() { if [[ -n "$deploy_deadline" ]]; then echo $(( deploy_deadline - $(date +%s) )); else echo 86400; fi; }
+# What the deployment needs once the old runtime is idle (stop, candidate start and health, a rollback), and what a
+# rollback alone needs (restore and reopen the previous runtime).
+replace_seconds=240
+rollback_seconds=120
 
 exec 9>/var/lock/asset-studio-deploy.lock
 flock -n 9 || { echo 'another deployment is active' >&2; exit 3; }
@@ -62,8 +73,13 @@ import json,re,sys
 value=json.load(open(sys.argv[1]))
 if not value.get("OPENAI_API_KEY") or not value.get("MESHY_API_KEY"):
     raise SystemExit("Provider credentials are not configured")
-if sys.argv[2].strip().lower() == "true" and not re.fullmatch(r"[A-Za-z0-9._~-]{16,}", str(value.get("STUDIO_GATEWAY_KEY") or "").strip()):
-    raise SystemExit("PUBLIC_STUDIO requires a valid STUDIO_GATEWAY_KEY; the running release was preserved")
+if sys.argv[2].strip().lower() == "true":
+    key = str(value.get("STUDIO_GATEWAY_KEY") or "").strip()
+    previous = str(value.get("STUDIO_GATEWAY_KEY_PREVIOUS") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._~-]{16,}", key):
+        raise SystemExit("PUBLIC_STUDIO requires a valid STUDIO_GATEWAY_KEY; the running release was preserved")
+    if previous and (previous == key or not re.fullmatch(r"[A-Za-z0-9._~-]{16,}", previous)):
+        raise SystemExit("STUDIO_GATEWAY_KEY_PREVIOUS must be another valid key; the running release was preserved")
 ' "$secret_tmp" "$PUBLIC_STUDIO"
 # The character records database (the mogaesup server stack's CharacterDatabaseSecret on the shared PostgreSQL), once
 # backend/infra/records-to-postgres.py has imported the records and named it in the config.
@@ -89,10 +105,12 @@ if docker inspect -f '{{.State.Running}}' "$candidate" 2>/dev/null | grep -qx tr
 fi
 docker rm "$candidate" >/dev/null 2>&1 || true
 
+service_running() { docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; }
+
 # Recover the stable name first if an earlier process ended between rename and rollback.
 if ! docker inspect "$service_name" >/dev/null 2>&1 && docker inspect "$rollback_name" >/dev/null 2>&1; then
   docker rename "$rollback_name" "$service_name"
-  if ! docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; then
+  if ! service_running; then
     docker start "$service_name" >/dev/null
   fi
 fi
@@ -125,34 +143,115 @@ except (KeyError, TypeError, ValueError, AttributeError):
 ' "$1"
 }
 
-drain_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+# A deployment that fails after closing admission can leave it closed with its token: a restored runtime that never
+# answered, or no runtime at all. The token stays in $token_file, under the deploy lock, until admission is verified
+# open, and the next deployment reuses it, so that drain is always its own to resume, never another operation's.
+token_saved=false
+token_created=false
+if [[ -f "$token_file" ]]; then
+  drain_token="$(tr -d '[:space:]' < "$token_file")"
+  [[ "$drain_token" =~ ^[0-9a-f]{32}$ ]] || { echo "$token_file holds no admission token; inspect the runtime drain before deploying" >&2; exit 2; }
+  token_saved=true
+else
+  drain_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+fi
 drain_payload="{\"token\":\"$drain_token\"}"
 drain_acquired=false
-control_admission() {
-  curl --fail --silent --show-error --max-time 5 -X "$1" -H 'Content-Type: application/json' \
-    --data "$drain_payload" http://127.0.0.1:8000/internal/drain
+save_token() {
+  # Before anything can close admission with the token.
+  [[ "$token_saved" == true ]] && return 0
+  printf '%s\n' "$drain_token" > "$token_file.new"
+  chmod 600 "$token_file.new"
+  mv -f "$token_file.new" "$token_file"
+  token_saved=true
+  token_created=true
+}
+# One request to the runtime's loopback control. Sets admission_status (000: nothing answered) and admission_body.
+admission_request() {
+  local output
+  output="$(curl --silent --max-time 5 -X "$1" -H 'Content-Type: application/json' --data "$drain_payload" \
+    --write-out '\n%{http_code}' http://127.0.0.1:8000/internal/drain 2>/dev/null)" || true
+  admission_status="${output##*$'\n'}"
+  admission_body="${output%$'\n'*}"
+  [[ "$admission_status" =~ ^[0-9]{3}$ ]] || admission_status=000
+}
+# A runtime that was just started or restored needs seconds before uvicorn listens: ask again, with the same token,
+# until it answers or the wait ends. Repeating a drain or a reopen with one token changes nothing.
+admission_call() {
+  local deadline=$((SECONDS + ${ASSET_DEPLOY_REOPEN_SECONDS:-60}))
+  while :; do
+    admission_request "$1"
+    [[ "$admission_status" == 000 || "$admission_status" == 5* ]] || return 0
+    (( SECONDS < deadline )) && service_running || return 0
+    sleep 2
+  done
+}
+reopen_admission() {
+  if ! service_running; then
+    echo "no runtime is running to reopen admission; the next deployment resumes it with the token in $token_file" >&2
+    return 1
+  fi
+  admission_call DELETE
+  case "$admission_status" in
+    200)
+      if health_snapshot open <<< "$admission_body" >/dev/null; then
+        drain_acquired=false
+        rm -f "$token_file"
+        return 0
+      fi
+      echo "runtime answered the reopen without verified open admission; the next deployment resumes it with the token in $token_file" >&2 ;;
+    409) echo "runtime admission is held by another operation's token and stays closed until that operation resumes it" >&2 ;;
+    000|5*) echo "runtime did not answer the admission reopen; it refuses new work until the next deployment resumes it with the token in $token_file" >&2 ;;
+    *) echo "runtime refused the admission reopen (HTTP $admission_status); the next deployment resumes it with the token in $token_file" >&2 ;;
+  esac
+  return 1
 }
 release_admission() {
   if [[ "$drain_acquired" == true ]]; then
-    control_admission DELETE >/dev/null || echo 'could not reopen runtime admission; resume the saved local drain before accepting work' >&2
+    reopen_admission || true
   fi
 }
 cleanup() { cleanup_files; release_admission; }
 trap cleanup EXIT
 trap 'exit 1' INT TERM
 
+if (( $(budget_left) < replace_seconds + 30 )); then
+  echo "only $(budget_left) s of the deployment time limit are left, too few to drain, replace and roll back; nothing was stopped. The image is built: deploy again" >&2
+  exit 7
+fi
+
 # Close admission atomically before observing work. Old releases without the control endpoint remain running:
 # there is no override that cuts off work whose admission cannot be closed and verified.
-if docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; then
+if service_running; then
+  save_token
   drain_acquired=true
-  if ! control_admission POST | health_snapshot drain >/dev/null; then
-    echo 'running release does not support verified admission drain; it was left running. Install the drain-capable runtime during an operator maintenance window before using automatic deployment' >&2
-    exit 5
-  fi
+  admission_call POST
+  case "$admission_status" in
+    200)
+      if ! health_snapshot drain <<< "$admission_body" >/dev/null; then
+        echo 'running release answered the drain without verifiable closed admission; it was left running and admission will reopen' >&2
+        exit 5
+      fi ;;
+    409)
+      drain_acquired=false
+      [[ "$token_created" == true ]] && rm -f "$token_file"
+      echo 'runtime admission is already closed by another operation (idle stop, maintenance, or a drain whose token was lost); the running release was left as it is. Resume that drain with its own token, then deploy again' >&2
+      exit 6 ;;
+    000|5*)
+      echo 'running release did not answer the admission drain; it was left running and admission will reopen' >&2
+      exit 5 ;;
+    *)
+      drain_acquired=false
+      [[ "$token_created" == true ]] && rm -f "$token_file"
+      echo 'running release does not support verified admission drain; it was left running. Install the drain-capable runtime during an operator maintenance window before using automatic deployment' >&2
+      exit 5 ;;
+  esac
 fi
 
 # Existing admitted work retains its grant until its background and provider stages have finished.
 drain_deadline=$((SECONDS + ${ASSET_DEPLOY_DRAIN_SECONDS:-420}))
+# The replacement and a rollback must still fit in the deployment time limit after the wait.
+(( drain_deadline <= SECONDS + $(budget_left) - replace_seconds )) || drain_deadline=$((SECONDS + $(budget_left) - replace_seconds))
 while docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; do
   busy="$(curl --fail --silent --max-time 5 http://127.0.0.1:8080/api/health | health_snapshot drain || echo unknown)"
   if [[ "$busy" == unknown ]]; then
@@ -196,6 +295,7 @@ restore_previous() {
   elif [[ -n "$current_id" && "$current_id" == "$candidate_id" ]]; then
     docker rm -f "$current_id" >/dev/null 2>&1 || true
   fi
+  # The EXIT trap reopens admission once the restored runtime answers.
 }
 trap 'restore_previous; exit 1' ERR INT TERM
 
@@ -218,6 +318,11 @@ if docker inspect "$service_name" >/dev/null 2>&1; then
   docker stop -t 30 "$rollback_name" >/dev/null
 fi
 
+# The candidate starts with admission closed by this deployment's token, also when no runtime was running before: a
+# failure from here on leaves the drain to this run's EXIT trap or, when nothing answers, to the next deployment.
+save_token
+drain_acquired=true
+start_id="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 docker run -d --restart unless-stopped --name "$candidate" --network host \
   --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
   --label gaesup.release.sha256="$release_sha" \
@@ -226,7 +331,7 @@ docker run -d --restart unless-stopped --name "$candidate" --network host \
   -e AWS_REGION="$AWS_REGION" \
   -e STUDIO_RELEASE_SHA="$release_sha" \
   -e ASSET_START_DRAIN_TOKEN="$drain_token" \
-  -e PUBLIC_SITE_ORIGIN="$PUBLIC_SITE_ORIGIN" \
+  -e ASSET_START_DRAIN_ID="$start_id" \
   -e PUBLIC_STUDIO="$PUBLIC_STUDIO" \
   -v /opt/asset-studio/provider.json:/run/studio-secrets.json:ro \
   -v /opt/asset-studio/scratch:/app/data \
@@ -236,6 +341,8 @@ candidate_id="$(docker inspect -f '{{.Id}}' "$candidate")"
 
 healthy=false
 for _ in $(seq 1 30); do
+  # Stop waiting while a rollback still fits in the deployment time limit.
+  (( $(budget_left) > rollback_seconds )) || break
   if docker inspect -f '{{.State.Running}}' "$candidate" 2>/dev/null | grep -qx true && \
      curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/api/health | health_snapshot candidate && \
      curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/version.json | grep -Eq '"release_sha"[[:space:]]*:[[:space:]]*"'"$release_sha"'"'; then
@@ -267,12 +374,34 @@ provider_committed=true
 trap - ERR INT TERM
 # No unverified mutation can run in a candidate before commit. After opening, a lost control response must
 # never force-stop this runtime: a newly accepted paid request may already exist.
-if ! control_admission DELETE | health_snapshot open >/dev/null; then
+if ! reopen_admission; then
   echo 'candidate is committed and healthy, but admission reopen could not be verified; runtime was preserved. Inspect the saved local drain' >&2
   exit 5
 fi
-drain_acquired=false
 docker rm "$rollback_name" >/dev/null 2>&1 || true
 # Power off after two idle hours; the app starts the instance again on demand. Kept up to date with each release.
 bash "$release_dir/infra/idle-stop.sh" install || echo 'idle stop could not be installed' >&2
+
+# Each release is an image of about 0.4 GB and a source folder: keep the newest few, the running one always among them.
+prune_releases() {
+  local keep=${ASSET_KEEP_RELEASES:-3} tag name
+  touch "$release_dir"
+  docker image ls --format '{{.CreatedAt}}|{{.Repository}}:{{.Tag}}' gaesup-asset-studio | sort -r | cut -d'|' -f2 \
+    | tail -n +$((keep + 1)) | while read -r tag; do
+      [[ "$tag" == "$image" ]] || docker image rm "$tag" >/dev/null 2>&1 || true
+    done
+  docker image prune -f >/dev/null 2>&1 || true
+  ls -1t /opt/asset-studio/releases | tail -n +$((keep + 1)) | while read -r name; do
+    if [[ "$name" =~ ^[0-9a-f]{64}$ && "$name" != "$release_sha" ]]; then
+      rm -rf "/opt/asset-studio/releases/$name"
+    fi
+  done
+  # Sources that earlier, failed deployments left behind.
+  for name in /opt/asset-studio/incoming/*; do
+    if [[ -d "$name" && "$(basename "$name")" =~ ^[0-9a-f]{64}$ && "$(basename "$name")" != "$release_sha" ]]; then
+      rm -rf "$name"
+    fi
+  done
+}
+prune_releases || echo 'earlier releases could not be pruned' >&2
 echo "deployment healthy: $release_sha"

@@ -168,6 +168,28 @@ def triangles(objects):
     return sum(sum(max(0, len(p.vertices) - 2) for p in obj.data.polygons) for obj in objects)
 
 
+def measure_assembly(body, rig, parts):
+    """Measure the pipeline's final assembled meshes, without modifying them."""
+    previous = rig.data.pose_position
+    try:
+        rig.data.pose_position = 'REST'
+        bpy.context.view_layer.update()
+        data = body_arrays(body, rig)
+        regions, _, _ = classify_regions(data['positions'], rig)
+        tree = body_tree(data)
+        hair = [obj for slot in HEAD_PARTS if slot != 'hat' for obj in parts.get(slot, [])]
+        result = {'rear_coverage': rear_coverage(data, regions, hair, body), 'parts': {}}
+        for slot, meshes in parts.items():
+            entry = {'triangles': triangles(meshes)}
+            if slot in GARMENTS:
+                entry['penetration'] = penetration(meshes, tree)
+            result['parts'][slot] = entry
+        return result
+    finally:
+        rig.data.pose_position = previous
+        bpy.context.view_layer.update()
+
+
 def run(payload):
     directory = Path(payload['directory'])
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -184,7 +206,9 @@ def run(payload):
             if obj.type == 'ARMATURE':
                 obj.data.pose_position = 'REST'
         bpy.context.view_layer.update()
-        parts[slot] = [obj for obj in added if obj.type == 'MESH' and obj.name.split('.')[0].startswith(slot)]
+        parts[slot] = [obj for obj in added if obj.type == 'MESH'
+                       and (obj.get('part_role') == slot or obj.get('standard_slot') == slot
+                            or obj.name.split('.')[0].startswith(slot))]
     data = body_arrays(body, rig)
     regions, _, marks = classify_regions(data['positions'], rig)
     tree = body_tree(data)

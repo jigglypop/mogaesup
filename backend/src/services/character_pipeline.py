@@ -17,10 +17,12 @@ from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _retry_file_io, _write_json
 from src.services.character_audit import inspect_character
 from src.services.glb import parse_glb
-from src.services.run_lock import run_lock
+from src.services.run_lock import WorkerLocks, run_lock
 
 # Character details are read-only; bounded parallel reads keep the list responsive on S3.
 _LISTING_READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='character-listing')
+# Operations whose worker runs in this process (src.services.character_actions.execute), by operation id.
+OPERATIONS = WorkerLocks()
 
 
 class PipelineError(Exception):
@@ -103,17 +105,23 @@ class CharacterPipeline:
             raise
 
     def latest_operation(self, run: Path) -> dict | None:
+        held = OPERATIONS.snapshot()
         files = sorted((run / "operations").glob("*/operation.json"))
         if not files:
             return None
         result = max((read_json(path) for path in files), key=lambda item: item["created_at"])
-        return self.public_operation(result)
+        return self.public_operation(result, result.get("id") in held)
 
-    def public_operation(self, value: dict) -> dict:
+    def public_operation(self, value: dict, held: bool = False) -> dict:
+        """`held`: whether this process ran the operation's worker before the record was read."""
         result = {key: value.get(key) for key in ("id", "action_id", "status", "created_at", "updated_at", "error")}
         if result["status"] in {"accepted", "running"} and value.get("executor") != self.instance:
             result.update(status="recovery_required", error={"code": "executor_interrupted",
                           "message": "서버 실행이 중단되었습니다. 기존 작업을 확인한 뒤 복구해 주세요."})
+        elif result["status"] == "running" and not held and not OPERATIONS.busy(value.get("id")):
+            # This process's worker ended without saving its result (a storage error): nothing runs it any more.
+            result.update(status="failed", error={"code": "executor_interrupted",
+                          "message": "작업 결과를 저장하지 못한 채 실행이 끝났습니다. 상태를 확인한 뒤 다시 진행해 주세요."})
         return result
 
     def files(self, entry: dict, run: Path, control: dict) -> dict[str, Path]:
@@ -394,4 +402,5 @@ class CharacterPipeline:
         path = run / "operations" / operation_id / "operation.json"
         if not path.is_file():
             raise PipelineError("not_found", "작업을 찾을 수 없습니다.", 404)
-        return self.public_operation(read_json(path))
+        held = OPERATIONS.busy(operation_id)
+        return self.public_operation(read_json(path), held)

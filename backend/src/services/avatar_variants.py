@@ -198,8 +198,12 @@ class AvatarVariants:
                     or library.is_job_deleted(base, metadata)):
                 raise PipelineError('body_deleted', '삭제한 기본 몸은 갤러리 휴지통에서 복원한 뒤 선택하세요.', 409)
             native_service = AvatarNativeParts(self.factory)
-            native = (native_service.get(owner, base_id, version=payload['base_version'])
-                      if photo_input is not None or frozen_context is not None else native_service.get(owner, base_id))
+            # A part is made on the sealed version the wardrobe offers (ready_version): the current one, or while a
+            # newer one is assembled or failed, the one it replaced. A photo or batch request names its own version.
+            ready = native_service.ready_version(owner, base_id)
+            if photo_input is None and frozen_context is None and payload['base_version'] != ready:
+                raise PipelineError('base_changed', '저장된 기본 몸 버전을 다시 선택하세요.', 409)
+            native = native_service.get(owner, base_id, version=payload['base_version'])
             if native.get('status') != 'review_required' or native.get('version') != payload['base_version']:
                 raise PipelineError('base_changed', '저장된 기본 몸 버전을 다시 선택하세요.', 409)
             if native.get('origin') == 'uploaded_glb':
@@ -214,7 +218,7 @@ class AvatarVariants:
             default_body = default_profile.get('body') or {}
             facts = body_facts(body_file, body_hash)
             body_geometry_sha256 = facts['identity']
-            historical_body = (photo_input is not None and AvatarNativeParts(self.factory).get(owner, base_id).get('version') != native['version'])
+            historical_body = photo_input is not None and ready != native['version']
             if historical_body and (
                     default_body.get('job_id') != base_id
                     or default_body.get('body_sha256') != body_hash
@@ -503,6 +507,11 @@ class AvatarVariants:
                 for part in state['parts']:
                     slot = part['slot']
                     if slot == 'body' or slot in slots:
+                        continue
+                    if native_reports.get(slot, {}).get('available') is False:
+                        # The base could not fit this slot: it has no file, and the new job reports it unavailable
+                        # too (as a refit does), instead of refusing the part that was asked for.
+                        frozen_parts[slot] = {'available': False, 'report': native_reports[slot]}
                         continue
                     name = f'{slot}.glb'
                     fitted = source/'native-parts'/native['version']/name

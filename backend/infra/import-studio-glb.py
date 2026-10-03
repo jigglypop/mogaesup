@@ -260,6 +260,20 @@ def accept(path, receipt, phase, value):
     save(path, receipt)
 
 
+def backend_refusal(response):
+    """A refusal the character server itself sent: its JSON error body (`error.code`, or FastAPI's `detail`) with the
+    request id it puts on every answer. A 403/404/405 of the CloudFront function or of nginx (the gateway key, an
+    unknown path) never reached the API, so it says nothing definite about the request."""
+    if not response.headers.get('x-request-id') or not response.headers.get('content-type', '').startswith('application/json'):
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and ('detail' in body or (
+        isinstance(body.get('error'), dict) and isinstance(body['error'].get('code'), str)))
+
+
 def lookup(client, receipt, phase):
     identifier = expected_id(receipt, phase)
     if phase == 'upload': route = f'/api/avatar-factory/base-bodies/glb-assets/{identifier}'
@@ -316,7 +330,8 @@ def run(args, client):
                 stop('POST outcome is uncertain. Use --resume with the same receipt and input; no automatic retry was made.')
             item['http_status'] = response.status_code
             if response.status_code != (202 if phase == 'fit' else 201):
-                item['state'] = 'rejected' if response.status_code in (400,401,403,404,405,409,413,415,422) else 'uncertain'
+                definite = response.status_code in (400,401,403,404,405,409,413,415,422) and backend_refusal(response)
+                item['state'] = 'rejected' if definite else 'uncertain'
                 save(path, receipt)
                 stop('POST was refused or its outcome is uncertain; no fallback or automatic retry was made.')
             try:

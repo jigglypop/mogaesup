@@ -61,6 +61,20 @@ fi
 
 keep() { echo "keeping on: $*"; exit 0; }
 
+# Only the last request matters; keep the file small without changing its time. Also with IDLE_STOP=off, where nothing
+# else would ever shorten it.
+trim_activity_log() {
+  [[ -f "$activity_log" ]] || return 0
+  (( $(stat -c %s "$activity_log") > 8 * 1024 * 1024 )) || return 0
+  install -d -m 700 "$state_dir"
+  local mtime
+  mtime=$(stat -c %Y "$activity_log")
+  tail -n 1000 "$activity_log" > "$state_dir/activity.tail" && cat "$state_dir/activity.tail" > "$activity_log"
+  rm -f "$state_dir/activity.tail"
+  touch -d "@$mtime" "$activity_log"
+}
+trim_activity_log
+
 [[ "${IDLE_STOP:-on}" == off ]] && keep 'IDLE_STOP=off'
 idle_limit=$(( ${IDLE_STOP_MINUTES:-120} * 60 ))
 boot_grace=$(( ${IDLE_BOOT_GRACE_MINUTES:-30} * 60 ))
@@ -120,13 +134,6 @@ fi
 
 if [[ -f "$activity_log" ]]; then
   latest "$(stat -c %Y "$activity_log")"
-  # Only the last request matters; keep the file small without changing its time.
-  if (( $(stat -c %s "$activity_log") > 8 * 1024 * 1024 )); then
-    mtime=$(stat -c %Y "$activity_log")
-    tail -n 1000 "$activity_log" > "$state_dir/activity.tail" && cat "$state_dir/activity.tail" > "$activity_log"
-    rm -f "$state_dir/activity.tail"
-    touch -d "@$mtime" "$activity_log"
-  fi
 elif [[ "$running" == true ]]; then
   # A release from before the activity log: read the container's own access log, leaving out probes.
   line=$(docker exec "$service_name" sh -c 'tail -n 5000 /var/log/nginx/access.log 2>/dev/null' \

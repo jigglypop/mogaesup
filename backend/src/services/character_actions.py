@@ -9,10 +9,11 @@ from src.services import character_jobs
 from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.glb import parse_glb
-from src.services.character_pipeline import CharacterPipeline, PipelineError, now, read_json
+from src.services.character_pipeline import OPERATIONS, CharacterPipeline, PipelineError, now, read_json
 from src.services.model_providers import MESHY_BASE
 from src.services.object_storage import sha256 as _digest
 from src.services.character_segmentation import CLOTHING_ROLES
+from src.services.run_lock import final_write
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,17 @@ def execute(pipeline: CharacterPipeline, character_id: str, user_id: int, operat
     operation = read_json(path)
     if operation.get("status") != "accepted" or operation.get("executor") != pipeline.instance:
         return
+    # Held from before `running` is written until the last save: a running operation of this process without it ended.
+    if not OPERATIONS.acquire(operation_id):
+        return
+    try:
+        _execute(pipeline, character_id, user_id, run, path, operation)
+    finally:
+        OPERATIONS.release(operation_id)
+
+
+def _execute(pipeline, character_id, user_id, run, path, operation):
+    operation_id = operation["id"]
     try:
         with pipeline.lock(run, blender=operation["action_id"] in {"separate_materials", "separate_parts"}):
             operation = read_json(path)
@@ -165,9 +177,12 @@ def execute(pipeline: CharacterPipeline, character_id: str, user_id: int, operat
             code, message = "provider_connection", "Meshy 응답을 확인하지 못했습니다. 기존 작업 상태부터 복구해 주세요."
         else:
             logger.exception("Character action failed: %s", operation["action_id"])
-        provider = read_json(run / "character.json")
-        pack = read_json(run / "motion-pack.json")
-        uncertain = any(task.get("status") == "submission_uncertain" for task in pack.get("tasks", {}).values())
-        status = "recovery_required" if provider.get("status") == "submission_uncertain" or uncertain else "failed"
-        operation.update(status=status, updated_at=now(), error={"code": code, "message": message})
-        _write_json(path, operation)
+
+        def fail():
+            provider = read_json(run / "character.json")
+            pack = read_json(run / "motion-pack.json")
+            uncertain = any(task.get("status") == "submission_uncertain" for task in pack.get("tasks", {}).values())
+            status = "recovery_required" if provider.get("status") == "submission_uncertain" or uncertain else "failed"
+            operation.update(status=status, updated_at=now(), error={"code": code, "message": message})
+            _write_json(path, operation)
+        final_write(fail, f"character operation {operation_id}")

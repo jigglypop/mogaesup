@@ -3,7 +3,9 @@ import base64
 import fnmatch
 import logging
 import os
+import re
 from typing import Iterable, Optional
+from urllib.parse import urlsplit
 
 import jwt as pyjwt
 from fastapi import HTTPException, Request, status
@@ -95,11 +97,41 @@ def is_public_path(path: str) -> bool:
     return False
 
 
+_LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def _loopback_host(value: str | None) -> bool:
+    """A Host header naming this machine: 127.0.0.1, localhost or [::1], with an optional port."""
+    value = (value or "").strip().lower()
+    if value.startswith("["):
+        host, _, rest = value[1:].partition("]")
+    else:
+        host, _, port = value.partition(":")
+        rest = ":" + port if port else ""
+    return host in _LOOPBACK_NAMES and (not rest or bool(re.fullmatch(r":[0-9]{1,5}", rest)))
+
+
+def _loopback_origin(value: str) -> bool:
+    try:
+        origin = urlsplit(value.strip())
+        origin.port  # raises on an invalid port
+    except ValueError:
+        return False
+    return origin.scheme in ("http", "https") and origin.hostname in _LOOPBACK_NAMES and origin.path in ("", "/")
+
+
 def trusted_loopback(request: Request) -> bool:
-    """The real socket peer only; a proxy-supplied loopback address is not an operator identity."""
+    """The real socket peer only; a proxy-supplied loopback address is not an operator identity.
+
+    The request must also name this machine in Host and come from no foreign browser page: a page whose name was made to
+    resolve to 127.0.0.1 (DNS rebinding) sends its own Host, and a cross-site page sends its own Origin, for example to an
+    operator's SSM port forward or a developer's local server."""
     client_host = (request.client.host if request.client else "") or ""
-    return (client_host in {"127.0.0.1", "::1"}
-            and not any(name in request.headers for name in ('forwarded', 'x-forwarded-for', 'x-real-ip')))
+    if (client_host not in {"127.0.0.1", "::1"}
+            or any(name in request.headers for name in ('forwarded', 'x-forwarded-for', 'x-real-ip'))):
+        return False
+    origin = request.headers.get("origin")
+    return _loopback_host(request.headers.get("host")) and (origin is None or _loopback_origin(origin))
 
 
 def _local_dev_user(request: Request) -> Optional[UserContext]:
@@ -118,7 +150,13 @@ def _local_dev_user(request: Request) -> Optional[UserContext]:
 def _decode_claims(token: str) -> dict:
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing JWT")
-    secret = _resolve_secret()
+    try:
+        secret = _resolve_secret()
+    except RuntimeError as exc:
+        # A configuration fault of this server, not of the caller's token.
+        logger.error("JWT verification is not configured: %s", exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="토큰을 확인할 수 없습니다. 서버의 JWT_SECRET 설정이 없거나 올바르지 않습니다.") from None
     # Same defaults as the Rust server's FACTORY_JWT_ISSUER / FACTORY_JWT_AUDIENCE (server/src/config.rs).
     issuer = (os.getenv("JWT_ISSUER") or "mogaesup").strip()
     audience = (os.getenv("JWT_AUDIENCE") or "mogaesup-client").strip()

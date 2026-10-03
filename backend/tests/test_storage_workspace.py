@@ -422,3 +422,159 @@ def test_a_read_that_overlaps_a_write_does_not_keep_the_old_bytes(bucket, s3, mo
     monkeypatch.setattr(s3, 'get_object', get_then_get_overwritten)
     assert path.read_text(encoding='utf-8') == '{"v": 1}'
     assert path.read_text(encoding='utf-8') == '{"v": 2}'
+
+
+# --- S3 answers as domain errors, its failure modes, and copies of large bytes -------------------------------------
+
+@pytest.mark.parametrize('race', ['exists', 'in_progress'])
+def test_an_exclusive_create_that_loses_the_race_is_a_file_exists_error(bucket, s3, monkeypatch, race):
+    path = bucket / 'avatar-factory' / '1' / JOB / 'lease.json'
+    if race == 'exists':
+        # Another writer stored it after this one looked (412 Precondition Failed).
+        s3.put(key(JOB, 'lease.json'), b'{"n": 0}')
+        monkeypatch.setattr(StoredPath, 'is_file', lambda self: False)
+    else:
+        # Another conditional write of the key is in progress (409 Conditional Request Conflict).
+        s3.conditional_writes.add(key(JOB, 'lease.json'))
+    with pytest.raises(FileExistsError):
+        with path.open('xb') as stream:
+            stream.write(b'{"n": 1}')
+    assert s3.objects.get(key(JOB, 'lease.json'), {}).get('Body') in (None, b'{"n": 0}')
+
+
+def test_ranged_reads_answer_missing_changed_and_out_of_range_as_files_do(bucket, s3, monkeypatch):
+    path = bucket / 'avatar-factory' / '1' / JOB / 'output' / 'model.glb'
+    with pytest.raises(FileNotFoundError):
+        object_storage.read_byte_range(path, 0, 20)
+    path.write_bytes(b'glTF' + b'x' * 60)
+    content, total, etag, _ = object_storage.read_byte_range(path, 0, 20)
+    assert content == b'glTF' + b'x' * 16 and total == 64
+    s3.put(key(JOB, 'output/model.glb'), b'glTF' + b'y' * 60)
+    with pytest.raises(ValueError, match='changed'):
+        object_storage.read_byte_range(path, 20, 10, etag=etag)
+    with pytest.raises(ValueError, match='Incomplete'):
+        object_storage.read_byte_range(path, 64, 10)
+
+
+def test_model_stats_of_a_missing_model_is_not_found(bucket, s3):
+    from src.services.avatar_factory import AvatarFactory
+    from src.services.avatar_model_stats import model_stats
+    from src.services.character_pipeline import PipelineError
+    factory = AvatarFactory(LocalPath(bucket))
+    object_storage.write_json(bucket / 'avatar-factory' / '1' / JOB / 'job.json', {'files': {'model.glb': 'a' * 64}})
+    with pytest.raises(PipelineError) as missing:
+        model_stats(factory, 1, JOB, 'model.glb')
+    assert missing.value.status == 404
+    (bucket / 'avatar-factory' / '1' / JOB / 'output' / 'model.glb').write_bytes(b'not a glb at all, but long enough')
+    with pytest.raises(PipelineError) as invalid:
+        model_stats(factory, 1, JOB, 'model.glb')
+    assert invalid.value.status == 422
+
+
+def test_a_head_that_s3_refuses_is_not_taken_for_a_missing_file(bucket, s3):
+    # A role that may not list a key gets 403 for a missing one: that cannot be told from a real denial.
+    s3.forbidden_heads = True
+    with pytest.raises(ClientError):
+        (bucket / 'avatar-factory' / '1' / 'shallow.json').is_file()
+
+
+def test_listings_read_every_page(bucket, s3):
+    s3.page_size = 2
+    job = bucket / 'avatar-factory' / '1' / JOB
+    names = [f'part-{index}.glb' for index in range(7)]
+    for name in names:
+        (job / 'output' / name).write_bytes(b'glTF')
+    _clear_s3_caches()
+    assert [path.name for path in (job / 'output').glob('*.glb')] == names
+    assert object_storage._holds_artifacts('fixture-bucket', key(JOB, 'output/'))
+    assert s3.calls['list_objects_v2'] >= 4
+
+
+def test_an_attempt_whose_input_delete_is_refused_stays_retryable(bucket, s3):
+    """A role without s3:DeleteObject refuses the delete of rig-input.glb. The attempt must stay as it was, not lose
+    its receipt and leave an input behind that refuses every new submission as an "Existing run"."""
+    from src.services import character_jobs
+    run = bucket / 'avatar-factory' / '1' / JOB / 'meshy'
+    object_storage.write_json(run / 'character.json', {'stage': 'rigging', 'status': 'FAILED', 'task_id': 'task-1'})
+    object_storage.write_json(run / 'rigging-result.json', {'status': 'FAILED'})
+    (run / 'rig-input.glb').write_bytes(b'glTF input')
+    s3.denied_deletes.add(key(JOB, 'meshy/rig-input.glb'))
+    with pytest.raises(ClientError):
+        character_jobs.archive_attempt(run, 'retry')
+    assert character_jobs.state(run)['status'] == 'FAILED'
+    assert (run / 'rig-input.glb').is_file() and (run / 'rigging-result.json').is_file()
+    # Once the role may delete, the same retry archives the attempt and frees the run for a new submission.
+    s3.denied_deletes.clear()
+    assert character_jobs.archive_attempt(run, 'retry') == 2
+    assert not (run / 'character.json').is_file() and not (run / 'rig-input.glb').is_file()
+    archived = json.loads((run / 'attempts' / '2' / 'archive.json').read_text(encoding='utf-8'))
+    assert archived['task_id'] == 'task-1' and (run / 'attempts' / '2' / 'rig-input.glb').read_bytes() == b'glTF input'
+
+
+def test_workspace_inputs_are_compared_and_written_outside_the_shared_lock(bucket, s3, monkeypatch):
+    job = bucket / 'avatar-factory' / '1' / JOB
+    shared = bucket / 'avatar-factory' / '1' / ('b' * 24) / 'output' / 'body.glb'
+    shared.write_bytes(b'glTF body')
+    held = []
+    materialize = object_storage._materialize
+
+    def watched(target, content):
+        held.append(object_storage._workspace_lock._is_owned())
+        return materialize(target, content)
+
+    monkeypatch.setattr(object_storage, '_materialize', watched)
+    with local_workspace(job, inputs=[shared]):
+        assert LocalPath(shared).read_bytes() == b'glTF body'
+        with local_workspace(bucket / 'avatar-factory' / '1' / ('c' * 24), inputs=[shared]):
+            assert object_storage._materialized[LocalPath(shared).resolve()][0] == 2
+        assert LocalPath(shared).is_file()
+    assert held == [False, False]
+    assert object_storage._materialized == {} and not LocalPath(shared).exists()
+
+
+def test_a_downloaded_model_is_inspected_and_stored_without_a_copy(bucket, s3, monkeypatch):
+    import httpx
+    from src.services import provider_http
+    content = b'glTF' + b'm' * 1000
+    seen = []
+    monkeypatch.setattr(provider_http, 'inspect_glb', lambda data, policy, **_: seen.append(data) or {'errors': []})
+    write = StoredPath.write_bytes
+    monkeypatch.setattr(StoredPath, 'write_bytes', lambda self, data: (seen.append(data), write(self, data))[1])
+    output = bucket / 'avatar-factory' / '1' / JOB / 'parts' / 'top' / 'generated.glb'
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content))) as client:
+        provider_http.download_glb(client, 'https://cdn.example/model.glb', output)
+    assert len(seen) == 2 and seen[0] is seen[1] and isinstance(seen[0], bytearray)
+    assert s3.objects[key(JOB, 'parts/top/generated.glb')]['Body'] == content
+
+
+def test_cached_bytes_stay_within_their_budget():
+    cache = record_store.ByteBoundedCache(100)
+    for index in range(5):
+        cache[index] = ('tag', b'x' * 30)
+    assert list(cache) == [2, 3, 4] and cache.size == 90
+    cache[3] = ('tag', b'y' * 10)
+    assert list(cache) == [2, 4, 3] and cache.size == 70
+    assert cache.pop(2)[1] == b'x' * 30 and cache.pop('missing', None) is None and cache.size == 40
+    del cache[4]
+    assert cache.size == 10
+    cache.clear()
+    assert cache.size == 0 and not cache
+    assert object_storage._content_cache.budget == record_store.CONTENT_CACHE_BYTES == record_store._contents.budget
+
+
+def test_write_marks_are_forgotten_once_no_query_can_still_be_comparing_them(monkeypatch):
+    moment = [1000.0]
+    monkeypatch.setattr(record_store, 'time', SimpleNamespace(monotonic=lambda: moment[0]))
+    monkeypatch.setattr(record_store, '_WRITE_TABLE_LIMIT', 3)
+    monkeypatch.setattr(record_store, '_writes', record_store.OrderedDict())
+    with record_store._lock:
+        for index in range(6):
+            record_store._mark_write(('p', f'scope-{index}/'))
+        # Recent marks stay however many there are: a query that began before them may still compare them.
+        assert len(record_store._writes) == 6
+        before = record_store._write_number(('p', 'scope-5/'))
+        moment[0] += 121
+        record_store._mark_write(('p', 'scope-6/'))
+        assert list(record_store._writes) == [('p', 'scope-4/'), ('p', 'scope-5/'), ('p', 'scope-6/')]
+        assert record_store._write_number(('p', 'scope-5/')) == before
+        assert record_store._write_number(('p', 'scope-0/')) == 0

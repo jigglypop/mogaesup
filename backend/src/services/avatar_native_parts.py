@@ -16,9 +16,27 @@ from src.services.object_storage import WorkspaceUploadError, copy_file, local_w
 from src.services.avatar_production_spec import production_spec, refresh_fitting_spec
 from src.services.avatar_equipment import is_native_part_set
 from src.services.worker_env import worker_environment
+from src.services.avatar_pipeline_quality import REVISION as QUALITY_REVISION, verify_quality
 
 SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 RECIPE = 'native-parts-v14-matte-limb-fit'
+# Absolute paths in worker text (C:\..., \\host\..., /srv/...); the worker's public_message cuts them the same way.
+_ABSOLUTE_PATH = re.compile(r'(?:\b[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/]|(?<![\w.:/~-])/(?=[^\s/]+/))'
+                            r'(?:[^\s\'"<>|*?\\/]+[\\/])*([^\s\'"<>|*?\\/]*)')
+_WORKER_TEXT = ('message', 'error', 'source')
+
+
+def public_result(value):
+    """A sealed assembly result as the API answers it: worker messages, errors and source files keep only the names of
+    the files they mention, never where they lay on the worker. Results sealed before the worker did the same carry
+    them in full."""
+    if isinstance(value, dict):
+        return {key: (_ABSOLUTE_PATH.sub(lambda match: match.group(1) or 'path', item)
+                      if key in _WORKER_TEXT and isinstance(item, str) else public_result(item))
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [public_result(item) for item in value]
+    return value
 
 
 def uploaded_native_hair(factory, owner, part, path, body):
@@ -42,6 +60,37 @@ def uploaded_native_hair(factory, owner, part, path, body):
     except (PipelineError, ValueError, KeyError, TypeError, IndexError, OSError):
         result['native_upload_error'] = 'Uploaded native hair validation failed'
     return result
+
+
+def accepted_seal(directory, seal):
+    """(files, result) of a worker's complete.json in `directory` when a version can be sealed from it: it answers
+    this input.json, every requested slot has a receipt, an unavailable slot is never the body and is reported
+    incomplete, and every file the version needs is there unchanged. ValueError otherwise."""
+    if seal.get('input_sha256') != digest(directory/'input.json'):
+        raise ValueError('Unsealed output')
+    payload = read_json(directory/'input.json')
+    result = seal.get('result', {})
+    reported = {p['slot']: p for p in result.get('parts', [])}
+    requested = {'body', *(p['slot'] for p in payload['parts']),
+                 *(p['slot'] for p in payload.get('prefit_parts', [])),
+                 *(p['slot'] for p in payload.get('unavailable_parts', []))}
+    if not requested <= reported.keys():
+        raise ValueError('Missing part receipts')
+    incomplete = {p['slot'] for p in result.get('incomplete_parts', [])}
+    unavailable = {slot for slot in requested if reported[slot].get('available') is False}
+    if 'body' in unavailable or not unavailable <= incomplete:
+        raise ValueError('Missing incomplete part receipts')
+    required = {'model.glb', 'front.png', 'side.png', 'back.png', 'motion.png',
+                *(f'{slot}.glb' for slot in requested-unavailable)}
+    if payload.get('production_spec'):
+        required.add('opposite.png')
+    if not required <= seal.get('files', {}).keys():
+        raise ValueError('Incomplete parts')
+    for name, expected in seal['files'].items():
+        if Path(name).name != name or digest(directory/name) != expected:
+            raise ValueError('Output changed')
+    verify_quality(directory, seal, payload)
+    return seal['files'], result
 
 
 def workspace_inputs(payload):
@@ -103,17 +152,18 @@ class AvatarNativeParts:
             and expression_run.get('status') == 'complete'
             and all(item['source_id'] in (expression_run.get('expressions') or {})
                     for item in frozen_expressions)))
+        result = public_result(record.get('result', {}))
         state = {'version': version, 'status': status, 'error': error,
                 'error_stage': record.get('error_stage'), 'error_type': record.get('error_type'),
-                **record.get('result', {}),
+                **result,
                 'expression_pending': expression_pending,
                 'refit_request_key': (local_refit.get('request_key')
                     if local_refit.get('target_version') == version else None),
                 'fit_update_available': (
-                    record.get('result', {}).get('origin') != 'uploaded_glb' and (
-                        record.get('result', {}).get('fitting_revision') != production_spec()['fitting']['revision']
+                    result.get('origin') != 'uploaded_glb' and (
+                        result.get('fitting_revision') != production_spec()['fitting']['revision']
                         or saved_contract.get('recipe') != RECIPE)),
-                'parts': record.get('result', {}).get('parts', []),
+                'parts': result.get('parts', []),
                 'artifacts': [{'name': name, 'sha256': value,
                     'url': f'/api/avatar-factory/jobs/{job}/native-parts/{version}/{name}'}
                     for name, value in record.get('files', {}).items()]}
@@ -123,7 +173,7 @@ class AvatarNativeParts:
                     and source_version != version):
                 source_record = read_json(root/source_version/'record.json') or {}
                 if source_record.get('status') == 'review_required':
-                    source_result = source_record.get('result', {})
+                    source_result = public_result(source_record.get('result', {}))
                     state['preview'] = {'version': source_version, 'status': 'review_required',
                         **source_result,
                         'parts': source_result.get('parts', []),
@@ -259,7 +309,12 @@ class AvatarNativeParts:
         return self.start(owner, job)
 
     def _resume_version(self, owner, job, version, *, recover_from=None, request_key=None):
-        """Recover the sealed input, even after source code or defaults change."""
+        """Recover the sealed input, even after source code or defaults change. The pointers, the pipeline and the
+        record it moves are written under the process lock, as a new version's are."""
+        with _LOCK:
+            return self._resume_version_locked(owner, job, version, recover_from=recover_from, request_key=request_key)
+
+    def _resume_version_locked(self, owner, job, version, *, recover_from=None, request_key=None):
         root = self.root(owner, job)
         record = read_json(root/version/'record.json')
         if record.get('status') == 'review_required':
@@ -295,11 +350,22 @@ class AvatarNativeParts:
 
     def _move_current(self, root, version):
         """Point current.json at a version that is not sealed yet. The sealed version it leaves is kept in
-        ready.json, which the wardrobe goes on offering until this one is sealed."""
-        previous = read_json(root/'current.json').get('version')
-        if previous and previous != version and read_json(root/previous/'record.json').get('status') == 'review_required':
-            _write_json(root/'ready.json', {'version': previous})
-        _write_json(root/'current.json', {'version': version})
+        ready.json, which the wardrobe goes on offering until this one is sealed. Both are written under the process
+        lock, which its callers already hold."""
+        with _LOCK:
+            previous = read_json(root/'current.json').get('version')
+            if previous and previous != version and read_json(root/previous/'record.json').get('status') == 'review_required':
+                _write_json(root/'ready.json', {'version': previous})
+            _write_json(root/'current.json', {'version': version})
+
+    def ready_version(self, owner, job):
+        """The sealed version the wardrobe offers for a job (its current one once sealed, else the one ready.json
+        kept while a newer one is assembled or failed), or None. Part requests build on the same version."""
+        from src.services.avatar_production_progress import ready_version
+        root = self.factory.directory(owner, job)/'native-parts'
+        pointer = read_json(root/'current.json')
+        record = read_json(root/pointer['version']/'record.json') if pointer.get('version') else {}
+        return ready_version(root, pointer, record)
 
     def execute_refit(self, owner, job):
         self.execute(owner, job)
@@ -344,7 +410,11 @@ class AvatarNativeParts:
             frozen = native_reuse.get(slot)
             if frozen:
                 if frozen.get('available') is False:
-                    unavailable_parts.append(deepcopy(frozen['report']))
+                    report = deepcopy(frozen['report'])
+                    # The seal accepts an unavailable slot only as an incomplete one.
+                    if report.get('fit_status') not in ('needs_anchors', 'failed'):
+                        report['fit_status'] = 'failed'
+                    unavailable_parts.append(report)
                     continue
                 path = self.factory.directory(owner, job)/'prefit-parts'/frozen['file']
                 if digest(path) != frozen['sha256']:
@@ -450,6 +520,10 @@ class AvatarNativeParts:
                     'glb_sha256': digest(Path(__file__).with_name('glb.py')),
                     'native_hair_upload_sha256': digest(Path(__file__).with_name('native_hair_upload.py')),
                     'asset_delivery_sha256': digest(Path(__file__).with_name('asset_delivery.py')),
+                    'pipeline_quality_revision': QUALITY_REVISION,
+                    'pipeline_quality_sha256': digest(Path(__file__).with_name('avatar_pipeline_quality.py')),
+                    'quality_worker_sha256': digest(Path(__file__).with_name('avatar_quality_blender.py')),
+                    'shell_garment_sha256': digest(Path(__file__).with_name('avatar_shell_garment.py')),
                     'garment_kinds': garment_kinds,
                     'part_methods': {p['slot']: p.get('part_method', 'isolated') for p in parts},
                     'front_axes': {p['slot']: p['front_axis'] for p in parts if p.get('front_axis')},
@@ -480,11 +554,11 @@ class AvatarNativeParts:
                                    sort_keys=True, separators=(',', ':')).encode()
             fit_spec['sha256'] = hashlib.sha256(canonical).hexdigest()
         measurements = {p['slot']: p.get('target_bounds_m') for p in pipeline.get('parts', [])}
+        # The worker imports the garment fitting whether or not a slot has a fit profile.
         contract.update(production_spec_sha256=fit_spec['sha256'],
                         source_spec_sha256=(pipeline.get('production_spec') or {}).get('sha256'),
-                        fit_worker_sha256=digest(Path(__file__).with_name('avatar_fit_geometry.py')))
-        if contract['fit_profiles']:
-            contract['garment_worker_sha256'] = digest(Path(__file__).with_name('avatar_garment_geometry.py'))
+                        fit_worker_sha256=digest(Path(__file__).with_name('avatar_fit_geometry.py')),
+                        garment_worker_sha256=digest(Path(__file__).with_name('avatar_garment_geometry.py')))
         version = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()[:24]
         root = self.root(owner, job); directory = root/version
         if not blender_executable():
@@ -574,32 +648,8 @@ class AvatarNativeParts:
                 if code:
                     raise ValueError('Blender fitting failed')
                 phase = 'artifacts'
-                seal = read_json(directory/'complete.json')
-                if seal.get('input_sha256') != digest(directory/'input.json'):
-                    raise ValueError('Unsealed output')
-                payload = read_json(directory/'input.json')
-                result = seal.get('result', {})
-                reported = {p['slot']: p for p in result.get('parts', [])}
-                requested = {'body', *(p['slot'] for p in payload['parts']),
-                             *(p['slot'] for p in payload.get('prefit_parts', [])),
-                             *(p['slot'] for p in payload.get('unavailable_parts', []))}
-                if not requested <= reported.keys():
-                    raise ValueError('Missing part receipts')
-                incomplete = {p['slot'] for p in result.get('incomplete_parts', [])}
-                unavailable = {slot for slot in requested if reported[slot].get('available') is False}
-                if 'body' in unavailable or not unavailable <= incomplete:
-                    raise ValueError('Missing incomplete part receipts')
-                required = {'model.glb', 'front.png', 'side.png', 'back.png', 'motion.png',
-                            *(f'{slot}.glb' for slot in requested-unavailable)}
-                production = payload.get('production_spec')
-                if production:
-                    required.add('opposite.png')
-                if not required <= seal.get('files', {}).keys():
-                    raise ValueError('Incomplete parts')
-                for name, expected in seal['files'].items():
-                    if Path(name).name != name or digest(directory/name) != expected:
-                        raise ValueError('Output changed')
-                record.update(status='review_required', files=seal['files'], result=result,
+                files, result = accepted_seal(directory, read_json(directory/'complete.json'))
+                record.update(status='review_required', files=files, result=result,
                               error=None, error_type=None, error_stage=None)
             except Exception as exc:
                 record.update(status='failed', error='Blender 조립 중단' if phase == 'blender' else '조립 산출물 저장 확인 중단',

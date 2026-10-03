@@ -1,8 +1,8 @@
 """Bounded runtime derivatives from preserved provider images and GLBs."""
 import hashlib
 import io
-import math
 
+import numpy as np
 from PIL import Image
 
 from src.services.asset_editor import _write_json
@@ -24,14 +24,13 @@ def texture_maps(source, directory, size):
             weight = (1-offset/edge)**2
             rgb.paste(Image.blend(first, average, weight), a)
             rgb.paste(Image.blend(last, average, weight), b)
-    height = rgb.convert('L').tobytes(); normals = bytearray()
-    for y in range(size):
-        for x in range(size):
-            dx = (height[y*size+(x+1)%size]-height[y*size+(x-1)%size])*2/255
-            dy = (height[((y+1)%size)*size+x]-height[((y-1)%size)*size+x])*2/255
-            length = math.sqrt(dx*dx+dy*dy+1)
-            normals.extend(round(127.5*(value/length+1)) for value in (-dx, dy, 1))
-    arrays = {'albedo.webp': rgb, 'normal.webp': Image.frombytes('RGB', (size, size), bytes(normals)),
+    # Wrapped central differences of the luminance, per texel in numpy (the same arithmetic as a per-texel loop).
+    height = np.asarray(rgb.convert('L'), dtype=np.int64)
+    dx = (np.roll(height, -1, axis=1)-np.roll(height, 1, axis=1))*2/255
+    dy = (np.roll(height, -1, axis=0)-np.roll(height, 1, axis=0))*2/255
+    length = np.sqrt(dx*dx+dy*dy+1)
+    normals = np.stack([np.rint(127.5*(value/length+1)) for value in (-dx, dy, 1)], axis=-1).astype(np.uint8)
+    arrays = {'albedo.webp': rgb, 'normal.webp': Image.frombytes('RGB', (size, size), normals.tobytes()),
               'orm.webp': Image.new('RGB', (size, size), (255, 220, 0))}
     files = {}
     for name, image in arrays.items():

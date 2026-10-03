@@ -138,3 +138,117 @@ def test_rejected_response_is_sanitized_classified_and_never_reposted(tmp_path, 
     assert metadata['provider_error_category'] == 'size'
     assert private_url not in receipt.with_suffix('.error.json').read_text()
     assert private_url not in receipt.with_suffix('.request.json').read_text()
+
+
+# --- automatic retries of requests the provider cannot have processed -------------------------------------------
+
+@pytest.fixture
+def retried(tmp_path, monkeypatch):
+    """An image edit whose transport answers from `answers` in order; returns (run, posts, delays)."""
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture-only')
+    source = tmp_path/'source.png'; source.write_bytes(png())
+    posts, delays, answers = [], [], []
+    monkeypatch.setattr(images.time, 'sleep', delays.append)
+
+    def transport(request):
+        posts.append(request.content)
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer(request) if callable(answer) else answer
+    monkeypatch.setattr(images, 'image_transport', lambda: httpx.MockTransport(transport))
+
+    def run():
+        return images.generate_part_image(source, 'whole character', images.DEFAULT_MODEL, images.DEFAULT_BASE,
+                                          receipt=tmp_path/'body-provider')
+    return run, answers, posts, delays, tmp_path/'body-provider'
+
+
+def ok():
+    return httpx.Response(200, json={'data': [{'b64_json': base64.b64encode(png()).decode()}]})
+
+
+def sent(complete, error):
+    """A transport failure after the request started; `complete`: the whole body reached the provider."""
+    def answer(request):
+        trace = request.extensions['trace']
+        trace('http11.send_request_headers.started', {})
+        if complete:
+            trace('http11.send_request_body.complete', {})
+        raise error
+    return answer
+
+
+def metadata(receipt):
+    return json.loads(receipt.with_suffix('.request.json').read_text())
+
+
+def test_a_busy_provider_is_asked_again_with_the_same_bytes_after_its_retry_after(retried):
+    run, answers, posts, delays, receipt = retried
+    answers.extend([httpx.Response(429, headers={'retry-after': '7'}, json={'error': {'code': 'rate_limit_exceeded'}}), ok()])
+    assert run() == png()
+    assert len(posts) == 2 and posts[0] == posts[1] and delays == [7.0]
+    saved = metadata(receipt)
+    assert [attempt['reason'] for attempt in saved['auto_retries']] == ['provider_busy']
+    assert saved['auto_retries'][0]['http_status'] == 429 and saved['phase'] == 'response_saved'
+    assert not receipt.with_suffix('.error.json').exists()
+
+
+def test_retries_stop_after_their_limit_and_the_refusal_is_kept(retried):
+    run, answers, posts, delays, receipt = retried
+    answers.extend([httpx.Response(503, json={'error': {'type': 'server_error'}})] * 3)
+    with pytest.raises(images.OpenAIImageHTTPError) as refused:
+        run()
+    assert refused.value.category == 'provider_unavailable'
+    assert len(posts) == images.AUTO_RETRIES + 1 and len(delays) == images.AUTO_RETRIES
+    assert json.loads(receipt.with_suffix('.error.json').read_text())['http_status'] == 503
+    with pytest.raises(images.OpenAIImageHTTPError):
+        run()
+    assert len(posts) == images.AUTO_RETRIES + 1
+
+
+@pytest.mark.parametrize('answer, reason', [
+    (httpx.ConnectError('connection refused'), 'not_sent'),
+    (sent(False, httpx.WriteError('reset while uploading')), 'incomplete_upload'),
+])
+def test_a_request_the_provider_never_received_whole_is_sent_again(retried, answer, reason):
+    run, answers, posts, delays, receipt = retried
+    answers.extend([answer, ok()])
+    assert run() == png()
+    assert len(posts) == 2 and posts[0] == posts[1] and delays == [1.5]
+    saved = metadata(receipt)
+    assert [attempt['reason'] for attempt in saved['auto_retries']] == [reason]
+    # Each attempt has its own client request id.
+    assert saved['auto_retries'][0]['client_request_id'] != saved['client_request_id']
+
+
+@pytest.mark.parametrize('answer', [sent(True, httpx.ReadError('connection reset')), httpx.ReadTimeout('no answer')])
+def test_a_request_that_may_have_been_processed_is_never_sent_again(retried, answer):
+    run, answers, posts, delays, receipt = retried
+    answers.append(answer)
+    with pytest.raises(httpx.TransportError):
+        run()
+    assert len(posts) == 1 and delays == []
+    saved = metadata(receipt)
+    assert saved['submission'] == 'unknown' and 'auto_retries' not in saved
+    # The saved intent now refuses another paid request until the operator decides.
+    with pytest.raises(PipelineError) as uncertain:
+        run()
+    assert uncertain.value.code == 'image_response_uncertain' and len(posts) == 1
+
+
+def test_a_tls_record_rejection_after_the_upload_is_sent_again(retried):
+    run, answers, posts, delays, receipt = retried
+
+    def rejected(request):
+        trace = request.extensions['trace']
+        trace('http11.send_request_headers.started', {})
+        trace('http11.send_request_body.complete', {})
+        failure = httpx.ReadError('tls failure')
+        cause = OSError('bad record mac')
+        cause.reason = 'SSLV3_ALERT_BAD_RECORD_MAC'
+        trace('http11.receive_response_headers.failed', {'exception': cause})
+        raise failure
+    answers.extend([rejected, ok()])
+    assert run() == png()
+    assert [attempt['reason'] for attempt in metadata(receipt)['auto_retries']] == ['tls_rejected']

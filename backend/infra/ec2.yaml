@@ -1,5 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Gaesup character studio API on one instance with S3 durability and SSM administration, optionally reachable over HTTPS through CloudFront
+# A stack update deploys UserData with ReleaseKey: pass the release the instance runs now (ReleaseKey in
+# /opt/asset-studio/current.json or backend/dist/aws/deployment-receipt.json), or a replaced instance boots an older one.
 Parameters:
   VpcId: {Type: 'AWS::EC2::VPC::Id'}
   SubnetId: {Type: 'AWS::EC2::Subnet::Id'}
@@ -22,11 +24,6 @@ Parameters:
     Default: ''
     Description: The records database host, the server stack's DatabaseEndpoint output.
     AllowedPattern: '^$|^[A-Za-z0-9.-]+$'
-  PublicSiteOrigin:
-    Type: String
-    Default: ''
-    Description: Optional HTTPS origin of the public site. When set and PublicStudio is false, port 80 is open to the internet and answers 404, since the studio serves its API only.
-    AllowedPattern: '^$|^https://[A-Za-z0-9.-]+(?::[0-9]+)?$'
   PublicStudio:
     Type: String
     Default: 'false'
@@ -62,9 +59,7 @@ Rules:
         AssertDescription: CharacterDbSecretArn and CharacterDbHost must be supplied together
 Conditions:
   HasCharacterDb: !And [!Not [!Equals [!Ref CharacterDbSecretArn, '']], !Not [!Equals [!Ref CharacterDbHost, '']]]
-  HasPublicSite: !Not [!Equals [!Ref PublicSiteOrigin, '']]
   HasPublicStudio: !Equals [!Ref PublicStudio, 'true']
-  HasOpenHttp: !And [!Condition HasPublicSite, !Not [!Condition HasPublicStudio]]
   IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
 Resources:
   InstanceRole:
@@ -102,19 +97,9 @@ Resources:
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: SSM administration with optional public static HTTP
+      GroupDescription: SSM administration with optional CloudFront HTTP
       VpcId: !Ref VpcId
       SecurityGroupEgress: [{IpProtocol: '-1', CidrIp: 0.0.0.0/0}]
-  PublicHttpIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Condition: HasOpenHttp
-    Properties:
-      GroupId: !Ref SecurityGroup
-      IpProtocol: tcp
-      FromPort: 80
-      ToPort: 80
-      CidrIp: 0.0.0.0/0
-      Description: Public static site only; nginx denies API paths
   CloudFrontHttpIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Condition: HasPublicStudio
@@ -156,7 +141,6 @@ Resources:
             ASSET_S3_BUCKET='${AssetBucket}'
             AWS_REGION='${AWS::Region}'
             PROVIDER_SECRET_ARN='${ProviderSecretArn}'
-            PUBLIC_SITE_ORIGIN='${PublicSiteOrigin}'
             PUBLIC_STUDIO='${PublicStudio}'${CharacterDbConfig}
             CONFIG
             chmod 600 /etc/asset-studio.env
@@ -238,9 +222,6 @@ Resources:
 Outputs:
   InstanceId: {Value: !Ref Instance}
   Access: {Value: !Sub 'aws ssm start-session --target ${Instance} --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080'}
-  PublicSite:
-    Condition: HasPublicSite
-    Value: !Ref PublicSiteOrigin
   StudioUrl:
     Condition: HasPublicStudio
     Value: !Sub 'https://${StudioDistribution.DomainName}'

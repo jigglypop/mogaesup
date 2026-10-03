@@ -140,13 +140,17 @@ async def test_runtime_control_requires_unforwarded_loopback_and_health_remains_
     monkeypatch.setenv('ASSET_DATA_ROOT', str(tmp_path))
     monkeypatch.setattr(server, '_API_KEY', 'private-api-key')
     token = 'a' * 32
-    for peer, headers, expected in [
-        ('203.0.113.9', {'x-api-key': 'private-api-key'}, 403),
-        ('127.0.0.1', {'x-api-key': 'private-api-key', 'x-forwarded-for': '127.0.0.1'}, 403),
-        ('127.0.0.1', {}, 200),
+    for peer, base, headers, expected in [
+        ('203.0.113.9', 'http://127.0.0.1:8000', {'x-api-key': 'private-api-key'}, 403),
+        ('127.0.0.1', 'http://127.0.0.1:8000', {'x-api-key': 'private-api-key', 'x-forwarded-for': '127.0.0.1'}, 403),
+        # A page rebound to 127.0.0.1 names its own host; a cross-site page sends its own origin.
+        ('127.0.0.1', 'http://rebound.example:8000', {'x-api-key': 'private-api-key'}, 403),
+        ('127.0.0.1', 'http://127.0.0.1:8000', {'x-api-key': 'private-api-key', 'origin': 'https://evil.example'}, 403),
+        ('127.0.0.1', 'http://rebound.example:8000', {}, 401),
+        ('127.0.0.1', 'http://127.0.0.1:8000', {}, 200),
     ]:
         transport = httpx.ASGITransport(app=server.app, client=(peer, 1234))
-        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+        async with httpx.AsyncClient(transport=transport, base_url=base) as client:
             response = await client.post('/internal/drain', json={'token': token}, headers=headers)
             assert response.status_code == expected
             if expected == 200:

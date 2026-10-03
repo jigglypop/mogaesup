@@ -41,7 +41,8 @@ def download_glb(client: httpx.Client, url: str, output: Path, *, preserve_detai
             data.extend(chunk)
             if len(data) > policy.max_file_bytes:
                 raise ValueError("Generated GLB exceeds file budget")
-    quality = inspect_glb(bytes(data), policy, budget_warnings=preserve_detail)
+    # The one bytearray is inspected and stored as it is: copies of a 256 MiB model would triple its memory.
+    quality = inspect_glb(data, policy, budget_warnings=preserve_detail)
     if quality["errors"]:
         raise ValueError("Generated GLB rejected: " + "; ".join(quality["errors"]))
     if is_remote(output):

@@ -295,3 +295,56 @@ def test_resume_route_takes_an_optional_provider(studio):
                               headers={'Idempotency-Key': 'fixture-api-2'})
         assert texture.status_code == 422 and texture.json()['error']['code'] == 'invalid_provider'
     assert len(calls['meshy']) == 1 and len(calls['tripo']) == 1 and calls['images'] == 1
+
+
+def test_a_generation_left_running_by_a_failed_last_save_can_be_resumed(studio):
+    from src.services.process_identity import identity
+    service, calls, replies, _ = studio
+    record, _ = service.create('fixture-prop-stuck', body())
+    directory = service.directory(record['id'])
+    # The worker of this very process ended, but its last save never landed.
+    _write_json(directory/'record.json', {**read_json(directory/'record.json'), 'status': 'running', 'process': identity()})
+    stuck = service.get(record['id'])
+    assert stuck['status'] == 'paused' and stuck['can_resume']
+    # While the worker holds its lock the same record is running and cannot be resumed twice.
+    assert module._WORKERS.acquire(str(directory))
+    try:
+        held = service.get(record['id'])
+        assert held['status'] == 'running' and not held['can_resume']
+        assert [item['status'] for item in service.listing('prop')['items']] == ['running']
+    finally:
+        module._WORKERS.release(str(directory))
+    assert service.resume(record['id'])[1] is True
+    assert module._WORKERS == {}
+
+
+def test_the_last_save_of_a_failed_generation_is_tried_again(studio, monkeypatch):
+    from src.services import run_lock
+    service, calls, replies, _ = studio
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0, 0))
+    record, _ = service.create('fixture-prop-blip', body())
+    save, failures = module.StudioGenerations._save, []
+
+    def blip(directory, value):
+        # The stop is saved while the storage still fails twice.
+        if value.get('status') == 'paused' and len(failures) < 2:
+            failures.append(1)
+            raise OSError('storage blip')
+        return save(directory, value)
+
+    monkeypatch.setattr(module.StudioGenerations, '_save', staticmethod(blip))
+    monkeypatch.setattr(module, 'generate_image', lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ConnectError('down')))
+    service.execute(record['id'])
+    assert len(failures) == 2
+    assert read_json(service.directory(record['id'])/'record.json')['status'] in ('paused', 'blocked')
+
+
+def test_a_listing_reads_each_record_once(studio, monkeypatch):
+    service, calls, replies, _ = studio
+    for index in range(3):
+        service.create(f'fixture-prop-list-{index}', body())
+    reads = []
+    real = module.read_json
+    monkeypatch.setattr(module, 'read_json', lambda path, *args: (reads.append(path.name), real(path, *args))[1])
+    items = service.listing('prop')['items']
+    assert len(items) == 3 and reads.count('record.json') == 3

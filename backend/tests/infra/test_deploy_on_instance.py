@@ -44,11 +44,12 @@ def run_drain(bash, reply, **env):
         'docker() { echo true; }',
         'curl() { if [ "$FAKE_REPLY" = refused ]; then return 7; fi; printf "%s" "$FAKE_REPLY"; }',
         'python3() { "$PYTHON_EXE" "$@"; }',
+        'budget_left() { echo "${FAKE_BUDGET:-86400}"; }', 'replace_seconds=240',
         health_reader(), drain_loop(), 'echo past-the-loop'])
-    return run_bash(bash, script, FAKE_REPLY=reply, ASSET_DEPLOY_DRAIN_SECONDS='0', **env)
+    return run_bash(bash, script, FAKE_REPLY=reply, ASSET_DEPLOY_DRAIN_SECONDS=env.pop('drain', '0'), **env)
 
 
-def run_candidate(bash, tmp_path, replies):
+def run_candidate(bash, tmp_path, replies, **env):
     """Exercise the real candidate wait and rollback decision with successive health replies."""
     reply_file = tmp_path / 'replies.json'
     calls = tmp_path / 'health-calls'
@@ -62,6 +63,7 @@ def run_candidate(bash, tmp_path, replies):
         'sleep() { :; }', 'seq() { echo "1 2 3"; }',
         'restore_previous() { echo previous-restored; }',
         'python3() { "$PYTHON_EXE" "$@"; }',
+        'budget_left() { echo "${FAKE_BUDGET:-86400}"; }', 'rollback_seconds=120',
         '''curl() {
   if [[ "${*: -1}" == */version.json ]]; then
     printf \'{"release_sha":"%s"}\' "$release_sha"
@@ -78,8 +80,8 @@ print(json.dumps(replies[min(index, len(replies) - 1)]))
   fi
 }''',
         health_reader(), probe, 'echo candidate-ready'])
-    result = run_bash(bash, script, HEALTH_REPLIES=str(reply_file), HEALTH_CALLS=str(calls))
-    return result, int(calls.read_text())
+    result = run_bash(bash, script, HEALTH_REPLIES=str(reply_file), HEALTH_CALLS=str(calls), **env)
+    return result, int(calls.read_text()) if calls.exists() else 0
 
 
 def test_the_script_is_valid_bash(bash):
@@ -173,6 +175,8 @@ def test_the_studio_container_logs_are_rotated():
 FAKE_HOST = r'''
 import json, os, sys
 from pathlib import Path
+# The commands answer as on Linux: no carriage returns before line ends.
+sys.stdout.reconfigure(newline=chr(10))
 root = Path(os.environ['FAKE_HOST_ROOT'])
 state_path, events_path = root/'state.json', root/'events.jsonl'
 state = json.loads(state_path.read_text())
@@ -186,7 +190,12 @@ def container(value):
 if family == 'docker':
     command = args[0]
     event(['docker', *args])
-    if command == 'image': sys.exit(0)
+    if command == 'image':
+        if args[1] == 'ls':
+            print('\n'.join(state.get('images', [])))
+        elif args[1] == 'rm':
+            state['images'] = [line for line in state.get('images', []) if line.split('|')[1] != args[-1]]; save()
+        sys.exit(0)
     if command == 'inspect':
         item = container(args[-1])
         if not item: sys.exit(1)
@@ -195,32 +204,55 @@ if family == 'docker':
         else: print(item['id'])
     elif command == 'rename': container(args[1])['name'] = args[2]; save()
     elif command == 'stop':
-        assert state['draining'], 'old runtime was stopped with admission still open'
-        container(args[-1])['running'] = False; save()
+        item = container(args[-1])
+        assert state['draining'] or not item['running'], 'old runtime was stopped with admission still open'
+        item['running'] = False; save()
     elif command == 'start':
         item = container(args[-1]); item['running'] = True
+        # uvicorn listens only once its startup has finished.
+        state['refusals'] = int(os.environ.get('FAKE_START_DELAY', '0'))
         event(['restart-config', json.loads((root/'studio/provider.json').read_text())['revision']])
         save()
     elif command == 'rm':
         item = container(args[-1])
         if item: state['containers'].remove(item); save()
     elif command == 'run':
+        token = next(value.split('=', 1)[1] for value in args if value.startswith('ASSET_START_DRAIN_TOKEN='))
+        if state.get('drain_owner') not in (None, token):
+            # The runtime refuses to start: another operation owns admission.
+            state['containers'].append({'id': 'new-id', 'name': args[args.index('--name')+1], 'running': False})
+            save(); print('new-id'); event(['candidate-refused', state['drain_owner']]); sys.exit(0)
         state['containers'].append({'id': 'new-id', 'name': args[args.index('--name')+1], 'running': True})
-        state['draining'] = True; save(); print('new-id')
+        state.update(draining=True, drain_owner=token); save(); print('new-id')
         event(['candidate-admission', state['draining']])
     elif command == 'logs': print('fixture candidate unavailable')
 elif family == 'curl':
     method = args[args.index('-X')+1] if '-X' in args else 'GET'
     event(['curl', method, args[-1]])
+    write_out = '--write-out' in args
+    def answer(status, body):
+        if write_out:
+            sys.stdout.write(body + '\n' + str(status)); sys.exit(0)
+        if '--fail' in args and status >= 400: sys.exit(22)
+        print(body); sys.exit(0)
+    if state.get('refusals'):
+        state['refusals'] -= 1; save(); event(['refused', method])
+        if write_out: sys.stdout.write('\n000')
+        sys.exit(7)
     if args[-1].endswith('/internal/drain'):
-        if os.environ.get('FAKE_CONTROL') == 'unsupported': sys.exit(22)
+        if os.environ.get('FAKE_CONTROL') == 'unsupported': answer(404, '{"detail":"Not Found"}')
+        token = json.loads(args[args.index('--data')+1])['token']
+        if state.get('drain_owner') not in (None, token):
+            answer(409, '{"detail":"Runtime admission state cannot be changed"}')
         if method == 'DELETE' and container('new-id'):
             assert (root/'studio/current.json').exists(), 'candidate admission opened before release commit'
             assert json.loads((root/'studio/current.json').read_text())['sha256'] == 'a'*64
-        state['draining'] = method == 'POST'; save()
+        state['draining'] = method == 'POST'
+        state['drain_owner'] = token if method == 'POST' else None
+        save()
         busy = int(os.environ.get('FAKE_DRAIN_BUSY', os.environ.get('FAKE_BUSY', '0')))
-        print(json.dumps({'activity': {'paid_requests': busy, 'running_tasks': 0},
-                          'admission': {'version': 1, 'verified': True, 'draining': state['draining']}}))
+        answer(200, json.dumps({'activity': {'paid_requests': busy, 'running_tasks': 0},
+                                'admission': {'version': 1, 'verified': True, 'draining': state['draining']}}))
     elif args[-1].endswith('/version.json'):
         print(json.dumps({'release_sha': 'a'*64}))
     else:
@@ -238,26 +270,42 @@ elif family == 'systemctl':
 '''
 
 
-def run_host_deploy(bash, tmp_path, **env):
-    """Run the entire deploy script against a disposable host and command doubles, never Docker/AWS."""
-    root = tmp_path / 'host'
+def run_host_deploy(bash, tmp_path, *, root=None, **env):
+    """Run the entire deploy script against a disposable host and command doubles, never Docker/AWS. Passing the `root`
+    of an earlier run deploys again on that host, as the next deployment would."""
+    again = root is not None
+    root = root or tmp_path / 'host'
     source = root / 'studio/incoming' / ('a' * 64) / 'source'
-    (source / 'infra').mkdir(parents=True)
+    (source / 'infra').mkdir(parents=True, exist_ok=True)
     (source / 'infra/Dockerfile').write_text('FROM fixture')
     (source / 'infra/idle-stop.sh').write_text('#!/bin/bash\nexit 0\n')
     (source / '.release-sha256').write_text('a' * 64 + '\n')
-    (root / 'studio/provider.json').write_text(json.dumps({'revision': 'old'}))
+    if not again:
+        (root / 'studio/provider.json').write_text(json.dumps({'revision': 'old'}))
     (root / 'config.env').write_text('ASSET_S3_BUCKET=fixture\nAWS_REGION=fixture\nPROVIDER_SECRET_ARN=fixture\n'
                                    + 'PUBLIC_STUDIO=' + env.pop('FAKE_PUBLIC', 'false') + '\n')
     secret = {'OPENAI_API_KEY': 'offline', 'MESHY_API_KEY': 'offline', 'revision': 'new'}
     if 'FAKE_GATEWAY_KEY' in env:
         secret['STUDIO_GATEWAY_KEY'] = env.pop('FAKE_GATEWAY_KEY')
-    containers = [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    containers = {'running': [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}],
+                  'stopped': [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': False}],
+                  'none': []}[env.pop('FAKE_OLD', 'running')]
     if env.get('FAKE_LEFTOVER'):
         name = ('gaesup-asset-studio-candidate-' + 'a'*12 if env['FAKE_LEFTOVER'] == 'candidate'
                 else 'gaesup-asset-studio-rollback')
         containers.append({'id': 'leftover-id', 'name': name, 'running': True})
-    (root / 'state.json').write_text(json.dumps({'draining': False, 'containers': containers}))
+    if env.pop('FAKE_ROLLBACK_STOPPED', None):
+        containers.append({'id': 'old-id', 'name': 'gaesup-asset-studio-rollback', 'running': False})
+    if again:
+        state = json.loads((root / 'state.json').read_text())
+        # The runtime that did not answer before has started listening by now.
+        state['containers'] = [item for item in state['containers'] if item['id'] != 'new-id']
+        state['refusals'] = 0
+        (root / 'state.json').write_text(json.dumps(state))
+        (root / 'events.jsonl').unlink(missing_ok=True)
+    else:
+        (root / 'state.json').write_text(json.dumps({'draining': False, 'drain_owner': env.pop('FAKE_DRAIN_OWNER', None),
+                                                     'containers': containers, 'images': env.pop('FAKE_IMAGES', [])}))
     fixture = root / 'commands.py'
     fixture.write_text(FAKE_HOST)
     text = SCRIPT.read_text(encoding='utf-8').replace('/opt/asset-studio', (root / 'studio').as_posix())
@@ -265,8 +313,9 @@ def run_host_deploy(bash, tmp_path, **env):
     text = text.replace('/var/lock/asset-studio-deploy.lock', (root / 'deploy.lock').as_posix())
     text = text.replace('/var/log/asset-studio', (root / 'logs').as_posix())
     script = '\n'.join([
-        'docker() { "$PYTHON_EXE" "$FAKE_COMMANDS" docker "$@"; '
-        'if [[ "${FAKE_TERMINATE:-}" == 1 && "$1" == stop ]]; then kill -TERM $$; fi; }',
+        # The exit status of the fake command, as `docker inspect` of a missing container fails.
+        'docker() { local code=0; "$PYTHON_EXE" "$FAKE_COMMANDS" docker "$@" || code=$?; '
+        'if [[ "${FAKE_TERMINATE:-}" == 1 && "$1" == stop ]]; then kill -TERM $$; fi; return $code; }',
         'curl() { "$PYTHON_EXE" "$FAKE_COMMANDS" curl "$@"; }',
         'aws() { printf "%s" "$FAKE_SECRET_PAYLOAD"; }',
         'python3() { "$PYTHON_EXE" "$@"; }', 'sleep() { :; }', 'seq() { echo "1 2 3"; }',
@@ -357,6 +406,122 @@ def test_live_leftover_containers_are_preserved_for_recovery(bash, tmp_path, lef
     assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
 
 
+TOKEN = 'b' * 32
+
+
+def token_file(root):
+    return root / 'studio/drain-token'
+
+
+def test_a_rollback_retries_the_reopen_until_the_restored_runtime_listens(bash, tmp_path):
+    # The restored container refuses connections while uvicorn starts; one refused DELETE must not leave it closed.
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_START_DELAY='3')
+    assert done.code == 1 and 'previous container restored' in done.err
+    assert not state['draining'] and state['drain_owner'] is None
+    assert [event for event in events if event[0] == 'refused'] == [['refused', 'DELETE']] * 3
+    assert events[-1][:2] == ['curl', 'DELETE'] and not token_file(root).exists()
+    assert 'could not' not in done.err and 'did not answer' not in done.err
+
+
+def test_a_restored_runtime_that_never_answers_keeps_its_token_for_the_next_deployment(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_START_DELAY='1000', ASSET_DEPLOY_REOPEN_SECONDS='0')
+    assert done.code == 1 and 'did not answer the admission reopen' in done.err
+    owner = state['drain_owner']
+    assert state['draining'] and token_file(root).read_text().strip() == owner
+    # The next deployment resumes that drain with the same token instead of meeting an unknown owner.
+    again, state, events, root = run_host_deploy(bash, tmp_path, root=root, FAKE_READY='1')
+    assert again.code == 0 and 'deployment healthy' in again.out
+    assert not state['draining'] and not token_file(root).exists()
+    assert ['candidate-admission', True] in events
+
+
+def test_a_failed_first_deployment_leaves_admission_resumable_by_the_next(bash, tmp_path):
+    # No runtime ran: the candidate closed admission with the token, and nothing is left to reopen it.
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_OLD='none')
+    assert done.code == 1 and 'no runtime is running to reopen admission' in done.err
+    assert state['drain_owner'] == token_file(root).read_text().strip()
+    again, state, events, root = run_host_deploy(bash, tmp_path, root=root, FAKE_READY='1')
+    assert again.code == 0 and 'deployment healthy' in again.out
+    assert not any(event[0] == 'candidate-refused' for event in events)
+    assert not state['draining'] and state['drain_owner'] is None and not token_file(root).exists()
+
+
+def test_a_stopped_runtime_restored_after_a_failed_candidate_is_reopened(bash, tmp_path):
+    # The service was down at deploy start, so no drain was requested, but the candidate closed admission.
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_OLD='stopped')
+    assert done.code == 1 and 'previous container restored' in done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining'] and state['drain_owner'] is None and not token_file(root).exists()
+    assert events[-1][:2] == ['curl', 'DELETE']
+
+
+def test_a_drain_owned_by_another_operation_is_named_and_left_alone(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_DRAIN_OWNER=TOKEN)
+    assert done.code == 6 and 'already closed by another operation' in done.err
+    assert 'does not support' not in done.err
+    assert state['drain_owner'] == TOKEN and not token_file(root).exists()
+    assert not any(event[:2] in (['docker', 'stop'], ['docker', 'run'], ['curl', 'DELETE']) for event in events)
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+
+
+def test_a_runtime_that_starts_listening_late_is_drained_once_it_answers(bash, tmp_path):
+    # The stable name is recovered from a stopped rollback container, which needs a moment before uvicorn listens.
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_OLD='none', FAKE_ROLLBACK_STOPPED='1',
+                                                FAKE_START_DELAY='2', FAKE_READY='1')
+    assert done.code == 0 and 'deployment healthy' in done.out
+    assert [event for event in events if event[0] == 'refused'] == [['refused', 'POST']] * 2
+    assert not state['draining'] and not token_file(root).exists()
+
+
+@pytest.mark.parametrize('budget, ran', [(100, False), (400, True)])
+def test_admission_is_closed_only_when_the_time_limit_covers_the_replacement_and_a_rollback(bash, tmp_path, budget, ran):
+    import time
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1',
+                                                ASSET_DEPLOY_DEADLINE=str(int(time.time()) + budget))
+    if ran:
+        assert done.code == 0 and 'deployment healthy' in done.out
+    else:
+        assert done.code == 7 and 'too few to drain, replace and roll back' in done.err
+        assert not any(event[0] == 'curl' or event[:2] in (['docker', 'stop'], ['docker', 'run']) for event in events)
+        assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+        assert not state['draining'] and not token_file(root).exists()
+
+
+def test_the_drain_wait_is_cut_to_what_the_time_limit_leaves(bash):
+    # 420 s of drain time, but only 240 s left, all of them for the replacement: the busy release stops the deploy now.
+    done = run_drain(bash, BUSY, drain='420', FAKE_BUDGET='240')
+    assert done.code == 4 and 'still has 1 paid or background tasks' in done.err
+
+
+def test_the_candidate_wait_ends_while_a_rollback_still_fits(bash, tmp_path):
+    done, calls = run_candidate(bash, tmp_path, [READY], FAKE_BUDGET='100')
+    assert calls == 0 and done.code == 1 and 'previous-restored' in done.out
+
+
+def test_an_invalid_deadline_stops_before_anything(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, ASSET_DEPLOY_DEADLINE='soon')
+    assert done.code == 2 and 'invalid ASSET_DEPLOY_DEADLINE' in done.err and not events
+
+
+def test_a_successful_deployment_keeps_the_newest_three_releases(bash, tmp_path):
+    import time
+    root = tmp_path / 'host'
+    releases = root / 'studio/releases'
+    old = [str(index) * 64 for index in range(1, 6)]
+    for age, name in enumerate(old):
+        (releases / name).mkdir(parents=True)
+        os.utime(releases / name, (time.time() - 1000 + age * 10,) * 2)
+    (root / 'studio/incoming' / ('9' * 64) / 'source').mkdir(parents=True)
+    images = [f'2026-10-0{day} 10:00:00 +0000 UTC|gaesup-asset-studio:{name}' for day, name in
+              zip((1, 2, 3, 4, 5), old)] + ['2026-10-06 10:00:00 +0000 UTC|gaesup-asset-studio:' + 'a' * 64]
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1', FAKE_IMAGES=images)
+    assert done.code == 0 and 'deployment healthy' in done.out
+    assert sorted(path.name for path in releases.iterdir()) == sorted(['a' * 64, old[4], old[3]])
+    assert [line.split(':')[-1] for line in state['images']] == [old[3], old[4], 'a' * 64]
+    assert not (root / 'studio/incoming' / ('9' * 64)).exists()
+    assert ['docker', 'image', 'prune', '-f'] in events
+
+
 IDLE_SCRIPT = SCRIPT.with_name('idle-stop.sh')
 
 
@@ -420,3 +585,25 @@ def test_an_old_runtime_without_drain_is_never_powered_off(bash, tmp_path):
     done, state, events = run_idle_check(bash, tmp_path, FAKE_CONTROL='unsupported')
     assert done.code == 0 and 'drain could not be verified' in done.out
     assert not any(event[0] == 'systemctl' for event in events)
+
+
+@pytest.mark.parametrize('setting', ['off', 'on'])
+def test_the_activity_log_is_kept_small_even_with_idle_stop_off(bash, tmp_path, setting):
+    root = tmp_path / 'idle-host'
+    (root / 'logs').mkdir(parents=True)
+    log = root / 'logs/activity.log'
+    log.write_bytes(b''.join(b'%d 200 GET /api/studio/catalog\n' % index for index in range(400_000)))
+    assert log.stat().st_size > 8 * 1024 * 1024
+    os.utime(log, (1_900_000_000, 1_900_000_000))
+    text = IDLE_SCRIPT.read_text(encoding='utf-8')
+    for original, target in [('/var/log/asset-studio', 'logs'), ('/var/lib/asset-studio-idle', 'state'),
+        ('/var/lock/asset-studio-deploy.lock', 'deploy.lock'), ('/var/lock/asset-studio-prepare.lock', 'prepare.lock')]:
+        text = text.replace(original, (root / target).as_posix())
+    script = '\n'.join(['install() { shift 3; mkdir -p "$@"; }', 'flock() { :; }',
+                        # Inside the boot grace, so the "on" run stops before it would read the API.
+                        'cut() { echo 60; }', text])
+    done = run_bash(bash, script, IDLE_STOP=setting)
+    assert done.code == 0 and 'keeping on' in done.out
+    lines = log.read_bytes().splitlines()
+    assert len(lines) == 1000 and lines[-1] == b'399999 200 GET /api/studio/catalog'
+    assert int(log.stat().st_mtime) == 1_900_000_000
