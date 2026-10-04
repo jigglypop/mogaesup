@@ -302,9 +302,9 @@ const FREE_POSTS: [&[&str]; 23] = [
     &["characters", "*", "actions", "record_review"],
 ];
 
-/// Paid POSTs for which the character server requires an `Idempotency-Key` and keeps one piece of work per key: a
-/// request sent again with the same key gets the work already started. Only on these does the monthly budget count a
-/// key once. The other paid POSTs ignore the header, so each of their requests counts.
+/// The POSTs for which the character server requires an `Idempotency-Key` and keeps one piece of work per key: a
+/// request sent again with the same key gets the work already started. Among paid POSTs, only on these does the monthly
+/// budget count a key once; the other paid POSTs ignore the header, so each of their requests counts.
 const KEYED_POSTS: [&[&str]; 17] = [
     &["studio", "layouts", "interpret"],
     &["avatar-factory", "jobs", "*", "native-parts", "*", "review"],
@@ -734,7 +734,8 @@ pub async fn fetch_file(
     if let (Some(received), Some(length)) = (received, response.content_length()) {
         received.total.store(length as usize, Ordering::Relaxed);
     }
-    let mut bytes = Vec::new();
+    // Sized once for what the server announced, not grown chunk by chunk up to a model's 64 MB.
+    let mut bytes = Vec::with_capacity(response.content_length().map_or(0, |length| (length as usize).min(limit)));
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(unavailable)?;

@@ -15,6 +15,7 @@ use mogaesup_server::{
     MIGRATOR,
     config::{Factory, FactoryAccess, FactoryToken},
     glb,
+    security::rate_record,
 };
 use serde_json::{Value, json};
 use std::{
@@ -164,6 +165,100 @@ async fn 섬_저장은_리비전을_지키고_위험한_url을_거절한다() {
     assert_eq!(save(2, evil).await.status, StatusCode::UNPROCESSABLE_ENTITY);
     let huge = json!({"version": 1, "savedAt": 1, "domains": {"blob": "x".repeat(2 * 1024 * 1024 + 10)}});
     assert!(matches!(save(2, huge).await.status, StatusCode::PAYLOAD_TOO_LARGE));
+    app.cleanup().await;
+}
+
+/// A GET of `path` as a browser sends it again: with the tag it holds, signed in or not.
+async fn load_again(app: &TestApp, path: &str, tag: Option<&str>, cookie: Option<&str>) -> common::Reply {
+    let mut request = Request::builder().method("GET").uri(path).header(header::ORIGIN, ORIGIN);
+    if let Some(tag) = tag {
+        request = request.header(header::IF_NONE_MATCH, tag);
+    }
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
+    }
+    app.send(request.body(Body::empty()).unwrap()).await
+}
+
+fn tag_of(reply: &common::Reply) -> String {
+    reply.headers[header::ETAG].to_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn 섬은_태그로_다시_묻고_그대로면_내용_없이_304로_답한다() {
+    let app = TestApp::new(None).await;
+    let owner = app.register("owner_w", "주인").await;
+    let save = |base: i64, tiles: i64| {
+        let (app, owner) = (&app, owner.clone());
+        async move {
+            let data = json!({"version": 1, "savedAt": 1, "domains": {"building": {"tiles": tiles}}});
+            let body = json!({"worldId": "minihome-v6", "baseRevision": base, "data": data});
+            app.call("PUT", "/api/homes/me/world", Some(body), Some(&owner)).await
+        }
+    };
+    let path = "/api/homes/owner_w/world?worldId=minihome-v6";
+    let tiles = |reply: &common::Reply| reply.body["data"]["domains"]["building"]["tiles"].as_i64();
+
+    // A save answers with what the page needs for the next one, not with the island it sent.
+    let saved = save(0, 1).await;
+    assert_eq!(saved.status, StatusCode::OK);
+    assert_eq!(saved.body.get("data"), None);
+    assert_eq!((saved.body["worldId"].as_str(), saved.body["revision"].as_i64()), (Some("minihome-v6"), Some(1)));
+
+    let first = load_again(&app, path, None, None).await;
+    assert_eq!((first.status, tiles(&first)), (StatusCode::OK, Some(1)));
+    assert_eq!(first.body["updatedAt"], saved.body["updatedAt"]);
+    assert_eq!(first.headers[header::CACHE_CONTROL], "private, no-cache");
+    let tag = tag_of(&first);
+    assert!(tag.starts_with("\"r1.") && tag.ends_with('"'), "{tag}");
+
+    // The browser still holds the stored island: 304 without a body, to visitors and the owner alike, whether or not a
+    // cache on the way weakened the tag.
+    for (sent, cookie) in [
+        (tag.clone(), None),
+        (tag.clone(), Some(owner.as_str())),
+        (format!("W/{tag}"), None),
+        (format!("\"other\", {tag}"), None),
+    ] {
+        let again = load_again(&app, path, Some(&sent), cookie).await;
+        assert_eq!(again.status, StatusCode::NOT_MODIFIED, "{sent}");
+        assert!(again.bytes.is_empty());
+        assert_eq!(tag_of(&again), tag);
+        assert_eq!(again.headers[header::CACHE_CONTROL], "private, no-cache");
+    }
+    // A tag of another shape is no tag.
+    for sent in ["*", "\"r1\"", "r1.5", "\"rx.y\""] {
+        assert_eq!(load_again(&app, path, Some(sent), None).await.status, StatusCode::OK, "{sent}");
+    }
+
+    // A newer save is answered in full, with a new tag.
+    assert_eq!(save(1, 2).await.body["revision"], 2);
+    let changed = load_again(&app, path, Some(&tag), None).await;
+    assert_eq!((changed.status, tiles(&changed)), (StatusCode::OK, Some(2)));
+    let second = tag_of(&changed);
+    assert!(second.starts_with("\"r2."), "{second}");
+
+    // A world pushed out and saved again starts over at revision 1; its tag is new all the same.
+    sqlx::query("DELETE FROM home_worlds WHERE world_id = 'minihome-v6'").execute(&app.state.db).await.unwrap();
+    assert_eq!(load_again(&app, path, Some(&second), None).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(save(0, 3).await.body["revision"], 1);
+    let remade = load_again(&app, path, Some(&tag), None).await;
+    assert_eq!((remade.status, tiles(&remade)), (StatusCode::OK, Some(3)));
+    let third = tag_of(&remade);
+    assert!(third.starts_with("\"r1.") && third != tag, "{third} {tag}");
+
+    // Who may see the island is asked before the tag is.
+    app.call("PATCH", "/api/homes/me", Some(json!({"visibility": "private"})), Some(&owner)).await;
+    assert_eq!(load_again(&app, path, Some(&third), None).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(load_again(&app, path, Some(&third), Some(&owner)).await.status, StatusCode::NOT_MODIFIED);
+
+    // Anonymous loads are counted per address; the owner's are not.
+    for _ in 0..600 {
+        rate_record(&app.state, "world-read:local".into());
+    }
+    let limited = load_again(&app, path, Some(&third), None).await;
+    assert_eq!((limited.status, limited.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    assert_eq!(load_again(&app, path, Some(&third), Some(&owner)).await.status, StatusCode::NOT_MODIFIED);
     app.cleanup().await;
 }
 
@@ -770,6 +865,68 @@ async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변�
 }
 
 #[tokio::test]
+async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_쓰지_않는다() {
+    let seen = Seen::default();
+    let studio = Studio::standard();
+    studio.slow("job_1", Duration::from_millis(1000));
+    let app = factory_app(&seen, studio).await;
+    let admin = app.register("operator_z", "운영자").await;
+    app.make_admin("operator_z").await;
+    let queued = app.call("POST", IMPORT, Some(import_body("job_1", "late", "늦은 영웅")), Some(&admin)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    let id: uuid::Uuid = queued.body["id"].as_str().unwrap().parse().unwrap();
+    // Status, step, error code, and whether the task recorded a report.
+    let row = || async {
+        sqlx::query_as::<_, (String, String, Option<String>, bool)>(
+            "SELECT status, step, error_code, report IS NOT NULL FROM catalog_imports WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap()
+    };
+    for _ in 0..200 {
+        if row().await.1 == "download" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // While it downloads, the periodic sweep gives up on it as on one silent for half an hour. A progress tick landing
+    // between the two statements makes it fresh again, so that is tried again.
+    let mut swept = 0;
+    for _ in 0..5 {
+        sqlx::query("UPDATE catalog_imports SET updated_at = now() - interval '31 minutes' WHERE id = $1")
+            .bind(id)
+            .execute(&app.state.db)
+            .await
+            .unwrap();
+        swept = mogaesup_server::imports::interrupt_stale(&app.state.db).await.unwrap();
+        if swept == 1 {
+            break;
+        }
+    }
+    assert_eq!(swept, 1);
+    // Its task still gets to the end and records how it ended, report and all; the item was never written.
+    let mut ended = row().await;
+    for _ in 0..400 {
+        if ended.3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        ended = row().await;
+    }
+    assert!(ended.3, "{ended:?}");
+    assert_eq!((ended.0.as_str(), ended.2.as_deref()), ("failed", Some("interrupted")), "{ended:?}");
+    assert_eq!(admin_item(&app, &admin, "late").await, Value::Null);
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_versions WHERE item_id = 'late'")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(versions, 0);
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn 서버가_다시_뜨면_멈춘_가져오기를_실패로_적는다() {
     let app = TestApp::new(None).await;
     let admin = app.register("operator_i", "운영자").await;
@@ -1167,6 +1324,14 @@ async fn 탐색_목록은_아이디와_이름과_제목으로_찾고_와일드�
             "{query}"
         );
     }
+
+    // Searches are counted per address; the plain listing is not.
+    for _ in 0..300 {
+        rate_record(&app.state, "home-search:local".into());
+    }
+    let limited = app.call("GET", "/api/homes?q=alice", None, None).await;
+    assert_eq!((limited.status, limited.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    assert_eq!(app.call("GET", "/api/homes?limit=3", None, None).await.status, StatusCode::OK);
     app.cleanup().await;
 }
 

@@ -508,12 +508,16 @@ async fn a_members_islands_share_one_byte_budget_and_come_back_as_they_were_save
     assert_eq!(ids(&worlds), ["w3", "w4", "w5"]);
     assert!(total(&worlds) <= 6 * 1024 * 1024, "{worlds:?}");
 
-    // The stored envelope is read back with the shape the app expects.
+    // The stored envelope is read back with the shape the app expects. A save answers without it: the page has what it
+    // sent, and an autosave does not carry the island back.
     let small = json!({"worldId": "plain", "baseRevision": 0, "data": {"version": 2, "savedAt": 1.5,
         "domains": {"building": {"tiles": [1, 2.25, -3], "name": "꽃 \"섬\"\n", "deep": {"ok": true, "none": null}}}}});
     let saved = app.call("PUT", "/api/homes/me/world", Some(small.clone()), Some(&owner)).await;
     assert_eq!(saved.headers[header::CONTENT_TYPE], "application/json");
-    assert_eq!(saved.body["data"], small["data"]);
+    let mut answered: Vec<&String> = saved.body.as_object().unwrap().keys().collect();
+    answered.sort();
+    assert_eq!(answered, ["revision", "updatedAt", "worldId"]);
+    assert_eq!((saved.body["worldId"].as_str(), saved.body["revision"].as_i64()), (Some("plain"), Some(1)));
     let read = app.call("GET", "/api/homes/bytes_owner/world?worldId=plain", None, None).await;
     assert_eq!(read.status, StatusCode::OK);
     assert_eq!((read.body["worldId"].as_str(), read.body["revision"].as_i64()), (Some("plain"), Some(1)));
@@ -530,6 +534,75 @@ async fn a_members_islands_share_one_byte_budget_and_come_back_as_they_were_save
         .body(Body::from("{\"worldId\": \"x\", \"data\": "))
         .unwrap();
     assert_eq!(app.send(request).await.status, StatusCode::UNPROCESSABLE_ENTITY);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn requests_the_server_cannot_read_are_refused_in_the_json_the_app_shows() {
+    let app = TestApp::new(None).await;
+    let login = |body: String| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let unreadable = ("invalid_request", "요청 형식이 올바르지 않습니다.");
+    // Not JSON, JSON of another shape, and more than the sign-in's 4 KB: each keeps its status.
+    for (body, status, (code, message)) in [
+        ("{\"username\": ".to_owned(), StatusCode::BAD_REQUEST, unreadable),
+        (json!({"username": 1, "password": "x"}).to_string(), StatusCode::UNPROCESSABLE_ENTITY, unreadable),
+        (
+            json!({"username": "a".repeat(5000), "password": "x"}).to_string(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ("too_large", "요청이 너무 큽니다."),
+        ),
+    ] {
+        let reply = app.send(login(body)).await;
+        assert_eq!(reply.status, status, "{}", String::from_utf8_lossy(&reply.bytes));
+        assert_eq!(reply.headers[header::CONTENT_TYPE], "application/json");
+        assert_eq!(reply.body, json!({"code": code, "message": message}));
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+    }
+    // A query its handler cannot read.
+    let reply = app.call("GET", "/api/homes?limit=many", None, None).await;
+    assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_request")));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_island_save_cut_short_is_not_taken_for_a_large_one() {
+    use axum::body::Bytes;
+    let app = TestApp::new(None).await;
+    let owner = app.register("cut_owner", "Owner").await;
+    let owner_id = app.user_id("cut_owner").await;
+    let put = |chunks: Vec<Result<Bytes, std::io::Error>>| {
+        Request::builder()
+            .method("PUT")
+            .uri("/api/homes/me/world")
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, &owner)
+            .body(Body::from_stream(futures_util::stream::iter(chunks)))
+            .unwrap()
+    };
+    let save = json!({"expectedOwnerId": owner_id, "worldId": "cut", "baseRevision": 0,
+        "data": {"version": 1, "savedAt": 1, "domains": {}}})
+    .to_string();
+    // The connection dropped halfway: nothing is stored, and the island is not called too large.
+    let half = Bytes::from(save.as_bytes()[..save.len() / 2].to_vec());
+    let reply = app.send(put(vec![Ok(half), Err(std::io::Error::other("connection reset"))])).await;
+    assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("incomplete_world")));
+    // Past the limit a piece at a time is too large, as one piece is.
+    let piece = Bytes::from(vec![b' '; 1024 * 1024]);
+    let reply = app.send(put(vec![Ok(piece.clone()), Ok(piece.clone()), Ok(piece)])).await;
+    assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::PAYLOAD_TOO_LARGE, Some("world_too_large")));
+    // Whole, in pieces, it is stored.
+    let (head, tail) = save.as_bytes().split_at(save.len() / 2);
+    let reply = app.send(put(vec![Ok(Bytes::from(head.to_vec())), Ok(Bytes::from(tail.to_vec()))])).await;
+    assert_eq!((reply.status, reply.body["revision"].as_i64()), (StatusCode::OK, Some(1)), "{:?}", reply.body);
     app.cleanup().await;
 }
 

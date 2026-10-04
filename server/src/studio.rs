@@ -169,8 +169,12 @@ pub struct Listing {
 }
 
 pub async fn list(state: &AppState, username: &str) -> ApiResult<Listing> {
-    let jobs = fetch_json(state, username, "avatar-factory/jobs").await?.unwrap_or_default();
-    let catalog = fetch_json(state, username, "studio/catalog").await?.unwrap_or_default();
+    // Asked at once: a cold job listing alone can take the character server twelve seconds.
+    let (jobs, catalog) = tokio::try_join!(
+        fetch_json(state, username, "avatar-factory/jobs"),
+        fetch_json(state, username, "studio/catalog"),
+    )?;
+    let (jobs, catalog) = (jobs.unwrap_or_default(), catalog.unwrap_or_default());
     Ok(Listing { characters: finished(&jobs, &catalog), owners: owners(&jobs) })
 }
 

@@ -2,11 +2,12 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgRow};
@@ -37,10 +38,20 @@ const MAX_DAILY_VISITORS: i64 = 10_000;
 /// Visits counted in the rate window (ten minutes): anonymous ones per address, a member's per member.
 const VISITS_PER_ADDRESS: u32 = 120;
 const VISITS_PER_MEMBER: u32 = 300;
+/// Island loads by anonymous visitors counted in the rate window (ten minutes), per address.
+const WORLD_READS_PER_ADDRESS: u32 = 600;
+/// Searches of the island listing counted in the rate window (ten minutes), per address; each one scans the islands.
+const SEARCHES_PER_ADDRESS: u32 = 300;
 const OWNER_CHANGED: ApiError = conflict("owner_changed", "계정이 바뀌어 저장을 중단했어요.");
 const WORLD_TOO_LARGE: ApiError =
     ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "world_too_large", "저장할 섬이 너무 큽니다.");
 const INVALID_WORLD: ApiError = bad("invalid_world", "저장할 수 없는 섬 데이터입니다.");
+/// A save whose body stopped coming before its end (the connection dropped): not an island too large.
+const WORLD_CUT_SHORT: ApiError = ApiError::new(
+    StatusCode::BAD_REQUEST,
+    "incomplete_world",
+    "섬 데이터를 끝까지 받지 못했습니다. 다시 저장해 주세요.",
+);
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -176,8 +187,12 @@ impl Page {
 }
 
 /// `GET /api/homes?q=`: public islands, newest first; `q` keeps the ones whose owner's username or name, or title,
-/// holds it (capitals do not matter).
-async fn list(State(state): State<AppState>, Query(page): Query<Page>) -> ApiResult<Json<Value>> {
+/// holds it (capitals do not matter). Searches are counted per address; the plain listing is not.
+async fn list(State(state): State<AppState>, headers: HeaderMap, Query(page): Query<Page>) -> ApiResult<Json<Value>> {
+    let pattern = page.pattern()?;
+    if pattern.is_some() {
+        rate_limit(&state, format!("home-search:{}", client_address(&headers)), SEARCHES_PER_ADDRESS)?;
+    }
     let rows = sqlx::query(
         "SELECT u.username, u.display_name AS owner_name, h.title, h.status_message, h.emoji, h.updated_at, h.visits_total
          FROM homes h JOIN users u ON u.id = h.owner_id
@@ -187,7 +202,7 @@ async fn list(State(state): State<AppState>, Query(page): Query<Page>) -> ApiRes
     )
     .bind(page.before())
     .bind(page.limit())
-    .bind(page.pattern()?)
+    .bind(pattern)
     .fetch_all(&state.db)
     .await?;
     let homes: Vec<Value> = rows
@@ -292,9 +307,11 @@ async fn update(
     if changes.visibility.as_deref().is_some_and(|v| !VISIBILITIES.contains(&v)) {
         return Err(bad("invalid_visibility", "공개 범위를 확인해 주세요."));
     }
-    // Picking a 미니미 means walking as it: a look the owner wore comes off.
+    // Picking a 미니미 means walking as it: a look the owner wore comes off, in the same transaction, so neither change
+    // is kept without the other.
     let picked = minime.is_some();
     let visibility_set = changes.visibility.is_some();
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE homes SET title = COALESCE($2, title), status_message = COALESCE($3, status_message),
          mood = COALESCE($4, mood), minime = COALESCE($5, minime), emoji = COALESCE($6, emoji),
@@ -307,11 +324,12 @@ async fn update(
     .bind(minime)
     .bind(emoji)
     .bind(changes.visibility)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
     if picked {
-        crate::looks::take_off(&state.db, user.id).await?;
+        crate::looks::take_off(&mut *tx, user.id).await?;
     }
+    tx.commit().await?;
     // Whoever stands on the island and no longer may is let out.
     if visibility_set {
         crate::rooms::revalidate(&state, &user.username).await;
@@ -391,22 +409,40 @@ fn world_id(value: &str) -> ApiResult<&str> {
     Ok(value)
 }
 
-/// The world columns a stored world is answered with; its envelope comes as the text PostgreSQL keeps.
-const WORLD_COLUMNS: &str = "world_id, revision, data::text AS data, updated_at";
-
-/// `{worldId, revision, data, updatedAt}` with the stored envelope written in as it is, not parsed and written again.
-fn world_response(row: &PgRow) -> Response {
+/// `{worldId, revision, data, updatedAt}` with the stored envelope (`data`, the text PostgreSQL keeps) written in as it
+/// is, not parsed and written again.
+fn world_response(row: &PgRow, data: &str) -> Response {
     let body = format!(
         r#"{{"worldId":{},"revision":{},"data":{},"updatedAt":{}}}"#,
         Value::from(row.get::<String, _>("world_id")),
         row.get::<i64, _>("revision"),
-        row.get::<String, _>("data"),
+        data,
         json!(row.get::<DateTime<Utc>, _>("updated_at")),
     );
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// 204 until the owner first saves: a fresh island is the normal state, not an error.
+/// A stored world's entity tag: its revision and the microsecond it was saved. The revision alone could come back: a
+/// world pushed out (see [`MAX_WORLDS`]) and saved again starts over at 1.
+fn world_tag(revision: i64, updated_at: DateTime<Utc>) -> String {
+    format!("\"r{revision}.{}\"", updated_at.timestamp_micros())
+}
+
+/// The revision and save time of the world the browser holds, from an `If-None-Match` in [`world_tag`]'s shape (also
+/// weakened, as a cache on the way may do); None for anything else.
+fn known_world(headers: &HeaderMap) -> Option<(i64, DateTime<Utc>)> {
+    let tags = headers.get(header::IF_NONE_MATCH)?.to_str().ok()?;
+    tags.split(',').find_map(|tag| {
+        let tag = tag.trim();
+        let (revision, micros) =
+            tag.strip_prefix("W/").unwrap_or(tag).strip_prefix("\"r")?.strip_suffix('"')?.split_once('.')?;
+        Some((revision.parse().ok()?, DateTime::from_timestamp_micros(micros.parse().ok()?)?))
+    })
+}
+
+/// 204 until the owner first saves: a fresh island is the normal state, not an error. A world comes with its
+/// [`world_tag`] and is checked again before each reuse; a browser that holds the stored one gets a 304, and the
+/// envelope is not even read out of storage. Who may view the island is checked first either way.
 async fn world(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -414,16 +450,32 @@ async fn world(
     Query(query): Query<WorldQuery>,
 ) -> ApiResult<Response> {
     let viewer = optional_user(&state, &headers).await?;
+    if viewer.is_none() {
+        rate_limit(&state, format!("world-read:{}", client_address(&headers)), WORLD_READS_PER_ADDRESS)?;
+    }
     let (home, _) = visible_home(&state, &name, viewer.as_ref()).await?;
-    let row = sqlx::query(&format!("SELECT {WORLD_COLUMNS} FROM home_worlds WHERE owner_id = $1 AND world_id = $2"))
-        .bind(home.owner_id)
-        .bind(world_id(&query.world_id)?)
-        .fetch_optional(&state.db)
-        .await?;
-    Ok(match row {
-        Some(row) => world_response(&row),
-        None => StatusCode::NO_CONTENT.into_response(),
-    })
+    let (revision, saved_at) = known_world(&headers).unzip();
+    let row = sqlx::query(
+        "SELECT world_id, revision, updated_at,
+           CASE WHEN revision = $3 AND updated_at = $4 THEN NULL ELSE data::text END AS data
+         FROM home_worlds WHERE owner_id = $1 AND world_id = $2",
+    )
+    .bind(home.owner_id)
+    .bind(world_id(&query.world_id)?)
+    .bind(revision)
+    .bind(saved_at)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(row) = row else { return Ok(StatusCode::NO_CONTENT.into_response()) };
+    let mut response = match row.get::<Option<&str>, _>("data") {
+        Some(data) => world_response(&row, data),
+        None => StatusCode::NOT_MODIFIED.into_response(),
+    };
+    let tag = HeaderValue::from_str(&world_tag(row.get("revision"), row.get("updated_at"))).map_err(internal)?;
+    let headers = response.headers_mut();
+    headers.insert(header::ETAG, tag);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -534,6 +586,10 @@ fn check_save(bytes: &[u8], owner: Uuid) -> ApiResult<Checked> {
     Ok(Checked { world_id: save.world_id, base_revision: save.base_revision, data, domains })
 }
 
+/// What a save answers with: the stored world's id, revision and time. The page has the envelope it sent, and an
+/// autosave every few seconds should not carry up to 2 MiB back.
+const SAVED_COLUMNS: &str = "world_id, revision, updated_at";
+
 /// Stores a save under a lock on the owner's home: a first save makes the world's row (None when it exists already),
 /// a later one needs the revision it was based on (None when another save came first). The owner then keeps at most
 /// [`MAX_WORLDS`] worlds and [`MAX_MEMBER_WORLD_BYTES`] in all: the least recently updated of the others make room,
@@ -545,7 +601,7 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
     let row = if save.base_revision == 0 {
         sqlx::query(&format!(
             "INSERT INTO home_worlds (owner_id, world_id, revision, data, byte_size) VALUES ($1, $2, 1, $3::jsonb, $4)
-             ON CONFLICT DO NOTHING RETURNING {WORLD_COLUMNS}"
+             ON CONFLICT DO NOTHING RETURNING {SAVED_COLUMNS}"
         ))
         .bind(owner)
         .bind(&save.world_id)
@@ -556,7 +612,7 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
     } else {
         sqlx::query(&format!(
             "UPDATE home_worlds SET revision = revision + 1, data = $3::jsonb, byte_size = $4, updated_at = now()
-             WHERE owner_id = $1 AND world_id = $2 AND revision = $5 RETURNING {WORLD_COLUMNS}"
+             WHERE owner_id = $1 AND world_id = $2 AND revision = $5 RETURNING {SAVED_COLUMNS}"
         ))
         .bind(owner)
         .bind(&save.world_id)
@@ -587,14 +643,30 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
     Ok(row)
 }
 
-/// `PUT /api/homes/me/world`. The body is read only once the sender is known and within its budget.
-async fn save_world(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Response> {
+/// The save request's body, up to [`MAX_SAVE_BYTES`]. Only a body past that is an island too large; one that stops
+/// coming (the connection dropped) is [`WORLD_CUT_SHORT`].
+async fn save_body(body: Body) -> ApiResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| WORLD_CUT_SHORT)?;
+        if chunk.len() > MAX_SAVE_BYTES.saturating_sub(bytes.len()) {
+            return Err(WORLD_TOO_LARGE);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// `PUT /api/homes/me/world`: `{worldId, revision, updatedAt}` of the stored world. The body is read only once the
+/// sender is known and within its budget.
+async fn save_world(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
     rate_limit(&state, format!("world:{}", user.id), WORLD_SAVES_PER_WINDOW)?;
-    let bytes = axum::body::to_bytes(body, MAX_SAVE_BYTES).await.map_err(|_| WORLD_TOO_LARGE)?;
+    let bytes = save_body(body).await?;
     let owner = user.id;
     let save = tokio::task::spawn_blocking(move || check_save(&bytes, owner)).await.map_err(internal)??;
-    my_home(&state, &user).await?;
+    create(&state.db, &user).await?;
     if let Some(problem) = match &save.domains {
         Some(domains) => crate::residents::problem(&state.db, domains).await?,
         None => None,
@@ -605,7 +677,11 @@ async fn save_world(State(state): State<AppState>, headers: HeaderMap, body: Bod
     let row = store(&state.db, user.id, &save)
         .await?
         .ok_or(conflict("revision_conflict", "다른 곳에서 먼저 저장했어요. 새로 불러온 뒤 다시 저장해 주세요."))?;
-    Ok(world_response(&row))
+    Ok(Json(json!({
+        "worldId": row.get::<String, _>("world_id"),
+        "revision": row.get::<i64, _>("revision"),
+        "updatedAt": row.get::<DateTime<Utc>, _>("updated_at"),
+    })))
 }
 
 #[cfg(test)]

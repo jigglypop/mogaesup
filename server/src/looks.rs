@@ -268,29 +268,36 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     let parts_path = format!("avatar-factory/wardrobe/bodies/{body_job}/parts");
     let listing = factory::fetch_json(&state, &user.username, &parts_path).await?.ok_or(BODY_CHANGED)?;
     let body_sha = listed(&bodies, &listing, &look)?;
-    let mut transaction = state.db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(BAKING_LOCK).execute(&mut *transaction).await?;
-    if baking_now(&mut *transaction).await? >= MAX_BAKING as i64 {
-        return Err(BUSY);
-    }
-    // One bake at a time per member; one cut short long ago no longer holds the next.
-    let revision: Option<i64> = sqlx::query_scalar(
-        "INSERT INTO user_looks (user_id, request) VALUES ($1, $2)
-         ON CONFLICT (user_id) DO UPDATE SET request = $2, revision = user_looks.revision + 1, status = 'baking',
-           error_code = NULL, error_message = NULL, wear_on_ready = true, updated_at = now()
-         WHERE user_looks.status <> 'baking' OR user_looks.updated_at < now() - make_interval(mins => $3)
-         RETURNING revision",
-    )
-    .bind(user.id)
-    .bind(&look)
-    .bind(STALE.num_minutes() as i32)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    let revision = revision.ok_or(BAKING)?;
-    transaction.commit().await?;
-    tokio::spawn(
-        Bake { state: state.clone(), user: user.clone(), revision, look, body_sha, _admission: admission }.run(),
-    );
+    // Recorded and started on a task of its own: a request dropped between the two (its connection closing) would leave
+    // the look `baking` with nothing baking it, holding the member's next save until it goes stale.
+    let (task_state, task_user) = (state.clone(), user.clone());
+    tokio::spawn(async move {
+        let mut transaction = task_state.db.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(BAKING_LOCK).execute(&mut *transaction).await?;
+        if baking_now(&mut *transaction).await? >= MAX_BAKING as i64 {
+            return Err(BUSY);
+        }
+        // One bake at a time per member; one cut short long ago no longer holds the next.
+        let revision: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO user_looks (user_id, request) VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET request = $2, revision = user_looks.revision + 1, status = 'baking',
+               error_code = NULL, error_message = NULL, wear_on_ready = true, updated_at = now()
+             WHERE user_looks.status <> 'baking' OR user_looks.updated_at < now() - make_interval(mins => $3)
+             RETURNING revision",
+        )
+        .bind(task_user.id)
+        .bind(&look)
+        .bind(STALE.num_minutes() as i32)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let revision = revision.ok_or(BAKING)?;
+        transaction.commit().await?;
+        let bake = Bake { state: task_state, user: task_user, revision, look, body_sha, _admission: admission };
+        tokio::spawn(bake.run());
+        Ok::<_, ApiError>(())
+    })
+    .await
+    .map_err(internal)??;
     let saved = look_of(&state, user.id).await?.ok_or(NO_LOOK)?;
     Ok((StatusCode::ACCEPTED, Json(json!({"look": saved}))).into_response())
 }
@@ -321,7 +328,7 @@ async fn wear(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
 }
 
 /// Picking a 미니미 on the island takes the look off, and a look still baking is not put on when it finishes.
-pub async fn take_off(db: &PgPool, user: Uuid) -> Result<(), sqlx::Error> {
+pub async fn take_off(db: impl PgExecutor<'_>, user: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE user_looks SET worn = false, wear_on_ready = false WHERE user_id = $1 AND (worn OR wear_on_ready)",
     )
@@ -570,9 +577,19 @@ impl Bake {
             let coverage = if COVERED_SLOTS.contains(&slot.as_str()) {
                 let path = format!("avatar-factory/wardrobe/bodies/{body_job}/coverage/{job}/{slot}?version={version}");
                 let record = self.json(&path).await?;
-                // Encoded and decoded coverage coexist briefly; account for both before decoding.
-                budget.take(record.as_ref().map_or(0, |r| r.to_string().len()).saturating_mul(2))?;
-                Some(record.as_ref().and_then(Coverage::parse).ok_or_else(|| no_coverage(slot))?)
+                // Encoded and decoded coverage coexist briefly; account for both before decoding. A record is up to
+                // 8 MiB, so it is measured and decoded off the runtime's threads.
+                let (record, size) = tokio::task::spawn_blocking(move || {
+                    let size = record.as_ref().map_or(0, |r| r.to_string().len());
+                    (record, size)
+                })
+                .await
+                .map_err(|error| Failure::from(internal(error)))?;
+                budget.take(size.saturating_mul(2))?;
+                let coverage = tokio::task::spawn_blocking(move || record.as_ref().and_then(Coverage::parse))
+                    .await
+                    .map_err(|error| Failure::from(internal(error)))?;
+                Some(coverage.ok_or_else(|| no_coverage(slot))?)
             } else {
                 None
             };

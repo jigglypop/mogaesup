@@ -70,6 +70,8 @@ const INTERRUPTED: &str = "서버가 다시 시작되어 가져오기가 멈췄�
 /// this long has stopped without recording why.
 const STALLED_MINUTES: i32 = 30;
 const STALLED: &str = "가져오기가 30분 넘게 진행되지 않아 멈춘 것으로 처리했습니다. 다시 시도해 주세요.";
+/// How an import `interrupt_stale` already gave up on ends, should its task still get as far as saving.
+const GAVE_UP: ApiError = conflict("interrupted", STALLED);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -124,8 +126,23 @@ impl Report {
         self.checks.push(Check { code, level, message: message.into() });
     }
 
+    /// The report as stored. A model's own names (its animations) go in as the file has them, and jsonb refuses a NUL:
+    /// one would fail the import's last write, success or failure alike, and leave it `running`.
     fn json(&self) -> Value {
-        serde_json::to_value(self).unwrap_or(Value::Null)
+        without_nul(serde_json::to_value(self).unwrap_or(Value::Null))
+    }
+}
+
+/// `value` with every NUL taken out of its strings and keys.
+fn without_nul(value: Value) -> Value {
+    let strip = |text: String| if text.contains('\0') { text.replace('\0', "") } else { text };
+    match value {
+        Value::String(text) => Value::String(strip(text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(without_nul).collect()),
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(key, child)| (strip(key), without_nul(child))).collect())
+        }
+        other => other,
     }
 }
 
@@ -363,25 +380,37 @@ pub async fn enqueue(
         check_target(row.get("kind"), row.get("source"), &order.kind)?;
     }
     let id = Uuid::new_v4();
-    // The partial unique index on active imports turns a second import of the same item into no row.
-    let queued = sqlx::query(
-        "INSERT INTO catalog_imports (id, item_id, kind, label, emoji, factory_job_id, replaces, requested_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
-    )
-    .bind(id)
-    .bind(&order.item)
-    .bind(&order.kind)
-    .bind(&order.label)
-    .bind(&order.emoji)
-    .bind(&order.job)
-    .bind(existing.is_some())
-    .bind(admin.id)
-    .execute(&state.db)
-    .await?;
-    if queued.rows_affected() == 0 {
+    let replaces = existing.is_some();
+    let task = Task { state: state.clone(), id, username: admin.username, user: admin.id, order };
+    // Queued and started on a task of its own: a request dropped between the two (its connection closing) would leave
+    // a queued import that nothing runs, holding its item until the server restarts.
+    let queued = tokio::spawn(async move {
+        // The partial unique index on active imports turns a second import of the same item into no row.
+        let queued = sqlx::query(
+            "INSERT INTO catalog_imports (id, item_id, kind, label, emoji, factory_job_id, replaces, requested_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+        )
+        .bind(task.id)
+        .bind(&task.order.item)
+        .bind(&task.order.kind)
+        .bind(&task.order.label)
+        .bind(&task.order.emoji)
+        .bind(&task.order.job)
+        .bind(replaces)
+        .bind(task.user)
+        .execute(&task.state.db)
+        .await?
+        .rows_affected();
+        if queued > 0 {
+            tokio::spawn(task.run());
+        }
+        Ok::<_, sqlx::Error>(queued)
+    })
+    .await
+    .map_err(internal)??;
+    if queued == 0 {
         return Err(RUNNING);
     }
-    tokio::spawn(Task { state: state.clone(), id, username: admin.username, user: admin.id, order }.run());
     let row = fetch(&state.db, id).await?.ok_or(NOT_FOUND)?;
     Ok((StatusCode::ACCEPTED, Json(import_json(&row))).into_response())
 }
@@ -606,7 +635,8 @@ impl Task {
 
     /// Makes the copy the item's model in one transaction, with its version and the finished import. A new item starts
     /// with the order's name, emoji, status and place; an existing one keeps all of those and, when no new picture came,
-    /// its picture. A copy identical to the version the item shows adds no version.
+    /// its picture. A copy identical to the version the item shows adds no version. An import no longer active (one
+    /// `interrupt_stale` gave up on, already reported failed and its item freed for another import) writes nothing.
     async fn save(
         &self,
         source: &studio::Source,
@@ -617,6 +647,14 @@ impl Task {
     ) -> ApiResult<()> {
         let source_ref = source.source_ref();
         let mut tx = self.state.db.begin().await?;
+        // Locked until the commit, so it cannot be given up on between this check and the import's own `done`.
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM catalog_imports WHERE id = $1 FOR UPDATE")
+            .bind(self.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if !matches!(status.as_deref(), Some("queued" | "running")) {
+            return Err(GAVE_UP);
+        }
         let existing = sqlx::query(
             "SELECT i.kind, i.source, i.thumbnail_url, v.id AS version, v.model_url AS version_model,
              v.thumbnail_url AS version_thumbnail, v.source_ref AS version_ref, v.stage AS version_stage
@@ -808,6 +846,22 @@ mod tests {
         web_checks(&mut report, 900, 900, false, &[]);
         assert_eq!(levels(&report), [("slim", Level::Info), ("file_size", Level::Ok)]);
         assert_eq!(size_text(900), "1 KB");
+    }
+
+    #[test]
+    fn a_report_keeps_no_nul_for_jsonb_to_refuse() {
+        // A model's animation names go into the report as they are, in its details and in the unused-clip check.
+        let model = glb::join(&json!({"asset": {"version": "2.0"}, "animations": [{"name": "Da\u{0}nce"}]}), &[]);
+        let mut report = Report::default();
+        verify("furniture", &model, None, &mut report).unwrap();
+        assert_eq!(report.model.as_ref().unwrap().animations, ["Da\u{0}nce"]);
+        report.source = Some(json!({"stage": "comp\u{0}lete", "ke\u{0}y": ["a\u{0}b", 1, null]}));
+        let stored = report.json();
+        assert_eq!(stored["model"]["animations"], json!(["Dance"]));
+        assert_eq!(stored["source"], json!({"stage": "complete", "key": ["ab", 1, null]}));
+        let unused = stored["checks"].as_array().unwrap().iter().find(|check| check["code"] == "unused_clips").unwrap();
+        assert_eq!(unused["message"], "엔진이 쓰지 않는 애니메이션: Dance");
+        assert!(!stored.to_string().contains("\\u0000"), "{stored}");
     }
 
     #[test]

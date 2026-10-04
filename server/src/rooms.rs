@@ -13,7 +13,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -44,6 +44,8 @@ const ACCOUNT_CAPACITY: usize = 4;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// Queued frames written to a peer before one flush.
+const SEND_BATCH: usize = 64;
 /// How long a socket we closed is kept for the peer's answer.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 const WINDOW: Duration = Duration::from_secs(1);
@@ -220,6 +222,25 @@ impl PartialState {
             && self.animation.as_deref().is_none_or(label)
             && self.model_url.as_deref().is_none_or(|url| model_url(url, origins))
             && self.t.is_none_or(|t| t.is_finite() && (0.0..1e13).contains(&t))
+    }
+}
+
+impl ClientMessage {
+    /// Whether what the message carries may be taken, checked before the hub is locked (a model URL is parsed against
+    /// each of the site's origins). Whether a message that may not counts as malformed is for [`Rooms::receive`] to say:
+    /// an Update before a Join is ignored.
+    fn valid(&self, origins: &[String]) -> bool {
+        match self {
+            Self::Join { color, model_url: model, .. } => {
+                hex_color(color) && model.as_deref().is_none_or(|url| model_url(url, origins))
+            }
+            Self::Update { state } => state.valid(origins),
+            Self::Chat { text, ack_id, .. } => {
+                let said = text.trim();
+                !said.is_empty() && said.chars().count() <= MAX_CHAT_CHARS && ack_id.as_deref().is_none_or(label)
+            }
+            Self::Ping { .. } | Self::Leave => true,
+        }
     }
 }
 
@@ -415,6 +436,11 @@ impl Rooms {
     }
 
     fn receive(&self, room_key: &str, id: &str, raw: &str, origins: &[String]) -> Flow {
+        // Read and checked before the hub is locked: every room's frames wait on that lock.
+        let message = serde_json::from_str::<ClientMessage>(raw).ok().map(|message| {
+            let valid = message.valid(origins);
+            (message, valid)
+        });
         let now = Instant::now();
         let mut hub = self.hub();
         let Some(room) = hub.rooms.get_mut(room_key) else { return Flow::Close(1011, "room closed") };
@@ -422,14 +448,14 @@ impl Rooms {
         if !peer.messages.allow(now, MESSAGES_PER_WINDOW) {
             return Flow::Close(4429, "too many messages");
         }
-        let Ok(message) = serde_json::from_str::<ClientMessage>(raw) else { return malformed(&mut peer.invalid, now) };
+        let Some((message, valid)) = message else { return malformed(&mut peer.invalid, now) };
         match message {
             ClientMessage::Ping { ts } => {
                 let _ = peer.tx.try_send(text(&json!({"type": "Pong", "ts": ts})));
             }
             ClientMessage::Leave => return Flow::Close(1000, "left"),
             ClientMessage::Join { color, model_url: model, .. } => {
-                if !hex_color(&color) || model.as_deref().is_some_and(|url| !model_url(url, origins)) {
+                if !valid {
                     return malformed(&mut peer.invalid, now);
                 }
                 let rejoin = peer.placed;
@@ -459,7 +485,7 @@ impl Rooms {
             }
             ClientMessage::Update { state: mut changes } => {
                 let Some(state) = peer.state.as_mut() else { return Flow::Continue };
-                if !changes.valid(origins) {
+                if !valid {
                     return malformed(&mut peer.invalid, now);
                 }
                 if !peer.updates.allow(now, UPDATES_PER_SECOND) {
@@ -502,13 +528,10 @@ impl Rooms {
                     let _ = peer.tx.try_send(text(&json!({"type": "Ack", "ackId": ack})));
                     return Flow::Continue;
                 }
-                let said = said.trim();
-                if said.is_empty()
-                    || said.chars().count() > MAX_CHAT_CHARS
-                    || ack_id.as_deref().is_some_and(|a| !label(a))
-                {
+                if !valid {
                     return malformed(&mut peer.invalid, now);
                 }
+                let said = said.trim();
                 if !peer.chats.allow(now, CHATS_PER_SECOND) {
                     return Flow::Continue;
                 }
@@ -635,6 +658,20 @@ async fn send(socket: &mut WebSocket, message: Message) -> bool {
     matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await, Ok(Ok(())))
 }
 
+/// Writes `first` and the frames already queued behind it, [`SEND_BATCH`] at most in all, then flushes them at once,
+/// within one [`SEND_TIMEOUT`]: a busy room's movement goes out in one write per wake instead of one per frame.
+async fn send_queued(socket: &mut WebSocket, first: Message, outbound: &mut mpsc::Receiver<Message>) -> bool {
+    let batch = async {
+        socket.feed(first).await?;
+        for _ in 1..SEND_BATCH {
+            let Ok(message) = outbound.try_recv() else { break };
+            socket.feed(message).await?;
+        }
+        socket.flush().await
+    };
+    matches!(tokio::time::timeout(SEND_TIMEOUT, batch).await, Ok(Ok(())))
+}
+
 /// The session and the island's visibility are checked on their own task, so a slow database never stops this
 /// socket's relay (a stalled loop delivers its peers' movement in bursts). Only a definite refusal closes the peer; a
 /// failed check keeps it, as `revalidate` does.
@@ -678,8 +715,6 @@ async fn connection(
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_seen = Instant::now();
-    // Whether a close frame has gone to the peer.
-    let mut closed = false;
     let closing = loop {
         if let Some(closing) = *registration.cancelled.borrow() {
             break Some(closing);
@@ -704,12 +739,7 @@ async fn connection(
             },
             outgoing = outbound.recv() => match outgoing {
                 Some(message) => {
-                    let close = matches!(message, Message::Close(_));
-                    if !send(&mut socket, message).await { break None; }
-                    if close {
-                        closed = true;
-                        break None;
-                    }
+                    if !send_queued(&mut socket, message, &mut outbound).await { break None; }
                 }
                 None => break *registration.cancelled.borrow(),
             },
@@ -722,6 +752,8 @@ async fn connection(
     // Revocation can race an incoming frame or the outbound channel closing after the peer was removed.
     // Preserve its reason whichever select branch completed first.
     let closing = (*registration.cancelled.borrow()).or(closing);
+    // Whether a close frame has gone to the peer.
+    let mut closed = false;
     if let Some((code, reason)) = closing {
         closed = send(&mut socket, Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
     }

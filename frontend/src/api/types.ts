@@ -70,6 +70,9 @@ export type HomeWorld = {
   updatedAt: string;
 };
 
+/** A save's answer: the stored world without the island it sent. */
+export type SavedHomeWorld = Pick<HomeWorld, 'worldId' | 'revision' | 'updatedAt'>;
+
 export type SaveHomeWorld = {
   expectedOwnerId: string;
   worldId: string;

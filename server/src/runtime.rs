@@ -71,13 +71,25 @@ const ATTEMPTS: u32 = 4;
 const FIRST_WAIT: Duration = Duration::from_millis(500);
 
 /// `request` until it succeeds, [`ATTEMPTS`] times at most: a background task's check or final write must outlast a
-/// brief database outage, which a request from a page would simply have reported.
+/// brief database outage, which a request from a page would simply have reported. A request the database refused for
+/// what it is ([`permanent`]) is not sent again.
 pub(crate) async fn retry<T, F, Fut>(request: F) -> Result<T, sqlx::Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, sqlx::Error>>,
 {
     retry_after(FIRST_WAIT, request).await
+}
+
+/// Whether the database would answer `error` again however often it is asked: SQLSTATE class 22 (a value it cannot
+/// take), 23 (a constraint) or 42 (a statement or permission it rejects).
+fn permanent(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => {
+            database.code().is_some_and(|code| matches!(code.get(..2), Some("22" | "23" | "42")))
+        }
+        _ => false,
+    }
 }
 
 async fn retry_after<T, F, Fut>(first_wait: Duration, mut request: F) -> Result<T, sqlx::Error>
@@ -89,6 +101,7 @@ where
     for _ in 1..ATTEMPTS {
         match request().await {
             Ok(value) => return Ok(value),
+            Err(error) if permanent(&error) => return Err(error),
             Err(error) => {
                 tracing::warn!(%error, "Database request failed; trying again");
                 tokio::time::sleep(wait).await;
@@ -102,7 +115,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::{
+        borrow::Cow,
+        error::Error,
+        sync::atomic::{AtomicU32, Ordering},
+    };
+
+    /// What PostgreSQL answers with SQLSTATE `.0`.
+    #[derive(Debug)]
+    struct Refusal(&'static str);
+
+    impl std::fmt::Display for Refusal {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "SQLSTATE {}", self.0)
+        }
+    }
+
+    impl Error for Refusal {}
+
+    impl sqlx::error::DatabaseError for Refusal {
+        fn message(&self) -> &str {
+            "refused"
+        }
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(self.0.into())
+        }
+        fn as_error(&self) -> &(dyn Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    fn refused(code: &'static str) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(Refusal(code)))
+    }
 
     #[tokio::test]
     async fn a_background_request_outlasts_a_brief_outage_and_then_gives_up() {
@@ -119,5 +173,25 @@ mod tests {
         };
         assert!(retry_after(wait, down).await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), ATTEMPTS);
+
+        // A value, constraint or statement the database refuses is refused again: asked once, not four times.
+        for code in ["22P05", "23505", "42703"] {
+            let calls = AtomicU32::new(0);
+            let refusing = || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(refused(code))
+            };
+            let error = retry_after(wait, refusing).await.unwrap_err();
+            assert!(matches!(&error, sqlx::Error::Database(found) if found.code().as_deref() == Some(code)), "{error}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{code}");
+        }
+        // A deadlock, a server shutting down or a lost connection passes, so it is asked again.
+        for code in ["40P01", "57P01", "08006"] {
+            let calls = AtomicU32::new(0);
+            let passing =
+                || async { if calls.fetch_add(1, Ordering::SeqCst) < 1 { Err(refused(code)) } else { Ok(7) } };
+            assert_eq!(retry_after(wait, passing).await.unwrap(), 7, "{code}");
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{code}");
+        }
     }
 }

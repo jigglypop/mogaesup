@@ -28,6 +28,7 @@ pub fn same_origin(state: &AppState, headers: &HeaderMap) -> bool {
 /// Writes must come from the site itself: a matching Origin, not cross-site, and JSON bodies (a cross-site form cannot
 /// send JSON without a preflight). The studio gateway carries uploads, so it only needs the Origin.
 pub async fn protect(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let studio = crate::factory::is_studio_path(request.uri().path());
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         let headers = request.headers();
         let cross_site = headers.get("sec-fetch-site").is_some_and(|v| v == "cross-site");
@@ -37,12 +38,16 @@ pub async fn protect(State(state): State<AppState>, request: Request, next: Next
         let json =
             headers.get(header::CONTENT_TYPE).is_some_and(|v| v.to_str().unwrap_or("").starts_with("application/json"));
         // The studio's own uploads are multipart; its requests go to the character server as they came.
-        if !json && !crate::factory::is_studio_path(request.uri().path()) {
+        if !json && !studio {
             return ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "json_required", "JSON 요청이 필요합니다.")
                 .into_response();
         }
     }
     let mut response = next.run(request).await;
+    // The character server's answers pass as they came.
+    if !studio {
+        response = rejection_as_json(response);
+    }
     let headers = response.headers_mut();
     if !headers.contains_key(header::CACHE_CONTROL) {
         headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -52,6 +57,28 @@ pub async fn protect(State(state): State<AppState>, request: Request, next: Next
     headers.insert("referrer-policy", "no-referrer".parse().unwrap());
     headers.insert("content-security-policy", "default-src 'none'; frame-ancestors 'none'".parse().unwrap());
     response
+}
+
+/// axum's own refusals of a request it could not read (a body, path or query its extractors cannot take, a body past its
+/// limit), which come as plain text, as the `{code, message}` every other error is and the app shows; same status.
+fn rejection_as_json(response: Response) -> Response {
+    let plain = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/plain"));
+    if !plain {
+        return response;
+    }
+    let status = response.status();
+    let (code, message) = match status {
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
+            ("invalid_request", "요청 형식이 올바르지 않습니다.")
+        }
+        StatusCode::PAYLOAD_TOO_LARGE => ("too_large", "요청이 너무 큽니다."),
+        _ => return response,
+    };
+    ApiError::new(status, code, message).into_response()
 }
 
 const RATE_WINDOW: Duration = Duration::from_secs(600);
