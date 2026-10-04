@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.api import server
@@ -187,3 +189,68 @@ async def test_artifact_head_uses_the_same_operator_authentication_as_get(monkey
             assert head.headers['content-length'] == str(path.stat().st_size)
     finally:
         server.app.dependency_overrides.pop(get_factory, None)
+
+
+def test_the_server_raises_the_worker_thread_limit_long_jobs_share_with_requests(monkeypatch, tmp_path):
+    import anyio
+    from fastapi.testclient import TestClient
+    from src.api import avatar_factory as factory_api
+    from src.services import avatar_auto_resume
+    monkeypatch.setenv('ASSET_DATA_ROOT', str(tmp_path))
+    monkeypatch.setattr(server, 'assert_records_mode', lambda: None)
+    # Only the thread limit is looked at: no startup scan, and the cached factory of the app stays as it is.
+    monkeypatch.setattr(factory_api, 'get_factory', lambda: None)
+    monkeypatch.setattr(avatar_auto_resume, 'start', lambda factory: None)
+    with TestClient(server.app) as client:
+        tokens = client.portal.call(lambda: anyio.to_thread.current_default_thread_limiter().total_tokens)
+    assert tokens == server.WORKER_THREADS == 200
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+async def test_health_and_drain_read_the_lock_files_off_the_event_loop_while_jobs_hold_every_worker_thread(
+        monkeypatch, tmp_path):
+    import anyio
+    import httpx
+    monkeypatch.setenv('ASSET_DATA_ROOT', str(tmp_path))
+    monkeypatch.setattr(server, '_API_KEY', '')
+    threads = []
+
+    def recorded(function):
+        def call(*args):
+            try:
+                asyncio.get_running_loop()
+                threads.append('event loop')
+            except RuntimeError:
+                threads.append('worker thread')
+            return function(*args)
+        return call
+
+    for name in ('activity_state', 'begin_drain', 'resume'):
+        monkeypatch.setattr(server, name, recorded(getattr(server, name)))
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_tokens = 1
+    taken, finish = anyio.Event(), anyio.Event()
+
+    async def long_job():
+        async with limiter:
+            taken.set()
+            await finish.wait()
+
+    token = 'c' * 32
+    async with anyio.create_task_group() as group:
+        group.start_soon(long_job)
+        await taken.wait()
+        try:
+            transport = httpx.ASGITransport(app=server.app, client=('127.0.0.1', 1234))
+            async with httpx.AsyncClient(transport=transport, base_url='http://127.0.0.1:8000') as client:
+                with anyio.fail_after(5):
+                    assert (await client.get('/health')).json()['admission']['draining'] is False
+                    drained = await client.post('/internal/drain', json={'token': token})
+                    assert drained.status_code == 200 and drained.json()['admission']['draining'] is True
+                    assert (await client.get('/api/health')).json()['admission']['draining'] is True
+                    reopened = await client.request('DELETE', '/internal/drain', json={'token': token})
+                    assert reopened.status_code == 200 and reopened.json()['admission']['draining'] is False
+        finally:
+            finish.set()
+    assert threads == ['worker thread'] * 4

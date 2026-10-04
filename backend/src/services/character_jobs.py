@@ -12,6 +12,7 @@ import httpx
 from PIL import Image
 
 from src.services.asset_editor import _write_json
+from src.services.run_lock import final_write
 from src.services.runtime_activity import paid_request
 from src.services.provider_http import download_glb
 from src.services.provider_http import get_with_retry
@@ -68,11 +69,53 @@ def archive_attempt(directory: Path, reason: str) -> int:
     return index
 
 
+def answered_task_id(path: Path, provider: str | None = None):
+    """The task ID named by a provider's saved 2xx answer to a submission (a *-submission-response.json), or None."""
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        status, body = saved.get("http_status"), saved.get("body")
+        if not (isinstance(status, int) and 200 <= status < 300 and isinstance(body, str)):
+            return None
+        document = json.loads(body)
+        if provider == 'tripo':
+            from src.services.model_providers import tripo_refusal, tripo_task_id
+            task_id = None if tripo_refusal(document) is not None else tripo_task_id(document)
+        else:
+            task_id = document.get("result")
+    except (ValueError, AttributeError):
+        return None  # Not an answer that names a task.
+    return task_id if isinstance(task_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", task_id) else None
+
+
+def submitted_task_id(directory: Path, value: dict):
+    """The task its provider accepted for the unconfirmed submission `value` (submission_uncertain, no task ID), named
+    only by the provider's saved 2xx answer; None for any other receipt. Only reads: adopt_submitted_task records it."""
+    if value.get("status") != "submission_uncertain" or value.get("task_id") or "stage" not in value:
+        return None
+    return answered_task_id(directory / f"{value['stage']}-submission-response.json", value.get('provider'))
+
+
+def adopt_submitted_task(directory: Path, value: dict) -> dict:
+    """The receipt `value`, with the task its provider accepted recorded when only the saved answer names it.
+
+    An accepted (paid) submission whose task ID could not be saved stays submission_uncertain, and a run that may send
+    it again would pay twice. When the provider's saved 2xx answer names a valid task, that task is recorded and polled.
+    """
+    task_id = submitted_task_id(directory, value)
+    if task_id is None:
+        return value
+    value = {**value, "task_id": task_id, "status": "PENDING", "recovery_method": "submission_response"}
+    _write_json(directory / "character.json", value)
+    LOGGER.info('Submitted task recovered from its saved answer: run=%s stage=%s', directory.name, value['stage'])
+    return value
+
+
 def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: httpx.Client) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
-    _write_json(directory / "character.json", value)
     try:
         with paid_request():
+            # The intent is saved once admitted: a refused admission sends nothing and leaves no uncertain receipt.
+            _write_json(directory / "character.json", value)
             response = client.post(endpoint, json=payload)
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
         # The connection never opened, so Meshy cannot have received this request.
@@ -102,7 +145,8 @@ def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: 
     if not isinstance(task_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", task_id):
         raise ValueError("Invalid task ID; recover existing submission before retrying")
     value.update(task_id=task_id, status="PENDING")
-    _write_json(directory / "character.json", value)
+    # The provider accepted (and bills) this task: a storage blip must not leave the receipt without its ID.
+    final_write(lambda: _write_json(directory / "character.json", value), 'provider task receipt')
     return value
 
 
@@ -258,7 +302,7 @@ def rig_model(directory: Path, model: Path, height: float, client: httpx.Client,
 
     if body_type != "humanoid":
         raise ValueError("Quadruped rigging requires the Meshy web app; the public Rigging API supports humanoids only")
-    if (directory / "character.json").exists() or (directory / "rig-input.glb").exists():
+    if (directory / "character.json").exists():
         raise ValueError("Existing run: refresh or recover; never resubmit an uncertain task")
     if not 0.1 <= height <= 100:
         raise ValueError("Invalid height")
@@ -269,8 +313,15 @@ def rig_model(directory: Path, model: Path, height: float, client: httpx.Client,
         raise ValueError("Meshy rigging requires a valid textured humanoid GLB")
     source_hash = hashlib.sha256(content).hexdigest()
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "rig-input.glb").open("xb") as target:
-        target.write(content)
+    staged = directory / "rig-input.glb"
+    if staged.exists():
+        # The intent is saved only once the request is admitted, so a staged input without a receipt was never sent
+        # (a refused admission). The same input is used again; another one stays refused.
+        if _digest(staged) != source_hash:
+            raise ValueError("Existing run: refresh or recover; never resubmit an uncertain task")
+    else:
+        with staged.open("xb") as target:
+            target.write(content)
     value = {"stage": "rigging", "status": "submission_uncertain", "body_type": body_type,
              "height_meters": height, "source_sha256": source_hash, "input_kind": "model",
              "generation_settings": {"should_remesh": False},
@@ -305,8 +356,17 @@ def fetch_task(client: httpx.Client, value: dict, task_id: str) -> dict:
 
 
 def record_task(directory: Path, value: dict, task_id: str, task: dict) -> dict:
-    """Save a fetched task and the status it gives the receipt `value`; callers may hold a lock, fetch_task needs none."""
-    _write_json(directory / (value["stage"] + "-result.json"), task)
+    """Save a fetched task and the status it gives the saved receipt `value`; callers may hold a lock, fetch_task needs
+    none. A poll that changed nothing writes nothing: every write is a storage request and marks the job changed."""
+    result = directory / (value["stage"] + "-result.json")
+    try:
+        unchanged = json.loads(result.read_text(encoding="utf-8")) == task
+    except (FileNotFoundError, ValueError):
+        unchanged = False
+    if not unchanged:
+        # The whole answer is compared: a finished task's download links are renewed by each read.
+        _write_json(result, task)
+    saved = dict(value)
     if value.get('provider') == 'tripo':
         from src.services.model_providers import tripo_state
         status, progress = tripo_state(task)
@@ -316,7 +376,8 @@ def record_task(directory: Path, value: dict, task_id: str, task: dict) -> dict:
             value['provider_error'] = error
     else:
         value.update(task_id=task_id, status=task["status"], progress=task.get("progress"))
-    _write_json(directory / "character.json", value)
+    if value != saved:
+        _write_json(directory / "character.json", value)
     return value
 
 

@@ -186,3 +186,36 @@ def test_one_owner_computes_only_a_few_textures_at_a_time(monkeypatch):
     with studio_library._texture_slot(1):
         results.append('free again')
     assert results == ['other owner', 'free again'] and studio_library._texture_runs == {}
+
+
+def test_a_texture_file_is_checked_by_its_stored_checksum_not_downloaded_to_be_hashed(tmp_path, monkeypatch,
+                                                                                     storage_configured):
+    import base64
+    import hashlib
+    from src.services import object_storage
+    from src.services.avatar_factory import AvatarFactory
+    library = studio_library.StudioLibrary(AvatarFactory(tmp_path), 1)
+    texture = library.generate_texture({'surface': 'grass', 'size': 256, 'seed': 7})
+    folder = library.root/'textures'/texture['id']
+    # Kept on local disk, a file is hashed from its bytes: one changed there is refused.
+    assert library.artifact(texture['id'], 'albedo.webp') == folder/'albedo.webp'
+    (folder/'orm.webp').write_bytes(b'changed')
+    with pytest.raises(PipelineError) as changed:
+        library.artifact(texture['id'], 'orm.webp')
+    assert changed.value.code == 'artifact_changed' and changed.value.status == 409
+
+    # In S3 the object's HEAD carries its SHA-256; the route streams the file after the check, which downloads nothing.
+    stored = {'albedo.webp': hashlib.sha256((folder/'albedo.webp').read_bytes()).digest(), 'normal.webp': bytes(32)}
+    monkeypatch.setattr(object_storage, '_head', lambda path: {
+        'ChecksumSHA256': base64.b64encode(stored[path.name]).decode('ascii'), 'ChecksumType': 'FULL_OBJECT'})
+    read_bytes = object_storage.StoredPath.read_bytes
+
+    def no_download(path):
+        assert path.suffix != '.webp', 'the texture was downloaded to be hashed'
+        return read_bytes(path)
+
+    monkeypatch.setattr(object_storage.StoredPath, 'read_bytes', no_download)
+    assert library.artifact(texture['id'], 'albedo.webp') == folder/'albedo.webp'
+    with pytest.raises(PipelineError) as changed:
+        library.artifact(texture['id'], 'normal.webp')
+    assert changed.value.code == 'artifact_changed'

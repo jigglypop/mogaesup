@@ -23,7 +23,7 @@ from src.services import character_jobs
 from src.services.asset_editor import _write_json, update_json
 from src.services.avatar_blueprints import AvatarBlueprints, SLOTS
 from src.services.avatar_equipment import EQUIPMENT
-from src.services.avatar_openai_images import (DEFAULT_MODEL, DEFAULT_BASE, OpenAIImageHTTPError,
+from src.services.avatar_openai_images import (DEFAULT_MODEL, DEFAULT_BASE, OpenAIImageHTTPError, saved_response,
                                                 generate_part_image as generate_openai_part_image)
 from src.services.avatar_factory import IMAGE_PROFILE as PROFILE, _LOCK, digest
 from src.services.character_parts import blender_executable
@@ -100,6 +100,21 @@ def _provider_http_message(status, provider='meshy', body=''):
 
 def resubmittable(task, explicit):
     return bool(task) and (_auto_resubmit(task) or (bool(explicit) and task.get('status') in character_jobs.RETRYABLE))
+
+
+def unresolved_image_attempt(directory, part, *, idle=True):
+    """True when the images stage cannot go on with this single-image part (a job without views): its request was
+    attempted and no answer to it is kept, so resume() refuses it. A request that never left (not_sent) is sent again.
+    `idle`: no worker can be writing the answer now, so a complete partial answer is moved into place; otherwise an
+    answer of a request in flight is only read."""
+    image = part['image']
+    if image['status'] not in ('submitting', 'submission_uncertain', 'rejected', 'failed'):
+        return False
+    receipt = directory/'output'/f'{part["slot"]}-provider'
+    if idle:
+        return not saved_response(receipt)
+    from src.services.avatar_multiview_images import answer_kept
+    return not answer_kept(image, receipt)
 
 
 # Stops that a later resume continues from without any new paid request: the task is saved, only its status or file is missing.
@@ -282,22 +297,18 @@ class AvatarImagePipeline:
         generated_views = ('front', 'side', 'back') if view_mode == 'front_side_back' else ('front', 'side')
         prepare_reference = payload.get('prepare_reference') is True
         default_expressions = payload.get('default_expressions') is True
-        if multiview and (production_mode != 'character_parts' or payload.get('reuse_job_id')):
+        if multiview and payload.get('reuse_job_id'):
             raise PipelineError('invalid_view_mode', '공통 규격 생산은 새 캐릭터 파츠 세트로 시작하세요.', 422)
-        if production_mode not in ('legacy', 'character_parts'):
-            raise PipelineError('invalid_production_mode', '지원하는 이미지 생산 모드를 선택하세요.', 422)
-        if prepare_reference and (production_mode != 'character_parts' or not multiview
-                                  or payload.get('image_mode') != 'generate' or payload.get('reuse_job_id')):
+        if prepare_reference and (not multiview or payload.get('image_mode') != 'generate' or payload.get('reuse_job_id')):
             raise PipelineError('invalid_reference_preparation',
                                 '새 캐릭터 파츠 정면·측면 이미지 생성에서만 공통 규격 원본을 만들 수 있습니다.', 422)
-        if production_mode == 'character_parts':
-            if payload.get('image_mode') != 'generate':
-                raise PipelineError('invalid_image_mode', '캐릭터 파츠 세트는 원본 이미지 생성 모드를 사용하세요.', 422)
-            payload['slots'] = payload.get('slots') or list(CHARACTER_PART_SLOTS)
-            payload['body_purpose'] = 'wardrobe_base'
-            payload['rig_with_meshy'] = True
-            if payload.get('reuse_job_id') and not re.fullmatch(r'[a-f0-9]{24}', payload['reuse_job_id']):
-                raise PipelineError('invalid_reuse', '올바른 재사용 작업 ID가 필요합니다.', 422)
+        if payload.get('image_mode') != 'generate':
+            raise PipelineError('invalid_image_mode', '캐릭터 파츠 세트는 원본 이미지 생성 모드를 사용하세요.', 422)
+        payload['slots'] = payload.get('slots') or list(CHARACTER_PART_SLOTS)
+        payload['body_purpose'] = 'wardrobe_base'
+        payload['rig_with_meshy'] = True
+        if payload.get('reuse_job_id') and not re.fullmatch(r'[a-f0-9]{24}', payload['reuse_job_id']):
+            raise PipelineError('invalid_reuse', '올바른 재사용 작업 ID가 필요합니다.', 422)
         job_id = request_job_id(owner, 'image', key)
         directory = self.factory.directory(owner, job_id)
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -306,11 +317,10 @@ class AvatarImagePipeline:
             # A replay returns its job; a new request must be affordable before any image is paid for.
             from src.services.meshy_status import require_credits
             slots = payload.get('slots') or []
-            require_credits(len(slots), rig=bool(payload.get('rig_with_meshy')) and 'body' in slots)
-            if payload.get('rig_with_meshy'):
-                # Asked here, not under the lock: a slow Meshy must not stall every other job action.
-                from src.services.avatar_meshy import AvatarMeshy
-                meshy_actions = AvatarMeshy(self.factory).library(owner)
+            require_credits(len(slots), rig='body' in slots)
+            # Asked here, not under the lock: a slow Meshy must not stall every other job action.
+            from src.services.avatar_meshy import AvatarMeshy
+            meshy_actions = AvatarMeshy(self.factory).library(owner)
         with _LOCK:
             existing = read_json(directory/'job.json')
             if existing:
@@ -324,42 +334,23 @@ class AvatarImagePipeline:
             fit_profiles = normalize_fit_profiles(submitted_fit_profiles, descriptions=design_prompts)
             for fit_slot, fit_profile in fit_profiles.items():
                 reject_generation_fit_profile(fit_profile, slot=fit_slot)
-            action = capabilities()['next_actions'][0 if payload['image_mode'] == 'generate' else 1]
+            action = capabilities()['next_actions'][0]
             if not action['enabled']:
                 raise PipelineError('provider_unavailable', action['reason'], 422)
             slots = payload['slots']
             if not slots or len(slots) != len(set(slots)) or any(s not in PARTS for s in slots):
                 raise PipelineError('invalid_slots', '중복되지 않은 이미지 파츠를 선택하세요.', 422)
-            if production_mode == 'character_parts' and slots != CHARACTER_PART_SLOTS:
+            if slots != CHARACTER_PART_SLOTS:
                 raise PipelineError('invalid_slots', '몸·머리카락·머리 장식·상의·하의·신발 한 세트를 선택하세요.', 422)
-            if production_mode != 'character_parts' and 'hair' in slots:
-                raise PipelineError('invalid_slots', '일체형 머리카락은 캐릭터 파츠 모드에서 생성하세요.', 422)
-            if production_mode != 'character_parts' and 'body' in slots and slots != ['body']:
-                raise PipelineError('invalid_slots', '통짜 전신은 얼굴·의상을 포함합니다. 전신 하나만 선택하세요.', 422)
-            mesh_rig = payload.get('rig_with_meshy', False)
-            body_purpose = payload.get('body_purpose', 'whole_character')
-            if body_purpose not in ('whole_character', 'wardrobe_base') or (body_purpose == 'wardrobe_base' and
-                    ((production_mode != 'character_parts' and slots != ['body']) or not mesh_rig)):
-                raise PipelineError('invalid_body_purpose', '의상용 기준 몸은 Meshy 전신 리깅 경로를 사용하세요.', 422)
             submitted_motions = payload.get('motion_actions', {})
             if not isinstance(submitted_motions, dict):
                 raise PipelineError('invalid_action', '기본 동작을 다시 선택하세요.', 422)
-            if mesh_rig and production_mode == 'character_parts':
-                from src.services.avatar_meshy import AvatarMeshy
-                motions = {**AvatarMeshy(self.factory).default_actions(owner), **submitted_motions}
-                payload['motion_actions'] = motions
-            else:
-                motions = submitted_motions
-            if (mesh_rig and slots != ['body'] and production_mode != 'character_parts') or (motions and not mesh_rig):
-                raise PipelineError('invalid_rig', 'Meshy 리깅과 동작은 통짜 전신에서 선택하세요.', 422)
-            if mesh_rig:
-                from src.services.avatar_meshy import SLOTS as MOTION_SLOTS
-                available = {i['action_id'] for i in meshy_actions} if motions else set()
-                if not set(motions) <= set(MOTION_SLOTS) or any(type(v) is not int or v not in available for v in motions.values()):
-                    raise PipelineError('invalid_action', '기본 동작을 현재 Meshy 목록에서 다시 선택하세요.', 422)
-            if default_expressions and (production_mode != 'character_parts' or 'body' not in slots or not mesh_rig):
-                raise PipelineError('invalid_default_expressions',
-                                    '기본 표정은 몸 파츠와 리깅을 포함한 새 캐릭터 파츠 작업에서 생성하세요.', 422)
+            from src.services.avatar_meshy import AvatarMeshy, SLOTS as MOTION_SLOTS
+            motions = {**AvatarMeshy(self.factory).default_actions(owner), **submitted_motions}
+            payload['motion_actions'] = motions
+            available = {i['action_id'] for i in meshy_actions} if motions else set()
+            if not set(motions) <= set(MOTION_SLOTS) or any(type(v) is not int or v not in available for v in motions.values()):
+                raise PipelineError('invalid_action', '기본 동작을 현재 Meshy 목록에서 다시 선택하세요.', 422)
             character = self.factory.pipeline.detail(payload['character_id'], owner)
             source = self.factory.pipeline.artifact(character['id'], owner, 'reference')
             content = source.read_bytes()
@@ -371,7 +362,7 @@ class AvatarImagePipeline:
             blueprint = self.blueprints.read(owner, character['id'])
             if blueprint['revision'] != payload['blueprint_revision']:
                 raise PipelineError('revision_conflict', '설계가 바뀌었습니다. 다시 불러오세요.')
-            parts = []; prepared = {}
+            parts = []
             for slot in slots:
                 layer = {'description': DESCRIPTIONS['hair']} if slot == 'hair' else next(l for l in blueprint['layers'] if l['slot'] == slot)
                 part = {'slot': slot, 'description': layer.get('description', ''),
@@ -382,24 +373,12 @@ class AvatarImagePipeline:
                     part['fit_profile'] = deepcopy(fit_profiles[slot])
                 if multiview:
                     part['views'] = {view: {'status': 'pending'} for view in generated_views}
-                if payload['image_mode'] == 'prepared':
-                    layer = next(l for l in blueprint['layers'] if l['slot'] == slot)
-                    # Prepared PNGs are exported as complete, isolated bitmaps by the image editor.
-                    if not layer['asset'] or layer['asset'] == 'sample-A-atlas' or list(layer['crop']) != [0, 0, 1, 1]:
-                        raise PipelineError('part_image_missing', f'{slot}: 완성한 개별 PNG를 먼저 저장해 주세요.', 422)
-                    path = self.blueprints.asset(owner, layer['asset'])
-                    name = f'{slot}-image.png'; prepared[name] = path.read_bytes()
-                    part['image'] = {'status': 'succeeded', 'sha256': digest(path), 'asset': layer['asset'], 'file': name, 'origin': 'prepared'}
                 parts.append(part)
             directory.mkdir(parents=True, exist_ok=True)
             (directory/'source.png').write_bytes(content)
             (directory/'output').mkdir(exist_ok=True)
-            for name, raw in prepared.items():
-                (directory/'output'/name).write_bytes(raw)
             reused = self._reuse_character_parts(owner, directory, parts, payload.get('reuse_job_id'),
-                                                   character['id'], source_hash) if production_mode == 'character_parts' else []
-            if payload.get('reuse_job_id') and production_mode != 'character_parts':
-                raise PipelineError('invalid_reuse', '파츠 재사용은 캐릭터 파츠 모드에서만 사용할 수 있습니다.', 422)
+                                                 character['id'], source_hash)
             reference_preparation = initial_reference_state(prompts=prompt_snapshot['reference']) if prepare_reference else None
             if default_expressions:
                 from src.services.avatar_expression_pipeline import default_contract
@@ -425,44 +404,41 @@ class AvatarImagePipeline:
                 'default_expressions': expression_contract,
                 'hair_length': hair_length,
                 'production_mode': production_mode, 'design_prompts': design_prompts,
-                'meshy_texture_prompts': prompt_snapshot['meshy_texture'] if body_purpose == 'wardrobe_base' else {},
+                'meshy_texture_prompts': prompt_snapshot['meshy_texture'],
                 'reuse': {'source_job_id': payload.get('reuse_job_id'), 'slots': reused},
-                'rig_with_meshy': mesh_rig, 'motion_actions': motions,
+                'rig_with_meshy': True, 'motion_actions': motions,
                 'motion_actions_explicit': bool(submitted_motions),
-                'body_purpose': body_purpose, 'body_prompt': WARDROBE_BODY_PROMPT if body_purpose == 'wardrobe_base' else WHOLE_BODY_PROMPT,
-                'body_height_m': 1.2 if body_purpose == 'wardrobe_base' else PROFILE['height'],
+                'body_purpose': 'wardrobe_base', 'body_prompt': WARDROBE_BODY_PROMPT,
+                'body_height_m': 1.2,
                 'image_provider': 'openai', 'image_model': capabilities()['image_model'],
                 'fit_profiles_revision': next(iter(fit_profiles.values()))['revision'],
                 'fit_profiles_sha256': (frozen_production_spec or {}).get('fit_profiles_sha256'),
                 'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
                 'meshy_base': base_url('meshy')})
+            # The rig budget and profile are in the one accepted record: a replay after a failed later write must
+            # still find the rig and motion stages it accepted.
             _write_json(directory/'job.json', {'id': job_id, 'fingerprint': fingerprint, 'executor': self.factory.instance,
                 'executor_process': identity(), 'character_id': character['id'], 'character_name': character['name'],
                 'input_kind': 'image', 'input': {**payload, 'design_prompts': design_prompts},
                 'meshy_options': {p['slot']: p['meshy_options']['options'] for p in parts if p.get('meshy_options')},
-                'production_mode': production_mode, 'auto_assemble': production_mode == 'character_parts', 'source_sha256': source_hash, 'profile': ({**PROFILE,
-                    'name': '의상용 기준 몸 · 머리 포함' if body_purpose == 'wardrobe_base' else '통짜 전신 · 반팔·반바지',
-                    'body_purpose': body_purpose, 'body_origin': 'generated_whole_character'} if body_purpose == 'wardrobe_base' or slots == ['body'] else PROFILE),
+                'production_mode': production_mode, 'auto_assemble': True, 'source_sha256': source_hash,
+                'profile': {**PROFILE, 'name': '의상용 기준 몸 · 머리 포함', 'body_purpose': 'wardrobe_base',
+                            'body_origin': 'generated_whole_character', 'rig': 'meshy-native', 'bones': None,
+                            'head_height': None, 'head_ratio': None, 'height': 1.2,
+                            'base_outfit': 'opaque_training_bodysuit'},
                 'image_provider': 'openai', 'image_model': capabilities()['image_model'],
                 'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
-                'limits': {'image_tasks': ((sum(p['image']['status'] == 'pending' for p in parts) * (len(generated_views) if multiview else 1))
-                                           + 2 * int(prepare_reference)) if payload['image_mode'] == 'generate' else 0,
+                'limits': {'image_tasks': (sum(p['image']['status'] == 'pending' for p in parts) * (len(generated_views) if multiview else 1))
+                                          + 2 * int(prepare_reference),
                            'reference_tasks': 2 * int(prepare_reference),
                            'expression_tasks': 5 * int(default_expressions),
-                           'meshy_tasks': sum(p['model']['status'] == 'pending' for p in parts)},
+                           'meshy_tasks': sum(p['model']['status'] == 'pending' for p in parts),
+                           'meshy_rig_tasks': 1, 'meshy_animation_tasks': len(set(motions.values()))},
                 'review': {'decision': 'pending'}, 'files': {p['image']['file']: p['image']['sha256'] for p in parts if p['image']['status'] == 'succeeded'}})
             if prepare_reference:
                 _write_json(directory/'output/progress.json', {'stage': 'reference',
                     'message': '공통 규격 정면 T자 · 오른쪽 측면 I자 이미지 생성 대기 중'})
             self.publish(owner, job_id, read_json(directory/'pipeline.json'))
-            if mesh_rig:
-                accepted = read_json(directory/'job.json')
-                accepted['limits'].update(meshy_rig_tasks=1, meshy_animation_tasks=len(set(motions.values())))
-                accepted['profile'].update(rig='meshy-native', bones=None, head_height=None, head_ratio=None,
-                                           height=1.2 if body_purpose == 'wardrobe_base' else PROFILE['height'])
-                if body_purpose == 'wardrobe_base':
-                    accepted['profile']['base_outfit'] = 'opaque_training_bodysuit'
-                _write_json(directory/'job.json', accepted)
             return self.factory.get(owner, job_id), True
 
     def publish(self, owner, job_id, state):
@@ -555,19 +531,13 @@ class AvatarImagePipeline:
             + ('Additional art direction: '+design_prompt if design_prompt else ''))
 
     def _record_image_failure(self, owner, job_id, state, part, exc, receipt):
-        failure_id = getattr(exc, 'diagnostic_id', uuid.uuid4().hex[:12])
-        if isinstance(exc, httpx.HTTPStatusError):
-            status = exc.response.status_code
-            part['image']['status'] = 'rejected' if status in (400, 401, 403, 404, 422, 429) else 'failed'
-            category = getattr(exc, 'category', 'provider_http')
-        elif isinstance(exc, httpx.RequestError):
-            part['image']['status'] = 'submission_uncertain'
-            category = 'provider_connection'
-        else:
-            if part['image'].get('status') not in ('received',):
-                part['image']['status'] = ('submitting' if receipt.with_suffix('.response.json').is_file() else 'failed')
-            category = 'local_processing'
-        part['image']['failure'] = {'id': failure_id, 'category': category, 'type': type(exc).__name__, 'at': now()}
+        from src.services.avatar_image_recovery import classify_image_failure
+        status, failure = classify_image_failure(exc, receipt)
+        if part['image'].get('status') == 'received':
+            # The image is saved; only its local indexing failed, and a resume indexes the saved file.
+            status, failure['category'] = 'received', 'local_processing'
+        part['image']['status'] = status
+        part['image']['failure'] = {key: failure[key] for key in ('id', 'category', 'type', 'at')}
         self.publish(owner, job_id, state)
 
     def resume(self, owner, job_id, *, stage='images', retry_failed=False):
@@ -580,6 +550,10 @@ class AvatarImagePipeline:
             job = read_json(directory/'job.json')
             if job.get('input_kind') != 'image' or job['status'] not in ('pipeline_paused', 'failed', 'recovery_required', 'review_required'):
                 raise PipelineError('invalid_state', '현재 재개할 수 없는 작업입니다.')
+            if _RUN_LOCKS.busy(str(directory)):
+                # The worker still runs this job, also past its images (review_required through rig and assembly):
+                # queueing it again would leave it pipeline_queued with no worker to take it.
+                raise PipelineError('worker_running', '진행 중인 작업입니다.', 409)
             runner = read_json(directory/'output/runner.json')
             if job['status'] in ('failed', 'recovery_required') and runner and process_state(runner.get('process')) != 'exited':
                 raise PipelineError('worker_running', '이전 Blender 프로세스가 종료되었는지 확인이 필요합니다.')
@@ -592,12 +566,13 @@ class AvatarImagePipeline:
                 if not can_resume(directory, state):
                     raise PipelineError('view_recovery_required', '기존 이미지 응답 확인 또는 실패 이미지 재요청이 필요합니다.', 409)
             for part in state['parts']:
-                cached_response = (directory/'output'/f'{part["slot"]}-provider.response.json').is_file()
-                if stage == 'images' and not state.get('production_spec') and part['image']['status'] in ('submitting', 'submission_uncertain', 'rejected', 'failed') and not cached_response:
+                if stage == 'images' and not state.get('production_spec') and unresolved_image_attempt(directory, part):
                     raise PipelineError('image_attempt_recorded', '이미 시도한 이미지 요청입니다. 새 생산 버전에서만 다시 요청할 수 있습니다.')
                 if read_json(directory/'parts'/part['slot']/'generation-artifacts.json').get('generated'):
                     continue
-                task = read_json(directory/'parts'/part['slot']/'character.json')
+                run = directory/'parts'/part['slot']
+                # A task the provider accepted, named only by its saved answer, is polled and never sent again.
+                task = character_jobs.adopt_submitted_task(run, read_json(run/'character.json'))
                 if resubmittable(task, retry_failed):
                     continue
                 if task and not task.get('task_id'):
@@ -666,7 +641,8 @@ class AvatarImagePipeline:
             generate_views(self, owner, job_id, state)
         for part in state['parts']:
             receipt = output/f'{part["slot"]}-provider'
-            if part['image']['status'] == 'submitting' and receipt.with_suffix('.response.json').is_file():
+            # This worker owns the part: a complete answer kept as a partial is moved into place and used.
+            if part['image']['status'] in ('submitting', 'submission_uncertain', 'failed') and saved_response(receipt):
                 try:
                     raw = generate_openai_part_image(directory/'source.png', part['image']['prompt'],
                                                      state['image_model'], state['image_base'], receipt=receipt)
@@ -696,20 +672,25 @@ class AvatarImagePipeline:
                 if digest(output/part['image']['file']) != part['image']['sha256']:
                     raise PipelineError('image_changed', '보존한 파츠 이미지가 변경되었습니다.')
                 continue
-            if part['image']['status'] != 'pending':
+            status = part['image']['status']
+            if status not in ('pending', 'not_sent'):
                 if state.get('production_mode') == 'character_parts':
                     continue
                 raise PipelineError('image_attempt_recorded', '이미지 요청의 응답을 확인할 수 없습니다. 자동 재제출하지 않습니다.')
-            if sum('attempted_at' in p['image'] for p in state['parts']) >= job['limits']['image_tasks']:
+            if status == 'pending' and sum('attempted_at' in p['image'] for p in state['parts']) >= job['limits']['image_tasks']:
                 raise PipelineError('image_budget_exhausted', '허용된 이미지 생성 횟수를 모두 사용했습니다.')
-            prompt = self._part_prompt(state, part)
-            if part['slot'] == 'body' and state.get('body_purpose') != 'wardrobe_base' and part.get('description'):
-                prompt += ' Additional art direction: '+part['description']
+            if status == 'not_sent' and part['image'].get('prompt'):
+                # The request never left: the same request, under its own attempt, is sent now.
+                prompt = part['image']['prompt']
+            else:
+                prompt = self._part_prompt(state, part)
+                if part['slot'] == 'body' and state.get('body_purpose') != 'wardrobe_base' and part.get('description'):
+                    prompt += ' Additional art direction: '+part['description']
             provider = state.get('image_provider', 'gemini')
             if provider != 'openai':
                 raise PipelineError('image_provider_removed', '이 작업의 이미지 제공자는 더 이상 지원하지 않습니다. 새 작업으로 생성하세요.', 410)
             part['image'] = {'status': 'submitting', 'prompt': prompt, 'provider': provider,
-                             'model': state['image_model'], 'attempted_at': now()}
+                             'model': state['image_model'], 'attempted_at': part['image'].get('attempted_at', now())}
             self.publish(owner, job_id, state)
             _write_json(output/'progress.json', {'stage': 'images', 'message': f'{part["slot"]} 이미지 분리·숨겨진 형태 보완 중'})
             try:
@@ -733,7 +714,9 @@ class AvatarImagePipeline:
                     raise PipelineError('image_provider_error',
                         f'이미지 생성 {part["slot"]}: {reason} 진단 {exc.diagnostic_id}. 자동 재요청하지 않습니다.') from None
                 raise PipelineError('image_provider_error', f'이미지 생성 {part["slot"]}: HTTP {exc.response.status_code}. 모델·키·할당량을 확인해 주세요. 자동 재요청하지 않습니다.') from None
-            except (httpx.RequestError, PipelineError, OSError, ValueError) as exc:
+            except Exception as exc:
+                # Recorded from the receipt, as every image stage does: an answer that arrived but could not be stored
+                # is not a plain failure.
                 if state.get('production_mode') != 'character_parts':
                     raise
                 self._record_image_failure(owner, job_id, state, part, exc, receipt)
@@ -864,7 +847,8 @@ class AvatarImagePipeline:
                                 raise PipelineError('model_changed', '생성된 파츠 파일이 변경되었습니다.')
                             part['model']['status'] = 'ready'
                             continue
-                        task = read_json(run/'character.json')
+                        # A task the provider accepted, named only by its saved answer, is polled and never sent again.
+                        task = character_jobs.adopt_submitted_task(run, read_json(run/'character.json'))
                         if resubmittable(task, job.get('model_retry')) and self._release_model(run, part, task, job):
                             self.publish(owner, job_id, state)
                             task = {}
@@ -879,6 +863,14 @@ class AvatarImagePipeline:
                         part['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
                         self.publish(owner, job_id, state)
                     deadline = time.monotonic()+deadline_seconds
+                    published, shown = [], None
+
+                    def publish_models():
+                        # A poll that changed no part's model writes nothing: each publish rewrites the job records.
+                        models = [dict(p['model']) for p in modelled]
+                        if models != published:
+                            self.publish(owner, job_id, state)
+                            published[:] = models
                     while True:
                         complete = True
                         for part in modelled:
@@ -891,15 +883,18 @@ class AvatarImagePipeline:
                             with _polling(state):
                                 task = character_jobs.refresh(run, client)
                             part['model'] = {k: task.get(k) for k in ('status', 'task_id', 'progress')}
-                            self.publish(owner, job_id, state)
                             if task['status'] in ('FAILED', 'CANCELED'):
                                 raise PipelineError('provider_failed', failure_text(part['slot'], task))
                             if task['status'] == 'SUCCEEDED':
+                                publish_models()  # Shown as downloading while the model arrives.
                                 character_jobs.download(run, 'generation'); part['model']['status'] = 'ready'
                             else:
                                 complete = False
-                        self.publish(owner, job_id, state)
-                        _write_json(output/'progress.json', {'stage': 'models', 'message': f'개별 3D 완료 {sum(p["model"]["status"] == "ready" for p in modelled)}/{len(modelled)}'})
+                        publish_models()
+                        message = f'개별 3D 완료 {sum(p["model"]["status"] == "ready" for p in modelled)}/{len(modelled)}'
+                        if message != shown:
+                            _write_json(output/'progress.json', {'stage': 'models', 'message': message})
+                            shown = message
                         if complete: break
                         if time.monotonic() >= deadline:
                             raise PipelineError('poll_paused', '긴 작업의 조회를 일시 중단했습니다. 기존 작업 이어가기로 상태 조회를 재개하세요.')

@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+from pathlib import Path as LocalPath
 from src.services.object_storage import StoredPath as Path
 import re
 import ssl
@@ -18,6 +19,7 @@ from PIL import Image
 from src.services.character_pipeline import PipelineError
 from src.services.asset_editor import _write_json
 from src.services.object_storage import is_remote, provider_image
+from src.services.run_lock import final_write
 from src.services.runtime_activity import paid_request
 
 LOGGER = logging.getLogger(__name__)
@@ -186,6 +188,30 @@ def _read_error_response(response):
     }
 
 
+def _complete_partial(partial):
+    """The bytes of a complete answer kept as .response.partial, or None for a cut-off one (evidence only). In remote
+    storage a partial the store does not hold is read from this host, where an answer the store refused is kept."""
+    if not partial.is_file():
+        return None
+    try:
+        raw = partial.read_bytes()
+        saved = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(saved, dict) and 'data' in saved else None
+
+
+def _keep_on_host(partial_path, received):
+    """Write a paid answer the store refused to this host's copy of .response.partial, where promote_partial_response
+    finds it. Never raises: the store's error is the one the caller reports."""
+    local = LocalPath(partial_path)
+    try:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(received)
+    except OSError as exc:
+        LOGGER.error('Image response not kept on this host either: type=%s', type(exc).__name__)
+
+
 def promote_partial_response(receipt):
     """True when a complete answer left as .response.partial was moved into place as .response.json.
 
@@ -194,24 +220,38 @@ def promote_partial_response(receipt):
     """
     receipt = Path(receipt)
     response_path, partial = receipt.with_suffix('.response.json'), receipt.with_suffix('.response.partial')
-    if response_path.is_file() or not partial.is_file():
+    if response_path.is_file():
         return False
-    try:
-        raw = partial.read_bytes()
-        saved = json.loads(raw)
-    except (OSError, ValueError):
-        return False
-    if not isinstance(saved, dict) or 'data' not in saved:
+    raw = _complete_partial(partial)
+    if raw is None:
         return False
     if is_remote(response_path):
         response_path.write_bytes(raw)
         try:
             partial.unlink(missing_ok=True)
+            LocalPath(partial).unlink(missing_ok=True)  # The copy kept on this host when the store refused it.
         except Exception as exc:
             LOGGER.warning('Image response promoted, leftover partial kept: type=%s', type(exc).__name__)
     else:
         partial.replace(response_path)
     return True
+
+
+def saved_response(receipt):
+    """True when a complete answer to the receipt's request is kept, so going on reads it instead of paying again: its
+    .response.json, or a complete .response.partial, moved into place here. A complete partial that the store still
+    refuses to take stays kept where it is and is moved by a later call. Not for a request in flight, whose
+    .response.partial may still be written."""
+    receipt = Path(receipt)
+    if receipt.with_suffix('.response.json').is_file():
+        return True
+    try:
+        return promote_partial_response(receipt)
+    except Exception as exc:
+        LOGGER.warning('Kept image response not moved into place yet: type=%s', type(exc).__name__)
+        # Another caller may have moved it first; otherwise the complete partial is still where it was.
+        return (receipt.with_suffix('.response.json').is_file()
+                or _complete_partial(receipt.with_suffix('.response.partial')) is not None)
 
 
 def edit_response(client, base, key, payload, receipt=None, *, multipart=False, input_sha256=None, endpoint='/images/edits'):
@@ -318,55 +358,67 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
     record()
     attempt = 0
     while True:
+        admitted = False
         try:
-            with paid_request(), closing(client.send(request, stream=True)) as response:
-                metadata.update(phase='response_headers', http_status=response.status_code,
-                                request_id=response.headers.get('x-request-id'))
-                record()
-                if response.is_error:
-                    provider_error, body = _read_error_response(response)
-                    diagnostic_id = uuid.uuid4().hex[:12]
-                    category = _error_category(response.status_code, provider_error)
-                    if (response.status_code in (429, 503) and category in ('rate_limit', 'provider_unavailable')
-                            and attempt < AUTO_RETRIES):
-                        metadata.update(phase='response_retryable', provider_error=provider_error,
-                                        provider_error_category=category)
-                        raise _RetryableRejection(_retry_after(response, attempt))
-                    error_record = {
-                        'diagnostic_id': diagnostic_id,
-                        'http_status': response.status_code,
-                        'request_id': response.headers.get('x-request-id'),
-                        'category': category,
-                        'provider_error': provider_error,
-                        **body,
-                    }
-                    metadata.update(phase='response_rejected', diagnostic_id=diagnostic_id,
-                                    provider_error=provider_error, provider_error_category=category,
-                                    response_bytes=body['body_bytes'], response_sha256=body['body_sha256'])
-                    if error_path:
-                        _write_json(error_path, error_record)
+            with paid_request():
+                # A refused admission (a drain, a runtime that cannot be verified) raises before this: nothing was sent.
+                admitted = True
+                with closing(client.send(request, stream=True)) as response:
+                    metadata.update(phase='response_headers', http_status=response.status_code,
+                                    request_id=response.headers.get('x-request-id'))
                     record()
-                    raise OpenAIImageHTTPError(response.status_code, category, diagnostic_id,
-                                               provider_error)
-                if response_path and is_remote(response_path):
-                    # One PUT of the final key is atomic; staging a .partial and renaming it costs a copy and a delete.
-                    received = bytearray()
-                    try:
-                        for chunk in response.iter_bytes():
-                            received.extend(chunk)
-                    except BaseException:
-                        partial_path.write_bytes(received)  # What arrived before the cut stays as evidence.
-                        raise
-                    response_path.write_bytes(received)
-                    raw = bytes(received)
-                elif response_path:
-                    with partial_path.open('wb') as output:
-                        for chunk in response.iter_bytes():
-                            output.write(chunk)
-                    partial_path.replace(response_path)
-                    raw = response_path.read_bytes()
-                else:
-                    raw = response.read()
+                    if response.is_error:
+                        provider_error, body = _read_error_response(response)
+                        diagnostic_id = uuid.uuid4().hex[:12]
+                        category = _error_category(response.status_code, provider_error)
+                        if (response.status_code in (429, 503) and category in ('rate_limit', 'provider_unavailable')
+                                and attempt < AUTO_RETRIES):
+                            metadata.update(phase='response_retryable', provider_error=provider_error,
+                                            provider_error_category=category)
+                            raise _RetryableRejection(_retry_after(response, attempt))
+                        error_record = {
+                            'diagnostic_id': diagnostic_id,
+                            'http_status': response.status_code,
+                            'request_id': response.headers.get('x-request-id'),
+                            'category': category,
+                            'provider_error': provider_error,
+                            **body,
+                        }
+                        metadata.update(phase='response_rejected', diagnostic_id=diagnostic_id,
+                                        provider_error=provider_error, provider_error_category=category,
+                                        response_bytes=body['body_bytes'], response_sha256=body['body_sha256'])
+                        if error_path:
+                            _write_json(error_path, error_record)
+                        record()
+                        raise OpenAIImageHTTPError(response.status_code, category, diagnostic_id,
+                                                   provider_error)
+                    if response_path and is_remote(response_path):
+                        # One PUT of the final key is atomic; staging a .partial and renaming it costs a copy and a delete.
+                        received = bytearray()
+                        try:
+                            for chunk in response.iter_bytes():
+                                received.extend(chunk)
+                        except BaseException:
+                            partial_path.write_bytes(received)  # What arrived before the cut stays as evidence.
+                            raise
+                        try:
+                            # The answer is paid for: a storage blip must not lose it.
+                            final_write(lambda: response_path.write_bytes(received), 'image response')
+                        except BaseException:
+                            # The store still refuses it: the complete answer is kept on this host, where the next run
+                            # or a resume moves it into place instead of paying for another one.
+                            _keep_on_host(partial_path, received)
+                            metadata['phase'] = 'response_unsaved'
+                            raise
+                        raw = bytes(received)
+                    elif response_path:
+                        with partial_path.open('wb') as output:
+                            for chunk in response.iter_bytes():
+                                output.write(chunk)
+                        partial_path.replace(response_path)
+                        raw = response_path.read_bytes()
+                    else:
+                        raw = response.read()
                 metadata.update(phase='response_saved', response_bytes=len(raw), elapsed_seconds=elapsed())
                 record()
                 return json.loads(raw)
@@ -388,9 +440,9 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                 attempt += 1
                 continue
             event = metadata.get('failed_event', '')
-            not_sent = not metadata['request_started'] and (
+            not_sent = not admitted or (not metadata['request_started'] and (
                 isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)) or
-                event in ('connection.connect_tcp.failed', 'connection.start_tls.failed'))
+                event in ('connection.connect_tcp.failed', 'connection.start_tls.failed')))
             metadata['submission'] = 'not_sent' if not_sent else 'rejected' if isinstance(exc, OpenAIImageHTTPError) else 'unknown'
             cause = exc.__cause__
             if cause is not None:
@@ -420,7 +472,7 @@ def reference_data_url(source):
 def generate_standard_part_image(references, prompt, model, base, *, receipt=None, canvas_size=(2048, 2048)):
     """One 2048px edit using the frozen body view plus optional art reference."""
     saved = Path(receipt).with_suffix('.response.json') if receipt else None
-    if saved and saved.is_file():
+    if saved and (saved.is_file() or promote_partial_response(receipt)):
         return standard_image_bytes(json.loads(saved.read_bytes()))
     key = os.getenv('OPENAI_API_KEY', '').strip()
     if not key:

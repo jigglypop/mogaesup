@@ -6,7 +6,7 @@ from PIL import Image
 import pytest
 
 from native_assembly_fixture import JOB, VERSION, seed_native_assembly
-from src.services import avatar_part_batches, meshy_status
+from src.services import avatar_part_batches, meshy_status, run_lock
 from src.services.asset_editor import _write_json
 from src.services.avatar_blueprints import AvatarBlueprints
 from src.services.avatar_factory import _LOCK
@@ -164,3 +164,33 @@ def test_a_listing_reads_each_child_once_and_trusts_the_saved_receipts(batches, 
                for batch in listing['items'] for item in batch['items'])
     # One factory read per child; a child that was never created is not looked up twice.
     assert sorted(gets) == sorted(item['job_id'] for batch in listing['items'] for item in batch['items'])
+
+
+def test_a_batch_whose_last_save_fails_is_not_left_running(batches, monkeypatch):
+    factory, _, service = batches
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    record, _ = service.create(1, 'part-batch-key-0008', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+
+    class Stopped:
+        def __init__(self, factory):
+            pass
+
+        def create_single_part(self, *args, **kwargs):
+            raise PipelineError('fixture_stopped', '헤어 처리 중단', 409)
+    monkeypatch.setattr(avatar_part_batches, 'AvatarVariants', Stopped)
+    write = avatar_part_batches._write_json
+
+    def refuse_the_end(path, value):
+        if path.name == 'batch.json' and value.get('status') in ('paused', 'complete'):
+            raise OSError('storage unavailable')
+        return write(path, value)
+    monkeypatch.setattr(avatar_part_batches, '_write_json', refuse_the_end)
+    with pytest.raises(OSError):
+        service.execute(1, record['id'])
+    assert read_json(service.root(1, record['id'])/'batch.json')['status'] == 'running'
+    # Running in this live process but held by no worker: it reads as paused and can be resumed, not as running.
+    public = service.get(1, record['id'])
+    assert public['status'] == 'paused' and public['can_resume'] and avatar_part_batches._RUNS == {}
+    monkeypatch.setattr(avatar_part_batches, '_write_json', write)
+    resumed, dispatch = service.resume(1, record['id'])
+    assert dispatch and read_json(service.root(1, record['id'])/'batch.json')['status'] == 'accepted'

@@ -13,8 +13,13 @@ import pytest
 
 import fake_blender
 from fake_blender import Vector, armature, bone, mesh
+from native_assembly_fixture import JOB, VERSION, seed_native_assembly
+from src.services import avatar_native_parts as native, run_lock
+from src.services.asset_editor import _write_json
 from src.services.avatar_native_parts import accepted_seal
+from src.services.character_pipeline import read_json
 from src.services.glb import build_glb
+from src.services.process_identity import identity
 
 SPEC = {'sha256': 'f'*64, 'body_height_m': 1.6, 'frozen_body': True,
         'anchors': {'neck': [0, 1.3, 0], 'shoulder_left': [.2, 1.25, 0], 'crown': [0, 1.6, 0]},
@@ -223,3 +228,63 @@ def test_a_body_exported_without_its_skin_ends_the_assembly(assembly, monkeypatc
     with pytest.raises(ValueError, match='Missing skinned part'):
         assembly.worker.run(assembly.payload)
     assert not (assembly.output/'complete.json').exists()
+
+
+# --- the server side of the worker: an admitted assembly never stays accepted or running for a live process ----------
+
+@pytest.fixture
+def admitted(tmp_path, monkeypatch):
+    """A version accepted by this process and waiting for its worker."""
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    factory, directory = seed_native_assembly(tmp_path, 'fixture')
+    _write_json(directory/'input.json', {'source': str(directory/'body.glb'), 'parts': [], 'prefit_parts': []})
+    _write_json(directory/'record.json', {'status': 'accepted', 'process': identity(), 'files': {}})
+    return native.AvatarNativeParts(factory), directory
+
+
+def refuse(monkeypatch, status, times):
+    """Saves of the version record with `status` fail `times` times, as a storage outage would."""
+    real, refused = native._write_json, []
+
+    def write(path, value):
+        if path.name == 'record.json' and value.get('status') == status and len(refused) < times:
+            refused.append(status)
+            raise OSError('storage unavailable')
+        return real(path, value)
+    monkeypatch.setattr(native, '_write_json', write)
+    return refused
+
+
+def test_an_assembly_stopped_before_blender_fails_instead_of_staying_accepted(admitted, monkeypatch):
+    service, directory = admitted
+
+    def unavailable(directory, *, inputs=()):
+        raise OSError('stored inputs unavailable')
+    monkeypatch.setattr(native, 'local_workspace', unavailable)
+    refused = refuse(monkeypatch, 'failed', 1)
+    with pytest.raises(OSError, match='stored inputs'):
+        service.execute(1, JOB)
+    record = read_json(directory/'record.json')
+    assert refused and record['status'] == 'failed' and record['error_type'] == 'OSError'
+    assert service.get(1, JOB)['status'] == 'failed' and native._WORKERS == {}
+
+
+def test_an_assembly_whose_last_save_failed_reads_as_stopped_and_is_admitted_again(admitted, monkeypatch):
+    service, directory = admitted
+
+    def no_blender(*args, **kwargs):
+        raise RuntimeError('Blender did not start')
+    monkeypatch.setattr(native, 'blender_process', no_blender)
+    refuse(monkeypatch, 'failed', 99)
+    with pytest.raises(OSError):
+        service.execute(1, JOB)
+    # The record still says running in this live process; nothing runs it any more.
+    assert read_json(directory/'record.json')['status'] == 'running'
+    assert service.get(1, JOB)['status'] == 'recovery_required'
+    assert native._WORKERS.acquire(str(directory))
+    try:
+        assert service.get(1, JOB)['status'] == 'running'  # while a worker holds it, it runs
+    finally:
+        native._WORKERS.release(str(directory))
+    _, again = service._resume_version(1, JOB, VERSION)
+    assert again and read_json(directory/'record.json')['status'] == 'accepted'

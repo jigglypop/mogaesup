@@ -216,8 +216,11 @@ def _extract_roles(claims: dict) -> list[str]:
     return []
 
 
-def get_current_user(request: Request) -> UserContext:
-    """FastAPI Depends 용. JWT 를 검증하고 UserContext 반환."""
+async def get_current_user(request: Request) -> UserContext:
+    """FastAPI Depends 용. JWT 를 검증하고 UserContext 반환.
+
+    async: it reads headers and the environment and checks an HMAC signature, with no I/O, so authentication runs on
+    the event loop and never waits for a worker thread that long background jobs may all be holding."""
     dev_user = _local_dev_user(request)
     if dev_user:
         return dev_user

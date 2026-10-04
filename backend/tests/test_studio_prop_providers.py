@@ -389,3 +389,26 @@ def test_a_listing_reads_each_record_once(studio, monkeypatch):
     monkeypatch.setattr(module, 'read_json', lambda path, *args: (reads.append(path.name), real(path, *args))[1])
     items = service.listing('prop')['items']
     assert len(items) == 3 and reads.count('record.json') == 3
+
+
+def test_a_generation_whose_image_answer_is_kept_on_this_host_can_be_resumed(studio):
+    from src.services.process_identity import identity
+    service, calls, replies, _ = studio
+    record, _ = service.create('fixture-prop-kept', body())
+    directory = service.directory(record['id'])
+    receipt = directory/'image-provider.json'
+    # The answer arrived and the store refused it: only the complete partial on this host has it.
+    _write_json(receipt.with_suffix('.request.json'), {'phase': 'response_unsaved', 'http_status': 200,
+                                                       'request_started': True, 'submission': 'unknown'})
+    receipt.with_suffix('.response.partial').write_text(json.dumps({'data': [{'b64_json': 'aW1hZ2U='}]}))
+    _write_json(directory/'record.json', {**read_json(directory/'record.json'), 'status': 'running', 'process': identity()})
+    # While its worker runs, the answer it may be writing is left where it is.
+    assert module._WORKERS.acquire(str(directory))
+    try:
+        assert service.get(record['id'])['status'] == 'running'
+        assert receipt.with_suffix('.response.partial').exists() and not receipt.with_suffix('.response.json').exists()
+    finally:
+        module._WORKERS.release(str(directory))
+    stopped = service.get(record['id'])
+    assert stopped['status'] == 'paused' and stopped['can_resume'] and receipt.with_suffix('.response.json').is_file()
+    assert calls['images'] == 0

@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-from threading import Lock
 import time
 
 import httpx
@@ -22,10 +21,27 @@ from src.services.process_identity import identity, state as process_state
 from src.services.provider_http import download_glb
 from src.services.provider_http import get_with_retry
 from src.services.meshy_status import BLOCKED, saved_problem
+from src.services.run_lock import WorkerLocks, final_write, this_process, worker_alive
 
 SLOTS = ('idle', 'walk', 'run', 'jump', 'fall', 'sit', 'armsUp', 'crouch')
-_WORKERS = {}
+# The Meshy worker of each job's meshy directory that runs in this process.
+_WORKERS = WorkerLocks()
 LOGGER = logging.getLogger(__name__)
+
+
+def worker_held(run):
+    """Whether a worker of this process runs the rig directory `run` now: the Meshy worker, or a local rig recovery,
+    which saves the same worker.json."""
+    from src.services.avatar_rig_transfer import _WORKERS as RECOVERIES
+    return _WORKERS.busy(str(run)) or RECOVERIES.busy(str(run))
+
+
+def worker_busy(run):
+    """(worker.json, whether its worker still runs). One this process started runs only while it holds its worker
+    lock: a worker whose last save failed leaves accepted or running behind and must not block the job until a restart."""
+    held = worker_held(run)
+    worker = read_json(run/'worker.json')
+    return worker, worker_alive(worker, held or worker_held(run))
 
 
 def client(base):
@@ -160,8 +176,7 @@ class AvatarMeshy:
                     contract.update(motion_actions=accepted_actions,
                                     max_animation_tasks=max_animation_tasks)
                     _write_json(run/'input.json', contract)
-            worker = read_json(run/'worker.json')
-            if worker.get('status') not in ('accepted', 'running') or process_state(worker.get('process')) == 'exited':
+            if not worker_busy(run)[1]:
                 _write_json(run/'worker.json', {'status': 'accepted', 'process': identity(), 'error': None})
         return self.get(owner, job_id)
 
@@ -173,10 +188,14 @@ class AvatarMeshy:
         """
         run = self.directory(owner, job_id)
         with _LOCK:
-            if self.get(owner, job_id)['busy'] or not saved_problem(run):
+            if self.get(owner, job_id)['busy']:
                 return False
             if (read_json(run/'worker.json').get('origin') == 'rig_transfer'
                     or read_json(run/'delivery.json').get('origin') in ('transferred_meshy_rig', 'frozen_body', 'uploaded_glb')):
+                return False
+            # A rig or clip the provider accepted, named only by its saved answer, is polled and never sent again.
+            self._adopt_submitted(run)
+            if not saved_problem(run):
                 return False
             contract = read_json(run/'input.json')
             task = read_json(run/'character.json')
@@ -203,6 +222,16 @@ class AvatarMeshy:
                         changed = True
             return changed
 
+    @staticmethod
+    def _adopt_submitted(run):
+        task = read_json(run/'character.json')
+        if task:
+            character_jobs.adopt_submitted_task(run, task)
+        for path in sorted((run/'actions').glob('*/motion-pack.json')):
+            pack = read_json(path)
+            if pack:
+                character_motion.adopt_submitted_task(path.parent, pack, 'clip')
+
     def _verify_source(self, run):
         contract = read_json(run/'input.json')
         if not contract or digest(run.parent/'output/generated-body.glb') != contract['source_sha256']:
@@ -213,8 +242,7 @@ class AvatarMeshy:
         run = self.directory(owner, job_id)
         task = read_json(run/'character.json')
         receipt = read_json(run/'delivery.json')
-        worker = read_json(run/'worker.json')
-        busy = worker.get('status') in ('accepted', 'running') and process_state(worker.get('process')) != 'exited'
+        worker, busy = worker_busy(run)
         tasks = []
         for path in sorted((run/'actions').glob('*/motion-pack.json')):
             pack = read_json(path)
@@ -376,14 +404,17 @@ class AvatarMeshy:
         return self.get(owner, job_id)
 
     def execute(self, owner, job_id, *, poll_seconds=5, timeout=1200):
-        run = self.directory(owner, job_id)
-        with _LOCK:
-            lock = _WORKERS.setdefault(str(run), Lock())
-        if not lock.acquire(blocking=False):
+        # Only the path here: the job is read inside the run, so a failure to read it pauses the admitted worker.
+        run = self.factory.directory(owner, job_id)/'meshy'
+        if not _WORKERS.acquire(str(run)):
             return
+        checked = False
         try:
+            self.directory(owner, job_id)
+            checked = True
             worker = read_json(run/'worker.json')
-            if worker.get('status') == 'running' and worker.get('process') != identity() and process_state(worker.get('process')) != 'exited':
+            if (worker.get('status') == 'running' and not this_process(worker.get('process'))
+                    and process_state(worker.get('process')) != 'exited'):
                 return
             contract = self._verify_source(run)
             _write_json(run/'worker.json', {'status': 'running', 'process': identity(), 'error': None})
@@ -392,7 +423,8 @@ class AvatarMeshy:
                 if contract.get('input_kind') == 'model' and not (run/'character.json').is_file():
                     task = character_jobs.rig_model(run, run.parent/'output/generated-body.glb', contract['height_meters'], api)
                 else:
-                    task = character_jobs.state(run)
+                    # A rig the provider accepted, named only by its saved answer, is polled and never sent again.
+                    task = character_jobs.adopt_submitted_task(run, character_jobs.state(run))
                 if task['stage'] == 'generation':
                     task = character_jobs.rig(run, api)
                 while True:
@@ -422,17 +454,24 @@ class AvatarMeshy:
                             _write_json(directory/'clip.json', {'sha256': digest(directory/'clip.glb'), 'task_id': motion['task_id']})
                         self._publish(run)
                         if not pending:
-                            _write_json(run/'worker.json', {'status': 'complete', 'error': None})
+                            final_write(lambda: _write_json(run/'worker.json', {'status': 'complete', 'error': None}),
+                                        'Meshy worker record')
                             if self.factory.get(owner, job_id).get('auto_assemble'):
                                 from src.services.avatar_character_flow import assemble_character
                                 assemble_character(self.factory, owner, job_id)
                             return
                     if time.monotonic() >= deadline:
-                        _write_json(run/'worker.json', {'status': 'paused', 'error': 'Meshy 작업을 조회해 이어갈 수 있습니다.'})
+                        final_write(lambda: _write_json(run/'worker.json', {
+                            'status': 'paused', 'error': 'Meshy 작업을 조회해 이어갈 수 있습니다.'}), 'Meshy worker record')
                         return
                     time.sleep(poll_seconds)
         except Exception as exc:
-            problem = saved_problem(run)
+            if not checked and isinstance(exc, PipelineError):
+                raise  # Not an owned whole-character job: nothing of it was admitted here.
+            try:
+                problem = saved_problem(run)
+            except Exception:
+                problem = None  # The receipts cannot be read now; the pause is saved all the same.
             if problem:
                 error = problem['message']
             elif isinstance(exc, httpx.HTTPError):
@@ -448,8 +487,9 @@ class AvatarMeshy:
             LOGGER.error('Meshy worker stopped job=%s type=%s function=%s line=%s code=%s',
                          job_id, type(exc).__name__, trace.tb_frame.f_code.co_name if trace else None,
                          trace.tb_lineno if trace else None, problem['code'] if problem else None)
-            _write_json(run/'worker.json', {'status': 'paused', 'error': error,
-                        'failure': problem, 'exception_type': type(exc).__name__})
+            # A storage blip that stopped the worker must not also leave it accepted or running.
+            final_write(lambda: _write_json(run/'worker.json', {'status': 'paused', 'error': error,
+                        'failure': problem, 'exception_type': type(exc).__name__}), 'Meshy worker record')
             if problem and problem['code'] == 'rig_pose_rejected':
                 from src.services.avatar_rig_transfer import AvatarRigTransfer
                 try:
@@ -457,7 +497,7 @@ class AvatarMeshy:
                 except Exception as recovery_error:
                     LOGGER.error('Local rig recovery stopped job=%s type=%s', job_id, type(recovery_error).__name__)
         finally:
-            lock.release()
+            _WORKERS.release(str(run))
 
     def _uncertain(self, owner, job_id, run, action_id):
         """(contract, motion pack or None, receipt) of the submission an operator may recover; raises when there is none now."""

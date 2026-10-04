@@ -5,7 +5,7 @@ import time
 
 import httpx
 
-from src.services.character_jobs import RETRYABLE
+from src.services.character_jobs import RETRYABLE, submitted_task_id
 from src.services.character_pipeline import PipelineError, read_json
 from src.services.model_providers import base_url
 
@@ -87,16 +87,21 @@ def task_problem(task, stage):
 
 
 def saved_problem(run):
+    """The first rig or animation receipt that blocks the job. A submission whose saved 2xx answer names the task the
+    provider accepted is not one: the next run records that task and polls it, and nothing is sent again."""
+    from src.services.character_motion import submitted_task_id as submitted_clip
     # Keep the rejected provider receipt intact after an explicit local recovery.
     if read_json(run/'delivery.json').get('origin') == 'transferred_meshy_rig':
         return None
     task = read_json(run/'character.json')
-    problem = task_problem(task, task.get('stage', 'rigging'))
+    problem = None if submitted_task_id(run, task) else task_problem(task, task.get('stage', 'rigging'))
     if problem:
         return problem
     for path in sorted((run/'actions').glob('*/motion-pack.json')):
         pack = read_json(path)
-        for task in pack.get('tasks', {}).values():
+        for slot, task in pack.get('tasks', {}).items():
+            if submitted_clip(path.parent, pack, slot):
+                continue
             problem = task_problem(task, 'animation')
             if problem:
                 return {**problem, 'action_id': pack.get('action_id')}

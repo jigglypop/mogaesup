@@ -5,10 +5,12 @@ the final key is atomic, and a temporary object that is renamed afterwards costs
 """
 import base64
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import io
 import json
 import logging
+from pathlib import Path as LocalPath
 
 from botocore.exceptions import ClientError
 import httpx
@@ -17,10 +19,12 @@ import pytest
 
 from api.test_characters import rigged_glb
 from src.services import avatar_openai_images as images
-from src.services import object_storage
-from src.services.avatar_image_recovery import settle_interrupted
+from src.services import object_storage, run_lock
+from src.services.avatar_image_recovery import classify_image_failure, decorate_job, settle_interrupted
+from src.services.avatar_multiview_images import can_resume
 from src.services.character_pipeline import PipelineError
 from src.services.object_storage import StoredPath
+from src.services.runtime_activity import RuntimeDraining
 from src.services.wardrobe import download_glb
 
 JOB = 'b' * 24
@@ -44,9 +48,13 @@ class CountingS3:
     def __init__(self):
         self.objects, self.calls, self.puts = {}, Counter(), []
         self.deny_delete = False
+        self.refuse_puts = Counter()  # key -> how many more PUTs of it fail, as an S3 outage would
 
     def put_object(self, *, Bucket, Key, Body, ContentType, Metadata, ChecksumSHA256, ServerSideEncryption, IfNoneMatch=None):
         self.calls['put_object'] += 1
+        if self.refuse_puts[Key] > 0:
+            self.refuse_puts[Key] -= 1
+            raise ClientError({'Error': {'Code': 'ServiceUnavailable'}}, 'PutObject')
         self.puts.append(Key)
         self.objects[Key] = bytes(Body)
 
@@ -203,6 +211,102 @@ def test_a_stopped_request_whose_answer_was_cut_off_stays_unconfirmed(tmp_path):
     assert receipt.with_suffix('.response.partial').is_file() and not receipt.with_suffix('.response.json').exists()
 
 
+def stopped_attempt(tmp_path, request):
+    """A view whose request was in flight when the server stopped, with `request` as its saved receipt and no answer."""
+    receipt = tmp_path / 'output' / 'top-front-provider'
+    receipt.parent.mkdir(parents=True)
+    receipt.with_suffix('.request.json').write_text(json.dumps(request))
+    return {'parts': [{'slot': 'top', 'views': {'front': {'status': 'submitting', 'attempted_at': '2026-10-01T00:00:00+00:00'}}}]}, receipt
+
+
+def test_a_stopped_upload_without_its_completion_mark_stays_unconfirmed(tmp_path):
+    # The receipt marks a complete upload only after the body is on the wire: without the mark the provider may still
+    # have the whole request, and a stop never makes it "not sent".
+    state, receipt = stopped_attempt(tmp_path, {'phase': 'sending', 'request_started': True, 'client_request_id': 'x'})
+    assert settle_interrupted(tmp_path, state)
+    view = state['parts'][0]['views']['front']
+    assert view['status'] == 'submission_uncertain' and view['failure']['category'] == 'provider_connection'
+    assert 'submission' not in json.loads(receipt.with_suffix('.request.json').read_text())
+
+
+def test_a_stopped_request_that_never_started_is_settled_as_not_sent(tmp_path):
+    state, receipt = stopped_attempt(tmp_path, {'phase': 'prepared', 'request_started': False, 'client_request_id': 'x'})
+    assert settle_interrupted(tmp_path, state)
+    assert state['parts'][0]['views']['front']['status'] == 'not_sent'
+    assert json.loads(receipt.with_suffix('.request.json').read_text())['submission'] == 'not_sent'
+
+
+# --- one rule for every image stage: what the receipt shows decides, never the exception alone --------------------------
+
+def failed_attempt(tmp_path, request=None, response=None):
+    receipt = tmp_path / 'top-front-provider'
+    if request is not None:
+        receipt.with_suffix('.request.json').write_text(json.dumps(request))
+    if response is not None:
+        receipt.with_suffix('.response.json').write_bytes(response)
+    return receipt
+
+
+@pytest.mark.parametrize('request_saved, response, error, expected', [
+    # An answer that arrived (HTTP 200) but could not be stored was paid for: unconfirmed, never a plain failure.
+    ({'phase': 'response_unsaved', 'http_status': 200, 'request_started': True, 'submission': 'unknown'}, None,
+     OSError('storage unavailable'), ('submission_uncertain', 'local_processing')),
+    # The receipt shows the request never left, whatever the exception was.
+    ({'phase': 'prepared', 'request_started': False, 'submission': 'not_sent'}, None,
+     httpx.ConnectError('refused'), ('not_sent', 'provider_connection')),
+    ({'phase': 'prepared', 'request_started': False, 'submission': 'not_sent'}, None,
+     RuntimeDraining('draining'), ('not_sent', 'provider_connection')),
+    ({'phase': 'awaiting_response', 'request_started': True, 'submission': 'unknown'}, None,
+     httpx.ReadError('reset'), ('submission_uncertain', 'provider_connection')),
+    ({'phase': 'response_saved', 'http_status': 200}, json.dumps(answer()).encode(),
+     OSError('local disk'), ('submitting', 'local_processing')),
+    (None, None, OSError('before any request'), ('failed', 'local_processing')),
+])
+def test_an_image_failure_is_classified_from_its_receipt(tmp_path, request_saved, response, error, expected):
+    status, failure = classify_image_failure(error, failed_attempt(tmp_path, request_saved, response))
+    assert (status, failure['category']) == expected and failure['id'] and failure['message']
+
+
+def test_a_provider_refusal_is_rejected_with_its_category(tmp_path):
+    refusal = images.OpenAIImageHTTPError(400, 'policy', 'diag1234abcd', {'code': 'moderation_blocked'})
+    status, failure = classify_image_failure(refusal, failed_attempt(tmp_path, {'http_status': 400}))
+    assert status == 'rejected' and failure['category'] == 'policy' and failure['id'] == 'diag1234abcd'
+    assert failure['http_status'] == 400 and failure['provider_code'] == 'moderation_blocked'
+
+
+def unconfirmed_view(tmp_path, kept):
+    """A paused job whose front body view was answered but not stored; `kept` is the copy left as its partial."""
+    receipt = tmp_path / 'output' / 'body-front-provider'
+    receipt.parent.mkdir(parents=True)
+    receipt.with_suffix('.request.json').write_text(json.dumps(
+        {'phase': 'response_unsaved', 'http_status': 200, 'request_started': True, 'submission': 'unknown'}))
+    if kept is not None:
+        receipt.with_suffix('.response.partial').write_bytes(kept)
+    failure = {'id': 'f00d', 'category': 'local_processing', 'message': '수신 이미지 저장 실패 · 응답 확인 필요'}
+    state = {'production_spec': {'generated_views': ['front']},
+             'parts': [{'slot': 'body', 'image': {'status': 'pending'}, 'model': {'status': 'pending'},
+                        'views': {'front': {'status': 'submission_uncertain', 'failure': failure}}}]}
+    (tmp_path / 'pipeline.json').write_text(json.dumps(state))
+    public = {'status': 'pipeline_paused', 'next_actions': [], 'progress': {'message': ''},
+              'parts': [{'slot': 'body', 'views': {'front': {'status': 'submission_uncertain', 'failure': dict(failure)}}}]}
+    return state, public, receipt
+
+
+def test_an_answer_kept_as_a_partial_is_resumed_and_never_offered_for_another_paid_request(tmp_path):
+    state, public, receipt = unconfirmed_view(tmp_path, json.dumps(answer()).encode())
+    decorate_job(tmp_path, public)
+    assert not [action for action in public['next_actions'] if action['id'] in ('retry_image', 'retry_images')]
+    assert can_resume(tmp_path, state)
+    assert receipt.with_suffix('.response.json').is_file() and not receipt.with_suffix('.response.partial').exists()
+
+
+def test_an_answer_lost_before_it_was_stored_can_only_be_requested_again_explicitly(tmp_path):
+    state, public, receipt = unconfirmed_view(tmp_path, None)
+    assert not can_resume(tmp_path, state)
+    decorate_job(tmp_path, public)
+    assert [action['failure_id'] for action in public['next_actions'] if action['id'] == 'retry_image'] == ['f00d']
+
+
 # --- one PUT of the final key in S3, temporary file and rename on disk ---------------------------------------------------
 
 def test_an_answer_saved_to_s3_is_one_put_of_its_final_key(remote, source, monkeypatch):
@@ -226,6 +330,61 @@ def test_an_answer_cut_off_on_its_way_to_s3_keeps_the_bytes_that_arrived(remote,
     with pytest.raises(httpx.ReadError):
         edit(source, receipt_in(root))
     assert s3.objects[KEY + '.response.partial'] == b'{"data":' and KEY + '.response.json' not in s3.objects
+
+
+@pytest.fixture
+def quick_retries(monkeypatch):
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+
+
+def test_an_answer_the_store_refuses_once_is_saved_by_the_next_attempt(remote, source, monkeypatch, quick_retries):
+    root, s3 = remote
+    s3.refuse_puts[KEY + '.response.json'] = 1
+    serve(monkeypatch, lambda request: httpx.Response(200, json=answer()))
+    assert edit(source, receipt_in(root)) == png()
+    assert json.loads(s3.objects[KEY + '.response.json']) == answer() and KEY + '.response.partial' not in s3.objects
+
+
+def test_an_answer_the_store_keeps_refusing_is_kept_on_this_host_and_used_without_paying_again(remote, source, monkeypatch,
+                                                                                               quick_retries):
+    root, s3 = remote
+    receipt = receipt_in(root)
+    s3.refuse_puts[KEY + '.response.json'] = 3  # every attempt of the last save
+    sent = []
+    serve(monkeypatch, lambda request: (sent.append(request), httpx.Response(200, json=answer()))[1])
+    with pytest.raises(ClientError) as refused:
+        edit(source, receipt)
+    kept = LocalPath(receipt.with_suffix('.response.partial'))
+    assert json.loads(kept.read_bytes()) == answer() and KEY + '.response.json' not in s3.objects
+    request = json.loads(receipt.with_suffix('.request.json').read_text())
+    assert (request['http_status'], request['phase'], request['submission']) == (200, 'response_unsaved', 'unknown')
+    # Paid for and not stored: not a plain failure, which an explicit retry would pay for again.
+    status, failure = classify_image_failure(refused.value, receipt)
+    assert (status, failure['category']) == ('submission_uncertain', 'local_processing')
+    # The store is back: the kept answer is moved into place and used; nothing is requested again.
+    serve(monkeypatch, never)
+    assert edit(source, receipt) == png()
+    assert json.loads(s3.objects[KEY + '.response.json']) == answer() and not kept.exists() and len(sent) == 1
+
+
+def test_a_request_the_runtime_does_not_admit_is_not_sent_and_goes_out_later(tmp_path, source, monkeypatch):
+    receipt = tmp_path / 'body-provider'
+    sent = []
+    serve(monkeypatch, lambda request: (sent.append(request), httpx.Response(200, json=answer()))[1])
+    admit = images.paid_request
+
+    @contextmanager
+    def draining():
+        raise RuntimeDraining('점검 중')
+        yield
+    monkeypatch.setattr(images, 'paid_request', draining)
+    with pytest.raises(RuntimeDraining) as refused:
+        edit(source, receipt)
+    assert not sent and json.loads(receipt.with_suffix('.request.json').read_text())['submission'] == 'not_sent'
+    assert classify_image_failure(refused.value, receipt)[0] == 'not_sent'
+    # Admission is open again: the same receipt sends the request it never sent.
+    monkeypatch.setattr(images, 'paid_request', admit)
+    assert edit(source, receipt) == png() and len(sent) == 1
 
 
 def test_on_disk_the_answer_is_still_staged_and_renamed(tmp_path, source, monkeypatch):
@@ -302,3 +461,40 @@ def test_the_receipt_written_before_the_request_is_still_required(tmp_path, sour
     with pytest.raises(OSError):
         edit(source, tmp_path / 'body-provider')
     assert not sent
+
+
+# --- every image stage reads an answer kept on this host as the saved answer it is --------------------------------------
+
+def answer_kept_on_this_host(directory):
+    """A request whose answer arrived and was refused by the store: only the complete partial on this host has it."""
+    receipt = directory / 'image-provider.json'
+    receipt.with_suffix('.request.json').write_text(json.dumps(
+        {'phase': 'response_unsaved', 'http_status': 200, 'request_started': True, 'submission': 'unknown'}))
+    receipt.with_suffix('.response.partial').write_text(json.dumps(answer()))
+    return receipt
+
+
+def test_a_studio_generation_continues_from_an_answer_kept_on_this_host(tmp_path):
+    from src.services.studio_generations import StudioGenerations
+    receipt = answer_kept_on_this_host(tmp_path)
+    # While its worker may still be writing the answer, it is only read.
+    assert StudioGenerations._image_reason(tmp_path, {'files': {}}, idle=False)[0] is False
+    assert receipt.with_suffix('.response.partial').exists()
+    assert StudioGenerations._image_reason(tmp_path, {'files': {}}) == (True, None)
+    assert receipt.with_suffix('.response.json').is_file()
+
+
+def test_an_expression_generation_continues_from_an_answer_kept_on_this_host(tmp_path):
+    from src.services.avatar_expression_generation import AvatarExpressionGeneration
+    receipt = answer_kept_on_this_host(tmp_path)
+    assert AvatarExpressionGeneration._resume_reason(tmp_path, {'status': 'paused'}, idle=False)[0] is False
+    assert AvatarExpressionGeneration._resume_reason(tmp_path, {'status': 'paused'}) == (True, None)
+    assert receipt.with_suffix('.response.json').is_file()
+
+
+def test_an_animal_view_continues_from_an_answer_kept_on_this_host(tmp_path):
+    from src.services.animal_production import AnimalProduction, StepPaused
+    receipt = answer_kept_on_this_host(tmp_path)
+    # Paid and kept: going on reads it, where an unconfirmed request would be blocked from any re-send.
+    assert isinstance(AnimalProduction._image_failure(receipt, OSError('storage unavailable')), StepPaused)
+    assert receipt.with_suffix('.response.json').is_file()

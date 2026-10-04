@@ -58,3 +58,21 @@ def test_a_run_of_this_process_is_busy_only_while_its_worker_holds_the_lock(job)
         assert pipeline.summary(directory)['busy'] is True
     finally:
         pipeline._WORKERS.release(str(directory))
+
+
+def test_a_rebake_of_this_process_is_busy_only_while_its_worker_holds_the_lock(job):
+    from src.services import avatar_expression_reuse as reuse
+    directory, _ = job
+    (directory / 'pipeline.json').write_text(json.dumps({'expression_reuse': {'expressions': [{'source_id': 'e1'}]}}))
+    (directory / 'expression-reuse.json').write_text(json.dumps(
+        {'target_version': 'v1', 'status': 'running', 'process': identity(), 'expressions': {}}))
+    # The re-bake's last save failed: the record says running, and no worker runs it.
+    assert reuse.expression_reuse_state(directory)['busy'] is False and reuse._WORKERS == {}
+    assert reuse._WORKERS.acquire(str(directory))
+    try:
+        assert reuse.expression_reuse_state(directory)['busy'] is True
+        assert reuse.reuse_saved_expressions(type('Factory', (), {'directory': lambda self, owner, job: directory})(),
+                                             1, 'job', 'v1')['status'] == 'running'  # the running worker keeps it
+    finally:
+        reuse._WORKERS.release(str(directory))
+    assert dict(reuse._WORKERS) == {}

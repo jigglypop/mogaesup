@@ -21,7 +21,7 @@ from src.services.animal_library import AnimalLibrary
 from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
-from src.services.avatar_openai_images import DEFAULT_BASE, DEFAULT_MODEL, generate_standard_part_image
+from src.services.avatar_openai_images import DEFAULT_BASE, DEFAULT_MODEL, generate_standard_part_image, saved_response
 from src.services.character_parts import blender_executable, blender_process, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, valid_request_key
 from src.services.model_providers import client as provider_client
@@ -351,8 +351,9 @@ class AnimalProduction:
         prompt_path = work/f'{view}-prompt.json'
         saved = read_json(prompt_path)
         if saved:
-            # A saved response is returned as it is; only a new request must match the saved inputs.
-            answered = receipt.with_suffix('.response.json').is_file()
+            # A saved response is returned as it is (also one kept on this host when the store refused it); only a
+            # new request must match the saved inputs.
+            answered = saved_response(receipt)
             if not answered and saved.get('references') != [digest(path) for path in references]:
                 raise StepBlocked('참조 이미지가 바뀌어 저장된 요청을 다시 보내지 않습니다.')
             text, model = saved['prompt'], saved.get('model') or DEFAULT_MODEL
@@ -374,7 +375,7 @@ class AnimalProduction:
         """What a failed image call means for this job, judged by its receipts, never by guesswork."""
         if isinstance(reason, PipelineError) and reason.code == 'image_request_changed':
             return StepBlocked('저장된 이미지 요청과 입력이 달라 다시 보내지 않습니다.')
-        if receipt.with_suffix('.response.json').is_file():
+        if saved_response(receipt):
             # The paid answer is saved; a rejection of its content stays, a read failure can be retried.
             return reason if isinstance(reason, PipelineError) else StepPaused(
                 '저장된 이미지 응답을 읽지 못했습니다. 같은 요청으로 이어서 실행할 수 있습니다.')

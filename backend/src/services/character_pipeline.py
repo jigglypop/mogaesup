@@ -44,6 +44,13 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def file_state(path: Path) -> list:
+    """[path, size, modification time] of a file from one stat(): one HEAD for a stored object, whose stat has a
+    modification time in seconds but no st_mtime_ns."""
+    stat = path.stat()
+    return [str(path), stat.st_size, stat.st_mtime]
+
+
 _REQUEST_KEY = re.compile(r'[a-zA-Z0-9_-]{8,100}')
 
 
@@ -168,14 +175,16 @@ class CharacterPipeline:
                 return name, files[name]
         return None, None
 
-    def revision(self, entry: dict, run: Path, control: dict, *, snapshot: dict | None = None) -> str:
+    def revision(self, entry: dict, run: Path, control: dict, *, snapshot: dict | None = None,
+                 files: dict[str, list] | None = None) -> str:
+        """`files`: the file_state() of each of self.files() when the caller has them already."""
         snapshot = snapshot if snapshot is not None else {
             "provider": read_json(run / "character.json"),
             "motion_pack": read_json(run / "motion-pack.json"),
             "operation": self.latest_operation(run)}
-        value = {"entry": entry, "control": control, **snapshot,
-                 "files": {key: [str(path), path.stat().st_size, path.stat().st_mtime_ns]
-                           for key, path in self.files(entry, run, control).items()}}
+        if files is None:
+            files = {key: file_state(path) for key, path in self.files(entry, run, control).items()}
+        value = {"entry": entry, "control": control, **snapshot, "files": files}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:24]
 
     def detail(self, character_id: str, user_id: int) -> dict:
@@ -264,10 +273,11 @@ class CharacterPipeline:
             for action in actions:
                 if action["id"] in {"refresh_provider", "recover_task", "resume_character", "recover_motion_task"}:
                     action.update(enabled=key_present, reason=None)
-        artifacts = [{"id": name, "kind": "image" if name in {"reference", "rest_render"} else ("file" if name == "parts_blend" else "model"), "bytes": path.stat().st_size,
-                      "url": f"/api/characters/{character_id}/artifacts/{name}"} for name, path in files.items()]
+        states = {name: file_state(path) for name, path in files.items()}
+        artifacts = [{"id": name, "kind": "image" if name in {"reference", "rest_render"} else ("file" if name == "parts_blend" else "model"), "bytes": states[name][1],
+                      "url": f"/api/characters/{character_id}/artifacts/{name}"} for name in files]
         return {"id": character_id, "name": control.get("name", entry.get("name", f"Character {character_id}")),
-                "revision": self.revision(entry, run, control, snapshot={"provider": provider, "motion_pack": motion_pack, "operation": operation}), "height_meters": height,
+                "revision": self.revision(entry, run, control, snapshot={"provider": provider, "motion_pack": motion_pack, "operation": operation}, files=states), "height_meters": height,
                 "provider": {key: provider.get(key) for key in ("stage", "status", "progress", "task_id", "http_status")},
                 "pipeline_status": pipeline_status, "rig_origin": rig_origin, "operation": operation,
                 "problems": problems, "next_actions": actions, "artifacts": artifacts,

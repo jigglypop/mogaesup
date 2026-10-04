@@ -15,6 +15,7 @@ from src.services.asset_delivery import inspect_glb
 from src.services.provider_http import download_glb
 from src.services.provider_http import get_with_retry
 from src.services.meshy_status import BLOCKED
+from src.services.run_lock import final_write
 from src.services.runtime_activity import paid_request
 
 DEFAULT_ACTIONS = {"idle": 0, "walk": 1, "run": 14, "jump": 466, "fall": 502}
@@ -39,6 +40,29 @@ def _save(run, pack):
     _write_json(run / "motion-pack.json", pack)
 
 
+def submitted_task_id(run, pack, slot):
+    """The task its provider accepted for the slot's unconfirmed submission (submission_uncertain, no task ID), named
+    only by the provider's saved 2xx answer, or None. The answer file is per slot and outlives an explicit retry, so a
+    task an earlier attempt already had is never taken for this one. Only reads."""
+    value = pack.get("tasks", {}).get(slot)
+    if not value or value.get("status") != "submission_uncertain" or value.get("task_id"):
+        return None
+    task_id = character_jobs.answered_task_id(run / f"{slot}-submission-response.json")
+    earlier = {task.get("task_id") for task in pack.get("previous_tasks", [])}
+    return None if task_id in earlier else task_id
+
+
+def adopt_submitted_task(run, pack, slot):
+    """True when the slot's submission, saved without a task ID, is recorded under the task its provider's saved 2xx
+    answer names (submitted_task_id): polled from then on, never sent again (and paid twice)."""
+    task_id = submitted_task_id(run, pack, slot)
+    if task_id is None:
+        return False
+    pack["tasks"][slot].update(task_id=task_id, status="PENDING", recovery_method="submission_response")
+    _save(run, pack)
+    return True
+
+
 def _task(run, pack, slot, endpoint, payload, client):
     tasks = pack.setdefault("tasks", {})
     value = tasks.get(slot)
@@ -51,9 +75,11 @@ def _task(run, pack, slot, endpoint, payload, client):
         value = {"status": "submission_uncertain", "endpoint": endpoint, "payload": receipt_payload}
         tasks[slot] = value
         pack["submitted_tasks"] += 1
-        _save(run, pack)  # durable intent before every possibly paid POST
         try:
             with paid_request():
+                # Durable intent before every possibly paid POST, saved once admitted: a refused admission sends
+                # nothing and leaves no uncertain receipt.
+                _save(run, pack)
                 response = client.post(endpoint, json=payload)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
             value.update(status="submission_not_sent")
@@ -71,7 +97,10 @@ def _task(run, pack, slot, endpoint, payload, client):
         if "model_url" in value["payload"]:
             value["payload"] = {"height_meters": payload["height_meters"], "input_sha256": pack["input_sha256"]}
         value.update(task_id=task_id, status="PENDING")
-        _save(run, pack)
+        # The provider accepted (and bills) this task: a storage blip must not leave the receipt without its ID.
+        final_write(lambda: _save(run, pack), 'motion task receipt')
+    else:
+        adopt_submitted_task(run, pack, slot)
     if value["status"] in BLOCKED:
         raise ValueError("Existing provider attempt requires recovery; no automatic resubmission")
     if value["status"] != "SUCCEEDED":

@@ -56,3 +56,40 @@ def test_a_run_that_cannot_be_saved_as_running_is_paused_instead_of_left_accepte
     record = read_json(directory / 'stage-runs' / 'r1.json')
     assert attempts == [1] and record['status'] == 'paused' and record['error']
     assert stages.stage_run_active(directory)[1] is False and stages._WORKERS == {}
+
+
+def stale_worker_records(directory):
+    """An assembly, a rig worker and a stage run all saved as running by this live process, whose workers are gone:
+    what a failed last save leaves behind."""
+    version = 'b' * 24
+    for name in ('native-parts/' + version, 'meshy'):
+        (directory / name).mkdir(parents=True)
+    (directory / 'native-parts' / 'current.json').write_text(json.dumps({'version': version}))
+    (directory / 'native-parts' / version / 'record.json').write_text(json.dumps({'status': 'running', 'process': identity()}))
+    (directory / 'meshy' / 'worker.json').write_text(json.dumps({'status': 'running', 'process': identity()}))
+    save_run(directory, status='running', process=identity())
+    return directory / 'native-parts' / version
+
+
+def flow(directory):
+    from src.services.avatar_character_flow import character_flow
+    job = {'status': 'review_required', 'progress': {'stage': 'rig', 'message': ''}, 'next_actions': [], 'error': None}
+    return character_flow(directory, job), job['next_actions']
+
+
+def test_workers_whose_last_save_failed_do_not_keep_the_job_running(job):
+    from src.services import avatar_meshy, avatar_native_parts
+    directory, _ = job
+    assembly = stale_worker_records(directory)
+    state, actions = flow(directory)
+    # Nothing runs them any more: the job can be resumed instead of reading as running until a restart.
+    assert state['busy'] is False and state['status'] == 'paused' and actions[0]['enabled']
+    for workers, key in ((avatar_native_parts._WORKERS, str(assembly)), (avatar_meshy._WORKERS, str(directory / 'meshy')),
+                         (stages._WORKERS, str(directory))):
+        assert workers.acquire(key)
+        try:
+            state, actions = flow(directory)
+            assert state['busy'] is True and state['status'] == 'running'
+            assert not any(action['enabled'] for action in actions)
+        finally:
+            workers.release(key)

@@ -11,7 +11,7 @@ from threading import Lock
 import numpy as np
 from PIL import Image
 from src.services.asset_editor import _write_json
-from src.services.avatar_factory import _LOCK
+from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, read_json, now, require_bucket
 
 SURFACES = {'snow': (224, 234, 244), 'sand': (202, 174, 119),
@@ -307,6 +307,8 @@ class StudioLibrary:
         if name not in record['files']:
             raise PipelineError('not_found', '텍스쳐 파일을 찾을 수 없습니다.', 404)
         path = self.root/'textures'/texture_id/name
-        if hashlib.sha256(path.read_bytes()).hexdigest() != record['files'][name]:
+        # The stored object's own SHA-256 (its HEAD checksum, or the record's hash): the route streams the file next,
+        # so it is not downloaded once more just to be hashed.
+        if digest(path) != record['files'][name]:
             raise PipelineError('artifact_changed', '저장된 텍스쳐가 변경되었습니다.', 409)
         return path

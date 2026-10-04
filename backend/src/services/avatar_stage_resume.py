@@ -3,10 +3,10 @@ import hashlib
 
 from src.services.asset_editor import _write_json, update_json
 from src.services.avatar_factory import _LOCK, digest
-from src.services.character_jobs import RETRYABLE
+from src.services.character_jobs import RETRYABLE, submitted_task_id
 from src.services.character_pipeline import PipelineError, now, read_json, valid_request_key
 from src.services.object_storage import copy_file
-from src.services.process_identity import identity, state as process_state
+from src.services.process_identity import identity
 from src.services.run_lock import WorkerLocks, final_write, this_process, worker_alive
 from src.services.avatar_equipment import is_native_part_set
 from src.services.meshy_status import saved_problem
@@ -20,8 +20,27 @@ def current_run(directory):
     return read_json(directory/'stage-runs'/f'{pointer["id"]}.json') if pointer else {}
 
 
-def active_run(record):
-    return record.get('status') in ('accepted', 'running') and process_state(record.get('process')) != 'exited'
+def assembly_state(directory):
+    """(the job's current assembly record, whether its worker still runs). One this process started runs only while
+    it holds its worker lock: a worker whose last save failed must not keep the job busy until a restart."""
+    from src.services.avatar_native_parts import assembly_running
+    pointer = read_json(directory/'native-parts/current.json')
+    return assembly_running(directory/'native-parts'/pointer['version']) if pointer else ({}, False)
+
+
+def rig_state(directory):
+    """(the job's meshy/worker.json, whether its worker, Meshy's or a local rig recovery, still runs), judged the same
+    way as assembly_state."""
+    from src.services.avatar_meshy import worker_busy
+    return worker_busy(directory/'meshy')
+
+
+def unconfirmed_submission(run):
+    """A part's 3D submission that nothing shows was accepted, so an explicit run would send it again. One whose saved
+    answer names the accepted task is not: the run records that task and polls it."""
+    task = read_json(run/'character.json')
+    return (task.get('status') == 'submission_uncertain' and not submitted_task_id(run, task)
+            and not read_json(run/'generation-artifacts.json').get('generated'))
 
 
 def stage_run_active(directory):
@@ -68,8 +87,10 @@ def model_problem(directory, part, pipeline, *, verify=False):
             return '저장된 3D 파일이 변경되었습니다.'
         return None
     task = read_json(run/'character.json')
-    if task and task.get('status') not in RETRYABLE:
-        if not task.get('task_id'):
+    # A submission whose saved answer names the accepted task is that task (character_jobs.adopt_submitted_task).
+    accepted = bool(task) and submitted_task_id(run, task) is not None
+    if task and (task.get('status') not in RETRYABLE or accepted):
+        if not (task.get('task_id') or accepted):
             return '기존 3D 요청의 응답 확인이 필요합니다.'
         return None  # Poll the known task; image generation is not a prerequisite.
     # A new or explicitly repeated request needs the saved part images.
@@ -123,10 +144,9 @@ class AvatarStageResume:
         valid = is_native_part_set(p['slot'] for p in parts)
         operation, running = stage_run_active(directory)
         busy = running or job.get('character_flow', {}).get('busy', False)
-        native_pointer = read_json(directory/'native-parts/current.json')
-        native = read_json(directory/'native-parts'/native_pointer['version']/'record.json') if native_pointer else {}
-        rig_worker = read_json(directory/'meshy/worker.json')
-        busy |= active_run(native) or active_run(rig_worker)
+        native, assembling = assembly_state(directory)
+        rig_worker, rigging = rig_state(directory)
+        busy |= assembling or rigging
         images = [i for p in parts for i in image_inputs(p, pipeline)]
         image_count = sum(saved_image(directory, i) for i in images)
         models = []
@@ -156,8 +176,10 @@ class AvatarStageResume:
                 from src.services.avatar_multiview_images import can_resume
                 image_resume = can_resume(directory, pipeline)
             else:
-                image_resume = all(p['image']['status'] in ('pending', 'received', 'succeeded') or
-                    (directory/'output'/f'{p["slot"]}-provider.response.json').is_file() for p in parts)
+                # What resume() takes; an answer is moved into place only while no worker can be writing it.
+                from src.services.avatar_image_pipeline import unresolved_image_attempt
+                idle = job['status'] in ('pipeline_paused', 'failed', 'recovery_required')
+                image_resume = not any(unresolved_image_attempt(directory, p, idle=idle) for p in parts)
         model_error = next((problem for p in parts if (problem := model_problem(directory, p, pipeline))), None)
         reasons = {
             'images': None if image_resume else '기존 이미지 응답 확인 또는 실패 이미지 재요청이 필요합니다.',
@@ -195,9 +217,7 @@ class AvatarStageResume:
                     'paid': stages_paid[stage]}
                    for stage in STAGES if stage != 'expressions' or expressions]
         # An explicit run re-sends a request whose acceptance was never confirmed.
-        uncertain_models = any(read_json(directory/'parts'/p['slot']/'character.json').get('status') == 'submission_uncertain'
-                               and not read_json(directory/'parts'/p['slot']/'generation-artifacts.json').get('generated')
-                               for p in parts)
+        uncertain_models = any(unconfirmed_submission(directory/'parts'/p['slot']) for p in parts)
         for action in actions:
             if action['stage'] in ('images', 'models') and uncertain_models:
                 action['warning'] = '접수 불명 3D 요청 재전송 · 중복 과금 가능'
@@ -259,8 +279,8 @@ class AvatarStageResume:
                         or read_json(run/'generation-artifacts.json').get('generated')):
                     continue
                 task = read_json(run/'character.json')
-                if task.get('task_id') and task.get('status') not in RETRYABLE:
-                    continue  # A known task is only polled.
+                if (task.get('task_id') and task.get('status') not in RETRYABLE) or submitted_task_id(run, task):
+                    continue  # A known task, also one only its saved answer names, is only polled.
                 parts += 1
         rig_source = pipeline.get('base_body') or (pipeline.get('base_body_setup') or {}).get('rig_source')
         needs_rig = not read_json(directory/'meshy/delivery.json').get('version') and not rig_source

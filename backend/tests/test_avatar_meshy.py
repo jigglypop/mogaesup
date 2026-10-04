@@ -6,7 +6,7 @@ import pytest
 
 from services.test_character_preparation import animated_fixture
 from src.services import avatar_meshy as module
-from src.services import provider_http
+from src.services import provider_http, run_lock
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import AvatarFactory, digest
 from src.services.character_pipeline import PipelineError, read_json
@@ -420,3 +420,96 @@ def test_a_refused_clip_download_pauses_the_rig_worker_with_the_reason(setup, mo
     service.start(1, jid); service.execute(1, jid, poll_seconds=0)
     worker = read_json(directory/'meshy/worker.json')
     assert worker['status'] == 'paused' and 'HTTP 403' in worker['error']
+
+
+# --- a worker that cannot save its end never keeps the rig busy ---------------------------------------------------------
+
+def test_a_rig_worker_whose_last_save_fails_does_not_stay_busy(setup, monkeypatch):
+    service, jid, directory, calls, _ = setup
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    real = module._write_json
+
+    def write(path, value):
+        if path.name == 'worker.json' and value.get('status') in ('complete', 'paused'):
+            raise OSError('storage unavailable')
+        return real(path, value)
+    monkeypatch.setattr(module, '_write_json', write)
+    service.start(1, jid)
+    with pytest.raises(OSError):
+        service.execute(1, jid, poll_seconds=0)
+    # The record still says running in this live process, but nothing runs it any more.
+    assert read_json(directory/'meshy/worker.json')['status'] == 'running'
+    assert service.get(1, jid)['busy'] is False and module._WORKERS == {}
+    monkeypatch.setattr(module, '_write_json', real)
+    service.start(1, jid)
+    assert read_json(directory/'meshy/worker.json')['status'] == 'accepted' and len(calls) == 1
+
+
+def test_a_rig_problem_that_cannot_be_read_still_pauses_the_worker(setup, monkeypatch):
+    service, jid, directory, calls, _ = setup
+
+    def refused(run, stage):
+        raise PipelineError('download_failed', '3D 파일을 내려받지 못했습니다 (HTTP 403). 다시 시도할 수 있습니다.', 502)
+    monkeypatch.setattr(module.character_jobs, 'download', refused)
+    service.start(1, jid)
+
+    def unreadable(run):
+        raise OSError('storage unavailable')
+    monkeypatch.setattr(module, 'saved_problem', unreadable)
+    service.execute(1, jid, poll_seconds=0)
+    worker = read_json(directory/'meshy/worker.json')
+    assert worker['status'] == 'paused' and 'HTTP 403' in worker['error'] and worker['failure'] is None
+
+
+def test_a_job_that_cannot_be_read_pauses_the_admitted_rig_worker(setup, monkeypatch):
+    service, jid, directory, calls, _ = setup
+    service.start(1, jid)
+    read = service.factory.get
+
+    def unavailable(owner, job_id):
+        raise OSError('storage unavailable')
+    monkeypatch.setattr(service.factory, 'get', unavailable)
+    service.execute(1, jid, poll_seconds=0)
+    monkeypatch.setattr(service.factory, 'get', read)
+    worker = read_json(directory/'meshy/worker.json')
+    assert worker['status'] == 'paused' and worker['exception_type'] == 'OSError'
+    assert service.get(1, jid)['busy'] is False and not calls
+    # Another owner's job is refused before anything is written for it.
+    with pytest.raises(PipelineError):
+        service.execute(2, jid, poll_seconds=0)
+    assert not (service.factory.root/'2').exists() and module._WORKERS == {}
+
+
+def test_a_rig_the_provider_accepted_without_a_saved_task_id_is_polled_not_sent_again(setup):
+    service, jid, directory, calls, _ = setup
+    run = stopped_rig(service, jid, directory)
+    _write_json(run/'rigging-submission-response.json', {'http_status': 202, 'request_id': 'r-1',
+                                                        'body': json.dumps({'result': 'fixture-rig'})})
+    # An explicit run resets unaccepted rigs; this one was accepted, so it is polled.
+    assert service.reset_failed(1, jid) is False
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert service.get(1, jid)['status'] == 'ready' and not calls
+    saved = read_json(run/'character.json')
+    assert saved['task_id'] == 'fixture-rig' and saved['recovery_method'] == 'submission_response'
+
+
+def test_an_accepted_rig_or_clip_named_only_by_its_saved_answer_is_recoverable_without_a_resend(setup):
+    from src.services.meshy_status import saved_problem
+    service, jid, directory, calls, _ = setup
+    run = stopped_rig(service, jid, directory)
+    unconfirmed = service.get(1, jid)
+    assert unconfirmed['failure']['status'] == 'submission_uncertain' and not unconfirmed['can_resume']
+    _write_json(run/'rigging-submission-response.json', {'http_status': 202, 'request_id': 'r-1',
+                                                        'body': json.dumps({'result': 'fixture-rig'})})
+    # The saved answer names the accepted rig: it is no problem to resolve by a re-send; resuming polls it.
+    accepted = service.get(1, jid)
+    assert accepted['failure'] is None and accepted['can_resume'] and not calls
+    action = stopped_animation(service, jid, directory)
+    _write_json(run/'character.json', {'stage': 'rigging', 'status': 'SUCCEEDED', 'task_id': 'fixture-rig'})
+    assert saved_problem(run)['status'] == 'submission_uncertain'
+    _write_json(action/'clip-submission-response.json', {'http_status': 202, 'body': json.dumps({'result': 'clip-1'})})
+    assert saved_problem(run) is None
+    # An answer kept from an earlier attempt of the same clip names that attempt's task, not this one's.
+    pack = read_json(action/'motion-pack.json')
+    _write_json(action/'motion-pack.json', {**pack, 'previous_tasks': [{'task_id': 'clip-1', 'status': 'FAILED'}]})
+    assert saved_problem(run)['status'] == 'submission_uncertain'

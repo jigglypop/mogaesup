@@ -1,6 +1,7 @@
 """Owner-scoped, resumable local avatar production. No provider submissions."""
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+import json
 import logging
 import os
 from src.services.object_storage import StoredPath as Path
@@ -35,6 +36,18 @@ def digest(path):
     return sha256(path)
 
 
+def _json_default(value):
+    """A value json cannot encode becomes what FastAPI's response encoder makes of it (a set, a date, a path), so the
+    encoded listing stays the JSON a returned dict would have been."""
+    from fastapi.encoders import jsonable_encoder
+    return jsonable_encoder(value)
+
+
+# The settings of the JSON FastAPI renders a returned dict to (starlette's JSONResponse).
+_LISTING_ENCODER = json.JSONEncoder(ensure_ascii=False, allow_nan=False, indent=None, separators=(',', ':'),
+                                    default=_json_default)
+
+
 class AvatarFactory:
     def __init__(self, root):
         self.data = Path(root).resolve(); self.root = self.data/'avatar-factory'
@@ -43,6 +56,7 @@ class AvatarFactory:
         self._listing_lock = RLock()
         self._listings = {}
         self._listing_pending = {}
+        self._listing_json = {}  # owner -> (the snapshot in _listings it encodes, its JSON bytes)
         self._records = {}
 
     def directory(self, owner, job_id):
@@ -93,19 +107,24 @@ class AvatarFactory:
         public['next_actions'] = []
         if job.get('input_kind') == 'image' and job['status'] in ('pipeline_paused', 'failed', 'recovery_required'):
             state = read_json(directory/'pipeline.json')
-            blocked = any(p['image']['status'] not in ('pending', 'received', 'succeeded') and
-                          not (p['image']['status'] == 'submitting' and (directory/'output'/f'{p["slot"]}-provider.response.json').is_file())
-                          for p in state.get('parts', []))
             if state.get('production_spec'):
                 from src.services.avatar_multiview_images import can_resume
                 blocked = not can_resume(directory, state)
+            else:
+                # What resume() takes: a request that never left, or an attempted one whose answer is kept.
+                from src.services.avatar_image_pipeline import unresolved_image_attempt
+                blocked = any(unresolved_image_attempt(directory, p) for p in state.get('parts', []))
             runner = read_json(directory/'output/runner.json')
             if job['status'] in ('failed', 'recovery_required') and runner and process_state(runner.get('process')) != 'exited':
                 blocked = True
             rejected = None
+            from src.services.character_jobs import submitted_task_id
             for p in state.get('parts', []):
-                task = read_json(directory/'parts'/p['slot']/'character.json')
-                blocked = blocked or bool(task and (not task.get('task_id') or task.get('status') in ('FAILED', 'CANCELED')))
+                run = directory/'parts'/p['slot']
+                task = read_json(run/'character.json')
+                # A submission whose saved answer names the accepted task is that task: resume polls it, never resends.
+                known = bool(task.get('task_id') or (task and submitted_task_id(run, task)))
+                blocked = blocked or bool(task and (not known or task.get('status') in ('FAILED', 'CANCELED')))
                 if task.get('status') == 'submission_rejected' and task.get('http_status'):
                     response = read_json(directory/'parts'/p['slot']/f'{task.get("stage", "generation")}-submission-response.json')
                     rejected = (task['http_status'], task.get('provider', 'meshy'), response.get('body') or '')
@@ -128,6 +147,30 @@ class AvatarFactory:
         return public
 
     def listing(self, owner):
+        """Every job of the owner, newest first. The list and its jobs are the snapshot every caller shares until the
+        next refresh, not copies: read them, and copy a job before changing it."""
+        return self._listing_snapshot(owner)[1]
+
+    def listing_json(self, owner):
+        """listing() as the UTF-8 JSON of {"jobs": [...]}, the bytes a returned dict would have been rendered to.
+        The studio polls it every 10 s per tab and it runs to megabytes, so a snapshot is encoded once, by the
+        thread that asks first, and later requests get the same bytes until the snapshot is refreshed."""
+        snapshot = self._listing_snapshot(owner)
+        owner = int(owner)
+        with self._listing_lock:
+            encoded = self._listing_json.get(owner)
+        if encoded and encoded[0] is snapshot:
+            return encoded[1]
+        # One job at a time: the C encoder holds the GIL for a whole call, and one call for every job would stall the
+        # event loop for as long. The joined pieces are the bytes of encoding {"jobs": [...]} at once.
+        content = b'{"jobs":[' + b','.join(_LISTING_ENCODER.encode(job).encode('utf-8') for job in snapshot[1]) + b']}'
+        with self._listing_lock:
+            # Bytes are kept only for the current snapshot; one that was replaced or dropped meanwhile is not kept.
+            if self._listings.get(owner) is snapshot:
+                self._listing_json[owner] = snapshot, content
+        return content
+
+    def _listing_snapshot(self, owner):
         # A full history read must not hold the lock or tie up every API worker.
         # Keep one refresh per owner and serve the last complete snapshot while
         # it runs. Selected job reads and every mutation still use live records.
@@ -142,12 +185,12 @@ class AvatarFactory:
                 pending = None
             cached = self._listings.get(owner)
             if cached and time.monotonic() - cached[0] < 10:
-                return deepcopy(cached[1])
+                return cached
             if pending is None:
                 pending = _LISTING_REFRESH.submit(self._read_listing, owner)
                 self._listing_pending[owner] = pending
             if cached:
-                return deepcopy(cached[1])
+                return cached
         # Cold start also has a deadline; the in-flight read survives a browser
         # timeout and the next GET joins it instead of starting another scan.
         try:
@@ -158,7 +201,7 @@ class AvatarFactory:
             if self._listing_pending.get(owner) is pending:
                 self._listings[owner] = snapshot
                 self._listing_pending.pop(owner)
-        return deepcopy(snapshot[1])
+        return snapshot
 
     def _settle_interrupted(self, owner, job_id):
         """A request cut off by a stopped server becomes an explicit retry instead of a dead end."""
@@ -187,13 +230,14 @@ class AvatarFactory:
         return time.monotonic(), [record for record in records if record]
 
     def _listing_record(self, owner, job_id):
+        # The record kept here is the job listed in the snapshots: listing() callers never change it, so it is shared.
         key = (int(owner), job_id)
         directory = self.directory(owner, job_id)
         with self._listing_lock:
             cached = self._records.get(key)
         if (cached and time.monotonic() - cached[0] < cached[2]
                 and not changed_since(directory/'job.json', cached[0])):
-            return deepcopy(cached[1])
+            return cached[1]
         started = time.monotonic()
         try:
             public = self.get(owner, job_id)
@@ -210,7 +254,7 @@ class AvatarFactory:
         with self._listing_lock:
             if len(self._records) > 4096:
                 self._records.clear()
-            self._records[key] = (started, deepcopy(public), SETTLED_RECORD_SECONDS if settled else 0)
+            self._records[key] = (started, public, SETTLED_RECORD_SECONDS if settled else 0)
         return public
 
     def _unreadable(self, directory):

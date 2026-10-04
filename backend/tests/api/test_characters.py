@@ -259,3 +259,42 @@ def test_a_face_selection_is_bounded_in_total_before_it_is_stored(setup, monkeyp
     assert too_large.status_code == 413 and too_large.json()['error']['code'] == 'input_too_large'
     _, run, _ = pipeline.entry(value['id'], 1)
     assert not (run / 'operations').exists()
+
+
+def test_a_stored_model_rewritten_at_the_same_size_changes_the_revision(setup, monkeypatch):
+    """The stat of an object in S3 or of a database record has its modification time in seconds but no st_mtime_ns;
+    the If-Match revision still follows the file, from one stat() (one HEAD) per file."""
+    import os
+    import stat as stat_module
+    from src.services.object_storage import StoredPath
+    client, pipeline, _ = setup
+    value = with_model(client)
+    model = pipeline.artifact(value['id'], 1, 'imported')
+    stats = []
+
+    def stored_stat(self, *, follow_symlinks=True):
+        stats.append(self.name)
+        local = os.stat(self)
+        return os.stat_result((stat_module.S_IFREG | 0o444, 0, 0, 1, 0, 0, local.st_size,
+                               local.st_mtime, local.st_mtime, local.st_mtime))
+
+    monkeypatch.setattr(StoredPath, 'stat', stored_stat)
+    entry, run, control = pipeline.entry(value['id'], 1)
+    stats.clear()
+    assert pipeline.files(entry, run, control) == {'imported': model}
+    listing = list(stats)  # Path.resolve() stats as well.
+    stats.clear()
+    assert pipeline.revision(entry, run, control)
+    assert sorted(stats) == sorted([*listing, model.name])  # What files() costs, and one stat of each file.
+    first = pipeline.detail(value['id'], 1)
+    assert [artifact['bytes'] for artifact in first['artifacts']] == [len(rigged_glb())]
+    assert first['revision'] == pipeline.revision(entry, run, control) == pipeline.detail(value['id'], 1)['revision']
+
+    model.write_bytes(rigged_glb())
+    later = os.stat(model).st_mtime + 5
+    os.utime(model, (later, later))
+    endpoint = f"/api/characters/{value['id']}"
+    current = client.get(endpoint).json()['revision']
+    assert current != first['revision']
+    assert client.patch(endpoint, json={"name": "Stale"}, headers={"If-Match": first['revision']}).status_code == 409
+    assert client.patch(endpoint, json={"name": "Current"}, headers={"If-Match": current}).status_code == 200

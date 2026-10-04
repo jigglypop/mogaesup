@@ -9,8 +9,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 def character_flow(directory, job):
-    """Summarize saved receipts only; GET must never poll a paid provider."""
-    from src.services.avatar_stage_resume import active_run, current_run
+    """Summarize saved receipts only; GET must never poll a paid provider. A worker of this process whose last save
+    failed runs no more, so its record does not keep the job busy (assembly_state, rig_state, stage_run_active)."""
+    from src.services.avatar_stage_resume import assembly_state, rig_state, stage_run_active
 
     progress = job['progress']
     problem = None
@@ -18,10 +19,9 @@ def character_flow(directory, job):
     status = 'running' if busy else 'paused'
     stage, message = progress['stage'], job.get('error') or progress['message']
     if job['status'] == 'review_required':
-        pointer = read_json(directory/'native-parts/current.json')
-        native = read_json(directory/'native-parts'/pointer['version']/'record.json') if pointer else {}
-        worker = read_json(directory/'meshy/worker.json')
-        busy = active_run(native) or active_run(worker)
+        native, assembling = assembly_state(directory)
+        worker, rigging = rig_state(directory)
+        busy = assembling or rigging
         problem = saved_problem(directory/'meshy')
         blocked = bool(problem)
         if native.get('status') == 'review_required' and not busy:
@@ -53,7 +53,7 @@ def character_flow(directory, job):
                                                   f"{', '.join(failed)} 피팅 실패" if failed else '']))
                 job['next_actions'] = []
         else:
-            stage = 'assemble' if active_run(native) or worker.get('status') == 'complete' else 'rig'
+            stage = 'assemble' if assembling or worker.get('status') == 'complete' else 'rig'
             status = 'running' if busy else 'blocked' if blocked or native.get('status') in ('failed', 'qc_failed') else 'paused'
             message = ('파츠 조립 중' if stage == 'assemble' else '몸 리깅·동작 수신 중') if busy else (
                 ('조립 재개 필요' if native.get('status') == 'qc_failed' else native.get('error')) or worker.get('error') or job.get('error') or
@@ -66,8 +66,8 @@ def character_flow(directory, job):
                 job['error'] = message
     elif not busy:
         status = 'paused' if any(a['id'] == 'resume' and a['enabled'] for a in job['next_actions']) else 'blocked'
-    operation = current_run(directory)
-    if active_run(operation):
+    operation, running = stage_run_active(directory)
+    if running:
         busy, status = True, 'running'
         if operation['status'] == 'accepted' or stage in ('complete', 'queued'):
             stage = operation['stage']

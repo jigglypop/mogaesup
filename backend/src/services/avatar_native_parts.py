@@ -15,11 +15,14 @@ from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import WorkspaceUploadError, copy_file, local_workspace, publish_checkpoint
 from src.services.avatar_production_spec import production_spec, refresh_fitting_spec
 from src.services.avatar_equipment import is_native_part_set
+from src.services.run_lock import WorkerLocks, final_write, this_process, worker_alive
 from src.services.worker_env import worker_environment
 from src.services.avatar_pipeline_quality import REVISION as QUALITY_REVISION, verify_quality
 
 SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 RECIPE = 'native-parts-v14-matte-limb-fit'
+# The assembly worker of each version directory that runs in this process.
+_WORKERS = WorkerLocks()
 # Absolute paths in worker text (C:\..., \\host\..., /srv/...); the worker's public_message cuts them the same way.
 _ABSOLUTE_PATH = re.compile(r'(?:\b[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/]|(?<![\w.:/~-])/(?=[^\s/]+/))'
                             r'(?:[^\s\'"<>|*?\\/]+[\\/])*([^\s\'"<>|*?\\/]*)')
@@ -105,6 +108,15 @@ def workspace_inputs(payload):
     return list(dict.fromkeys(paths))
 
 
+def assembly_running(directory):
+    """(record.json of the version `directory`, whether its worker still runs). One this process started runs only
+    while it holds its worker lock: a worker whose last save failed leaves accepted or running behind, and that must not
+    hold the version until a restart."""
+    held = _WORKERS.busy(str(directory))
+    record = read_json(directory/'record.json')
+    return record, worker_alive(record, held or _WORKERS.busy(str(directory)))
+
+
 def placed_head_bounds(bounds, spec, slot):
     """True when a head part's measured canvas bounds are a placement on the shared canvas: the
     part reaches the crown and is not much wider than the slot's fitting bounds. A provider that
@@ -130,11 +142,11 @@ class AvatarNativeParts:
         if not pointer:
             return {'status': 'not_started', 'parts': [], 'artifacts': []}
         version = pointer['version']; directory = root/version
-        record = read_json(directory/'record.json')
+        record, running = assembly_running(directory)
         if not record:
             raise PipelineError('not_found', '조립 버전을 찾을 수 없습니다.', 404)
         status = record['status']
-        if status in ('accepted', 'running') and process_state(record.get('process')) == 'exited':
+        if status in ('accepted', 'running') and not running:
             status = 'recovery_required'
         error = '조립 재개 필요' if status == 'qc_failed' else record.get('error')
         saved_contract = read_json(directory/'input.json').get('contract', {})
@@ -231,9 +243,9 @@ class AvatarNativeParts:
                 return self._resume_version(owner, job, previous_intent['target_version'],
                     recover_from=source_version, request_key=request_key)
             return self.start(owner, job)
-        expression_run = read_json(directory/'expression-reuse.json')
-        if (expression_run.get('status') == 'running' and expression_run.get('process')
-                and process_state(expression_run['process']) != 'exited'):
+        from src.services.avatar_expression_reuse import reuse_running
+        expression_run, running = reuse_running(directory)
+        if running and expression_run.get('process'):
             raise PipelineError('expression_running', '기존 표정을 적용 중입니다. 완료 후 파츠를 선택하세요.', 409)
         current = read_json(directory/'native-parts/current.json')
         if current.get('version') != source_version:
@@ -319,7 +331,7 @@ class AvatarNativeParts:
 
     def _resume_version_locked(self, owner, job, version, *, recover_from=None, request_key=None):
         root = self.root(owner, job)
-        record = read_json(root/version/'record.json')
+        record, running = assembly_running(root/version)
         if record.get('status') == 'review_required':
             return self.get(owner, job, version), False
         current_version = read_json(root/'current.json').get('version')
@@ -344,7 +356,7 @@ class AvatarNativeParts:
         if runner.get('process') and process_state(runner['process']) != 'exited':
             return self.get(owner, job, version), False
         if record.get('status') in ('failed', 'qc_failed', 'running', 'accepted'):
-            if record.get('status') in ('accepted', 'running') and process_state(record.get('process')) != 'exited':
+            if record.get('status') in ('accepted', 'running') and running:
                 return self.get(owner, job, version), False
             record.update(status='accepted', process=identity(), error=None)
             _write_json(root/version/'record.json', record)
@@ -569,8 +581,8 @@ class AvatarNativeParts:
         with _LOCK:
             previous = read_json(root/'current.json')
             if previous:
-                current = read_json(root/previous['version']/'record.json')
-                if current.get('status') in ('accepted', 'running') and process_state(current.get('process')) != 'exited':
+                current, running = assembly_running(root/previous['version'])
+                if current.get('status') in ('accepted', 'running') and running:
                     return self.get(owner, job), False
             record = read_json(directory/'record.json')
             if record.get('status') == 'review_required':
@@ -602,23 +614,36 @@ class AvatarNativeParts:
         root = self.root(owner, job)
         version = read_json(root/'current.json')['version']
         directory = root/version
-        payload = read_json(directory/'input.json')
-        # Reassembly needs the saved input GLBs and this output version, not every
-        # prior render, provider response, and .blend in the job's history.
+        if not _WORKERS.acquire(str(directory)):
+            return
         try:
+            payload = read_json(directory/'input.json')
+            # Reassembly needs the saved input GLBs and this output version, not every
+            # prior render, provider response, and .blend in the job's history.
             with local_workspace(directory, inputs=workspace_inputs(payload)):
                 return self._execute_local(owner, job, version)
         except WorkspaceUploadError:
             self._fail_unstored(directory)
+        except Exception as exc:
+            # Whatever else stopped this worker (its inputs, a record it could not read or save) fails the run it
+            # admitted as well, so a resume assembles again instead of finding it accepted or running.
+            self._fail_unstored(directory, error='Blender 조립 중단', error_type=type(exc).__name__, error_stage='blender')
+            raise
+        finally:
+            _WORKERS.release(str(directory))
 
-    def _fail_unstored(self, directory):
+    def _fail_unstored(self, directory, *, error='조립 산출물 저장 실패', error_type='WorkspaceUploadError',
+                       error_stage='upload'):
         """The workspace ended with files the store did not take, so the record there is still the running checkpoint
-        with this process's id, which would stand until a restart. It fails instead, and a resume assembles again."""
-        record = read_json(directory/'record.json')
-        if record.get('status') in ('accepted', 'running'):
-            record.update(status='failed', error='조립 산출물 저장 실패', error_type='WorkspaceUploadError',
-                          error_stage='upload', files={}, result={})
-            _write_json(directory/'record.json', record)
+        with this process's id, which would stand until a restart. It fails instead, and a resume assembles again. A
+        run another process admitted is that process's to settle."""
+        def fail():
+            record = read_json(directory/'record.json')
+            if record.get('status') in ('accepted', 'running') and this_process(record.get('process')):
+                record.update(status='failed', error=error, error_type=error_type,
+                              error_stage=error_stage, files={}, result={})
+                _write_json(directory/'record.json', record)
+        final_write(fail, 'assembly record')
 
     def _execute_local(self, owner, job, version):
         root = self.root(owner, job)
@@ -659,7 +684,7 @@ class AvatarNativeParts:
                     error_type=type(exc).__name__, error_stage=phase,
                     files={name: digest(directory/name) for name in ('front.png', 'side.png', 'back.png', 'opposite.png') if (directory/name).is_file()},
                     result={})
-            _write_json(directory/'record.json', record)
+            final_write(lambda: _write_json(directory/'record.json', record), 'assembly record')
 
     def artifact(self, owner, job, version, name):
         root = self.root(owner, job)

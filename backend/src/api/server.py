@@ -10,6 +10,8 @@ import os
 import threading
 import time
 
+import anyio
+from anyio.lowlevel import RunVar
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from fastapi.exceptions import RequestValidationError
@@ -49,9 +51,31 @@ from src.services.object_storage import assert_records_mode
 logger = logging.getLogger(__name__)
 _RUNTIME = runtime_identity()
 
+# Threads of the event loop's default limiter. Each long job runs as a sync background task and holds one for its
+# whole run, and every sync route needs one too: with AnyIO's default of 40, about 40 running jobs left no thread for
+# any REST call. 200 leaves the routes room beside far more jobs than one server runs at once (Blender runs
+# BLENDER_CONCURRENCY at a time; the other jobs mostly wait on providers or on that queue) and still bounds the threads.
+WORKER_THREADS = 200
+# Health and the loopback drain control read the admission lock and the work lease files. They do that in worker
+# threads of their own few, so they neither block the event loop nor wait for a thread the long jobs hold: a
+# deployment drains and polls health exactly while jobs run.
+CONTROL_THREADS = 4
+_control_threads = RunVar('runtime_control_threads')
+
+
+def _control_limiter():
+    """CONTROL_THREADS for the running event loop (a limiter belongs to one loop, as AnyIO's default one does)."""
+    try:
+        return _control_threads.get()
+    except LookupError:
+        limiter = anyio.CapacityLimiter(CONTROL_THREADS)
+        _control_threads.set(limiter)
+        return limiter
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    anyio.to_thread.current_default_thread_limiter().total_tokens = WORKER_THREADS
     with server_lease():
         # A server that lost CHARACTER_DATABASE_URL must not read the records the database replaced.
         await asyncio.to_thread(assert_records_mode)
@@ -152,34 +176,35 @@ class DrainInput(BaseModel):
     token: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
-def _control(request, callback, token):
+async def _control(request, callback, token):
     if not trusted_loopback(request):
         raise HTTPException(status_code=403, detail='Local runtime control only')
     try:
-        return callback(token)
+        # The drain receipt is written and fsynced under the admission file lock.
+        return await anyio.to_thread.run_sync(callback, token, limiter=_control_limiter())
     except (RuntimeDraining, RuntimeUncertain):
         raise HTTPException(status_code=409, detail='Runtime admission state cannot be changed') from None
 
 
 @app.post('/internal/drain', include_in_schema=False)
 async def drain_runtime(request: Request, body: DrainInput):
-    return _control(request, begin_drain, body.token)
+    return await _control(request, begin_drain, body.token)
 
 
 @app.delete('/internal/drain', include_in_schema=False)
 async def resume_runtime(request: Request, body: DrainInput):
-    return _control(request, resume, body.token)
+    return await _control(request, resume, body.token)
 
 
-# async: health only reads in-memory state, so it never waits for a worker thread the long background tasks hold.
+# health() takes the admission file lock and reads every work lease: in a control thread, not on the event loop.
 @app.get("/health")
 async def root_health() -> dict:
-    return health()
+    return await anyio.to_thread.run_sync(health, limiter=_control_limiter())
 
 
 @app.get("/api/health")
 async def api_health() -> dict:
-    return health()
+    return await anyio.to_thread.run_sync(health, limiter=_control_limiter())
 
 
 # Outermost: a request stays counted until its background tasks finish (see /health activity).

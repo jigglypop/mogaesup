@@ -10,8 +10,12 @@ from src.services.character_pipeline import PipelineError, now, read_json, requi
 from src.services.glb import parse_glb
 from src.services.object_storage import StoredPath as Path, copy_file, local_workspace
 from src.services.process_identity import identity, state as process_state
-from src.services.run_lock import run_lock
+from src.services.run_lock import WorkerLocks, final_write, run_lock, worker_alive
 from src.services.studio_library import StudioLibrary
+
+# The local rig recovery of each job that runs in this process, by the job's meshy directory: a recovery saves the
+# Meshy worker record (worker.json) too, so the Meshy worker's state reads this table as well.
+_WORKERS = WorkerLocks()
 
 
 class AvatarRigTransfer:
@@ -62,13 +66,16 @@ class AvatarRigTransfer:
 
     def get(self, owner, job_id, *, during_pipeline=False):
         root = self.root(owner, job_id)
+        held = _WORKERS.busy(str(root.parent))
         pointer = read_json(root/'current.json')
         record = read_json(root/pointer['id']/'record.json') if pointer else {}
         status = record.get('status', 'not_started')
         runner = read_json(root/record['id']/'runner.json') if record else {}
-        worker_alive = process_state(record.get('process')) != 'exited'
+        # A recovery this process started runs only while its worker holds the lock: one whose last save failed reads
+        # as paused instead of running until a restart.
+        alive = worker_alive(record, held or _WORKERS.busy(str(root.parent)))
         blender_alive = bool(runner) and process_state(runner.get('process')) != 'exited'
-        if status in ('accepted', 'running') and not worker_alive and not blender_alive:
+        if status in ('accepted', 'running') and not alive and not blender_alive:
             status = 'paused'
         directory = root.parent.parent
         job = self.factory.get(owner, job_id)
@@ -165,6 +172,19 @@ class AvatarRigTransfer:
     def execute(self, owner, job_id, request_id):
         root = self.root(owner, job_id)
         directory = root/request_id
+        if not _WORKERS.acquire(str(root.parent)):
+            return
+        try:
+            complete = self._execute(root, directory, request_id)
+        finally:
+            _WORKERS.release(str(root.parent))
+        if complete:
+            # Release the workspace and run lock before normal parts assembly.
+            from src.services.avatar_character_flow import assemble_character
+            assemble_character(self.factory, owner, job_id)
+
+    def _execute(self, root, directory, request_id):
+        """True when the recovery was run and saved as complete."""
         # Lock order is the same as native assembly: local_workspace (per-directory
         # scratch lock) first, then the shared BLENDER_CONCURRENCY queue, released as
         # soon as Blender exits. Taking the queue before the workspace would invert
@@ -173,9 +193,16 @@ class AvatarRigTransfer:
         with run_lock(directory, 0, blender=False):
             record = read_json(directory/'record.json')
             if record.get('status') != 'accepted' or read_json(root/'current.json').get('id') != request_id:
-                return
+                return False
             record.update(status='running', process=identity(), error=None)
-            self._save(root, directory, record)
+            try:
+                self._save(root, directory, record)
+            except Exception as exc:
+                # An admitted recovery left accepted by a failed write would read as running until a restart.
+                record.update(status='paused', error='저장된 골격 연결이 중단됐습니다. 원본 몸과 파츠는 보존했습니다.',
+                              error_type=type(exc).__name__)
+                final_write(lambda: self._save(root, directory, record), 'rig recovery record')
+                raise
             try:
                 payload = read_json(directory/'input.json')
                 if (payload['worker_sha256'] != digest(Path(__file__).with_name('avatar_rig_transfer_blender.py'))
@@ -196,15 +223,14 @@ class AvatarRigTransfer:
                         raise ValueError('Rig transfer failed')
                 self._publish(root, directory, record, payload)
                 record.update(status='complete', error=None)
-                self._save(root, directory, record)
+                final_write(lambda: self._save(root, directory, record), 'rig recovery record')
             except Exception as exc:
                 record.update(status='paused', error='저장된 골격 연결이 중단됐습니다. 원본 몸과 파츠는 보존했습니다.',
                               error_type=type(exc).__name__)
-                self._save(root, directory, record)
-                return
-        # Release the workspace and run lock before normal parts assembly.
-        from src.services.avatar_character_flow import assemble_character
-        assemble_character(self.factory, owner, job_id)
+                # A storage blip that stopped the recovery must not also leave it running.
+                final_write(lambda: self._save(root, directory, record), 'rig recovery record')
+                return False
+        return True
 
     @staticmethod
     def _save(root, directory, record):

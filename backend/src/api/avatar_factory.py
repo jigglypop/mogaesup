@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
 from src.services.object_storage import artifact_response as FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -692,6 +692,10 @@ def resume_images(job_id: str, background: BackgroundTasks, user: UserContext = 
     ensure_stage_idle(factory, user.user_id, job_id)
     current = factory.get(user.user_id, job_id)
     if current.get('production_mode') == 'character_parts' and current['status'] == 'review_required':
+        if (current.get('character_flow') or {}).get('busy'):
+            # A running rig, assembly or expression step continues this job already; a second continuation would
+            # read and rewrite job.json beside it.
+            raise PipelineError('worker_running', '진행 중인 작업입니다.', 409)
         from src.services.avatar_character_flow import continue_character
         background.add_task(continue_character, factory, user.user_id, job_id)
         return current
@@ -770,7 +774,9 @@ def profiles(user: UserContext = Depends(get_current_user)):
 
 @router.get('/jobs')
 def jobs(user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
-    return {'jobs': factory.listing(user.user_id)}
+    # Megabytes of jobs, polled by every studio tab and the app server: the JSON is encoded here in the worker thread,
+    # once per snapshot, instead of on the event loop as FastAPI encodes a returned dict.
+    return Response(factory.listing_json(user.user_id), media_type='application/json')
 
 
 @router.get('/jobs/{job_id}')

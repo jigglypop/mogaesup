@@ -2,15 +2,11 @@
 from copy import deepcopy
 import hashlib
 import io
-import uuid
 
-import httpx
 from PIL import Image, ImageDraw
 
 from src.services.asset_editor import _write_json
-from src.services.avatar_openai_images import (
-    OpenAIImageHTTPError, generate_standard_part_image, image_error_message,
-)
+from src.services.avatar_openai_images import generate_standard_part_image
 from src.services.avatar_production_spec import guide, prepare_image, project
 from src.services.character_pipeline import PipelineError, now, read_json
 
@@ -134,7 +130,8 @@ def _recoverable(image, receipt):
     if status in ('pending', 'not_sent', 'received'):
         return True
     if status in ('submitting', 'submission_uncertain', 'failed'):
-        return receipt.with_suffix('.response.json').is_file()
+        from src.services.avatar_multiview_images import answer_kept
+        return answer_kept(image, receipt)
     return False
 
 
@@ -182,25 +179,9 @@ def _remove_edge_white(raw):
 
 
 def _failure(exc, receipt):
-    transport = read_json(receipt.with_suffix('.request.json'))
-    saved = receipt.with_suffix('.response.json').is_file()
-    if saved:
-        status, category, message = 'submitting', 'local_processing', '수신 이미지 로컬 처리 중단'
-    elif isinstance(exc, OpenAIImageHTTPError):
-        status, category = 'rejected', exc.category
-        message = image_error_message(category, exc.response.status_code)
-    elif transport.get('submission') == 'not_sent':
-        status, category, message = 'not_sent', 'provider_connection', '생성 서버 연결 실패 · 재개 가능'
-    elif isinstance(exc, httpx.RequestError):
-        status, category, message = 'submission_uncertain', 'provider_connection', '생성 서버 연결 끊김 · 수신된 응답 없음'
-    else:
-        status, category, message = 'failed', 'local_processing', '공통 규격 원본 이미지 처리 실패'
-    failure = {'id': getattr(exc, 'diagnostic_id', uuid.uuid4().hex[:12]), 'type': type(exc).__name__,
-               'category': category, 'message': message, 'phase': transport.get('phase'),
-               'elapsed_seconds': transport.get('elapsed_seconds'), 'at': now()}
-    if isinstance(exc, OpenAIImageHTTPError):
-        failure.update(http_status=exc.response.status_code, provider_code=exc.provider_error.get('code'))
-    return status, failure
+    from src.services.avatar_image_recovery import classify_image_failure
+    return classify_image_failure(exc, receipt, messages={'submitting': '수신 이미지 로컬 처리 중단',
+                                                          'failed': '공통 규격 원본 이미지 처리 실패'})
 
 
 def _reference_guide(view, spec, frozen_render=None, *, t_pose=False):

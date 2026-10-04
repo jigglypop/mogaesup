@@ -1,8 +1,6 @@
 """Bounded per-view generation with durable images and shared placement."""
 import hashlib
 import json
-import uuid
-import httpx
 import time
 from copy import deepcopy
 from concurrent.futures import as_completed
@@ -10,12 +8,19 @@ from src.services.runtime_activity import ContextThreadPoolExecutor as ThreadPoo
 from threading import Lock
 
 from src.services.asset_editor import _write_json
-from src.services.avatar_openai_images import (generate_standard_part_image, OpenAIImageHTTPError, image_error_message,
-                                               standard_image_bytes)
+from src.services.avatar_openai_images import generate_standard_part_image, saved_response, standard_image_bytes
 from src.services.avatar_production_spec import guide, prepare_image, paired_bounds, can_reuse_image
-from src.services.avatar_image_recovery import receipt_path
+from src.services.avatar_image_recovery import classify_image_failure, receipt_path
 from src.services.avatar_image_prompts import PROMPT_REVISION, build_prompt, layout_contract, reference_roles, hair_length_prompt
 from src.services.character_pipeline import PipelineError, now, read_json
+
+
+def answer_kept(image, receipt):
+    """A stopped view whose paid answer is kept, so going on reads it instead of paying again. The answer of a request
+    in flight (submitting, with no failure yet) is only being written: it is never moved from here."""
+    if image.get('status') == 'submitting' and not image.get('failure'):
+        return receipt.with_suffix('.response.json').is_file()
+    return saved_response(receipt)
 
 
 def can_resume(directory, state):
@@ -35,7 +40,7 @@ def can_resume(directory, state):
                 return True
             if status == 'qc_failed' and can_reuse_image(image):
                 return True
-            if status in ('submitting', 'submission_uncertain', 'failed') and receipt_path(directory, part['slot'], view, image).with_suffix('.response.json').is_file():
+            if status in ('submitting', 'submission_uncertain', 'failed') and answer_kept(image, receipt_path(directory, part['slot'], view, image)):
                 return True
             return False
         return None
@@ -172,7 +177,8 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
             if hashlib.sha256(path.read_bytes()).hexdigest() != image['sha256']:
                 raise PipelineError('image_changed', '저장된 파츠 이미지가 변경되었습니다.', 409)
             continue
-        cached = receipt.with_suffix('.response.json').is_file()
+        # This worker owns the view: a complete answer kept as a partial is moved into place and used.
+        cached = saved_response(receipt)
         if image['status'] == 'qc_failed' and can_reuse_image(image):
             image['status'] = 'received'
         if image['status'] not in ('pending', 'not_sent', 'received') and not (image['status'] in ('submitting', 'submission_uncertain', 'failed') and cached):
@@ -261,26 +267,9 @@ def _generate_part(service, owner, job_id, state, part, body, publish, reserve, 
                 image.update(status='received', file=name, sha256=hashlib.sha256(raw).hexdigest())
                 publish(part)
             except Exception as exc:
-                transport = read_json(receipt.with_suffix('.request.json'))
-                saved = receipt.with_suffix('.response.json').is_file()
-                if saved:
-                    status, category, message = 'submitting', 'local_processing', '수신 이미지 처리 중단'
-                elif isinstance(exc, OpenAIImageHTTPError):
-                    status, category = 'rejected', exc.category
-                    message = image_error_message(category, exc.response.status_code)
-                elif transport.get('submission') == 'not_sent':
-                    status, category, message = 'not_sent', 'provider_connection', '생성 서버 연결 실패 · 재개 가능'
-                elif isinstance(exc, httpx.RequestError):
-                    status, category, message = 'submission_uncertain', 'provider_connection', '생성 서버 연결 끊김 · 수신된 응답 없음'
-                else:
-                    status, category, message = 'failed', 'local_processing', '이미지 처리 실패'
-                image.update(status=status, failure={
-                    'id': getattr(exc, 'diagnostic_id', uuid.uuid4().hex[:12]), 'type': type(exc).__name__,
-                    'category': category, 'message': message, 'phase': transport.get('phase'),
-                    'elapsed_seconds': transport.get('elapsed_seconds'), 'at': now()})
-                if isinstance(exc, OpenAIImageHTTPError):
-                    image['failure'].update(http_status=exc.response.status_code,
-                                            provider_code=exc.provider_error.get('code'))
+                status, failure = classify_image_failure(exc, receipt)
+                message = failure['message']
+                image.update(status=status, failure=failure)
                 publish(part)
                 label = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리', 'hat': '머리 장식', 'top': '상의', 'bottom': '하의', 'shoes': '신발', 'weapon': '무기', 'tool': '도구', 'glasses': '안경'}.get(slot, slot)
                 view_label = {'front': '정면', 'side': '좌측면', 'back': '후면', 'opposite': '우측면'}.get(view, view)

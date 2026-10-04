@@ -2,16 +2,19 @@
 
 The world is the one of test_avatar_image_pipeline (fake OpenAI images, one MockTransport for Meshy and its CDN).
 """
+from collections import Counter
 import threading
 
 import httpx
 import pytest
 
 from src.services import avatar_image_pipeline as module
-from src.services import avatar_meshy, character_jobs, provider_http
+from src.services import avatar_meshy, character_jobs, provider_http, run_lock
 from src.services.asset_editor import _write_json
+from src.services.avatar_stage_resume import AvatarStageResume
 from src.services.character_jobs import download as real_download
 from src.services.character_pipeline import PipelineError, read_json
+from src.services.process_identity import identity
 from test_avatar_image_pipeline import PART_COUNT, setup  # noqa: F401  (the fixture)
 
 MODEL_URL = 'https://fixture.invalid/model.glb'
@@ -268,3 +271,106 @@ def test_a_task_the_provider_does_not_know_is_still_a_lookup_error(world):
     with pytest.raises(PipelineError) as error:
         service.recover_task(1, job_id, 'top', 'unknown-task')
     assert error.value.code == 'task_lookup_failed' and error.value.status == 422
+
+
+# --- polling a provider writes only what changed --------------------------------------------------------------------
+
+def test_a_poll_that_changes_nothing_writes_nothing(world, monkeypatch):
+    service, factory, job_id, calls, transport, use, waited = world
+    polls, events = Counter(), []
+
+    def handler(request):
+        if is_poll(request):
+            polls[request.url.path] += 1
+            events.append(('poll', polls[request.url.path]))
+            if polls[request.url.path] <= 3:
+                return httpx.Response(200, json={'status': 'IN_PROGRESS', 'progress': 40})
+        return transport(request)
+    use(handler)
+
+    def counted(module_, name):
+        real = getattr(module_, name)
+        monkeypatch.setattr(module_, name, lambda path, value: (events.append(('write', path.name)), real(path, value))[1])
+    counted(module, '_write_json')
+    counted(module, 'update_json')
+    counted(character_jobs, '_write_json')
+    service.execute(1, job_id, poll_seconds=0)
+    assert stopped(factory, job_id)['status'] == 'review_required' and len(calls['posts']) == PART_COUNT
+    # The second and third polls of every part found the same task: the job records, the receipts and the progress
+    # were written by the first poll and are not written again.
+    second = events.index(('poll', 2))
+    fourth = events.index(('poll', 4))
+    assert events[second:fourth] == [('poll', 2)] * PART_COUNT + [('poll', 3)] * PART_COUNT
+    assert ('write', 'progress.json') in events[:second] and ('write', 'job.json') in events[fourth:]
+
+
+# --- a task the provider accepted is never sent again, even when its ID was not saved ------------------------------
+
+def accepted_without_a_saved_id(world, monkeypatch):
+    """(the top part's run, its task ID): Meshy accepted the top part, and its task ID never reached storage."""
+    service, factory, job_id, calls, transport, use, waited = world
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    real = character_jobs._write_json
+
+    def write(path, value):
+        if path.name == 'character.json' and path.parent.name == 'top' and value.get('task_id'):
+            raise OSError('storage unavailable')
+        return real(path, value)
+    monkeypatch.setattr(character_jobs, '_write_json', write)
+    service.execute(1, job_id, poll_seconds=0)
+    monkeypatch.setattr(character_jobs, '_write_json', real)
+    run = factory.directory(1, job_id)/'parts'/'top'
+    lost = read_json(run/'character.json')
+    assert lost['status'] == 'submission_uncertain' and 'task_id' not in lost
+    assert stopped(factory, job_id)['status'] == 'pipeline_paused'
+    return run, f'fixture-task-{len(calls["posts"])}'
+
+
+def test_a_part_whose_task_id_could_not_be_saved_is_polled_and_never_sent_again(world, monkeypatch):
+    service, factory, job_id, calls, transport, use, waited = world
+    run, accepted = accepted_without_a_saved_id(world, monkeypatch)
+    # An explicit run sends unaccepted parts again; the saved answer shows this one was accepted.
+    service.resume(1, job_id, stage='models', retry_failed=True)
+    service.execute(1, job_id, poll_seconds=0)
+    saved = read_json(run/'character.json')
+    assert saved['task_id'] == accepted and saved['recovery_method'] == 'submission_response'
+    assert len(calls['posts']) == PART_COUNT and stopped(factory, job_id)['status'] == 'review_required'
+    assert not (run/'attempts').exists()
+
+
+def test_a_part_whose_saved_answer_names_its_task_is_offered_as_recoverable_without_a_resend(world, monkeypatch):
+    service, factory, job_id, calls, transport, use, waited = world
+    run, accepted = accepted_without_a_saved_id(world, monkeypatch)
+    # The saved answer names the accepted task: resuming polls it, so resume is open and no re-send is offered.
+    public = factory.get(1, job_id)
+    assert next(action for action in public['next_actions'] if action['id'] == 'resume')['enabled']
+    stages = AvatarStageResume(factory).get(1, job_id)
+    assert not [action for action in stages['actions'] if action.get('warning')]
+    assert next(action for action in stages['actions'] if action['stage'] == 'models')['enabled']
+    # A GET only reads: the receipt is recorded under its task by the run that continues it.
+    assert read_json(run/'character.json')['status'] == 'submission_uncertain'
+
+
+# --- workers whose last save failed do not hold the stages -------------------------------------------------------------
+
+def test_the_stages_are_open_when_the_rig_and_assembly_workers_are_gone(world):
+    service, factory, job_id, calls, transport, use, waited = world
+    service.execute(1, job_id, poll_seconds=0)
+    assert stopped(factory, job_id)['status'] == 'review_required'
+    directory = factory.directory(1, job_id)
+    version = 'c' * 24
+    (directory/'native-parts'/version).mkdir(parents=True)
+    _write_json(directory/'native-parts/current.json', {'version': version})
+    # Saved as running by this live process, whose workers ended without their last save.
+    _write_json(directory/'native-parts'/version/'record.json', {'status': 'running', 'process': identity()})
+    (directory/'meshy').mkdir(exist_ok=True)
+    _write_json(directory/'meshy/worker.json', {'status': 'running', 'process': identity()})
+    stages = AvatarStageResume(factory).get(1, job_id)
+    assert stages['busy'] is False
+    assert next(action for action in stages['actions'] if action['stage'] == 'rig')['enabled']
+    assert factory.get(1, job_id)['character_flow']['busy'] is False
+    assert avatar_meshy._WORKERS.acquire(str(directory/'meshy'))
+    try:
+        assert AvatarStageResume(factory).get(1, job_id)['busy'] is True
+    finally:
+        avatar_meshy._WORKERS.release(str(directory/'meshy'))

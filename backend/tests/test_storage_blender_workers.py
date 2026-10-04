@@ -141,6 +141,26 @@ def test_rig_transfer_still_stops_a_worker_that_outlives_its_time(transfer, blen
     assert read_json(work / 'record.json')['error_type'] == 'TimeoutExpired'
 
 
+def test_rig_transfer_whose_last_save_fails_reads_as_paused_not_running(transfer, blender, monkeypatch):
+    from src.services import run_lock
+    service, work, request = transfer
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    write = avatar_rig_transfer._write_json
+
+    def refuse_the_end(path, value):
+        if path.name == 'record.json' and value.get('status') in ('paused', 'complete'):
+            raise OSError('storage unavailable')
+        return write(path, value)
+    monkeypatch.setattr(avatar_rig_transfer, '_write_json', refuse_the_end)
+    with pytest.raises(OSError):
+        service.execute(1, JOB, request)
+    assert read_json(work / 'record.json')['status'] == 'running'
+    # The fake Blender is this test process: its receipt now names a process that has exited, as a real one's would.
+    _write_json(work / 'runner.json', {'process': {'pid': os.getpid(), 'created_at': 1.5}})
+    # Running in this live process, but no worker holds it any more: it can be started again.
+    assert service.get(1, JOB)['status'] == 'paused' and avatar_rig_transfer._WORKERS == {}
+
+
 # --- animal rig -----------------------------------------------------------------------------------
 
 @pytest.fixture

@@ -285,3 +285,34 @@ def test_a_drain_of_this_boot_owned_by_another_token_still_refuses_the_candidate
     with pytest.raises(activity.RuntimeUncertain, match='startup admission id'):
         with activity.server_lease():
             pass
+
+
+def test_a_paid_request_refused_by_a_drain_leaves_no_uncertain_receipt(tmp_path):
+    from src.services import character_motion
+    run = tmp_path / 'actions' / '77'
+    run.mkdir(parents=True)
+    (run / 'motion-pack.json').write_text(json.dumps(
+        {'action_id': 77, 'rig_task_id': 'rig-1', 'max_new_tasks': 1, 'submitted_tasks': 0, 'tasks': {}}))
+    sent = []
+
+    def answer(request):
+        sent.append(request.method)
+        if request.method == 'POST':
+            return httpx.Response(202, json={'result': 'clip-1'})
+        return httpx.Response(200, json={'status': 'IN_PROGRESS', 'progress': 5})
+
+    def request_clip():
+        with httpx.Client(base_url='https://api.meshy.invalid', transport=httpx.MockTransport(answer)) as client:
+            return character_motion._task(run, character_motion.read_pack(run), 'clip',
+                                          character_motion.ENDPOINTS['animation'],
+                                          {'rig_task_id': 'rig-1', 'action_id': 77}, client)
+    activity.begin_drain(TOKEN)
+    try:
+        with pytest.raises(activity.RuntimeDraining):
+            request_clip()
+    finally:
+        activity.resume(TOKEN)
+    # The intent is saved only once the request is admitted: nothing was sent and nothing claims it might have been.
+    pack = character_motion.read_pack(run)
+    assert sent == [] and pack['tasks'] == {} and pack['submitted_tasks'] == 0
+    assert request_clip()['task_id'] == 'clip-1' and sent.count('POST') == 1

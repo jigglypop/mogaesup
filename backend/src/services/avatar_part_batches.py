@@ -21,7 +21,7 @@ from src.services.avatar_variants import AvatarVariants
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.meshy_options import freeze_options
 from src.services.process_identity import identity, lease_guard, state as process_state
-from src.services.run_lock import WorkerLocks
+from src.services.run_lock import WorkerLocks, final_write, worker_alive
 from src.services.studio_library import StudioLibrary
 from src.services.studio_prompts import StudioPrompts
 
@@ -354,7 +354,10 @@ class PartBatches:
         items = list(pool.map(snapshot, record['items']) if pool else map(snapshot, record['items']))
         complete = all(item['status'] == 'complete' for item in items)
         running = any(item['status'] == 'running' for item in items)
-        owner_running = record.get('status') == 'running' and process_state(record.get('process')) != 'exited'
+        # A batch this process runs is running only while its worker holds the lock: one whose last save failed reads
+        # as paused, and can be resumed, instead of running until a restart.
+        owner_running = record.get('status') == 'running' and worker_alive(
+            record, _RUNS.busy((int(owner), record['id'])))
         status = 'complete' if complete else 'running' if running or owner_running else record.get('status', 'paused')
         if status == 'running' and not running and not owner_running:
             status = 'paused'
@@ -522,22 +525,26 @@ class PartBatches:
             with ThreadPoolExecutor(max_workers=record['concurrency'], thread_name_prefix='part-batch') as pool:
                 for future in as_completed([pool.submit(run, item) for item in record['items']]):
                     future.result()
-            with _LOCK, _batch_lease(self.root(owner, batch)):
-                current = read_json(path); public = self._public(owner, current)
-                current.update(status='complete' if public['completed'] == len(current['items']) else 'paused',
-                               process=None, error=None if public['completed'] == len(current['items'])
-                               else '완료되지 않은 헤어 작업을 저장했습니다. 이어가기로 계속하세요.')
-                self._save(owner, current)
+
+            def finish():
+                with _LOCK, _batch_lease(self.root(owner, batch)):
+                    current = read_json(path); public = self._public(owner, current)
+                    current.update(status='complete' if public['completed'] == len(current['items']) else 'paused',
+                                   process=None, error=None if public['completed'] == len(current['items'])
+                                   else '완료되지 않은 헤어 작업을 저장했습니다. 이어가기로 계속하세요.')
+                    self._save(owner, current)
+            final_write(finish, 'part batch record')
         except Exception as exc:
-            try:
+            error = (exc.message if isinstance(exc, PipelineError)
+                     else '일괄 작업이 중단되었습니다. 하위 작업과 영수증은 보존했습니다.')
+
+            def pause():
                 with _LOCK, _batch_lease(self.root(owner, batch)):
                     record = read_json(path)
                     if record:
-                        record.update(status='paused', process=None,
-                                      error=exc.message if isinstance(exc, PipelineError)
-                                      else '일괄 작업이 중단되었습니다. 하위 작업과 영수증은 보존했습니다.')
+                        record.update(status='paused', process=None, error=error)
                         self._save(owner, record)
-            except PipelineError:
-                pass
+            # A storage blip, or the lease of another process's short update, must not leave the batch running.
+            final_write(pause, 'part batch record')
         finally:
             _RUNS.release((int(owner), batch))

@@ -2,11 +2,15 @@
 from copy import deepcopy
 import hashlib
 import json
+import uuid
+
+import httpx
 
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity
-from src.services.avatar_openai_images import image_error_message, _error_category, promote_partial_response
+from src.services.avatar_openai_images import (OpenAIImageHTTPError, image_error_message, _error_category,
+                                               saved_response)
 
 RETRYABLE = {'submission_uncertain', 'rejected', 'failed', 'qc_failed'}
 REFERENCE = 'reference'
@@ -37,6 +41,43 @@ def reference_receipt(directory, view, image):
     return view_receipt(directory/'output', view, image)
 
 
+def _answered(transport):
+    """The provider's answer to the request arrived (HTTP 2xx): the request was processed and paid for."""
+    status = transport.get('http_status')
+    return isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300
+
+
+def classify_image_failure(exc, receipt, *, messages=None):
+    """(status, failure) of an image request that stopped with `exc`, from what its receipt kept; the one rule of every
+    image stage (part views, the appearance reference, single part images).
+
+    An answer saved as .response.json is processed again without a request. A provider refusal is final. A request its
+    receipt shows never left is sent again. A connection lost after the request left is unconfirmed. An answer that
+    arrived (HTTP 2xx) but could not be stored was paid for: it is unconfirmed as well, never a plain local failure,
+    and a kept copy of it is used before any new request is offered (saved_response). `messages` replaces the message
+    given for a status."""
+    transport = read_json(receipt.with_suffix('.request.json'))
+    if receipt.with_suffix('.response.json').is_file():
+        status, category, message = 'submitting', 'local_processing', '수신 이미지 처리 중단'
+    elif isinstance(exc, httpx.HTTPStatusError):
+        status, category = 'rejected', getattr(exc, 'category', 'provider_http')
+        message = image_error_message(category, exc.response.status_code)
+    elif transport.get('submission') == 'not_sent':
+        status, category, message = 'not_sent', 'provider_connection', '생성 서버 연결 실패 · 재개 가능'
+    elif isinstance(exc, httpx.RequestError):
+        status, category, message = 'submission_uncertain', 'provider_connection', '생성 서버 연결 끊김 · 수신된 응답 없음'
+    elif _answered(transport):
+        status, category, message = 'submission_uncertain', 'local_processing', '수신 이미지 저장 실패 · 응답 확인 필요'
+    else:
+        status, category, message = 'failed', 'local_processing', '이미지 처리 실패'
+    failure = {'id': getattr(exc, 'diagnostic_id', None) or uuid.uuid4().hex[:12], 'type': type(exc).__name__,
+               'category': category, 'message': (messages or {}).get(status, message), 'phase': transport.get('phase'),
+               'elapsed_seconds': transport.get('elapsed_seconds'), 'at': now()}
+    if isinstance(exc, OpenAIImageHTTPError):
+        failure.update(http_status=exc.response.status_code, provider_code=exc.provider_error.get('code'))
+    return status, failure
+
+
 def _reference_views(state):
     reference = state.get('reference_preparation') or {}
     views = reference.get('views')
@@ -52,14 +93,14 @@ def settle_interrupted(directory, state):
         if image.get('status') != 'submitting' or image.get('failure'):
             return
         # An answer that was complete when the server stopped is a saved response, not an unconfirmed request.
-        promote_partial_response(receipt)
-        saved = receipt.with_suffix('.response.json').is_file()
+        saved = saved_response(receipt)
         request_path = receipt.with_suffix('.request.json')
         request = read_json(request_path)
-        # Earlier automatic attempts in this receipt were all provably unprocessed, so only the
-        # stopped attempt decides: no request, or an incomplete upload, was never processed.
+        # Earlier automatic attempts in this receipt were all provably unprocessed, so only the stopped attempt
+        # decides, and only a request that never started was never sent: the receipt marks a complete upload after
+        # the body is already on the wire, so a stop can leave a whole upload without that mark.
         unsent = not saved and (not request or request.get('submission') == 'not_sent' or (
-            'submission' not in request and not (request.get('request_started') and request.get('request_body_complete'))))
+            'submission' not in request and not request.get('request_started')))
         token = hashlib.sha256(f'{receipt.name}:{image.get("attempted_at")}'.encode()).hexdigest()[:12]
         if unsent:
             if request and request.get('submission') != 'not_sent':
@@ -154,7 +195,7 @@ def decorate_job(directory, public):
             if failure.get('message'):
                 failure_message = f'{LABELS.get(part["slot"], part["slot"])} {VIEW_LABELS.get(view, view)}: {failure["message"]}'
                 failure_count += 1
-            if paused and failure.get('id') and (image['status'] == 'qc_failed' or not receipt.with_suffix('.response.json').is_file()):
+            if paused and failure.get('id') and (image['status'] == 'qc_failed' or not saved_response(receipt)):
                 from src.services.avatar_production_spec import can_reuse_image
                 if image['status'] == 'qc_failed' and can_reuse_image(image):
                     continue
@@ -176,7 +217,7 @@ def decorate_job(directory, public):
         if failure.get('message'):
             failure_message = f'{LABELS[REFERENCE]} {REFERENCE_VIEW_LABELS.get(view, view)}: {failure["message"]}'
             failure_count += 1
-        if failure.get('id') and not receipt.with_suffix('.response.json').is_file():
+        if failure.get('id') and not saved_response(receipt):
             blocked = reference_has_dependents(state, view)
             public['next_actions'].append({'id': 'retry_image', 'enabled': not blocked,
                 'reason': '이 이미지를 사용하는 후속 작업이 있습니다.' if blocked else None,
@@ -237,7 +278,8 @@ def retry_views(service, owner, job_id, images):
                 raise PipelineError('failure_changed', '이미지 상태가 변경되었습니다.', 409)
             receipt = (reference_receipt(directory, view, image) if part is None
                        else receipt_path(directory, part['slot'], view, image))
-            if image['status'] != 'qc_failed' and receipt.with_suffix('.response.json').is_file():
+            if image['status'] != 'qc_failed' and saved_response(receipt):
+                # A kept answer, also one the store refused at first, is resumed instead of paid for again.
                 raise PipelineError('response_saved', '저장된 응답에서 재개할 수 있습니다.', 409)
             if reference_has_dependents(state, view) if part is None else has_dependents(state, part, view):
                 raise PipelineError('dependent_views_exist', '후속 이미지가 있는 작업은 새 버전이 필요합니다.', 409)

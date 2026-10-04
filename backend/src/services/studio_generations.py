@@ -18,7 +18,7 @@ from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, generate_image,
                                               generate_standard_part_image, OpenAIImageHTTPError,
-                                              image_error_message)
+                                              image_error_message, saved_response)
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.illustration_motion import FORMATS, MOTION_REVISION, encode, render_frames
 from src.services.illustration_rig import build_rig
@@ -86,9 +86,12 @@ class StudioGenerations:
         return directory/(record.get('provider') or 'meshy')
 
     @staticmethod
-    def _image_reason(directory, record):
+    def _image_reason(directory, record, *, idle=True):
+        """`idle`: no worker can be writing the image answer now, so a complete answer kept as a partial (also one the
+        store refused at first and this host kept) is moved into place and used; otherwise one in flight is only read."""
         if 'image.png' not in record['files']:
-            if (directory/'image-provider.response.json').is_file():
+            receipt = directory/'image-provider.json'
+            if (saved_response(receipt) if idle else receipt.with_suffix('.response.json').is_file()):
                 return True, None
             error = read_json(directory/'image-provider.error.json')
             if error:
@@ -127,7 +130,8 @@ class StudioGenerations:
         alive = worker_alive(record, held or _WORKERS.busy(str(directory)))
         prop = record['kind'] == 'prop'
         task = read_json(self._run(directory, record)/'character.json') if prop else {}
-        image = None if record['status'] == 'complete' else self._image_reason(directory, record)
+        image = (None if record['status'] == 'complete' else
+                 self._image_reason(directory, record, idle=not (alive and record['status'] == 'running')))
         resumable, reason = self._resume_reason(directory, record, task, image)
         status = record['status']
         if not alive and status in ('accepted', 'running'):

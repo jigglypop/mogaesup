@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import io
 import json
@@ -172,3 +173,106 @@ def test_character_parts_local_image_failure_continues_and_resumes_without_repos
     assert sum(post.get('ai_model') == 'meshy-7' for post in calls['posts']) == PART_COUNT
 
 
+
+
+def test_character_parts_image_that_was_never_sent_is_sent_again_on_resume(setup, monkeypatch):
+    service, factory, payload, calls, _, _ = setup
+    attempts = []
+
+    def image(source, prompt, model, base, **kwargs):
+        attempts.append(prompt)
+        if 'voluminous hairstyle' in prompt and attempts.count(prompt) == 1:
+            # The connection never opened: the request receipt says so.
+            kwargs['receipt'].with_suffix('.request.json').write_text(json.dumps(
+                {'phase': 'prepared', 'request_started': False, 'submission': 'not_sent'}))
+            raise httpx.ConnectError('connection refused')
+        return png()
+    monkeypatch.setattr(module, 'generate_openai_part_image', image)
+    job, _ = service.create(1, 'character-parts-not-sent',
+                            {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS})
+    service.execute(1, job['id'], poll_seconds=0)
+    hair = next(part for part in factory.get(1, job['id'])['parts'] if part['slot'] == 'hair')
+    assert hair['image_status'] == 'not_sent' and hair['image_failure']['category'] == 'provider_connection'
+    assert not calls['posts']
+    # Nothing was sent, so resuming sends that request: it is not an attempt whose answer is unknown.
+    service.resume(1, job['id'])
+    service.execute(1, job['id'], poll_seconds=0)
+    assert len(attempts) == PART_COUNT + 1 and attempts.count(attempts[1]) == 2
+    assert all(part['image_status'] == 'succeeded' for part in factory.get(1, job['id'])['parts'])
+    assert sum(post.get('ai_model') == 'meshy-7' for post in calls['posts']) == PART_COUNT
+
+
+def test_resume_is_refused_while_the_worker_still_runs_the_job(setup):
+    service, factory, payload, _, _, _ = setup
+    job, _ = service.create(1, 'character-parts-busy-resume',
+                            {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS})
+    directory = factory.directory(1, job['id'])
+    # The worker has finished the parts and still runs the rig and assembly of the same job.
+    _write_json(directory/'job.json', {**read_json(directory/'job.json'), 'status': 'review_required'})
+    assert module._RUN_LOCKS.acquire(str(directory))
+    try:
+        with pytest.raises(PipelineError) as busy:
+            service.resume(1, job['id'], stage='models')
+        assert busy.value.code == 'worker_running' and busy.value.status == 409
+        assert read_json(directory/'job.json')['status'] == 'review_required'
+    finally:
+        module._RUN_LOCKS.release(str(directory))
+
+
+def test_a_job_whose_first_publish_failed_keeps_its_rig_budget(setup, monkeypatch):
+    service, factory, payload, _, _, _ = setup
+    request = {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS}
+    published = AvatarImagePipeline.publish
+
+    def unavailable(self, owner, job_id, state):
+        raise OSError('storage unavailable')
+    monkeypatch.setattr(AvatarImagePipeline, 'publish', unavailable)
+    with pytest.raises(OSError):
+        service.create(1, 'character-parts-rig-budget', request)
+    monkeypatch.setattr(AvatarImagePipeline, 'publish', published)
+    job, created = service.create(1, 'character-parts-rig-budget', request)
+    assert not created
+    saved = read_json(factory.directory(1, job['id'])/'job.json')
+    motions = read_json(factory.directory(1, job['id'])/'pipeline.json')['motion_actions']
+    # The rig stage checks the accepted rig and motion budget: a replay must find it in the one accepted record.
+    assert saved['limits']['meshy_rig_tasks'] == 1
+    assert saved['limits']['meshy_animation_tasks'] == len(set(motions.values())) > 0
+    assert saved['profile']['rig'] == 'meshy-native' and saved['profile']['height'] == 1.2
+
+
+ANSWER = {'data': [{'b64_json': base64.b64encode(png()).decode()}]}
+
+
+@pytest.mark.parametrize('stop', ['not_sent', 'answer_kept'])
+def test_a_single_image_that_resume_takes_is_offered_for_resume(setup, monkeypatch, stop):
+    from src.services.avatar_stage_resume import AvatarStageResume
+    service, factory, payload, calls, _, _ = setup
+
+    def image(source, prompt, model, base, **kwargs):
+        receipt = kwargs['receipt']
+        if 'voluminous hairstyle' not in prompt:
+            return png()
+        if stop == 'not_sent':
+            receipt.with_suffix('.request.json').write_text(json.dumps(
+                {'phase': 'prepared', 'request_started': False, 'submission': 'not_sent'}))
+            raise httpx.ConnectError('connection refused')
+        # The answer arrived and the store refused it: it is kept as the partial on this host.
+        receipt.with_suffix('.request.json').write_text(json.dumps(
+            {'phase': 'response_unsaved', 'http_status': 200, 'request_started': True, 'submission': 'unknown'}))
+        receipt.with_suffix('.response.partial').write_text(json.dumps(ANSWER))
+        raise OSError('storage unavailable')
+    monkeypatch.setattr(module, 'generate_openai_part_image', image)
+    job, _ = service.create(1, f'character-parts-offer-{stop.replace("_", "-")}',
+                            {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS})
+    service.execute(1, job['id'], poll_seconds=0)
+    public = factory.get(1, job['id'])
+    hair = next(part for part in public['parts'] if part['slot'] == 'hair')
+    assert hair['image_status'] == ('not_sent' if stop == 'not_sent' else 'submission_uncertain')
+    # resume() takes it, so the job and its images stage say so.
+    assert next(action for action in public['next_actions'] if action['id'] == 'resume')['enabled']
+    images = next(action for action in AvatarStageResume(factory).get(1, job['id'])['actions'] if action['stage'] == 'images')
+    assert images['enabled'] and images['reason'] is None
+    if stop == 'answer_kept':
+        receipt = factory.directory(1, job['id'])/'output'/'hair-provider'
+        assert receipt.with_suffix('.response.json').is_file() and not receipt.with_suffix('.response.partial').exists()
+    service.resume(1, job['id'])

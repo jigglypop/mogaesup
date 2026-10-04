@@ -233,11 +233,11 @@ class FittingManagement:
                     return native.get(self.owner, job)
             ensure_stage_idle(self.factory, self.owner, job)
             pointer = read_json(root/'current.json')
-            from src.services.avatar_stage_resume import active_run
+            from src.services.avatar_native_parts import assembly_running
             from src.services.avatar_expression_reuse import expression_reuse_state
-            current_record = read_json(root/pointer['version']/'record.json') if pointer else {}
+            assembling = assembly_running(root/pointer['version'])[1] if pointer else False
             expressions = expression_reuse_state(self.factory.directory(self.owner, job))
-            if active_run(current_record) or (expressions and expressions.get('busy')):
+            if assembling or (expressions and expressions.get('busy')):
                 raise PipelineError('assembly_running', '현재 조립이나 표정 저장이 끝난 뒤 버전을 선택하세요.', 409)
             if pointer.get('version') not in (expected_version, version):
                 raise PipelineError('revision_conflict', '현재 조립 버전이 변경되었습니다.', 409)

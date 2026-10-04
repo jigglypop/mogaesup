@@ -18,6 +18,7 @@ from src.services.avatar_openai_images import (
     OpenAIImageHTTPError,
     generate_standard_part_image,
     image_error_message,
+    saved_response,
 )
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.object_storage import copy_file
@@ -107,12 +108,15 @@ class AvatarExpressionGeneration:
         }
 
     @staticmethod
-    def _resume_reason(directory, record):
+    def _resume_reason(directory, record, *, idle=True):
+        """`idle`: no worker can be writing the image answer now, so a complete answer kept as a partial (also one the
+        store refused at first and this host kept) is moved into place and used; otherwise one in flight is only read."""
         if record['status'] == 'complete':
             return False, None
         if record.get('error_code') == 'expression_background':
             return False, record.get('error')
-        if (directory/'image-provider.response.json').is_file():
+        receipt = directory/'image-provider.json'
+        if (saved_response(receipt) if idle else receipt.with_suffix('.response.json').is_file()):
             return True, None
         error = read_json(directory/'image-provider.error.json')
         if error:
@@ -127,7 +131,7 @@ class AvatarExpressionGeneration:
         held = _WORKERS.busy(str(directory))
         record = self._record(generation_id)
         alive = worker_alive(record, held or _WORKERS.busy(str(directory)))
-        resumable, reason = self._resume_reason(directory, record)
+        resumable, reason = self._resume_reason(directory, record, idle=not (alive and record['status'] == 'running'))
         status = record['status']
         if not alive and status in ('accepted', 'running'):
             status = 'paused' if resumable else 'blocked'
