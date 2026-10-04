@@ -79,6 +79,10 @@
     radial-gradient(60vmax 40vmax at 100% 4%, rgba(190, 232, 196, 0.55), transparent 58%),
     radial-gradient(70vmax 50vmax at 60% 112%, rgba(247, 219, 176, 0.45), transparent 62%),
     #eef1ea;
+
+  /* OX 퀴즈's O and X: the zones on the island (hex: three.js reads them) and their letters in the panel. */
+  --mg-ox-o: #2f6fe4;
+  --mg-ox-x: #d93a40;
 }
 
 :root[data-theme='dark'] {
@@ -135,4 +139,7 @@
     radial-gradient(60vmax 40vmax at 100% 4%, rgba(50, 110, 90, 0.3), transparent 58%),
     radial-gradient(70vmax 50vmax at 60% 112%, rgba(140, 90, 60, 0.25), transparent 62%),
     #10111c;
+
+  --mg-ox-o: #82a9ff;
+  --mg-ox-x: #ff8e8a;
 }

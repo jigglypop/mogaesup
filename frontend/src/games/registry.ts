@@ -1,4 +1,5 @@
 import type { GameDefinition } from './game';
+import { ox } from './ox';
 import { treasure } from './treasure';
 
 /**
@@ -7,6 +8,7 @@ import { treasure } from './treasure';
  */
 export const GAMES: readonly GameDefinition[] = [
   treasure,
+  ox,
 ];
 
 export const gameOf = (kind: string | null | undefined): GameDefinition | null => GAMES.find((game) => game.kind === kind) ?? null;

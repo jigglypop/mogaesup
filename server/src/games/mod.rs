@@ -84,6 +84,7 @@ macro_rules! registry {
 // The plugin point: one line per game.
 registry! {
     treasure,
+    ox,
 }
 
 /// Milliseconds on the server's clock: what games measure time in, and what views carry (`endsAt`). Monotonic, and
