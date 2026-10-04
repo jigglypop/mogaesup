@@ -23,6 +23,12 @@ type AuthValue = {
 const AuthContext = createContext<AuthValue | null>(null);
 
 /**
+ * A page left open asks who is signed in again once it is in view this long after it last asked. The server renews a
+ * session it is asked about that way (as each opening of the app does), so a tab kept open for weeks stays signed in.
+ */
+export const SESSION_RENEW_MS = 12 * 60 * 60 * 1000;
+
+/**
  * Asks the server who the session cookie belongs to, then follows sign-in and sign-out. While the server does not
  * answer, nobody is taken for signed out: the screens wait, and it asks again. A session the server stops taking (a 401
  * on any request) signs the member out but keeps their unsaved work: signing in again as them resumes it.
@@ -80,6 +86,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     return () => { mounted.current = false; generation.current++; stopChecking.current?.(); stopLapse(); };
   }, []);
+
+  // Only the renewal is wanted from these asks; who is signed in is followed as before.
+  useEffect(() => {
+    if (!user) return undefined;
+    let asked = Date.now();
+    const renew = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - asked < SESSION_RENEW_MS) return;
+      asked = Date.now();
+      void Promise.resolve().then(authApi.me).catch(() => undefined);
+    };
+    const timer = setInterval(renew, SESSION_RENEW_MS / 12);
+    document.addEventListener('visibilitychange', renew);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', renew);
+    };
+  }, [user]);
 
   // Signed in again in another tab: coming back to this one finds out.
   useEffect(() => {

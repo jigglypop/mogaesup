@@ -41,6 +41,8 @@ export type HomeProfile = {
   emoji: string;
   visibility: HomeVisibility;
   updatedAt: string;
+  /** The picture the island's link preview shows (a stored 1200×630 JPEG); null or missing for the site's own. */
+  thumbnailUrl?: string | null;
 };
 
 export type VisitCounter = { today: number; total: number };

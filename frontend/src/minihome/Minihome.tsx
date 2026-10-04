@@ -46,6 +46,7 @@ import { createGreetingStore, createResidentStore } from './residents';
 import { ResidentGreeting, ResidentsWorld } from './ResidentsWorld';
 import { Scene, type SceneSettings } from './Scene';
 import { SettingsMenu } from './Settings';
+import { SharedToast, ShareLink, type Shared } from './ShareLink';
 import { StatusPanel } from './StatusPanel';
 import { useStored } from './stored';
 import { createVillage, spawnFor } from './village';
@@ -173,6 +174,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const { profile, isOwner } = view;
   const navigate = useNavigate();
   const [saved, setSaved] = useState(false);
+  const [shared, setShared] = useState<Shared | null>(null);
   const [profileError, setProfileError] = useState('');
   const profileWrites = useRef<Promise<void>>(Promise.resolve());
   const latestLook = useRef(viewerLook);
@@ -298,6 +300,22 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     },
     [onView, onLook, profile.ownerId],
   );
+  // The link preview's picture, in turn with the other profile saves; its control shows what went wrong itself.
+  const saveThumbnail = useCallback(
+    (image: string | null) => {
+      const write = profileWrites.current.catch(() => undefined).then(async () => {
+        if (!sessionBelongsTo(profile.ownerId)) throw new ApiRequestError(409, 'owner_changed', '계정이 바뀌어 저장을 중단했어요.');
+        const expectedOwnerId = profile.ownerId;
+        const updated = image === null ? await homeApi.removeThumbnail({ expectedOwnerId }) : await homeApi.setThumbnail({ expectedOwnerId, image });
+        if (active.current && sessionBelongsTo(profile.ownerId)) onView(updated);
+      });
+      profileWrites.current = write;
+      return write;
+    },
+    [onView, profile.ownerId],
+  );
+  const canvasBox = useRef<HTMLDivElement>(null);
+  const islandCanvas = useCallback(() => canvasBox.current?.querySelector('canvas') ?? null, []);
   const wearLook = useCallback(() => {
     const write = profileWrites.current.catch(() => undefined).then(async () => {
       if (!sessionBelongsTo(profile.ownerId)) throw new ApiRequestError(409, 'owner_changed', '계정이 바뀌어 저장을 중단했어요.');
@@ -356,6 +374,11 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const timer = setTimeout(() => setSaved(false), 2200);
     return () => clearTimeout(timer);
   }, [saved]);
+  useEffect(() => {
+    if (!shared) return undefined;
+    const timer = setTimeout(() => setShared(null), 2200);
+    return () => clearTimeout(timer);
+  }, [shared]);
   // Finishing decorating saves what is left, rather than waiting for the autosave.
   useEffect(() => {
     if (!decorating) return undefined;
@@ -399,7 +422,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
       <LiveRoom username={profile.username} viewer={viewer} characterUrl={characterUrl} playerRef={playerRef} visualRotationRef={visualRotationRef}>
         <GameRoom username={profile.username} viewer={viewer} building={building} playerRef={playerRef}>
           <div className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`}>
-            <div className="mg-world-canvas">
+            <div className="mg-world-canvas" ref={canvasBox}>
               {/* The canvas reads the decorating session for its in-world tools (R3F bridges the context). */}
               <EditContext.Provider value={decorating ? session : null}>
                 <Scene
@@ -438,6 +461,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                     <TimeChip />
                   </div>
                   <TopActions>
+                    <ShareLink username={profile.username} onShared={setShared} />
                     {viewer && <GameDock />}
                     <SettingsMenu settings={settings} onChange={changeSettings} bgm={bgm} onBgm={setBgm} onPerformance={() => setPerformance(true)} />
                   </TopActions>
@@ -472,7 +496,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                 <NeighborsTab view={view} viewer={viewer} neighbors={neighbors} />
               </div>
               <div className="mg-side-body" {...tabs.panel('about')}>
-                <About view={view} minimes={minimes} look={viewerLook} onUpdate={updateProfile} onWearLook={wearLook} />
+                <About view={view} minimes={minimes} look={viewerLook} onUpdate={updateProfile} onWearLook={wearLook} onThumbnail={isOwner ? saveThumbnail : undefined} islandCanvas={islandCanvas} />
               </div>
             </aside>
 
@@ -503,6 +527,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                 <Icon name="check" /> 섬을 저장했어요
               </p>
             )}
+            <SharedToast shared={shared} />
             {startFailed && <StartBanner onRetry={retryStart} />}
             {profileError && <p className="mg-toast mg-glass mg-error" role="alert">{profileError}</p>}
             <SaveBanners saver={saver} editing={decorating} onReloaded={reloaded} />

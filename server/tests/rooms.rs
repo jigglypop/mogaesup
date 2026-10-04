@@ -3,6 +3,7 @@ mod common;
 use axum::http::StatusCode;
 use common::{ORIGIN, TestApp};
 use futures_util::{SinkExt, StreamExt};
+use mogaesup_server::auth::SESSIONS_PER_USER;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -83,7 +84,8 @@ async fn 세션_상한으로_제거된_연결만_닫고_동시_로그인도_상�
     let mut retained = connect(&base, "session_cap", &ticket(&app, &second).await, ORIGIN).await.unwrap();
     send(&mut retained, json!({"type": "Join", "room_id": "session_cap", "color": "#fff"})).await;
     next(&mut retained, "Welcome").await.unwrap();
-    for _ in 0..7 {
+    // The first session is the one used least recently: the cap's next sign-in ends it.
+    for _ in 0..SESSIONS_PER_USER - 1 {
         assert_eq!(login().await.status, StatusCode::OK);
     }
     assert_eq!(closed(&mut oldest).await, Some(4401));
@@ -93,7 +95,7 @@ async fn 세션_상한으로_제거된_연결만_닫고_동시_로그인도_상�
     assert!(replies.iter().all(|reply| reply.status == StatusCode::OK));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions").fetch_one(&app.state.db).await.unwrap(),
-        8
+        SESSIONS_PER_USER
     );
     assert_eq!(closed(&mut retained).await, Some(4401));
     app.cleanup().await;

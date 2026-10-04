@@ -18,6 +18,7 @@ pub mod residents;
 pub mod rooms;
 pub mod runtime;
 pub mod security;
+pub mod share;
 pub mod slim;
 pub mod social;
 pub mod studio;
@@ -111,7 +112,9 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), security::protect))
         .layer(compression)
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(state.clone());
+        .with_state(state.clone())
+        // The link preview page is HTML with headers of its own, outside the JSON middleware above.
+        .merge(share::router(state.clone()));
     // In production CloudFront serves /models/* from S3 and never sends it here.
     let models = Router::new().route("/models/{file}", get(models::serve)).with_state(state.clone());
     api.merge(models).merge(rooms::router(state.clone())).merge(games::router(state))

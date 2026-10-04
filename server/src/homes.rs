@@ -20,6 +20,7 @@ use crate::{
     permissions::like_escape,
     rebac::{Checker, Object, Subject},
     security::{client_address, hmac_sha256, rate_limit},
+    share,
 };
 
 const MAX_WORLD_BYTES: usize = 2 * 1024 * 1024;
@@ -42,6 +43,10 @@ const VISITS_PER_MEMBER: u32 = 300;
 const WORLD_READS_PER_ADDRESS: u32 = 600;
 /// Searches of the island listing counted in the rate window (ten minutes), per address; each one scans the islands.
 const SEARCHES_PER_ADDRESS: u32 = 300;
+/// Link preview pictures one member may send in the rate window (ten minutes).
+const THUMBNAILS_PER_WINDOW: u32 = 20;
+/// A picture save request: the picture as base64 and the fields around it.
+const MAX_THUMBNAIL_REQUEST_BYTES: usize = share::MAX_PICTURE_BYTES.div_ceil(3) * 4 + 4096;
 const OWNER_CHANGED: ApiError = conflict("owner_changed", "계정이 바뀌어 저장을 중단했어요.");
 const WORLD_TOO_LARGE: ApiError =
     ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "world_too_large", "저장할 섬이 너무 큽니다.");
@@ -52,12 +57,15 @@ const WORLD_CUT_SHORT: ApiError = ApiError::new(
     "incomplete_world",
     "섬 데이터를 끝까지 받지 못했습니다. 다시 저장해 주세요.",
 );
+const PICTURE_CUT_SHORT: ApiError =
+    ApiError::new(StatusCode::BAD_REQUEST, "incomplete_picture", "사진을 끝까지 받지 못했어요. 다시 올려 주세요.");
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/homes", get(list))
         .route("/api/homes/me", get(mine).patch(update))
         .route("/api/homes/me/world", put(save_world))
+        .route("/api/homes/me/thumbnail", put(save_thumbnail).delete(remove_thumbnail))
         .route("/api/homes/{username}", get(view))
         .route("/api/homes/{username}/visits", post(visit))
         .route("/api/homes/{username}/world", get(world))
@@ -81,10 +89,13 @@ pub struct HomeProfile {
     pub emoji: String,
     pub visibility: String,
     pub updated_at: DateTime<Utc>,
+    /// The picture the island's link preview shows (see [`crate::share`]), a stored JPEG's site path; None for the
+    /// site's own.
+    pub thumbnail_url: Option<String>,
 }
 
 const PROFILE_SELECT: &str = "SELECT h.owner_id, u.username, u.display_name AS owner_name, h.title, h.status_message,
-    h.mood, h.minime, h.emoji, h.visibility, h.updated_at FROM homes h JOIN users u ON u.id = h.owner_id";
+    h.mood, h.minime, h.emoji, h.visibility, h.updated_at, h.thumbnail_url FROM homes h JOIN users u ON u.id = h.owner_id";
 
 fn profile(row: &PgRow) -> HomeProfile {
     HomeProfile {
@@ -98,6 +109,7 @@ fn profile(row: &PgRow) -> HomeProfile {
         emoji: row.get("emoji"),
         visibility: row.get("visibility"),
         updated_at: row.get("updated_at"),
+        thumbnail_url: row.get("thumbnail_url"),
     }
 }
 
@@ -334,6 +346,62 @@ async fn update(
     if visibility_set {
         crate::rooms::revalidate(&state, &user.username).await;
     }
+    let home = my_home(&state, &user).await?;
+    home_view(&state, home, true).await
+}
+
+/// What a picture save sends.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PictureSave {
+    /// The account the page was loaded for. A missing value must refuse the save.
+    expected_owner_id: Option<Uuid>,
+    /// A `data:image/jpeg;base64,` (or PNG) URL.
+    image: String,
+}
+
+/// `PUT /api/homes/me/thumbnail`: the picture the island's link preview shows ([`crate::share`]), answered with the
+/// island's view. The body is read only once the sender is known and within its budget, and only up to a picture's
+/// size; the picture is read, cropped to the preview and encoded again before it is stored.
+async fn save_thumbnail(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Json<Value>> {
+    let user = current_user(&state, &headers).await?;
+    rate_limit(&state, format!("thumbnail:{}", user.id), THUMBNAILS_PER_WINDOW)?;
+    let bytes = limited_body(body, MAX_THUMBNAIL_REQUEST_BYTES, share::PICTURE_TOO_LARGE, PICTURE_CUT_SHORT).await?;
+    let save: PictureSave = serde_json::from_slice(&bytes).map_err(|_| share::INVALID_PICTURE)?;
+    drop(bytes);
+    same_owner(save.expected_owner_id, user.id)?;
+    let picture = share::picture(save.image).await?;
+    let url = state.config.models.put("jpg", picture).await?;
+    create(&state.db, &user).await?;
+    sqlx::query("UPDATE homes SET thumbnail_url = $2, updated_at = now() WHERE owner_id = $1")
+        .bind(user.id)
+        .bind(url)
+        .execute(&state.db)
+        .await?;
+    let home = my_home(&state, &user).await?;
+    home_view(&state, home, true).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnerOnly {
+    expected_owner_id: Option<Uuid>,
+}
+
+/// `DELETE /api/homes/me/thumbnail`: the link preview shows the site's own picture again. The stored file stays, as
+/// every stored file does (it is named by its bytes).
+async fn remove_thumbnail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<OwnerOnly>,
+) -> ApiResult<Json<Value>> {
+    let user = current_user(&state, &headers).await?;
+    same_owner(body.expected_owner_id, user.id)?;
+    create(&state.db, &user).await?;
+    sqlx::query("UPDATE homes SET thumbnail_url = NULL, updated_at = now() WHERE owner_id = $1")
+        .bind(user.id)
+        .execute(&state.db)
+        .await?;
     let home = my_home(&state, &user).await?;
     home_view(&state, home, true).await
 }
@@ -643,19 +711,25 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
     Ok(row)
 }
 
-/// The save request's body, up to [`MAX_SAVE_BYTES`]. Only a body past that is an island too large; one that stops
-/// coming (the connection dropped) is [`WORLD_CUT_SHORT`].
-async fn save_body(body: Body) -> ApiResult<Vec<u8>> {
+/// A request's body, up to `max` bytes. Only a body past that is `too_large`; one that stops coming (the connection
+/// dropped) is `cut_short`.
+async fn limited_body(body: Body, max: usize, too_large: ApiError, cut_short: ApiError) -> ApiResult<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| WORLD_CUT_SHORT)?;
-        if chunk.len() > MAX_SAVE_BYTES.saturating_sub(bytes.len()) {
-            return Err(WORLD_TOO_LARGE);
+        let Ok(chunk) = chunk else { return Err(cut_short) };
+        if chunk.len() > max.saturating_sub(bytes.len()) {
+            return Err(too_large);
         }
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+/// The save request's body, up to [`MAX_SAVE_BYTES`]: past that it is an island too large, and one that stops coming
+/// is [`WORLD_CUT_SHORT`].
+async fn save_body(body: Body) -> ApiResult<Vec<u8>> {
+    limited_body(body, MAX_SAVE_BYTES, WORLD_TOO_LARGE, WORLD_CUT_SHORT).await
 }
 
 /// `PUT /api/homes/me/world`: `{worldId, revision, updatedAt}` of the stored world. The body is read only once the

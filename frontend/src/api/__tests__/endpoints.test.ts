@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setSessionOwner } from '../../auth/sessionWork';
-import { homeApi, homesPath, layoutApi, socialApi } from '../endpoints';
+import { homeApi, homesPath, layoutApi, shareUrl, socialApi } from '../endpoints';
+
+describe('섬 공유 링크', () => {
+  it('미리보기를 읽는 서버의 공유 페이지를 가리킨다', () => {
+    expect(shareUrl('mogae', 'https://mogaesup.com')).toBe('https://mogaesup.com/api/share/@mogae');
+    expect(shareUrl('mogae_1')).toBe(`${window.location.origin}/api/share/@mogae_1`);
+  });
+});
 
 describe('섬 목록 주소', () => {
   it('정한 것만 붙인다', () => {
@@ -65,6 +72,18 @@ describe('섬 목록 주소', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('공유 사진은 주인 확인과 함께 JSON으로 올리고 지운다', async () => {
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ profile: {}, visits: {}, isOwner: true }), { status: 200 }));
+      await homeApi.setThumbnail({ expectedOwnerId: 'owner', image: 'data:image/jpeg;base64,AAAA' });
+      await homeApi.removeThumbnail({ expectedOwnerId: 'owner' });
+      const sent = fetchMock.mock.calls.map(([url, init]) => [`${init?.method} ${String(url)}`, JSON.parse(init?.body as string)]);
+      expect(sent).toEqual([
+        ['PUT /api/homes/me/thumbnail', { expectedOwnerId: 'owner', image: 'data:image/jpeg;base64,AAAA' }],
+        ['DELETE /api/homes/me/thumbnail', { expectedOwnerId: 'owner' }],
+      ]);
+      for (const [, init] of fetchMock.mock.calls) expect(init?.headers).toMatchObject({ 'content-type': 'application/json' });
     });
 
     it('검색어가 바뀌어 부른 쪽이 끊으면 가던 요청도 끊긴다', async () => {

@@ -26,8 +26,14 @@ use crate::{
 };
 
 const SESSION_COOKIE: &str = "mogaesup_session";
-const SESSIONS_PER_USER: i64 = 8;
+/// Signed-in devices one account keeps. A new sign-in past it ends the sessions used least recently.
+pub const SESSIONS_PER_USER: i64 = 20;
+/// A session lasts this long after it was made or last renewed, and so does its cookie (`SESSION_TERM` in SQL).
 const SESSION_MAX_AGE_SECONDS: u32 = 30 * 24 * 60 * 60;
+const SESSION_TERM: &str = "30 days";
+/// A session in use is renewed once its expiry is closer than this, about a day after its last renewal: a device used
+/// every few weeks stays signed in, and a row is written at most once a day however often the app opens.
+const SESSION_RENEW_BELOW: &str = "29 days";
 /// Wrong passwords from one address, and for one account, in the rate window (ten minutes).
 const LOGIN_FAILURES_PER_ADDRESS: u32 = 30;
 const LOGIN_FAILURES_PER_ACCOUNT: u32 = 50;
@@ -67,8 +73,8 @@ impl User {
     }
 }
 
-/// The session token's hash, from a well-formed session cookie.
-pub(crate) fn token_hash(headers: &HeaderMap) -> Option<String> {
+/// The token of a well-formed session cookie.
+fn session_token(headers: &HeaderMap) -> Option<&str> {
     let prefix = format!("{SESSION_COOKIE}=");
     let token = headers
         .get_all(header::COOKIE)
@@ -76,10 +82,12 @@ pub(crate) fn token_hash(headers: &HeaderMap) -> Option<String> {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|cookie| cookie.split(';'))
         .find_map(|item| item.trim().strip_prefix(prefix.as_str()))?;
-    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(hex::encode(Sha256::digest(token.as_bytes())))
+    (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())).then_some(token)
+}
+
+/// The session token's hash, from a well-formed session cookie.
+pub(crate) fn token_hash(headers: &HeaderMap) -> Option<String> {
+    session_token(headers).map(|token| hex::encode(Sha256::digest(token.as_bytes())))
 }
 
 pub async fn optional_user(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<User>> {
@@ -260,12 +268,16 @@ async fn session(state: &AppState, user: User, status: StatusCode) -> ApiResult<
     let mut tx = state.db.begin().await?;
     // Serialize admission and pruning for an account, including concurrent successful logins.
     sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE").bind(user.id).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, clock_timestamp() + interval '30 days')")
-        .bind(hex::encode(Sha256::digest(token.as_bytes())))
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
-    // Bound stolen or forgotten sessions per account; every token gets the same TTL, so expiry is insertion order.
+    sqlx::query(&format!(
+        "INSERT INTO sessions (token_hash, user_id, expires_at)
+         VALUES ($1, $2, clock_timestamp() + interval '{SESSION_TERM}')"
+    ))
+    .bind(hex::encode(Sha256::digest(token.as_bytes())))
+    .bind(user.id)
+    .execute(&mut *tx)
+    .await?;
+    // Bound stolen or forgotten sessions per account. A session's expiry moves with its use (see `me`, renewed at most a
+    // day apart), so the latest expiries are the devices used most recently and the earliest are the ones that go.
     let expired: Vec<String> = sqlx::query_scalar(
         "DELETE FROM sessions WHERE token_hash IN
          (SELECT token_hash FROM sessions WHERE user_id = $1 ORDER BY expires_at DESC, token_hash DESC OFFSET $2) RETURNING token_hash",
@@ -357,12 +369,32 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, session_cookie(&state, "", 0))]).into_response())
 }
 
-pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let user = match optional_user(&state, &headers).await? {
-        Some(user) => with_permissions(&state, &user).await?,
-        None => Value::Null,
-    };
-    Ok(Json(json!({"user": user})))
+/// `GET /api/auth/me`, which the app asks each time it opens: who is signed in. A session whose expiry has come closer
+/// than [`SESSION_RENEW_BELOW`] is renewed to a full term here, and its cookie sent again with the full Max-Age, so a
+/// device in use stays signed in. Other reads of the session ([`optional_user`]) only read it.
+pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
+    let Some(token) = session_token(&headers) else { return Ok(Json(json!({"user": null})).into_response()) };
+    // One statement: the renewal sees the row the read finds, and a renewal already made (another tab, a moment ago)
+    // leaves the expiry too far off to match again.
+    let row = sqlx::query(&format!(
+        "WITH renewed AS (
+           UPDATE sessions SET expires_at = clock_timestamp() + interval '{SESSION_TERM}'
+           WHERE token_hash = $1 AND expires_at > now() AND expires_at < now() + interval '{SESSION_RENEW_BELOW}'
+           RETURNING token_hash)
+         SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, EXISTS (SELECT 1 FROM renewed) AS renewed
+         FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > now()"
+    ))
+    .bind(hex::encode(Sha256::digest(token.as_bytes())))
+    .fetch_optional(&state.db)
+    .await?;
+    let Some(row) = row else { return Ok(Json(json!({"user": null})).into_response()) };
+    let user = with_permissions(&state, &User::from_row(&row)).await?;
+    let mut response = Json(json!({"user": user})).into_response();
+    if row.get::<bool, _>("renewed") {
+        let cookie = session_cookie(&state, token, SESSION_MAX_AGE_SECONDS);
+        response.headers_mut().insert(header::SET_COOKIE, cookie.parse().map_err(internal)?);
+    }
+    Ok(response)
 }
 
 pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {

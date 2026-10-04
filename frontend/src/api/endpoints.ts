@@ -69,7 +69,16 @@ export const homeApi = {
     api<HomeWorld | undefined>(`/homes/${segment(username)}/world?worldId=${segment(worldId)}`, { signal }),
   /** An island is up to 2MB, so a save may take longer than other requests before it counts as unanswered. */
   saveWorld: (body: SaveHomeWorld, signal?: AbortSignal) => api<SavedHomeWorld>('/homes/me/world', { method: 'PUT', body, signal, timeoutMs: 60_000 }),
+  /** The link preview's picture: a 1200×630 JPEG as a data URL, which the server checks and encodes again. */
+  setThumbnail: (body: { expectedOwnerId: string; image: string }) =>
+    api<HomeView>('/homes/me/thumbnail', { method: 'PUT', body, timeoutMs: 60_000 }),
+  /** The link preview shows the site's own picture again. */
+  removeThumbnail: (body: { expectedOwnerId: string }) => api<HomeView>('/homes/me/thumbnail', { method: 'DELETE', body }),
 };
+
+/** The island's link to send: the server's share page, which link previews read and which takes people on to the island. */
+export const shareUrl = (username: string, origin: string = window.location.origin) =>
+  `${origin}/api/share/@${segment(username)}`;
 
 type IlchonRequests = { received: IlchonRequest[]; sent: IlchonRequest[] };
 /**

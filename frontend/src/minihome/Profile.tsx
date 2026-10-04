@@ -5,6 +5,7 @@ import type { CatalogItem, HomeView, HomeVisibility, Look, ProfileChanges } from
 import { draftKey } from '../auth/drafts';
 import { Icon } from '../ui/icons';
 import { wearsLook } from './character';
+import { IslandThumbnail } from './Thumbnail';
 
 const MOODS = [
   { emoji: '😊', label: '행복' },
@@ -202,19 +203,28 @@ export function ProfileHeader({
   );
 }
 
-/** 소개: the island's name, the owner's mood and 미니미 (or their own look from the wardrobe), and who may visit. */
+/**
+ * 소개: the island's name, the owner's mood and 미니미 (or their own look from the wardrobe), who may visit, and the
+ * picture a link to the island shows.
+ */
 export function About({
   view,
   minimes,
   look,
   onUpdate,
   onWearLook,
+  onThumbnail,
+  islandCanvas,
 }: {
   view: HomeView;
   minimes: CatalogItem[];
   look: Look | null;
   onUpdate: (changes: ProfileChanges) => void | Promise<void>;
   onWearLook: () => void | Promise<void>;
+  /** Saves the link preview's picture (a JPEG data URL), or null for the site's own. */
+  onThumbnail?: (image: string | null) => Promise<void>;
+  /** The island's canvas, which the owner may take as the picture. */
+  islandCanvas?: () => HTMLCanvasElement | null;
 }) {
   const { profile, isOwner } = view;
   const ownLook = wearsLook(look);
@@ -273,6 +283,7 @@ export function About({
               ))}
             </div>
           </div>
+          {onThumbnail && <IslandThumbnail view={view} onChange={onThumbnail} islandCanvas={islandCanvas} />}
         </section>
       ) : (
         <section className="mg-card mg-about-card">

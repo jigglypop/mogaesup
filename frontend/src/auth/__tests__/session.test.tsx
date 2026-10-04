@@ -6,7 +6,7 @@ import { ApiRequestError, ApiTimeoutError } from '../../api/client';
 import type { Credentials, Registration, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
 import { Loading } from '../../pages/Loading';
-import { AuthProvider, useAuth } from '../AuthProvider';
+import { AuthProvider, SESSION_RENEW_MS, useAuth } from '../AuthProvider';
 import { draftKey } from '../drafts';
 import { followSession, SESSION_RETRY_MS, SESSION_UNREACHABLE_AFTER } from '../session';
 import { expireSession, followSessionOwner, sessionEpoch, sessionLapsed, setSessionOwner } from '../sessionWork';
@@ -162,6 +162,46 @@ describe('로그인 상태 제공자', () => {
     });
     expect(shown(container)).toBe('signedIn:mogae');
     await unmount();
+  });
+
+  it('오래 열어 둔 화면은 보일 때 다시 물어 서버가 세션을 늘리게 하고, 로그인 상태는 그대로 둔다', async () => {
+    const visibility = (state: DocumentVisibilityState) => Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+    visibility('visible');
+    me.mockResolvedValue({ user: mogae });
+    const { container, unmount } = await mount(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+    expect(me).toHaveBeenCalledTimes(1);
+    // Within the half day: nothing more is asked, however often the page is shown.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_RENEW_MS - 60_000);
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(me).toHaveBeenCalledTimes(1);
+    // A hidden page does not ask; shown again after the half day, it does, once.
+    visibility('hidden');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2 * SESSION_RENEW_MS);
+    });
+    expect(me).toHaveBeenCalledTimes(1);
+    visibility('visible');
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      document.dispatchEvent(new Event('visibilitychange'));
+      await flush();
+    });
+    expect(me).toHaveBeenCalledTimes(2);
+    // A page left in view asks on its own as well.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_RENEW_MS + SESSION_RENEW_MS / 12);
+    });
+    expect(me).toHaveBeenCalledTimes(3);
+    expect(shown(container)).toBe('signedIn:mogae');
+    await unmount();
+    await vi.advanceTimersByTimeAsync(2 * SESSION_RENEW_MS);
+    expect(me).toHaveBeenCalledTimes(3);
   });
 
   it('서버가 로그인한 사람이 없다고 하면 바로 anonymous다', async () => {
