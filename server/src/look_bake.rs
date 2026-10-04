@@ -26,6 +26,9 @@ use crate::{
 pub const HAIR_SLOTS: [&str; 3] = ["hair", "hairFront", "hairBack"];
 /// Slots whose part covers some of the body: the wardrobe reads a coverage record for each.
 pub const COVERED_SLOTS: [&str; 5] = ["top", "bottom", "shoes", "hat", "hair"];
+/// Slots whose worn part a member may resize and move (`PartEdit`), as the wardrobe offers them
+/// (`frontend/src/character/part-edit.ts`).
+pub const EDITABLE_SLOTS: [&str; 8] = ["hair", "hairFront", "hairBack", "hat", "top", "bottom", "shoes", "glasses"];
 /// Worn slots that never hide body materials: hair is open between strands, and the head stays.
 const SKIN_STAYS: [&str; 4] = ["hair", "head", "hairFront", "hairBack"];
 /// How far a part's bone may stand from the body's at rest, in the files' units, and still be the same bone.
@@ -1335,9 +1338,7 @@ pub fn bake_with_edits(
     edits: &BTreeMap<String, PartEdit>,
 ) -> Result<Baked, BakeError> {
     if edits.iter().any(|(slot, edit)| {
-        !edit.valid()
-            || !["hair", "hairFront", "hairBack", "hat", "glasses"].contains(&slot.as_str())
-            || !parts.iter().any(|part| &part.slot == slot)
+        !edit.valid() || !EDITABLE_SLOTS.contains(&slot.as_str()) || !parts.iter().any(|part| &part.slot == slot)
     }) {
         return Err(fail("invalid_look", "파츠 편집 범위를 벗어났습니다."));
     }
@@ -1663,15 +1664,41 @@ pub(crate) mod tests {
 
     #[test]
     fn morph_parts_refuse_nonidentity_edits_and_keep_basic_wearing() {
-        let original = part("hair", 0.5);
-        let (mut json, bin) = split(&original).unwrap();
-        json["meshes"][0]["primitives"][0]["targets"] = json!([{"POSITION":0}]);
-        let bytes = join(&json, bin);
-        let parts = || vec![Part { slot: "hair".into(), glb: &bytes, coverage: None, palette: None }];
-        let edit = PartEdit { scale: [1.1; 3], translation: [0.0; 3] };
-        let error = bake_with_edits(&body(), parts(), None, &BTreeMap::from([("hair".into(), edit)])).err().unwrap();
-        assert_eq!(error.code, "look_part_edit");
-        assert!(bake(&body(), parts(), None).is_ok());
+        for slot in ["hair", "top", "bottom", "shoes"] {
+            let original = part(slot, 0.5);
+            let (mut json, bin) = split(&original).unwrap();
+            json["meshes"][0]["primitives"][0]["targets"] = json!([{"POSITION":0}]);
+            let bytes = join(&json, bin);
+            let parts = || vec![Part { slot: slot.into(), glb: &bytes, coverage: None, palette: None }];
+            let edit = PartEdit { scale: [1.1; 3], translation: [0.0; 3] };
+            let error = bake_with_edits(&body(), parts(), None, &BTreeMap::from([(slot.into(), edit)])).err().unwrap();
+            assert_eq!(error.code, "look_part_edit", "{slot}");
+            assert!(bake(&body(), parts(), None).is_ok(), "{slot}");
+        }
+    }
+
+    #[test]
+    fn edits_the_wardrobe_does_not_offer_are_refused_before_baking() {
+        let (weapon, shoes) = (part("weapon", 0.5), part("shoes", 0.5));
+        let parts = || {
+            vec![
+                Part { slot: "weapon".into(), glb: &weapon, coverage: None, palette: None },
+                Part { slot: "shoes".into(), glb: &shoes, coverage: None, palette: None },
+            ]
+        };
+        let bake_edited = |slot: &str, edit: PartEdit| {
+            bake_with_edits(&body(), parts(), None, &BTreeMap::from([(slot.into(), edit)]))
+        };
+        let moved = |translation: [f64; 3]| PartEdit { scale: [1.0; 3], translation };
+        for (slot, edit) in [
+            ("weapon", moved([0.0, 0.01, 0.0])),
+            ("hat", moved([0.0, 0.01, 0.0])),
+            ("shoes", moved([0.0, -0.151, 0.0])),
+            ("shoes", PartEdit { scale: [1.0, 1.0, 1.51], translation: [0.0; 3] }),
+        ] {
+            assert_eq!(bake_edited(slot, edit).err().unwrap().code, "invalid_look", "{slot}");
+        }
+        assert!(bake_edited("shoes", PartEdit { scale: [1.5, 0.6, 1.5], translation: [-0.05, -0.15, 0.1] }).is_ok());
     }
 
     #[test]
@@ -1688,6 +1715,99 @@ pub(crate) mod tests {
         assert_eq!(edited.report["hiddenTriangles"], 0);
         assert_eq!(edited.report["hiddenPrimitives"], 0);
         assert_eq!(edited.report["coverageDisabledForEdits"], json!(["hat"]));
+    }
+
+    #[test]
+    fn a_resized_bottom_keeps_the_skin_it_covered_and_stays_on_the_body_bones() {
+        // The bottom hides both of the body's triangles, and the body's second primitive wears a material it covers.
+        let body = edited(&body(), |json| json["materials"][1]["extras"]["hidden_by_slots"] = json!("bottom"));
+        let bottom = part("bottom", 0.5);
+        let coverage = Coverage { hidden: BTreeMap::from([("0:0".into(), vec![0b11])]), ..Default::default() };
+        let dressed = |edits: BTreeMap<String, PartEdit>| {
+            let part = Part { slot: "bottom".into(), glb: &bottom, coverage: Some(coverage.clone()), palette: None };
+            bake_with_edits(&body, vec![part], None, &edits).unwrap()
+        };
+        let hidden =
+            |baked: &Baked| (baked.report["hiddenTriangles"].as_u64(), baked.report["hiddenPrimitives"].as_u64());
+        assert_eq!(hidden(&dressed(BTreeMap::new())), (Some(2), Some(1)));
+
+        // Taller, lower and further forward as far as each goes, and thinner front to back.
+        let edit = PartEdit { scale: [1.0, 1.5, 0.6], translation: [0.0, -0.15, 0.1] };
+        let baked = dressed(BTreeMap::from([("bottom".to_string(), edit.clone())]));
+        assert!(glb::details(&baked.glb).unwrap().summary().playable());
+        // Where it was fitted says nothing about what it covers now: the legs keep their skin and their material.
+        assert_eq!(hidden(&baked), (Some(0), Some(0)));
+        assert_eq!(baked.report["coverageDisabledForEdits"], json!(["bottom"]));
+        let (json, bin) = split(&baked.glb).unwrap();
+        let skin_primitives = json["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(skin_primitives.len(), 2);
+        assert_eq!(triangles(&json, bin, &skin_primitives[0]).unwrap().0, [0, 1, 2, 0, 2, 3]);
+
+        // Its rest geometry is resized about its centre and moved; its bones, weights and inverse binds are as fitted.
+        let (source, source_bin) = split(&bottom).unwrap();
+        let node =
+            json["nodes"].as_array().unwrap().iter().find(|node| node["extras"]["standard_slot"] == "bottom").unwrap();
+        let attributes = &json["meshes"][index(&node["mesh"]).unwrap()]["primitives"][0]["attributes"];
+        let fitted = &source["meshes"][0]["primitives"][0]["attributes"];
+        let values = |json: &Value, bin: &[u8], attributes: &Value, name: &str| {
+            read(json, bin, index(&attributes[name]).unwrap()).unwrap()
+        };
+        let pivot = [0.5, 1.75, 0.0];
+        let before = values(&source, source_bin, fitted, "POSITION");
+        let after = values(&json, bin, attributes, "POSITION");
+        for (before, after) in before.as_chunks::<3>().0.iter().zip(after.as_chunks::<3>().0) {
+            for axis in 0..3 {
+                let expected = (before[axis] - pivot[axis]) * edit.scale[axis] + pivot[axis] + edit.translation[axis];
+                assert!((after[axis] - expected).abs() < 1e-6, "{after:?}");
+            }
+        }
+        for name in ["JOINTS_0", "WEIGHTS_0"] {
+            assert_eq!(values(&json, bin, attributes, name), values(&source, source_bin, fitted, name), "{name}");
+        }
+        let skin = &json["skins"][index(&node["skin"]).unwrap()];
+        assert_eq!(skin["joints"], json!([1, 2]));
+        assert_eq!(read(&json, bin, index(&skin["inverseBindMatrices"]).unwrap()), read(&source, source_bin, 3));
+    }
+
+    #[test]
+    fn an_edited_top_presses_nothing_and_an_edited_bottom_is_pressed_then_moved() {
+        // As in `an_inner_garment_tucks_only_where_the_outer_one_covers`: the top covers the body's first triangle and
+        // the bottom's first two vertices sit over the skin it covers.
+        let top = Coverage::parse(&json!({"hidden": {"0:0": b64(&[0b01])}})).unwrap();
+        let anchors: Vec<u8> = [1i32, 3, -1].iter().flat_map(|a| a.to_le_bytes()).collect();
+        let moves = f32s(&[0.0, 0.0, -0.1, 0.0, 0.0, -0.2, 0.0, 0.0, -0.3]);
+        let bottom =
+            Coverage::parse(&json!({"hidden": {}, "anchors": {"0:0": b64(&anchors)}, "tucks": {"0:0": b64(&moves)},
+            "anchor_keys": ["0:0"], "under": ["top"]}))
+            .unwrap();
+        let (top_glb, bottom_glb) = (part("top", 0.5), part("bottom", 0.5));
+        let dressed = |slot: &str, edit: PartEdit| {
+            let parts = vec![
+                Part { slot: "top".into(), glb: &top_glb, coverage: Some(top.clone()), palette: None },
+                Part { slot: "bottom".into(), glb: &bottom_glb, coverage: Some(bottom.clone()), palette: None },
+            ];
+            bake_with_edits(&body(), parts, None, &BTreeMap::from([(slot.to_string(), edit)])).unwrap()
+        };
+        let counts =
+            |baked: &Baked| (baked.report["tuckedVertices"].as_u64(), baked.report["hiddenTriangles"].as_u64());
+        let bottom_depths = |baked: &Baked| -> Vec<f64> {
+            let (json, bin) = split(&baked.glb).unwrap();
+            let node =
+                json["nodes"].as_array().unwrap().iter().find(|node| node["extras"]["standard_slot"] == "bottom");
+            let primitive = &json["meshes"][index(&node.unwrap()["mesh"]).unwrap()]["primitives"][0];
+            let points = read(&json, bin, index(&primitive["attributes"]["POSITION"]).unwrap()).unwrap();
+            points.chunks(3).map(|p| (p[2] * 100.0).round() / 100.0).collect()
+        };
+
+        // A longer top: where it was fitted proves nothing now, so nothing is pressed under it and its skin stays.
+        let longer = dressed("top", PartEdit { scale: [1.0, 1.5, 1.0], translation: [0.0, -0.15, 0.0] });
+        assert_eq!(counts(&longer), (Some(0), Some(0)));
+        assert_eq!(bottom_depths(&longer), [0.0, 0.0, 0.0]);
+
+        // A bottom moved forward under the top as fitted: pressed onto the skin first, then moved with the rest of it.
+        let forward = dressed("bottom", PartEdit { scale: [1.0; 3], translation: [0.0, 0.0, 0.1] });
+        assert_eq!(counts(&forward), (Some(2), Some(1)));
+        assert_eq!(bottom_depths(&forward), [0.0, -0.1, 0.1]);
     }
 
     #[test]

@@ -165,12 +165,14 @@ fn standing_glb() -> Vec<u8> {
 
 /// What the fake character server knows: two finished characters, and a wardrobe with one body and parts that each go
 /// wrong in their own way: `bare` has no coverage record, `twisted` one that is not base64, `plain` no colour regions,
-/// `flat` a 422 for them (no texture), `blurred` a mask that is not a picture, `heavy` too many triangles.
+/// `flat` a 422 for them (no texture), `blurred` a mask that is not a picture, `heavy` too many triangles. `pants` is a
+/// bottom that hides all of the body's skin.
 struct Studio {
     body: Vec<u8>,
     hat: Vec<u8>,
     tall_hat: Vec<u8>,
     heavy_hat: Vec<u8>,
+    pants: Vec<u8>,
     standing: Vec<u8>,
     /// Wardrobe requests seen, by path.
     seen: Mutex<Vec<String>>,
@@ -189,6 +191,7 @@ impl Studio {
             hat: part_glb("hat", 0.5),
             tall_hat: part_glb("hat", 0.8),
             heavy_hat: heavy_glb(),
+            pants: part_glb("bottom", 0.5),
             standing: standing_glb(),
             seen: Mutex::default(),
         })
@@ -198,7 +201,8 @@ impl Studio {
         let part = |job: &str, bytes: &[u8]| json!({"job_id": job, "version": "v2", "slot": "hat", "name": format!("{job} 모자"), "sha256": sha256(bytes)});
         let plain: Vec<Value> =
             ["hats", "bare", "twisted", "plain", "flat", "blurred"].iter().map(|job| part(job, &self.hat)).collect();
-        let others = [part("tall", &self.tall_hat), part("heavy", &self.heavy_hat)];
+        let pants = json!({"job_id": "pants", "version": "v2", "slot": "bottom", "name": "바지", "sha256": sha256(&self.pants)});
+        let others = [part("tall", &self.tall_hat), part("heavy", &self.heavy_hat), pants];
         let parts = [plain, others.to_vec()].concat();
         json!({"body": {"job_id": "body", "version": "v1"}, "parts": parts})
     }
@@ -220,6 +224,12 @@ impl Studio {
             ["avatar-factory", "jobs", "tall", "native-parts", "v2", "hat.glb"] => file(&self.tall_hat),
             ["avatar-factory", "jobs", "heavy", "native-parts", "v2", "hat.glb"] => file(&self.heavy_hat),
             ["avatar-factory", "jobs", _, "native-parts", "v2", "hat.glb"] => file(&self.hat),
+            ["avatar-factory", "jobs", "pants", "native-parts", "v2", "bottom.glb"] => file(&self.pants),
+            // Both of the body's triangles.
+            ["avatar-factory", "wardrobe", "bodies", "body", "coverage", "pants", "bottom"] => {
+                Json(json!({"slot": "bottom", "hidden": {"0:0": "Aw=="}, "triangles": {}, "covers_bottom": false}))
+                    .into_response()
+            }
             ["avatar-factory", "wardrobe", "bodies", "body", "coverage", "bare", "hat"] => {
                 StatusCode::NOT_FOUND.into_response()
             }
@@ -560,6 +570,65 @@ async fn 옷장에서_꾸민_모습을_저장하면_한_모델로_조립되어_�
     );
     assert_eq!(app.call("GET", "/api/looks/me", None, Some(&other)).await.body, json!({"look": null}));
     assert_eq!(app.call("GET", "/api/looks/member_x", None, Some(&other)).await.status, StatusCode::NOT_FOUND);
+    app.cleanup().await;
+}
+
+/// The hat and the pants, each changed as `edits` says.
+fn dressed(edits: Value) -> Value {
+    let studio = Studio::new();
+    json!({"body": {"jobId": "body", "version": "v1"},
+        "parts": {"hat": {"jobId": "hats", "version": "v2", "sha256": sha256(&studio.hat)},
+            "bottom": {"jobId": "pants", "version": "v2", "sha256": sha256(&studio.pants)}},
+        "hairColor": null, "colors": {}, "partEdits": edits})
+}
+
+#[tokio::test]
+async fn 늘리고_옮긴_하의와_모자는_그대로_구워지고_하의가_가리던_피부는_남는다() {
+    let (app, _studio, _admin, member) = resident_app().await;
+    // As fitted, the pants hide the body's skin under them.
+    let queued = app.call("PUT", "/api/looks/me", Some(dressed(json!({}))), Some(&member)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    let fitted = settled(&app, &member).await;
+    assert_eq!(fitted["status"], "ready", "{fitted}");
+    assert_eq!(fitted["report"]["hiddenTriangles"], 2);
+
+    // Each axis as far as it goes: the pants taller, lower and further forward, the hat smaller, higher and back.
+    let edits = json!({
+        "bottom": {"scale": [1.0, 1.5, 0.6], "translation": [0.0, -0.15, 0.1]},
+        "hat": {"scale": [0.6, 0.6, 0.6], "translation": [0.05, 0.15, -0.1]},
+    });
+    let queued = app.call("PUT", "/api/looks/me", Some(dressed(edits.clone())), Some(&member)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    let edited = settled(&app, &member).await;
+    assert_eq!(edited["status"], "ready", "{edited}");
+    assert_eq!((&edited["request"]["partEdits"], &edited["report"]["partEdits"]), (&edits, &edits));
+    // Where the pants were fitted proves nothing about what they cover now: the skin stays.
+    assert_eq!(edited["report"]["hiddenTriangles"], 0);
+    assert_eq!(edited["report"]["coverageDisabledForEdits"], json!(["bottom", "hat"]));
+    let model = edited["modelUrl"].as_str().unwrap();
+    assert_ne!(Some(model), fitted["modelUrl"].as_str());
+    let details = glb::details(&app.call("GET", model, None, None).await.bytes).unwrap();
+    assert!(details.summary().playable());
+    assert_eq!(details.meshes, 3);
+
+    // A step past the range on any one axis, or an edit of a part not worn, is refused before anything is made.
+    for edits in [
+        json!({"bottom": {"scale": [1.0, 1.51, 1.0], "translation": [0.0, 0.0, 0.0]}}),
+        json!({"bottom": {"scale": [0.59, 1.0, 1.0], "translation": [0.0, 0.0, 0.0]}}),
+        json!({"bottom": {"scale": [1.0, 1.0, 1.0], "translation": [0.0, -0.151, 0.0]}}),
+        json!({"bottom": {"scale": [1.0, 1.0, 1.0], "translation": [0.0, 0.0, 0.101]}}),
+        json!({"hat": {"scale": [1.0, 1.0, 1.0], "translation": [0.051, 0.0, 0.0]}}),
+        json!({"shoes": {"scale": [1.1, 1.0, 1.0], "translation": [0.0, 0.0, 0.0]}}),
+    ] {
+        let reply = app.call("PUT", "/api/looks/me", Some(dressed(edits.clone())), Some(&member)).await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid_look")),
+            "{edits}"
+        );
+    }
+    let kept = app.call("GET", "/api/looks/me", None, Some(&member)).await;
+    assert_eq!(kept.body["look"]["modelUrl"], edited["modelUrl"]);
     app.cleanup().await;
 }
 

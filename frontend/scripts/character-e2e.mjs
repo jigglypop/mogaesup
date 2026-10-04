@@ -758,9 +758,10 @@ if (browser) {
       const width = member.getByRole('slider', { name: /가로 크기$/ });
       await width.focus();
       for (let i = 0; i < 10; i++) await width.press('ArrowRight');
+      // Two 5 mm steps up.
       const height = member.getByRole('slider', { name: /상하 위치$/ });
       await height.focus();
-      for (let i = 0; i < 10; i++) await height.press('ArrowRight');
+      for (let i = 0; i < 2; i++) await height.press('ArrowRight');
       const wear = member.getByRole('button', { name: '내 캐릭터로 입기' });
       await wear.and(member.locator(':enabled')).waitFor({ timeout: 60_000 });
       const queued = member.waitForResponse(

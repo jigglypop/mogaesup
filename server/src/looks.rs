@@ -15,7 +15,7 @@ use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgRow};
-use std::{collections::BTreeMap, io::Cursor, panic::AssertUnwindSafe};
+use std::{collections::BTreeMap, io::Cursor, ops::RangeInclusive, panic::AssertUnwindSafe};
 use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
@@ -25,7 +25,7 @@ use crate::{
     error::{ApiError, ApiResult, bad, conflict, internal, not_found},
     factory::{self, MAX_MODEL_BYTES},
     glb,
-    look_bake::{self, COVERED_SLOTS, Coverage, HAIR_SLOTS, Palette, Part},
+    look_bake::{self, COVERED_SLOTS, Coverage, EDITABLE_SLOTS, HAIR_SLOTS, Palette, Part},
     models::{self, is_sha256},
     runtime::retry,
     security::rate_limit,
@@ -81,6 +81,12 @@ pub struct BodyRef {
     version: String,
 }
 
+/// How large a worn part may be made along each axis, as a factor of its own size (the wardrobe's sliders,
+/// `frontend/src/character/part-edit.ts`).
+const EDIT_SCALE: RangeInclusive<f64> = 0.6..=1.5;
+/// How far a worn part may be moved, in metres: across (x), up and down (y), front to back (z).
+const EDIT_REACH: [f64; 3] = [0.05, 0.15, 0.1];
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartEdit {
@@ -93,8 +99,8 @@ impl PartEdit {
         self.scale == [1.0; 3] && self.translation == [0.0; 3]
     }
     pub fn valid(&self) -> bool {
-        self.scale.iter().all(|v| v.is_finite() && (0.8..=1.2).contains(v))
-            && self.translation.iter().all(|v| v.is_finite() && (-0.05..=0.05).contains(v))
+        self.scale.iter().all(|v| v.is_finite() && EDIT_SCALE.contains(v))
+            && self.translation.iter().zip(EDIT_REACH).all(|(v, reach)| v.is_finite() && v.abs() <= reach)
     }
 }
 
@@ -162,10 +168,7 @@ pub fn request(body: LookBody) -> ApiResult<Value> {
         }
     }
     for (slot, edit) in &body.part_edits {
-        if !parts.contains_key(slot)
-            || !["hair", "hairFront", "hairBack", "hat", "glasses"].contains(&slot.as_str())
-            || !edit.valid()
-        {
+        if !parts.contains_key(slot) || !EDITABLE_SLOTS.contains(&slot.as_str()) || !edit.valid() {
             return Err(INVALID);
         }
     }
@@ -716,23 +719,51 @@ mod tests {
 
     #[test]
     fn edits_require_a_worn_editable_part_and_bounded_finite_coordinates() {
-        let base = json!({"body":{"jobId":"b1","version":"v1"},
-            "parts":{"hair":{"jobId":"p1","version":"v1","sha256":sha('a')}}});
-        let edit = json!({"scale":[1.2,0.8,1.0],"translation":[0.05,-0.05,0.0]});
-        let mut valid = base.clone();
-        valid["partEdits"] = json!({"hair":edit});
-        assert_eq!(request(body(valid)).unwrap()["partEdits"]["hair"], edit);
-        for value in [
-            json!({"hat":edit}),
-            json!({"body":edit}),
-            json!({"hair":{"scale":[1.21,1,1],"translation":[0,0,0]}}),
-            json!({"hair":{"scale":[1,1,1],"translation":[0,0.051,0]}}),
+        let wearing = |slots: &[&str], edits: Value| {
+            let parts: Map<String, Value> = slots
+                .iter()
+                .map(|slot| (slot.to_string(), json!({"jobId": "p1", "version": "v1", "sha256": sha('a')})))
+                .collect();
+            request(body(json!({"body": {"jobId": "b1", "version": "v1"}, "parts": parts, "partEdits": edits})))
+        };
+        let dressed = ["hair", "hat", "glasses", "top", "bottom", "shoes", "weapon"];
+        // Each axis as far as it goes either way, and what the narrower sliders saved before, on every editable part.
+        for edit in [
+            json!({"scale": [0.6, 1.5, 0.6], "translation": [0.05, -0.15, 0.1]}),
+            json!({"scale": [1.5, 0.6, 1.5], "translation": [-0.05, 0.15, -0.1]}),
+            json!({"scale": [1.2, 0.8, 1.0], "translation": [0.05, -0.05, 0.0]}),
         ] {
-            let mut invalid = base.clone();
-            invalid["partEdits"] = value;
-            assert_eq!(request(body(invalid)).unwrap_err().code, "invalid_look");
+            for slot in ["hair", "hat", "glasses", "top", "bottom", "shoes"] {
+                let look = wearing(&dressed, json!({slot: edit})).unwrap();
+                assert_eq!(look["partEdits"][slot], edit, "{slot}");
+            }
+            for slot in ["hairFront", "hairBack"] {
+                let look = wearing(&["hairFront", "hairBack"], json!({slot: edit})).unwrap();
+                assert_eq!(look["partEdits"][slot], edit, "{slot}");
+            }
         }
-        assert!(!PartEdit { scale: [f64::NAN, 1.0, 1.0], translation: [0.0; 3] }.valid());
+        // A step past the range on any one axis, a part not worn, or one that is not for editing: refused.
+        let sized = |scale: [f64; 3]| json!({"scale": scale, "translation": [0.0, 0.0, 0.0]});
+        let moved = |translation: [f64; 3]| json!({"scale": [1.0, 1.0, 1.0], "translation": translation});
+        let refused: [(&[&str], Value); 10] = [
+            (&dressed, json!({"bottom": sized([0.59, 1.0, 1.0])})),
+            (&dressed, json!({"bottom": sized([1.0, 1.51, 1.0])})),
+            (&dressed, json!({"bottom": sized([1.0, 1.0, 0.59])})),
+            (&dressed, json!({"top": moved([0.051, 0.0, 0.0])})),
+            (&dressed, json!({"top": moved([0.0, -0.151, 0.0])})),
+            (&dressed, json!({"top": moved([0.0, 0.0, 0.101])})),
+            (&dressed, json!({"weapon": sized([1.1, 1.0, 1.0])})),
+            (&dressed, json!({"body": sized([1.1, 1.0, 1.0])})),
+            (&["hair", "top"], json!({"shoes": sized([1.1, 1.0, 1.0])})),
+            (&["hair", "top"], json!({"hat": sized([1.1, 1.0, 1.0])})),
+        ];
+        for (slots, edits) in refused {
+            assert_eq!(wearing(slots, edits.clone()).unwrap_err().code, "invalid_look", "{slots:?} {edits}");
+        }
+        for broken in [f64::NAN, f64::INFINITY] {
+            assert!(!PartEdit { scale: [1.0, broken, 1.0], translation: [0.0; 3] }.valid());
+            assert!(!PartEdit { scale: [1.0; 3], translation: [0.0, 0.0, broken] }.valid());
+        }
     }
 
     #[test]

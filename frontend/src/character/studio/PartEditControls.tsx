@@ -1,4 +1,14 @@
-import { defaultPartEdit, type PartEdit } from '../part-edit';
+import { defaultPartEdit, PART_REACH, PART_SCALE, type PartEdit } from '../part-edit';
+
+/** Height and how high a part sits come first: they are what fitting a part on mostly takes. */
+const SLIDERS: readonly { name: string; kind: keyof PartEdit; axis: 0 | 1 | 2 }[] = [
+  { name: '상하 크기', kind: 'scale', axis: 1 },
+  { name: '상하 위치', kind: 'translation', axis: 1 },
+  { name: '가로 크기', kind: 'scale', axis: 0 },
+  { name: '깊이 크기', kind: 'scale', axis: 2 },
+  { name: '앞뒤 위치', kind: 'translation', axis: 2 },
+  { name: '좌우 위치', kind: 'translation', axis: 0 },
+];
 
 export function PartEditControls({ label, value, disabled, onChange }: { label: string; value?: PartEdit; disabled: boolean; onChange(value: PartEdit | null): void }) {
   const edit = value || defaultPartEdit();
@@ -6,12 +16,13 @@ export function PartEditControls({ label, value, disabled, onChange }: { label: 
     const next: PartEdit = { scale: [...edit.scale], translation: [...edit.translation] }; next[kind][axis] = number; onChange(next);
   };
   return <fieldset className="wardrobe-part-edit" disabled={disabled}><legend>{label}</legend>
-    {(['가로', '세로', '깊이'] as const).map((axis, index) => <label key={axis}>{axis} 크기
-      <input aria-label={`${label} ${axis} 크기`} type="range" min={.8} max={1.2} step={.01} value={edit.scale[index]} onChange={event => set('scale', index as 0 | 1 | 2, Number(event.target.value))} />
-      <output>{Math.round(edit.scale[index]! * 100)}%</output></label>)}
-    {(['좌우', '상하', '앞뒤'] as const).map((axis, index) => <label key={axis}>{axis} 위치
-      <input aria-label={`${label} ${axis} 위치`} type="range" min={-.05} max={.05} step={.001} value={edit.translation[index]} onChange={event => set('translation', index as 0 | 1 | 2, Number(event.target.value))} />
-      <output>{(edit.translation[index]! * 100).toFixed(1)} cm</output></label>)}
+    {SLIDERS.map(({ name, kind, axis }) => {
+      const size = kind === 'scale', number = edit[kind][axis]!;
+      return <label key={name}><span>{name}</span>
+        <input aria-label={`${label} ${name}`} type="range" min={size ? PART_SCALE.min : -PART_REACH[axis]} max={size ? PART_SCALE.max : PART_REACH[axis]}
+          step={size ? .01 : .005} value={number} onChange={event => set(kind, axis, Number(event.target.value))} />
+        <output>{size ? `${Math.round(number * 100)}%` : `${(number * 100).toFixed(1)} cm`}</output></label>;
+    })}
     <button type="button" onClick={() => onChange(null)}>원래 크기와 위치</button>
   </fieldset>;
 }

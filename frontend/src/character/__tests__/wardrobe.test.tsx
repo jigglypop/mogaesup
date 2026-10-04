@@ -9,6 +9,7 @@ import type { Look, PermissionName, User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
 import { ApiError } from '../api';
 import { factoryApi, type WardrobeBody, type WardrobeOutfit, type WardrobePart, type WardrobeUnavailable } from '../factory/api';
+import { PartEditControls } from '../studio/PartEditControls';
 import Wardrobe from '../studio/Wardrobe';
 
 const auth = vi.hoisted(() => ({ user: null as unknown }));
@@ -73,6 +74,17 @@ const card = (container: HTMLElement, name: string) =>
 const cardNames = (container: HTMLElement) => [...container.querySelectorAll('.wardrobe-card strong')].map((item) => item.textContent);
 const tab = (container: HTMLElement, label: string) => [...container.querySelectorAll<HTMLElement>('[role=tab]')].find((item) => item.textContent?.startsWith(label));
 const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button')].find((item) => item.textContent?.trim() === label);
+const slider = (container: HTMLElement, label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+/** What a part's size and place controls read, in their order. */
+const outputs = (container: HTMLElement, legend: string) => {
+  const fieldset = [...container.querySelectorAll('.wardrobe-part-edit')].find((item) => item.querySelector('legend')?.textContent === legend);
+  return [...(fieldset?.querySelectorAll('output') ?? [])].map((item) => item.textContent);
+};
+/** The member's saved look wearing `worn`, ready on the island. */
+const wearing = (worn: WardrobePart[]): Look => ({
+  request: { body: { jobId: body.job_id, version: body.version }, parts: Object.fromEntries(worn.map((item) => [item.slot, { jobId: item.job_id, version: item.version, sha256: item.sha256 }])), hairColor: null, colors: {} },
+  status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '',
+});
 
 let parts: WardrobePart[];
 let unavailable: WardrobeUnavailable[];
@@ -203,6 +215,58 @@ describe('옷장', () => {
     expect(viewer.setHiddenBodyTriangles).toHaveBeenLastCalledWith(null);
     expect(viewer.setTucked).toHaveBeenLastCalledWith('hair', expect.any(Object), null);
     expect(viewer.setPartEdit).toHaveBeenLastCalledWith('hair', { scale: [1.05, 1, 1], translation: [0, 0, 0] });
+    await unmount();
+  });
+
+  it('앞뒷머리·모자·안경과 상의·하의·신발도 입으면 각각 크기와 위치를 고칠 수 있다', async () => {
+    parts = [part('front', 'hairFront', '앞머리 A'), part('back', 'hairBack', '뒷머리 A'), part('ribbon', 'hat', '리본'), part('top-job', 'top', '후드'),
+      part('pants', 'bottom', '청바지'), part('sneakers', 'shoes', '운동화'), part('round', 'glasses', '둥근 안경'), part('sword', 'weapon', '검')];
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: wearing(parts) });
+    const { container, unmount } = await open(); await settle();
+    const fieldsets = [...container.querySelectorAll<HTMLFieldSetElement>('.wardrobe-part-edit')];
+    // In the wardrobe's slot order; a weapon is not fitted on.
+    expect(fieldsets.map(item => item.querySelector('legend')?.textContent)).toEqual(['앞머리', '뒷머리', '모자·머리 장식', '상의', '하의', '신발', '안경']);
+    expect(fieldsets.map(item => item.disabled)).toEqual(fieldsets.map(() => false));
+    expect([...fieldsets[4]!.querySelectorAll('input')].map(input => input.getAttribute('aria-label')))
+      .toEqual(['하의 상하 크기', '하의 상하 위치', '하의 가로 크기', '하의 깊이 크기', '하의 앞뒤 위치', '하의 좌우 위치']);
+    await unmount();
+  });
+
+  it('늘리고 내린 하의는 원래 가림으로 다리를 지우지 않고 그대로 저장하며, 늘린 상의는 하의를 누르지 않는다', async () => {
+    const top = part('top-job', 'top', '후드'), bottom = part('pants', 'bottom', '청바지'); parts = [top, bottom];
+    const encode = (values: Uint8Array) => btoa(String.fromCharCode(...values));
+    const anchor = encode(new Uint8Array(new Int32Array([0]).buffer)), move = encode(new Uint8Array(new Float32Array([0, 0, -.01]).buffer));
+    vi.mocked(factoryApi.wardrobeCoverage).mockImplementation(async (_body, item) => item.slot === 'top'
+      ? { slot: 'top', hidden: { '0:0': encode(new Uint8Array([1])) }, triangles: {}, covers_bottom: false }
+      : { slot: 'bottom', hidden: { '0:0': encode(new Uint8Array([6])) }, triangles: {}, covers_bottom: false, anchors: { '0:0': anchor }, tucks: { '0:0': move }, anchor_keys: ['0:0'], under: ['top'] });
+    const saved = wearing(parts);
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+    const save = vi.spyOn(lookApi, 'save').mockImplementation(async request => ({ look: { ...saved, request } }));
+    const { container, unmount } = await open(); await settle();
+    const viewer = viewers[0]!;
+    expect(viewer.setHiddenBodyTriangles).toHaveBeenLastCalledWith({ '0:0': new Uint8Array([7]) });
+    expect(viewer.setTucked).toHaveBeenLastCalledWith('bottom', expect.any(Object), { '0:0': new Uint8Array([1]) });
+
+    // Longer, lower and further forward: the pants' old place no longer hides the legs; the top still hides its skin.
+    expect(slider(container, '하의 상하 크기').closest('fieldset')?.disabled).toBe(false);
+    await type(slider(container, '하의 상하 크기'), '1.5');
+    await type(slider(container, '하의 상하 위치'), '-0.15');
+    await type(slider(container, '하의 앞뒤 위치'), '0.1');
+    await settle();
+    const longer = { scale: [1, 1.5, 1], translation: [0, -.15, .1] };
+    expect(viewer.setPartEdit).toHaveBeenLastCalledWith('bottom', longer);
+    expect(viewer.setHiddenBodyTriangles).toHaveBeenLastCalledWith({ '0:0': new Uint8Array([1]) });
+    expect(outputs(container, '하의')).toEqual(['150%', '-15.0 cm', '100%', '100%', '10.0 cm', '0.0 cm']);
+    await click(button(container, '내 캐릭터로 입기')); await settle();
+    expect(save).toHaveBeenLastCalledWith({ ...saved.request, partEdits: { bottom: longer } });
+
+    await click(slider(container, '하의 상하 크기').closest('fieldset')?.querySelector('button')); await settle();
+    expect(viewer.setPartEdit).toHaveBeenLastCalledWith('bottom', null);
+    expect(viewer.setHiddenBodyTriangles).toHaveBeenLastCalledWith({ '0:0': new Uint8Array([7]) });
+    // A longer top: where it was fitted proves nothing now, so the pants are not pressed under it and its skin shows.
+    await type(slider(container, '상의 상하 크기'), '1.2'); await settle();
+    expect(viewer.setTucked).toHaveBeenLastCalledWith('bottom', expect.any(Object), null);
+    expect(viewer.setHiddenBodyTriangles).toHaveBeenLastCalledWith({ '0:0': new Uint8Array([6]) });
     await unmount();
   });
 
@@ -680,5 +744,35 @@ describe('옷장', () => {
       expect(card(container, '후드')!.querySelector('img')?.getAttribute('src')).toContain('attempt=1');
       await unmount();
     });
+  });
+});
+
+describe('파츠 크기와 위치 조절', () => {
+  it('상하 크기와 위치를 먼저 두고, 축마다 넓힌 범위를 고운 간격으로 고르며 %와 cm로 보인다', async () => {
+    const change = vi.fn();
+    const { container, unmount } = await mount(
+      <PartEditControls label="하의" value={{ scale: [1, 1.5, 0.6], translation: [0.05, -0.15, 0.1] }} disabled={false} onChange={change} />,
+    );
+    const rows = [...container.querySelectorAll('label')].map((label) => ({
+      name: label.querySelector('span')?.textContent,
+      input: label.querySelector('input')!,
+      shown: label.querySelector('output')?.textContent,
+    }));
+    expect(rows.map((row) => row.name)).toEqual(['상하 크기', '상하 위치', '가로 크기', '깊이 크기', '앞뒤 위치', '좌우 위치']);
+    expect(rows.map((row) => row.input.getAttribute('aria-label'))).toEqual(rows.map((row) => `하의 ${row.name}`));
+    expect(rows.map((row) => [row.input.min, row.input.max, row.input.step])).toEqual([
+      ['0.6', '1.5', '0.01'],
+      ['-0.15', '0.15', '0.005'],
+      ['0.6', '1.5', '0.01'],
+      ['0.6', '1.5', '0.01'],
+      ['-0.1', '0.1', '0.005'],
+      ['-0.05', '0.05', '0.005'],
+    ]);
+    expect(rows.map((row) => row.shown)).toEqual(['150%', '-15.0 cm', '100%', '60%', '10.0 cm', '5.0 cm']);
+    await type(rows[1]!.input, '-0.075');
+    expect(change).toHaveBeenLastCalledWith({ scale: [1, 1.5, 0.6], translation: [0.05, -0.075, 0.1] });
+    await click(button(container, '원래 크기와 위치'));
+    expect(change).toHaveBeenLastCalledWith(null);
+    await unmount();
   });
 });

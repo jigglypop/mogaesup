@@ -1,12 +1,18 @@
 import { Matrix3, Matrix4, Vector3, type BufferAttribute, type BufferGeometry } from 'three';
 
 export type PartEdit = { scale: [number, number, number]; translation: [number, number, number] };
-export const EDITABLE_PARTS = ['hair', 'hairFront', 'hairBack', 'hat', 'glasses'] as const;
+/** Worn parts a member may resize and move, in the wardrobe's slot order: the server's `EDITABLE_SLOTS`. */
+export const EDITABLE_PARTS = ['hair', 'hairFront', 'hairBack', 'hat', 'top', 'bottom', 'shoes', 'glasses'] as const;
+/** The size along each axis, as a factor of the part's own (the server's `PartEdit::valid` holds the same). */
+export const PART_SCALE = { min: .6, max: 1.5 } as const;
+/** How far a part may move, in metres: across (x), up and down (y), front to back (z). */
+export const PART_REACH = [.05, .15, .1] as const;
 export const defaultPartEdit = (): PartEdit => ({ scale: [1, 1, 1], translation: [0, 0, 0] });
 export const isDefaultPartEdit = (edit: PartEdit) => edit.scale.every(value => value === 1) && edit.translation.every(value => value === 0);
 export function validPartEdit(edit: PartEdit) {
-  return edit.scale.length === 3 && edit.translation.length === 3 && edit.scale.every(value => Number.isFinite(value) && value >= .8 && value <= 1.2)
-    && edit.translation.every(value => Number.isFinite(value) && Math.abs(value) <= .05);
+  return edit.scale.length === 3 && edit.translation.length === 3
+    && edit.scale.every(value => Number.isFinite(value) && value >= PART_SCALE.min && value <= PART_SCALE.max)
+    && edit.translation.every((value, axis) => Number.isFinite(value) && Math.abs(value) <= PART_REACH[axis]!);
 }
 
 /** Common body rest coordinates, matching the server's bake. The pivot is the source part's rest bounds centre. */
