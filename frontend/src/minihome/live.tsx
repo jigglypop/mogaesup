@@ -150,7 +150,8 @@ export function LiveRoom({ children, ...options }: Parameters<typeof useLiveRoom
   return <LiveContext.Provider value={live}>{children}</LiveContext.Provider>;
 }
 
-const useLive = () => useContext(LiveContext);
+/** The room as its screens read it (`players` keeps each avatar's latest state between renders); null outside one. */
+export const useLive = () => useContext(LiveContext);
 
 /** The viewer's own place in the room: whether it is connected, and the `client_id` the room gave this page. */
 export function useLiveSelf(): { connected: boolean; peer: string | null } {

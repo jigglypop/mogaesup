@@ -1,0 +1,25 @@
+/* 무궁화 꽃이 피었습니다: the call, big, in the light's tone; the viewer's own state under the timer. */
+.mg-redlight-call {
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+  padding: 10px 12px;
+  border-radius: var(--mg-r-control);
+  background: var(--mg-tint);
+  font-size: 20px;
+  font-weight: 850;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  text-align: center;
+}
+.mg-redlight-call.is-green { background: var(--mg-good-soft); color: var(--mg-good); }
+.mg-redlight-call.is-red { background: var(--mg-bad-soft); color: var(--mg-bad); font-size: 28px; }
+
+.mg-redlight-state { font-size: 13px; font-weight: 750; }
+.mg-redlight-state.is-finished { color: var(--mg-good); }
+.mg-redlight-state.is-out { color: var(--mg-bad); }
+
+@media (max-width: 720px) {
+  .mg-redlight-call { min-height: 52px; font-size: 18px; }
+  .mg-redlight-call.is-red { font-size: 24px; }
+}

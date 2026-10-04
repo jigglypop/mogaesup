@@ -89,6 +89,14 @@
   /* OX 퀴즈's O and X: the zones on the island (hex: three.js reads them) and their letters in the panel. */
   --mg-ox-o: #2f6fe4;
   --mg-ox-x: #d93a40;
+  /* 무궁화 꽃이 피었습니다 and 술래잡기 in the island's canvas (hex: three.js reads them): the lights, the marker at the
+     finish, and the ring around an it. */
+  --mg-redlight-wait: #ffb81c;
+  --mg-redlight-go: #2fbf71;
+  --mg-redlight-stop: #ff4d4f;
+  --mg-redlight-marker: #f3e3cf;
+  --mg-redlight-eye: #2a2238;
+  --mg-tag-it: #ff3d8b;
 }
 
 :root[data-theme='dark'] {
@@ -153,4 +161,10 @@
 
   --mg-ox-o: #82a9ff;
   --mg-ox-x: #ff8e8a;
+  --mg-redlight-wait: #ffb81c;
+  --mg-redlight-go: #2fbf71;
+  --mg-redlight-stop: #ff4d4f;
+  --mg-redlight-marker: #f3e3cf;
+  --mg-redlight-eye: #2a2238;
+  --mg-tag-it: #ff3d8b;
 }

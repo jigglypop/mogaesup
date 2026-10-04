@@ -86,6 +86,8 @@ registry! {
     treasure,
     ox,
     impostor,
+    redlight,
+    tag,
 }
 
 /// Milliseconds on the server's clock: what games measure time in, and what views carry (`endsAt`). Monotonic, and
