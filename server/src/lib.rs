@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod config;
 pub mod error;
 pub mod factory;
+pub mod games;
 pub mod glb;
 mod glb_validation;
 mod gltf;
@@ -53,6 +54,8 @@ pub struct AppState {
     pub attempts: Arc<Mutex<RateTable>>,
     pub hashing: Arc<Semaphore>,
     pub rooms: rooms::Rooms,
+    /// Minigames on the islands, played by the people in each island's room.
+    pub games: games::Games,
     pub http: reqwest::Client,
     /// Catalog imports copying at once; the rest wait their turn as `queued`.
     pub imports: Arc<Semaphore>,
@@ -72,6 +75,7 @@ impl AppState {
             attempts: Default::default(),
             hashing: Arc::new(Semaphore::new(HASHING_SLOTS)),
             rooms: rooms::Rooms::default(),
+            games: games::Games::default(),
             http: factory::client(),
             imports: Arc::new(Semaphore::new(imports::SLOTS)),
             looks: Arc::new(Semaphore::new(looks::MAX_BAKING)),
@@ -110,7 +114,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state.clone());
     // In production CloudFront serves /models/* from S3 and never sends it here.
     let models = Router::new().route("/models/{file}", get(models::serve)).with_state(state.clone());
-    api.merge(models).merge(rooms::router(state))
+    api.merge(models).merge(rooms::router(state.clone())).merge(games::router(state))
 }
 
 async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {

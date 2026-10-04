@@ -29,6 +29,9 @@
   --mg-bad-soft: rgba(210, 69, 61, 0.12);
   /* A status dot or mark in the warning tone (text in that tone is --mg-warn). */
   --mg-warn-dot: #d99a2b;
+  /* 보물찾기's gems in the island's canvas (hex: three.js reads them), the same in either theme. */
+  --mg-gem: #2f9bff;
+  --mg-gem-gold: #ffb81c;
 
   /* Someone's initial tile, one of four pastels (data-tone 0-3): fill and letter. */
   --mg-tone-0: linear-gradient(160deg, #efe9ff, #dcd3fb);

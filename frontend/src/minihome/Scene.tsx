@@ -85,15 +85,17 @@ type SceneProps = SceneSettings & {
   visitors?: ReactNode;
   /** The island's residents. */
   residents?: ReactNode;
+  /** The island's game, when one is playing. */
+  game?: ReactNode;
   /** Where the player starts (the crossroads unless given). */
   spawn?: [number, number, number];
 };
 
 /**
- * The island canvas: the player, the village, visitors, residents and the rule engine's trigger areas. Memoized: the
+ * The island canvas: the player, the village, visitors, residents, a game and the rule engine's trigger areas. Memoized: the
  * page around it re-renders with the live room and the panels, and every render of the canvas reconfigures its root.
  */
-export const Scene = memo(function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visualRotationRef, visitors, residents, spawn = SPAWN }: SceneProps) {
+export const Scene = memo(function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visualRotationRef, visitors, residents, game, spawn = SPAWN }: SceneProps) {
   // A lost GPU device remounts the canvas with a fresh renderer; the island's state lives outside it.
   const canvasKey = useRendererRecovery();
   // The ratio the engine last drew at, given back to the canvas so that applying its prop changes nothing.
@@ -117,6 +119,7 @@ export const Scene = memo(function Scene({ quality, postProcessing, cinematic, i
             <Shore />
             {visitors}
             {residents}
+            {game}
           </WorldPhysics>
           <InteractionTracker />
           <EditCanvas />

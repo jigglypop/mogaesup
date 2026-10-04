@@ -67,11 +67,12 @@ const ACK_MEMORY: usize = 64;
 const REST_ROTATION: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
 
 #[derive(Debug, Deserialize, Serialize)]
-struct TicketClaims {
-    sub: Uuid,
-    session: String,
-    username: String,
-    name: String,
+pub(crate) struct TicketClaims {
+    pub(crate) sub: Uuid,
+    /// The login session (its token's hash) the ticket was issued in.
+    pub(crate) session: String,
+    pub(crate) username: String,
+    pub(crate) name: String,
     exp: u64,
     nonce: String,
 }
@@ -94,16 +95,17 @@ pub fn issue_ticket(secret: &[u8], user: &User, session: &str) -> (String, u64) 
     (format!("{body}.{signature}"), exp)
 }
 
-struct RateWindow(VecDeque<Instant>, Duration);
+/// Events allowed per sliding window (one second unless made `over` another).
+pub(crate) struct RateWindow(VecDeque<Instant>, Duration);
 
 impl RateWindow {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(VecDeque::new(), WINDOW)
     }
     fn over(window: Duration) -> Self {
         Self(VecDeque::new(), window)
     }
-    fn allow(&mut self, now: Instant, maximum: usize) -> bool {
+    pub(crate) fn allow(&mut self, now: Instant, maximum: usize) -> bool {
         while self.0.front().is_some_and(|time| now.duration_since(*time) >= self.1) {
             self.0.pop_front();
         }
@@ -280,6 +282,16 @@ pub struct Rooms {
     inner: Arc<Inner>,
 }
 
+/// Someone with a socket in a room, as other parts of the server see them (see [`Rooms::peers`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RoomPeer {
+    /// The peer's `client_id` in the room's messages.
+    pub(crate) id: String,
+    pub(crate) user: Uuid,
+    /// Where it stands, once it has said so: None before its first positioned Update.
+    pub(crate) position: Option<[f64; 3]>,
+}
+
 enum Flow {
     Continue,
     Close(u16, &'static str),
@@ -315,7 +327,8 @@ impl Rooms {
         self.hub().connections
     }
 
-    fn verify(&self, secret: &[u8], ticket: &str) -> Option<TicketClaims> {
+    /// The claims of a realtime ticket signed with `secret`, the first time it is shown and only within its minute.
+    pub(crate) fn verify(&self, secret: &[u8], ticket: &str) -> Option<TicketClaims> {
         if ticket.len() > 2048 {
             return None;
         }
@@ -400,6 +413,21 @@ impl Rooms {
                 hub.accounts.remove(&peer.user.id);
             }
         }
+    }
+
+    /// Everyone with a socket in `room` now: client id, account and position. One account may hold several peers (tabs).
+    pub(crate) fn peers(&self, room: &str) -> Vec<RoomPeer> {
+        let hub = self.hub();
+        hub.rooms
+            .get(room)
+            .into_iter()
+            .flatten()
+            .map(|(id, peer)| RoomPeer {
+                id: id.clone(),
+                user: peer.user.id,
+                position: peer.state.as_ref().filter(|_| peer.placed).map(|state| state.position),
+            })
+            .collect()
     }
 
     /// Everyone with a socket in `room`: each peer's id and who it is.
@@ -563,7 +591,7 @@ impl Rooms {
 }
 
 /// Stops a spawned task when its owner goes, however the owner ends.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+pub(crate) struct AbortOnDrop(pub(crate) tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -596,7 +624,7 @@ struct TicketQuery {
     ticket: String,
 }
 
-const BAD_TICKET: ApiError =
+pub(crate) const BAD_TICKET: ApiError =
     ApiError::new(StatusCode::UNAUTHORIZED, "ticket", "실시간 인증 티켓이 올바르지 않거나 만료되었습니다.");
 
 async fn upgrade(
@@ -626,7 +654,13 @@ async fn upgrade(
 
 /// Group membership can grant access to many homes. Re-check every occupied room after any explicit revocation.
 pub async fn revalidate_all(state: &AppState) {
-    let owners: Vec<String> = state.rooms.hub().rooms.keys().cloned().collect();
+    let mut owners: Vec<String> = state.rooms.hub().rooms.keys().cloned().collect();
+    // An island's game sockets can outlast its room peers.
+    for owner in state.games.islands() {
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
     futures_util::stream::iter(owners)
         .for_each_concurrent(8, |owner| async move {
             revalidate(state, &owner).await;
@@ -652,15 +686,20 @@ pub async fn revalidate(state: &AppState, owner: &str) {
             state.rooms.evict(owner, &id);
         }
     }
+    crate::games::revalidate(state, owner).await;
 }
 
-async fn send(socket: &mut WebSocket, message: Message) -> bool {
+pub(crate) async fn send(socket: &mut WebSocket, message: Message) -> bool {
     matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await, Ok(Ok(())))
 }
 
 /// Writes `first` and the frames already queued behind it, [`SEND_BATCH`] at most in all, then flushes them at once,
 /// within one [`SEND_TIMEOUT`]: a busy room's movement goes out in one write per wake instead of one per frame.
-async fn send_queued(socket: &mut WebSocket, first: Message, outbound: &mut mpsc::Receiver<Message>) -> bool {
+pub(crate) async fn send_queued(
+    socket: &mut WebSocket,
+    first: Message,
+    outbound: &mut mpsc::Receiver<Message>,
+) -> bool {
     let batch = async {
         socket.feed(first).await?;
         for _ in 1..SEND_BATCH {

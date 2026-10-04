@@ -20,6 +20,7 @@ import { defaultMultiplayerConfig, RemotePlayers, useMultiplayer, type Multiplay
 import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
 import { useSignInPath } from '../auth/signIn';
+import { useHiddenPeers, withoutPeers } from '../games/hiddenPeers';
 import { Icon } from '../ui/icons';
 import { MINIME_SCALE } from './character';
 import { peerColor } from './peers';
@@ -121,31 +122,41 @@ function useLiveRoom(options: {
 }
 
 /** What the room's screens read: who is here, what they say, and the way to talk. */
-type Live = Pick<Multiplayer, 'isConnected' | 'players' | 'speechByPlayerId' | 'localSpeechText' | 'sendChat'>;
+type Live = Pick<
+  Multiplayer,
+  'isConnected' | 'localPlayerId' | 'players' | 'speechByPlayerId' | 'localSpeechText' | 'sendChat'
+>;
 const LiveContext = createContext<Live | null>(null);
 
 /** Opens the live room for everything below it; render it under `GaesupWorld`, whose runtime the tracking reads. */
 export function LiveRoom({ children, ...options }: Parameters<typeof useLiveRoom>[0] & { children: ReactNode }) {
-  const { isConnected, players, speechByPlayerId, localSpeechText, sendChat } = useLiveRoom(options);
+  const { isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat } = useLiveRoom(options);
   // The room answers a new object on every update, a visitor's moves (several a second) and pings included, and every
   // reader of this context re-renders with its value, the island's canvas too (R3F bridges contexts into it). Moves reach
   // the avatars through `players` itself; the value changes only when one of these does.
   const live = useMemo(
-    () => ({ isConnected, players, speechByPlayerId, localSpeechText, sendChat }),
-    [isConnected, players, speechByPlayerId, localSpeechText, sendChat],
+    () => ({ isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat }),
+    [isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat],
   );
   return <LiveContext.Provider value={live}>{children}</LiveContext.Provider>;
 }
 
 const useLive = () => useContext(LiveContext);
 
-/** Everyone else in the room, each in their own 미니미; mount inside the world's physics. */
+/** The viewer's own place in the room: whether it is connected, and the `client_id` the room gave this page. */
+export function useLiveSelf(): { connected: boolean; peer: string | null } {
+  const live = useLive();
+  return { connected: !!live?.isConnected, peer: live?.localPlayerId ?? null };
+}
+
+/** Everyone else in the room, each in their own 미니미, but those a game hides; mount inside the world's physics. */
 export function LiveAvatars({ playerRef }: { playerRef: RefObject<RapierRigidBody> }) {
   const live = useLive();
-  if (!live) return null;
-  return (
-    <RemotePlayers players={live.players} config={CONFIG} playerRef={playerRef} speechByPlayerId={live.speechByPlayerId} />
-  );
+  const hidden = useHiddenPeers();
+  const everyone = live?.players;
+  const players = useMemo(() => everyone && withoutPeers(everyone, hidden), [everyone, hidden]);
+  if (!live || !players) return null;
+  return <RemotePlayers players={players} config={CONFIG} playerRef={playerRef} speechByPlayerId={live.speechByPlayerId} />;
 }
 
 /** How many are on the island now, counting the viewer, and who the others are; empty until the room connects. */

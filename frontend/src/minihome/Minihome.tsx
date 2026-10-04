@@ -21,6 +21,9 @@ import { ApiRequestError, problemText } from '../api/client';
 import { homeApi, lookApi } from '../api/endpoints';
 import { followSessionOwner, sessionBelongsTo } from '../auth/sessionWork';
 import type { CatalogItem, HomeView, Look, ProfileChanges, User } from '../api/types';
+import { GameDock } from '../games/GameDock';
+import { GameWorld } from '../games/GameWorld';
+import { GameRoom } from '../games/room';
 import { Brand, initialOf, Rail, toneOf, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
 import { useTabs } from '../ui/tabs';
@@ -266,6 +269,8 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const visualRotationRef = useRef<Group>(null!);
   // The same elements on every render, so the memoized scene skips the renders of this page (the panels, the live room).
   const visitors = useMemo(() => <LiveAvatars playerRef={playerRef} />, []);
+  const gameWorld = useMemo(() => <GameWorld playerRef={playerRef} />, []);
+  const building = useCallback(() => runtime.buildingStore.getState().serialize(), [runtime]);
   const residentsWorld = useMemo(
     () => <ResidentsWorld runtime={runtime} residents={residents} items={npcItems} greetings={greetings} />,
     [runtime, residents, npcItems, greetings],
@@ -392,114 +397,118 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
       <Bgm enabled={bgm} />
       <CameraOcclusion fade={settings.cameraFade ?? true} />
       <LiveRoom username={profile.username} viewer={viewer} characterUrl={characterUrl} playerRef={playerRef} visualRotationRef={visualRotationRef}>
-        <div className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`}>
-          <div className="mg-world-canvas">
-            {/* The canvas reads the decorating session for its in-world tools (R3F bridges the context). */}
-            <EditContext.Provider value={decorating ? session : null}>
-              <Scene
-                {...settings}
-                playerRef={playerRef}
-                visualRotationRef={visualRotationRef}
-                spawn={spawn}
-                visitors={visitors}
-                residents={residentsWorld}
+        <GameRoom username={profile.username} viewer={viewer} building={building} playerRef={playerRef}>
+          <div className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`}>
+            <div className="mg-world-canvas">
+              {/* The canvas reads the decorating session for its in-world tools (R3F bridges the context). */}
+              <EditContext.Provider value={decorating ? session : null}>
+                <Scene
+                  {...settings}
+                  playerRef={playerRef}
+                  visualRotationRef={visualRotationRef}
+                  spawn={spawn}
+                  visitors={visitors}
+                  residents={residentsWorld}
+                  game={gameWorld}
+                />
+              </EditContext.Provider>
+            </div>
+            <WorldLoading />
+            <WorldKeyboard enabled={!decorating} />
+
+            {decorating && session ? (
+              <>
+                <EditBar view={view} session={session} saver={saver} onSave={saveNow} onExit={exit} />
+                <Rail />
+                {saverState.phase === 'ready' || editActive ? (
+                  <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} ownerId={profile.ownerId} />
+                ) : (
+                  <p className="mg-edit-wait mg-glass" role="status">
+                    {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요.' : '섬을 불러와야 꾸밀 수 있어요.'}
+                  </p>
+                )}
+                <EditHelp session={session} />
+              </>
+            ) : (
+              <>
+                <header className="mg-topbar">
+                  <div className="mg-topbar-left">
+                    <Brand />
+                    <IslandPill view={view} minimes={minimes} />
+                    <TimeChip />
+                  </div>
+                  <TopActions>
+                    {viewer && <GameDock />}
+                    <SettingsMenu settings={settings} onChange={changeSettings} bgm={bgm} onBgm={setBgm} onPerformance={() => setPerformance(true)} />
+                  </TopActions>
+                </header>
+                <Rail />
+              </>
+            )}
+
+            {/* Folded, on another tab or under the decorating tools, the panel stays mounted, keeping what was typed in it. */}
+            <aside className="mg-side mg-glass" aria-label={`${profile.ownerName}의 섬`} hidden={decorating || !panelOpen}>
+              <button ref={sideClose} className="mg-icon-btn is-quiet mg-side-close" aria-label="패널 접기" onClick={() => togglePanel(false)}>
+                <Icon name="chevronRight" />
+              </button>
+              <ProfileHeader
+                view={view}
+                minimes={minimes}
+                neighbors={neighbors.list.length}
+                onEdit={() => setTab('about')}
               />
-            </EditContext.Provider>
-          </div>
-          <WorldLoading />
-          <WorldKeyboard enabled={!decorating} />
-
-          {decorating && session ? (
-            <>
-              <EditBar view={view} session={session} saver={saver} onSave={saveNow} onExit={exit} />
-              <Rail />
-              {saverState.phase === 'ready' || editActive ? (
-                <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} ownerId={profile.ownerId} />
-              ) : (
-                <p className="mg-edit-wait mg-glass" role="status">
-                  {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요.' : '섬을 불러와야 꾸밀 수 있어요.'}
-                </p>
-              )}
-              <EditHelp session={session} />
-            </>
-          ) : (
-            <>
-              <header className="mg-topbar">
-                <div className="mg-topbar-left">
-                  <Brand />
-                  <IslandPill view={view} minimes={minimes} />
-                  <TimeChip />
-                </div>
-                <TopActions>
-                  <SettingsMenu settings={settings} onChange={changeSettings} bgm={bgm} onBgm={setBgm} onPerformance={() => setPerformance(true)} />
-                </TopActions>
-              </header>
-              <Rail />
-            </>
-          )}
-
-          {/* Folded, on another tab or under the decorating tools, the panel stays mounted, keeping what was typed in it. */}
-          <aside className="mg-side mg-glass" aria-label={`${profile.ownerName}의 섬`} hidden={decorating || !panelOpen}>
-            <button ref={sideClose} className="mg-icon-btn is-quiet mg-side-close" aria-label="패널 접기" onClick={() => togglePanel(false)}>
-              <Icon name="chevronRight" />
-            </button>
-            <ProfileHeader
-              view={view}
-              minimes={minimes}
-              neighbors={neighbors.list.length}
-              onEdit={() => setTab('about')}
-            />
-            <div className="mg-tabs" {...tabs.list} aria-label="섬 이야기">
-              {PANEL_TABS.map((item) => (
-                <button key={item.id} {...tabs.tab(item.id)}>
-                  {item.label}
-                  {item.id === 'neighbors' && neighbors.received.length > 0 && <span className="mg-badge is-paid">{neighbors.received.length}</span>}
-                </button>
-              ))}
-            </div>
-            <div className="mg-side-body" {...tabs.panel('guestbook')}>
-              <Guestbook username={profile.username} viewer={viewer} />
-            </div>
-            <div className="mg-side-body" {...tabs.panel('neighbors')}>
-              <NeighborsTab view={view} viewer={viewer} neighbors={neighbors} />
-            </div>
-            <div className="mg-side-body" {...tabs.panel('about')}>
-              <About view={view} minimes={minimes} look={viewerLook} onUpdate={updateProfile} onWearLook={wearLook} />
-            </div>
-          </aside>
-
-          {!decorating && (
-            <>
-              {!panelOpen && (
-                <button ref={sideOpen} className="mg-btn mg-side-open" onClick={() => togglePanel(true)}>
-                  <span className="mg-avatar is-round" data-tone={toneOf(profile.username)}>
-                    {initialOf(profile.ownerName)}
-                  </span>
-                  <span className="mg-side-open-label">{profile.ownerName}의 섬 이야기</span>
-                </button>
-              )}
-
-              <div className="mg-world-bottom">
-                <ResidentGreeting greetings={greetings} />
-                <InteractButton />
-                <ChatBar signedIn={!!viewer} />
-                <KeyHints keys={KEYS} />
-                <KeyHints keys={TOUCH_KEYS} touch />
+              <div className="mg-tabs" {...tabs.list} aria-label="섬 이야기">
+                {PANEL_TABS.map((item) => (
+                  <button key={item.id} {...tabs.tab(item.id)}>
+                    {item.label}
+                    {item.id === 'neighbors' && neighbors.received.length > 0 && <span className="mg-badge is-paid">{neighbors.received.length}</span>}
+                  </button>
+                ))}
               </div>
-              {performance && <StatusPanel onClose={() => setPerformance(false)} />}
-            </>
-          )}
+              <div className="mg-side-body" {...tabs.panel('guestbook')}>
+                <Guestbook username={profile.username} viewer={viewer} />
+              </div>
+              <div className="mg-side-body" {...tabs.panel('neighbors')}>
+                <NeighborsTab view={view} viewer={viewer} neighbors={neighbors} />
+              </div>
+              <div className="mg-side-body" {...tabs.panel('about')}>
+                <About view={view} minimes={minimes} look={viewerLook} onUpdate={updateProfile} onWearLook={wearLook} />
+              </div>
+            </aside>
 
-          {saved && (
-            <p className="mg-toast mg-glass" role="status">
-              <Icon name="check" /> 섬을 저장했어요
-            </p>
-          )}
-          {startFailed && <StartBanner onRetry={retryStart} />}
-          {profileError && <p className="mg-toast mg-glass mg-error" role="alert">{profileError}</p>}
-          <SaveBanners saver={saver} editing={decorating} onReloaded={reloaded} />
-          <ToastHost position="top-center" />
-        </div>
+            {!decorating && (
+              <>
+                {!panelOpen && (
+                  <button ref={sideOpen} className="mg-btn mg-side-open" onClick={() => togglePanel(true)}>
+                    <span className="mg-avatar is-round" data-tone={toneOf(profile.username)}>
+                      {initialOf(profile.ownerName)}
+                    </span>
+                    <span className="mg-side-open-label">{profile.ownerName}의 섬 이야기</span>
+                  </button>
+                )}
+
+                <div className="mg-world-bottom">
+                  <ResidentGreeting greetings={greetings} />
+                  <InteractButton />
+                  <ChatBar signedIn={!!viewer} />
+                  <KeyHints keys={KEYS} />
+                  <KeyHints keys={TOUCH_KEYS} touch />
+                </div>
+                {performance && <StatusPanel onClose={() => setPerformance(false)} />}
+              </>
+            )}
+
+            {saved && (
+              <p className="mg-toast mg-glass" role="status">
+                <Icon name="check" /> 섬을 저장했어요
+              </p>
+            )}
+            {startFailed && <StartBanner onRetry={retryStart} />}
+            {profileError && <p className="mg-toast mg-glass mg-error" role="alert">{profileError}</p>}
+            <SaveBanners saver={saver} editing={decorating} onReloaded={reloaded} />
+            <ToastHost position="top-center" />
+          </div>
+        </GameRoom>
       </LiveRoom>
     </GaesupWorld>
   );

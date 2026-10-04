@@ -277,6 +277,7 @@ async fn session(state: &AppState, user: User, status: StatusCode) -> ApiResult<
     tx.commit().await?;
     for hash in expired {
         state.rooms.end_session(&hash);
+        state.games.end_session(&hash);
     }
     let cookie = session_cookie(state, &token, SESSION_MAX_AGE_SECONDS);
     let user = with_permissions(state, &user).await?;
@@ -351,6 +352,7 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     if let Some(hash) = token_hash(&headers) {
         sqlx::query("DELETE FROM sessions WHERE token_hash = $1").bind(&hash).execute(&state.db).await?;
         state.rooms.end_session(&hash);
+        state.games.end_session(&hash);
     }
     Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, session_cookie(&state, "", 0))]).into_response())
 }

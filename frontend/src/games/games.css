@@ -1,0 +1,73 @@
+/* The island's games: the 게임 button in the top bar and the glass panel it opens over the world. */
+.mg-game-toggle { position: relative; height: 44px; }
+
+/* Fixed over the world (which fills the window), whichever bar holds its button. */
+.mg-game {
+  position: fixed;
+  z-index: 30;
+  top: calc(var(--mg-edge) + 72px);
+  right: var(--mg-edge);
+  width: 320px;
+  max-height: calc(100% - var(--mg-edge) * 2 - 72px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 16px;
+  scrollbar-width: thin;
+}
+.mg-world.has-panel .mg-game { right: calc(var(--mg-edge) * 2 + var(--mg-side)); }
+.mg-game-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 34px; }
+.mg-game-head h2 { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
+.mg-game-head .mg-icon-btn { margin-right: -6px; }
+
+.mg-game-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.mg-game-list .mg-btn { justify-content: flex-start; }
+
+.mg-game-players, .mg-game-scores { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.mg-game-players li, .mg-game-scores li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: var(--mg-tint);
+  font-size: 13px;
+  font-weight: 700;
+}
+.mg-game-players li > span:first-child, .mg-game-scores li > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mg-game-scores b { font-variant-numeric: tabular-nums; }
+.mg-game-scores i { min-width: 2.6em; font-style: normal; font-weight: 850; color: var(--mg-muted); }
+.mg-game-scores li[aria-current='true'] { background: var(--mg-primary-soft); color: var(--mg-primary); }
+.mg-game-scores li[aria-current='true'] i { color: inherit; }
+
+.mg-game-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mg-game-hud { display: grid; gap: 10px; }
+.mg-game-timer { font-size: 30px; font-weight: 850; letter-spacing: -0.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+
+/* Too narrow for the panel beside the island's story panel: it covers that panel instead. */
+@media (max-width: 860px) {
+  .mg-world.has-panel .mg-game { right: var(--mg-edge); }
+}
+
+/* Phones: the button keeps only its icon (the name stays for screen readers) and the panel spans the width. */
+@media (max-width: 720px) {
+  .mg-game-toggle { width: 44px; padding: 0; }
+  .mg-game-toggle-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .mg-game {
+    top: calc(var(--mg-edge) + 58px);
+    left: var(--mg-edge);
+    right: var(--mg-edge);
+    width: auto;
+    max-height: 44dvh;
+    padding: 14px;
+  }
+  .mg-game-timer { font-size: 24px; }
+}
+
+/* A phone on its side: the slim bars. */
+@media (max-height: 500px) and (min-width: 721px) {
+  .mg-game { top: calc(var(--mg-edge) + 58px); }
+}
