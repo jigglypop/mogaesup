@@ -868,7 +868,8 @@ async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변�
 async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_쓰지_않는다() {
     let seen = Seen::default();
     let studio = Studio::standard();
-    studio.slow("job_1", Duration::from_millis(1000));
+    // Long enough that the sweep below lands while the model is still downloading, even on a slow runner.
+    studio.slow("job_1", Duration::from_millis(3000));
     let app = factory_app(&seen, studio).await;
     let admin = app.register("operator_z", "운영자").await;
     app.make_admin("operator_z").await;
@@ -908,7 +909,7 @@ async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_�
     assert_eq!(swept, 1);
     // Its task still gets to the end and records how it ended, report and all; the item was never written.
     let mut ended = row().await;
-    for _ in 0..400 {
+    for _ in 0..800 {
         if ended.3 {
             break;
         }

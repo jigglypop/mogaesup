@@ -108,7 +108,9 @@ async fn 데이터베이스에서_만료된_세션은_연결_중에도_끝난다
     send(&mut socket, json!({"type": "Join", "room_id": "expired_socket", "color": "#fff"})).await;
     next(&mut socket, "Welcome").await.unwrap();
     sqlx::query("UPDATE sessions SET expires_at = now() - interval '1 second'").execute(&app.state.db).await.unwrap();
-    let code = tokio::time::timeout(Duration::from_secs(18), async {
+    // The access check runs every 15 s: when its first look came before the session expired, the next one ends it, and
+    // a busy runner can take a while past that.
+    let code = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(Ok(message)) = socket.next().await {
             if let Message::Close(frame) = message {
                 return frame.map(|frame| u16::from(frame.code));
