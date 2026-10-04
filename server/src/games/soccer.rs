@@ -180,7 +180,9 @@ impl Ball {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     /// The ball waits on the centre spot until then.
-    Kickoff { until: Millis },
+    Kickoff {
+        until: Millis,
+    },
     Play,
 }
 
@@ -464,7 +466,8 @@ impl Game for Soccer {
         if self.kicked.get(&player).is_some_and(|at| now < at + KICK_COOLDOWN) {
             return Err(COOLING);
         }
-        let at = ctx.position(player).map(|at| self.field.local(at)).filter(|at| self.field.holds(*at)).ok_or(OFF_FIELD)?;
+        let at =
+            ctx.position(player).map(|at| self.field.local(at)).filter(|at| self.field.holds(*at)).ok_or(OFF_FIELD)?;
         if distance(at, self.ball.at) > KICK_REACH {
             return Err(TOO_FAR);
         }
@@ -539,9 +542,7 @@ impl Game for Soccer {
         scorers.sort_by_key(|(.., goals)| std::cmp::Reverse(*goals));
         let scorers: Vec<Value> = scorers
             .iter()
-            .map(|(id, team, goals)| {
-                json!({"id": id, "name": self.names.get(id), "team": team.name(), "goals": goals})
-            })
+            .map(|(id, team, goals)| json!({"id": id, "name": self.names.get(id), "team": team.name(), "goals": goals}))
             .collect();
         Some(json!({"score": {"a": self.score[0], "b": self.score[1]}, "winner": winner, "scorers": scorers}))
     }
@@ -738,10 +739,7 @@ mod tests {
         let positions = HashMap::new();
         let mut ctx = Ctx::new(START, &players, &positions, &mut rng);
         let game = create(&layout(), &mut ctx).unwrap();
-        assert_eq!(
-            ctx.events(),
-            [(Audience::Everyone, json!({"type": "kickoff", "n": 1, "until": START + KICKOFF}))]
-        );
+        assert_eq!(ctx.events(), [(Audience::Everyone, json!({"type": "kickoff", "n": 1, "until": START + KICKOFF}))]);
         let view = game.view(Some(players[0].id), START);
         assert_eq!(
             view["field"],

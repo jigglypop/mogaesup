@@ -165,6 +165,7 @@ export const relay = defineGame<RelayView, RelayOutcome>({
 ```
 
 - `layout(ctx)`: 방장의 시작이 보낼 값. `ctx.building`(불러온 섬의 `BuildingSerializedState`), `ctx.spots()`(`openSpots`: 걸을 수 있고 아무것도 놓이지 않은 바닥 칸 가운데, 북서쪽부터, cm 반올림, 200개까지. 모자라면 섬 범위 격자를 더한다), `ctx.position`(방장 위치), `ctx.session`. 던지면 그 메시지가 방장에게 보인다.
+- `attention(view)`(선택): 플레이어가 패널에서 답해야 하는 것(임포스터의 회의 투표)이 있으면 그 키를, 없으면 null을 돌려준다. 키가 새로 바뀔 때마다 접힌 패널이 한 번 다시 열린다.
 - `Panel`, `World`, `Result`가 받는 값(`GameProps<View>`): `session`, `view`(=`session.game`, 이 사람의 화면), `me`(참가자면 내 항목), `act(action)`, `onEvent(listener)`(이 게임의 이벤트만, 해제 함수를 돌려준다), `serverNow()`, `teleport(ground)`. `Result`는 `result`도 받는다. 함수들은 게임 동안 같은 것이라 effect 의존성에 넣어도 된다.
 - 시간: `useRemaining(view.endsAt, serverNow)`와 `clock(ms)`(`../time`).
 - 아바타 맞추기: `session.players[].peer`가 실시간 방의 `client_id`(gaesup-world `players` 지도의 키)다. 방 밖에 있으면 `null`.
@@ -183,4 +184,4 @@ export const relay = defineGame<RelayView, RelayOutcome>({
 
 - 서버(게임 파일 안 `#[cfg(test)]`): `Ctx::new(now, &members, &positions, &mut StdRng::seed_from_u64(…))`로 `create`·`tick`·`act`·`leave`·`result`를 시간과 위치를 직접 넣어 부른다. layout 거절, 판정, 끝, 결과, 비밀이 주인 화면에만 있는지, `ctx.events()`로 이벤트 대상을 확인한다. `treasure.rs`의 테스트가 예다. 실제 소켓 흐름이 필요하면 `server/tests/games.rs`처럼 방에 들어가 `Update`로 움직인다.
 - 클라이언트: `frontend/src/games/__tests__/gameDock.test.tsx`처럼 가짜 client로 `Panel`·`Result`를 그려 확인하고, `layout`을 섬(`createVillage()`)으로 단위 테스트한다. `registry.test.ts`가 등록 전체를 검사한다.
-- 검증: `server/`에서 `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. 루트에서 `npm run typecheck`, `npm test`, `npm run build`.
+- 검증: `server/`에서 `cargo fmt --check`, `rustfmt --edition 2024 --check $(find src/games -name '*.rs')`(게임 모듈은 `registry!` 안에서 선언되어 `cargo fmt`가 보지 않는다), `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. 루트에서 `npm run typecheck`, `npm test`, `npm run build`.

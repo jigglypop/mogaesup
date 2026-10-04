@@ -338,7 +338,8 @@ mod tests {
         let layout = spots(12);
         let under = |index: usize| -> [f64; 3] { serde_json::from_value(layout["spots"][index].clone()).unwrap() };
         // Two players on two of the twelve spots: the ten gems take the other ten, game after game.
-        let standing = HashMap::from([(players[0].id, under(0)), (players[1].id, [under(5)[0] + 0.5, 0.0, under(5)[2]])]);
+        let standing =
+            HashMap::from([(players[0].id, under(0)), (players[1].id, [under(5)[0] + 0.5, 0.0, under(5)[2]])]);
         for seed in 0..40 {
             let mut rng = StdRng::seed_from_u64(seed);
             let mut ctx = Ctx::new(START, &players, &standing, &mut rng);
@@ -348,7 +349,8 @@ mod tests {
         }
         // With every spot within someone's reach, gems still come out.
         let crowd = members(12);
-        let everywhere: HashMap<Uuid, [f64; 3]> = crowd.iter().enumerate().map(|(index, player)| (player.id, under(index))).collect();
+        let everywhere: HashMap<Uuid, [f64; 3]> =
+            crowd.iter().enumerate().map(|(index, player)| (player.id, under(index))).collect();
         let mut rng = StdRng::seed_from_u64(1);
         let mut ctx = Ctx::new(START, &crowd, &everywhere, &mut rng);
         assert_eq!(gems(create(&layout, &mut ctx).unwrap().as_ref()).len(), LIVE);

@@ -110,6 +110,8 @@ jobs:
           workspaces: server
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
+      # Game modules are declared inside the `registry!` macro (src/games/mod.rs), where cargo fmt does not look.
+      - run: rustfmt --edition 2024 --check $(find src/games -name '*.rs')
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 

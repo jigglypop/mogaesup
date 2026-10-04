@@ -54,6 +54,11 @@ export type GameDefinition<View = unknown, Result = unknown> = {
   World?: ComponentType<GameProps<View>>;
   /** The result in the game panel once the game has ended. */
   Result: ComponentType<GameResultProps<View, Result>>;
+  /**
+   * A key for something the player must answer in the panel (a meeting's vote): each new key brings the folded panel up
+   * again, once; null when nothing waits.
+   */
+  attention?: (view: View) => string | null;
 };
 
 /** Checks a game's definition against its own view and result types, and lists it among the others. */

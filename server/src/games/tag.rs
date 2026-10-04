@@ -372,7 +372,10 @@ mod tests {
         assert_eq!((view["role"].as_str(), view["its"].clone()), (Some("it"), json!([it])));
         let runner = players.iter().find(|player| player.id != it).unwrap().id;
         assert_eq!(game.view(Some(runner), T0)["role"], "runner");
-        assert_eq!((game.view(None, T0)["role"].clone(), game.view(None, T0)["spot"].clone()), (Value::Null, Value::Null));
+        assert_eq!(
+            (game.view(None, T0)["role"].clone(), game.view(None, T0)["spot"].clone()),
+            (Value::Null, Value::Null)
+        );
         assert_eq!(view["safeUntil"], SAFE);
         assert_eq!(view["endsAt"], T0 + DURATION);
         // Once the head start is over, nobody is sent to their start again.
@@ -438,10 +441,19 @@ mod tests {
         let mut game = chasing(&players, &[it], &mut rng);
         // A chain: a by the it, b by a but out of the it's reach, c by b.
         let chain = [(it, [0.0; 3]), (a, [1.4, 0.0, 0.0]), (b, [2.8, 0.0, 0.0]), (c, [4.2, 0.0, 0.0])];
-        assert_eq!(tick(&mut game, &players, &chain, SAFE, &mut rng), [json!({"type": "caught", "player": a, "by": it})]);
-        assert_eq!(tick(&mut game, &players, &chain, SAFE + 100, &mut rng), [json!({"type": "caught", "player": b, "by": a})]);
+        assert_eq!(
+            tick(&mut game, &players, &chain, SAFE, &mut rng),
+            [json!({"type": "caught", "player": a, "by": it})]
+        );
+        assert_eq!(
+            tick(&mut game, &players, &chain, SAFE + 100, &mut rng),
+            [json!({"type": "caught", "player": b, "by": a})]
+        );
         assert!(game.result().is_none());
-        assert_eq!(tick(&mut game, &players, &chain, SAFE + 200, &mut rng), [json!({"type": "caught", "player": c, "by": b})]);
+        assert_eq!(
+            tick(&mut game, &players, &chain, SAFE + 200, &mut rng),
+            [json!({"type": "caught", "player": c, "by": b})]
+        );
         // With nobody left to catch, the its have won.
         let result = game.result().unwrap();
         assert_eq!(result["winner"], "its");

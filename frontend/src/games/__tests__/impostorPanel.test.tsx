@@ -248,3 +248,15 @@ describe('임포스터 패널', () => {
     expect(rows[0]!.getAttribute('aria-current')).toBe('true');
   });
 });
+
+describe('임포스터 패널 부르기', () => {
+  it('회의마다 한 번씩 접어 둔 패널을 부르고, 회의가 없거나 끝나면 부르지 않는다', async () => {
+    const { impostor } = await import('../impostor');
+    const meeting = (number: number) => ({ number }) as unknown as ImpostorMeeting;
+    expect(impostor.attention!({ phase: 'play', meeting: null })).toBeNull();
+    expect(impostor.attention!({ phase: 'discuss', meeting: meeting(1) })).toBe('meeting-1');
+    expect(impostor.attention!({ phase: 'vote', meeting: meeting(1) })).toBe('meeting-1');
+    expect(impostor.attention!({ phase: 'discuss', meeting: meeting(2) })).toBe('meeting-2');
+    expect(impostor.attention!({ phase: 'ended', meeting: meeting(2) })).toBeNull();
+  });
+});

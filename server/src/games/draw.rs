@@ -54,8 +54,7 @@ const BONUS_EVERY: Millis = 8_000;
 const DRAWER_POINTS: u32 = 5;
 const MAX_GUESS: usize = 30;
 /// The colours a stroke may have.
-const PALETTE: [&str; 8] =
-    ["#222222", "#e5484d", "#f5a524", "#ffd60a", "#30a46c", "#3b82f6", "#8e4ec6", "#8b5a2b"];
+const PALETTE: [&str; 8] = ["#222222", "#e5484d", "#f5a524", "#ffd60a", "#30a46c", "#3b82f6", "#8e4ec6", "#8b5a2b"];
 const MAX_SIZE: u64 = 3;
 /// Points in one stroke message.
 const MAX_PIECE: usize = 64;
@@ -255,9 +254,7 @@ impl Draw {
         let text = value
             .as_str()
             .map(str::trim)
-            .filter(|text| {
-                !text.is_empty() && text.chars().count() <= MAX_GUESS && !text.chars().any(char::is_control)
-            })
+            .filter(|text| !text.is_empty() && text.chars().count() <= MAX_GUESS && !text.chars().any(char::is_control))
             .ok_or(BAD_GUESS)?;
         if plain(text) != plain(self.word()) {
             ctx.emit(json!({"type": "chat", "player": player, "text": text}));
@@ -356,8 +353,11 @@ impl Piece {
             .and_then(Value::as_str)
             .and_then(|color| PALETTE.iter().copied().find(|known| *known == color))
             .ok_or(BAD_STROKE)?;
-        let size =
-            fields.get("size").and_then(Value::as_u64).filter(|size| (1..=MAX_SIZE).contains(size)).ok_or(BAD_STROKE)?;
+        let size = fields
+            .get("size")
+            .and_then(Value::as_u64)
+            .filter(|size| (1..=MAX_SIZE).contains(size))
+            .ok_or(BAD_STROKE)?;
         let join = match fields.get("join") {
             None | Some(Value::Bool(false)) => false,
             Some(Value::Bool(true)) => true,
@@ -370,9 +370,8 @@ impl Piece {
 /// `[x, y]` on the board (0 to 1 each), kept to the [`GRID`].
 fn board_point(value: &Value) -> Option<[f64; 2]> {
     let [x, y] = value.as_array()?.as_slice() else { return None };
-    let on_board = |value: &Value| {
-        value.as_f64().filter(|v| (0.0..=1.0).contains(v)).map(|v| (v * GRID).round() / GRID + 0.0)
-    };
+    let on_board =
+        |value: &Value| value.as_f64().filter(|v| (0.0..=1.0).contains(v)).map(|v| (v * GRID).round() / GRID + 0.0);
     Some([on_board(x)?, on_board(y)?])
 }
 
@@ -750,7 +749,8 @@ mod tests {
         let longest = "가".repeat(30);
         assert_eq!(table.act(2, json!({"guess": format!(" {longest} ")}), START).unwrap()[0].1["text"], longest);
         let long = "가".repeat(31);
-        for bad in [json!(""), json!("   "), json!(long), json!("사\u{7}과"), json!("사\n과"), json!(3), json!(null)] {
+        for bad in [json!(""), json!("   "), json!(long), json!("사\u{7}과"), json!("사\n과"), json!(3), json!(null)]
+        {
             assert_eq!(table.act(2, json!({"guess": bad}), START), Err(BAD_GUESS), "{bad}");
         }
         // The drawer can neither guess nor say the word.

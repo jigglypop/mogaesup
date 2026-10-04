@@ -82,4 +82,6 @@ export const impostor = defineGame<ImpostorView, ImpostorOutcome>({
   Panel: ImpostorPanel,
   World: ImpostorWorld,
   Result: ImpostorResult,
+  // Each meeting brings the panel up once: the vote happens there.
+  attention: (view) => (view.meeting && view.phase !== 'ended' ? `meeting-${view.meeting.number}` : null),
 });

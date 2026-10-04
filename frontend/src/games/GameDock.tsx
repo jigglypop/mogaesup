@@ -34,10 +34,14 @@ export function GameDock() {
   const panelId = useId();
   const plays = !!session?.players.some((player) => player.id === session.you);
   const playing = session?.phase === 'playing' && plays;
-  // A game the viewer plays brings its panel up as it starts.
+  // A game the viewer plays brings its panel up as it starts, and again whenever it waits for an answer there.
+  const attention = playing ? (gameOf(session?.kind)?.attention?.(session?.game) ?? null) : null;
   useEffect(() => {
     if (playing) setOpen(true);
   }, [playing]);
+  useEffect(() => {
+    if (attention) setOpen(true);
+  }, [attention]);
   useEffect(() => {
     if (!open || !focusPanel.current) return;
     focusPanel.current = false;

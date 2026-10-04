@@ -441,7 +441,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2);
         let (mut game, _) = started(&players, &mut rng);
         let (right, wrong) = (spot(&game, true), spot(&game, false));
-        let (right_zone, wrong_zone) = (Zone::of(game.question().answer).name(), Zone::of(!game.question().answer).name());
+        let (right_zone, wrong_zone) =
+            (Zone::of(game.question().answer).name(), Zone::of(!game.question().answer).name());
         let shifted = |dx: f64, dy: f64| [right[0] + dx, right[1] + dy, right[2]];
         // a on the zone's very edge, b high over its spot (height does not count), c just past the edge, d in the
         // other zone, e nowhere the room knows, f in the right zone until the last moment.
@@ -541,7 +542,8 @@ mod tests {
             let mut asked = vec![game.question().statement];
             for round in 0..10 {
                 let at = START + round * ROUND;
-                let right: Vec<(Uuid, [f64; 3])> = players.iter().map(|player| (player.id, spot(&game, true))).collect();
+                let right: Vec<(Uuid, [f64; 3])> =
+                    players.iter().map(|player| (player.id, spot(&game, true))).collect();
                 tick(&mut game, &players, &right, at + ASKING, &mut rng);
                 assert!(game.result().is_none(), "seed {seed}, round {round}");
                 let events = tick(&mut game, &players, &right, at + ROUND, &mut rng);

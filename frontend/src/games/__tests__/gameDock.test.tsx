@@ -7,6 +7,7 @@ vi.mock('../registry', async () => {
   const pair = {
     kind: 'pair', label: '둘이서', minPlayers: 2, maxPlayers: 3, layout: () => ({ goal: 3 }),
     Panel: () => <p>둘이서 진행</p>, Result: () => <p>둘이서 결과</p>,
+    attention: (view: { ask?: number } | null) => (view?.ask ? `ask-${view.ask}` : null),
   };
   const GAMES = [treasure, pair];
   return { GAMES, gameOf: (kind: string | null | undefined) => GAMES.find((game) => game.kind === kind) ?? null };
@@ -174,6 +175,21 @@ describe('섬의 게임 패널', () => {
     // A refusal is said in the panel.
     set({ error: { code: 'bad_action', message: '할 수 없는 행동이에요.' } });
     expect(panel()!.querySelector('[role="alert"]')!.textContent).toBe('할 수 없는 행동이에요.');
+  });
+
+  it('접어 둔 패널은 게임이 답을 기다릴 때마다 한 번씩 다시 열린다', async () => {
+    const { toggle, panel, set } = await dock({ session: session({ phase: 'playing', players: [me, friend], game: {} }) });
+    expect(panel()).not.toBeNull();
+    await act(() => toggle().click());
+    expect(panel()).toBeNull();
+    set({ session: session({ phase: 'playing', players: [me, friend], game: { ask: 1 } }) });
+    expect(panel()).not.toBeNull();
+    // Folded again while the same question waits, it stays folded; the next question brings it up.
+    await act(() => toggle().click());
+    set({ session: session({ phase: 'playing', players: [me, friend], game: { ask: 1 }, seq: 2 }) });
+    expect(panel()).toBeNull();
+    set({ session: session({ phase: 'playing', players: [me, friend], game: { ask: 2 }, seq: 3 }) });
+    expect(panel()).not.toBeNull();
   });
 
   it('끝나면 결과를 보여 주고, 방장은 다시 하거나 닫고 다른 사람은 나간다', async () => {
