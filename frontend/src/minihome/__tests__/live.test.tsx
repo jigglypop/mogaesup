@@ -3,13 +3,18 @@ import type { RapierRigidBody } from '@react-three/rapier';
 import type { Group } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { multiplayer, avatars, ticket } = vi.hoisted(() => ({
-  multiplayer: vi.fn(), avatars: vi.fn(() => null), ticket: vi.fn(),
+const { multiplayer, avatars, balloon, frame, ticket } = vi.hoisted(() => ({
+  multiplayer: vi.fn(), avatars: vi.fn(() => null), balloon: vi.fn(() => null), frame: vi.fn(), ticket: vi.fn(),
 }));
 vi.mock('gaesup-world', async (original) => ({
   ...await original<typeof import('gaesup-world')>(),
   useMultiplayer: multiplayer,
   RemotePlayers: avatars,
+  SpeechBalloon: balloon,
+}));
+vi.mock('@react-three/fiber', async (original) => ({
+  ...await original<typeof import('@react-three/fiber')>(),
+  useFrame: frame,
 }));
 vi.mock('../../api/endpoints', () => ({ authApi: { realtimeTicket: ticket } }));
 
@@ -17,6 +22,8 @@ import { MemoryRouter } from 'react-router-dom';
 
 import type { RealtimeTicket, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
+import { useUIConfigStore } from 'gaesup-world';
+
 import { ChatBar, LiveAvatars, LiveRoom } from '../live';
 
 const user: User = { id: 'viewer-a', username: 'a', displayName: '방문자 A', role: 'user' };
@@ -64,6 +71,27 @@ describe('방문자 연결과 캐릭터 전달', () => {
     expect(live.connect).toHaveBeenCalledWith({ roomId: 'host', playerName: user.displayName, playerColor: expect.stringMatching(/^#[0-9a-f]{6}$/) });
     await view.unmount();
     expect(live.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('내가 한 말은 내 캐릭터 위 말풍선으로 몸을 따라간다', async () => {
+    const view = await mount(room());
+    await flush();
+    expect(balloon).not.toHaveBeenCalled();
+    Object.assign(live, { localSpeechText: '안녕하세요' });
+    multiplayer.mockReturnValue({ ...live });
+    await view.rerender(room());
+    const props = (balloon.mock.calls.at(-1) as unknown as [{ text: string; position: { x: number; y: number; z: number } }])[0];
+    expect(props.text).toBe('안녕하세요');
+    // Each frame copies the body's place into the vector the balloon follows.
+    body.current = { translation: () => ({ x: 3, y: 1.5, z: -2 }) } as unknown as RapierRigidBody;
+    (frame.mock.calls.at(-1) as unknown as [() => void])[0]();
+    expect([props.position.x, props.position.y, props.position.z]).toEqual([3, 1.5, -2]);
+    // Balloons (the others' too) sit just above the name tags, sized for the island camera.
+    const balloons = useUIConfigStore.getState().config.speechBalloon;
+    expect(balloons.defaultOffset.y).toBeCloseTo(1.7 * 1.5 + 1.05);
+    expect([balloons.scaleMultiplier, balloons.maxWidth]).toEqual([1, 400]);
+    body.current = null!;
+    await view.unmount();
   });
 
   it('연결을 다시 열 때 소비한 티켓 대신 새 티켓을 쓴다', async () => {

@@ -10,12 +10,20 @@ import {
   type RefObject,
 } from 'react';
 
+import { useFrame } from '@react-three/fiber';
 import type { RapierRigidBody } from '@react-three/rapier';
-import type { Group } from 'three';
+import { Vector3, type Group } from 'three';
 
 import { Link } from 'react-router-dom';
 
-import { defaultMultiplayerConfig, RemotePlayers, useMultiplayer, type MultiplayerConfig } from 'gaesup-world';
+import {
+  defaultMultiplayerConfig,
+  RemotePlayers,
+  SpeechBalloon,
+  useMultiplayer,
+  useUIConfigStore,
+  type MultiplayerConfig,
+} from 'gaesup-world';
 
 import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
@@ -130,6 +138,7 @@ const LiveContext = createContext<Live | null>(null);
 
 /** Opens the live room for everything below it; render it under `GaesupWorld`, whose runtime the tracking reads. */
 export function LiveRoom({ children, ...options }: Parameters<typeof useLiveRoom>[0] & { children: ReactNode }) {
+  useBalloonStyle();
   const { isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat } = useLiveRoom(options);
   // The room answers a new object on every update, a visitor's moves (several a second) and pings included, and every
   // reader of this context re-renders with its value, the island's canvas too (R3F bridges contexts into it). Moves reach
@@ -156,7 +165,57 @@ export function LiveAvatars({ playerRef }: { playerRef: RefObject<RapierRigidBod
   const everyone = live?.players;
   const players = useMemo(() => everyone && withoutPeers(everyone, hidden), [everyone, hidden]);
   if (!live || !players) return null;
-  return <RemotePlayers players={players} config={CONFIG} playerRef={playerRef} speechByPlayerId={live.speechByPlayerId} />;
+  return (
+    <>
+      <RemotePlayers players={players} config={CONFIG} playerRef={playerRef} speechByPlayerId={live.speechByPlayerId} />
+      {live.localSpeechText ? <LocalSpeech text={live.localSpeechText} playerRef={playerRef} /> : null}
+    </>
+  );
+}
+
+/** Where a balloon sits: just above a 미니미's name tag (`nameTagHeight`), sized for the island camera. */
+const BALLOON_HEIGHT = 1.7 * MINIME_SCALE + 1.05;
+
+/**
+ * Speech balloons (the engine draws them for everyone in the room) in the glass colours, re-read when the theme changes;
+ * the engine's own defaults float them 4.5 m up at 4 × 2 m and squeeze the words into a fifth of the balloon.
+ */
+function useBalloonStyle() {
+  useEffect(() => {
+    const apply = () => {
+      const css = getComputedStyle(document.documentElement);
+      const token = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
+      useUIConfigStore.getState().updateSpeechBalloonConfig({
+        defaultOffset: { x: 0, y: BALLOON_HEIGHT, z: 0 },
+        scaleMultiplier: 1,
+        fontSize: 72,
+        padding: 24,
+        maxWidth: 400,
+        borderRadius: 64,
+        borderWidth: 4,
+        backgroundColor: token('--mg-glass-strong', 'rgba(255, 255, 255, 0.86)'),
+        textColor: token('--mg-ink', '#1d1830'),
+        borderColor: token('--mg-hair-strong', 'rgba(29, 24, 48, 0.14)'),
+      });
+    };
+    apply();
+    const theme = new MutationObserver(apply);
+    theme.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => theme.disconnect();
+  }, []);
+}
+
+/** What the member just said, above their own character, drawn as the others' words are drawn above theirs. */
+function LocalSpeech({ text, playerRef }: { text: string; playerRef: RefObject<RapierRigidBody> }) {
+  // The balloon follows this vector every frame; the body is where the room places the member for the others too.
+  const position = useMemo(() => new Vector3(), []);
+  useFrame(() => {
+    const body = playerRef.current;
+    if (!body) return;
+    const at = body.translation();
+    position.set(at.x, at.y, at.z);
+  });
+  return <SpeechBalloon text={text} position={position} />;
 }
 
 /** How many are on the island now, counting the viewer, and who the others are; empty until the room connects. */
