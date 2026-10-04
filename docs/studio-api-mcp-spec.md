@@ -1,6 +1,6 @@
 # 모개숲 API 검수용 MCP 설계
 
-작성일: 2026-10-03. 로컬 stdio API 어댑터와 네이티브 조립 검수 API는 구현되었다. 아래에서 등록된 tool과 후속 제안을 구분한다. 원격 HTTP MCP/OAuth와 회원별 사진 제작 API는 구현되지 않았다. 어댑터 검증은 가짜 HTTP 응답과 임시 조립 산출물을 사용한다.
+작성일: 2026-10-03. 로컬 stdio API 어댑터와 네이티브 조립 검수 API는 구현되었다. 2026-10-04에 옷장 의상 유료 생성 tool과 로컬 큐를 추가했다. 아래에서 등록된 tool과 후속 제안을 구분한다. 원격 HTTP MCP/OAuth와 회원별 사진 제작 API는 구현되지 않았다. 어댑터 검증은 가짜 HTTP 응답과 임시 조립 산출물을 사용한다.
 
 ## 현재 구현과 실행 설정
 
@@ -19,16 +19,38 @@ uv run --no-sync asset-studio-mcp
 | `MOGA_STUDIO_SESSION` | 기존 로그인 세션의 64자리 hex 자격 증명. 요청의 `mogaesup_session` 쿠키에만 사용 |
 | `MOGA_STUDIO_APP_ORIGIN` | 선택 사항. Rust의 `APP_ORIGIN`과 같은 origin; 미설정 시 API origin. 개발 웹과 API 포트가 다르면 설정 |
 | `MOGA_STUDIO_MCP_WRITE` | 기본 읽기 전용. 정확히 `1`일 때 아래 세 mutation만 요청 가능 |
+| `MOGA_STUDIO_MCP_PAID` | 기본 꺼짐. `MOGA_STUDIO_MCP_WRITE=1`과 함께 정확히 `1`일 때만 아래 옷장 의상 tool 7개를 목록에 등록 |
 
-현재 읽기 tool은 `get_my_permissions`, `list_catalog_items`, `list_wardrobe_bodies`, `get_my_look`, `get_factory_usage`, `get_character`, `get_character_operation`, `get_factory_job`, `get_native_assembly`다. 변경 tool은 `inspect_character`, `record_character_review`, `record_native_review`다. 각각 ID와 revision 또는 조립 SHA, idempotency key, bounded 검수 입력만 받으며 임의 HTTP/API/코드/경로 tool은 없다. 게이트웨이의 로그인·ReBAC·서버 전체 access와 backend의 소유권·상태 검사를 그대로 통과해야 한다. 유료 생성 tool은 없다.
+현재 읽기 tool은 `get_my_permissions`, `list_catalog_items`, `list_wardrobe_bodies`, `get_my_look`, `get_factory_usage`, `get_character`, `get_character_operation`, `get_factory_job`, `get_native_assembly`다. 변경 tool은 `inspect_character`, `record_character_review`, `record_native_review`다. 각각 ID와 revision 또는 조립 SHA, idempotency key, bounded 검수 입력만 받으며 임의 HTTP/API/코드/경로 tool은 없다. 게이트웨이의 로그인·ReBAC·서버 전체 access와 backend의 소유권·상태 검사를 그대로 통과해야 한다. 유료 생성 tool은 아래 옷장 의상 생성뿐이다.
 
 `record_native_review`는 `POST /api/avatar-factory/jobs/{job_id}/native-parts/{version}/review`에 `Idempotency-Key`와 `{expected_assembly_sha256, decision, appearance_checked, motion_checked, notes}`를 보낸다. notes는 승인에도 5~2000자 필수다. 서버는 현재 완료된 버전과 전체 sealed 산출물 hash, 기술 오류·미완성 파츠·표정 적용 여부를 다시 확인한다. 승인에는 외형/동작 체크와 네 방향·동작 렌더가 필요하다. `reviews.json`은 원본 `record.json`·`quality.json`과 별도로 저장되며 GET과 버전 목록의 `review.status`에 결합된다. 산출물이 달라지면 `stale`이다. `reviewer_id`는 공유 factory owner, `reviewer_name`은 게이트웨이가 서명한 실제 조작자 이름이다. MCP의 검사 결과 자체는 사람의 시각 승인을 대신하지 않는다.
 
-HTTP/API 오류의 status와 허용된 안정적인 code만 출력하고 내부 메시지·토큰·절대 경로·서명 URL은 정리한다. 응답은 8MiB까지 읽는다. timeout이나 5xx 이후 POST를 자동 재시도하지 않는다. 캐릭터 operation ID를 조회하거나 동일 key와 입력으로 사용자가 명시적으로 복구한다. [API·stdio 테스트](../backend/tests/api/test_studio_mcp.py), [네이티브 검수 테스트](../backend/tests/api/test_native_reviews.py).
+HTTP/API 오류의 status와 허용된 안정적인 code만 출력하고 내부 메시지·토큰·절대 경로·서명 URL은 정리한다. 응답은 8MiB까지 읽는다. timeout이나 5xx 이후 POST를 자동 재시도하지 않는다. 캐릭터 operation ID를 조회하거나 동일 key와 입력으로 사용자가 명시적으로 복구한다. drain 중 캐릭터 서버의 code 없는 503은 `draining`으로 전달한다. [API·stdio 테스트](../backend/tests/api/test_studio_mcp.py), [네이티브 검수 테스트](../backend/tests/api/test_native_reviews.py).
+
+### 옷장 의상 생성 (유료)
+
+[studio_garments.py](../backend/src/studio_garments.py)의 tool이다. 의상 하나는 스튜디오 단일 파츠 화면([SinglePart.tsx](../frontend/src/character/studio/SinglePart.tsx))이 처음 열린 상태로 보내는 요청과 같다. 기준은 옷장에 등록된 몸과 그 등록 버전이고 `hair_length`·`bottom_kind`(기본 `source`), `view_mode: front_side_back`, slot별 Meshy 기본값(`meshyDefaultsFor`), `part_name`, `description`을 보낸다. 상의·하의·헤어는 `part_method: worn`, 상의·하의는 `fit_profile`(`garment-fit-v1`, 소매·여유 `source`)을 함께 보낸다. 디자인 의상은 [garment-styles.json](../frontend/src/character/studio/garment-styles.json)(28종)을 읽기만 하고 ID는 slot과 이름 해시(`top-1a2b3c4d`)다. `description`은 brief 뒤에 파일의 공통 스타일 문장을 붙인 것이고, 자유 brief(8~600자, 이름 1~60자)에도 같은 문장을 붙인다. brief와 이름은 글자·숫자·공백과 `. , ' ! ? ( ) & + % -`만 받으며 웹 주소·파일 이름·경로·33자 이상 토큰은 거절한다. slot은 단일 파츠 API가 같은 방식으로 받는 `top`, `bottom`, `shoes`, `hat`, `hair`, `glasses`다.
+
+| tool | 입력 | 호출 | 비용 |
+| --- | --- | --- | --- |
+| `list_garment_options` | 없음 | 디자인 JSON, `GET /api/avatar-factory/wardrobe/bodies` | 무료 |
+| `start_garment` | `garment`(`body_job_id`와 `design_id`, 또는 `slot`·`brief`·`name`과 선택 `bottom_kind`·`hair_length`), `idempotency_key` | 옷장 몸 목록과 `GET /api/avatar-factory/jobs/{body}`로 등록 버전이 봉인 버전인지 확인 뒤 `POST /api/avatar-factory/variants/single-part` | 유료(이미지 3장·3D 1개) |
+| `get_garment_job` | `job_id` | `GET /api/avatar-factory/jobs/{id}`, 봉인 뒤 `GET /api/avatar-factory/wardrobe/bodies/{body}/parts` | 무료 |
+| `enqueue_garments` | `garments`(1~30개), `idempotency_key` | 로컬 큐 파일만 | 무료 |
+| `get_garment_queue` | 없음 | 로컬 큐 파일만 | 무료 |
+| `advance_garment_queue` | `idempotency_key`, `max_new`(0~3) | 위 GET과 `POST .../variants/single-part` | 유료 |
+| `resolve_garment_item` | `item_id`, `action`(`replay`·`drop`), `idempotency_key` | `replay`만 `POST .../variants/single-part` | `replay`만 유료 |
+
+게이트웨이는 이 POST를 유료(`paid_operator`, `FACTORY_ACCESS=paid`, `FACTORY_PAID_MONTHLY`)이자 key 요청으로 다룬다. 같은 key 재요청에는 캐릭터 서버가 이미 만든 작업으로 답하고 월 한도도 한 번만 센다. 작업은 스스로 조립되고 봉인되면 등록 몸의 옷장 파츠 목록에 나온다. 화면에도 별도 게시 단계가 없어 fitting tool은 두지 않았다. 피팅되지 않은 파츠(`unavailable`)나 멈춘 작업은 스튜디오에서 처리한다.
+
+- **key.** `start_garment`의 key가 그대로 `Idempotency-Key`다. 답을 못 받으면(`outcome: uncertain`) 같은 key로 다시 호출해 작업을 받는다. `enqueue_garments`, `advance_garment_queue`, `resolve_garment_item`은 key별 결과를 큐 파일에 남기고 같은 key 재호출에는 그 결과를 돌려준다. 입력이 다르면 `idempotency_conflict`다. 큐 항목은 자기 key(UUID)를 가지며 요청 본문과 key를 fsync로 저장한 뒤 POST한다. 큐에 같은 몸·디자인(brief는 slot·이름) 항목이 있으면 다시 넣지 않는다(`failed`·`dropped` 제외).
+- **진행.** advance는 진행 중 의상과 멈춘 의상 6개까지를 조회한 뒤, 진행 중이 3개 미만일 때만 `max_new` 이하로 새로 접수한다. 접수 전 무료 GET으로 몸 등록과 봉인 버전을 확인하고, 맞지 않으면 그 몸의 의상은 `waiting`이다. 202는 `running`이다. 401·402·403·429와 `insufficient_credits`·`conflict`·`draining` 같은 거절은 `pending`으로 남아 다음에 같은 key와 본문으로 보낸다. 그 밖의 4xx는 `failed`다. 연결 끊김, timeout, 그 밖의 5xx(`factory_timeout`, `studio_waking` 포함)는 `uncertain`이다. 첫 거절이나 불확실 응답에서 advance가 멈춘다(`stopped`). `uncertain`과 실행이 끊겨 `submitting`으로 남은 항목은 자동으로 다시 보내지 않고 `resolve_garment_item(replay)`가 저장한 본문과 key로만 보낸다. 작업의 유료 단계 재개나 이미지 재요청도 하지 않는다. 결과는 `started`, `finished`(옷장 목록의 버전·SHA), `failed`, `attention`(`stalled`·`uncertain`), `waiting`, `counts`, `paid_submissions`, `stopped`다.
+- **큐 위치.** 의상 큐를 담을 기존 API 기록이 없어(`part-batches`는 업로드한 헤어 3뷰 전용) 저장소 루트의 `.data/studio-mcp/garments-<API origin SHA-256 앞 16자>.json`(gitignore)에 둔다. 변경은 OS 파일 잠금 아래에서 하며 다른 실행이 잡고 있으면 `queue_busy`다. 읽을 수 없는 파일은 비우지 않고 `queue_unreadable`로 멈춘다. 끝난 항목은 300개, key 기록은 200개까지 남긴다.
+- **터미널.** 같은 두 설정과 API·세션 환경에서 `uv run --no-sync asset-studio-mcp garments --max-new 3 --until-empty --max-paid 9`로 같은 advance를 반복한다. 단계마다 결과를 JSON 한 줄로 출력하고 `--poll-seconds`(기본 60, 10~3600)만큼 쉰다. `--max-paid`(기본 3, 1~50)는 이 실행의 POST 수 상한(불확실 응답 포함)이고 `--max-hours`(기본 12)가 지나면 멈춘다. `--until-empty`가 없으면 한 단계만 한다. 종료 코드는 0 끝남, 1 설정 오류, 2 거절·불확실 응답, 3 진행 불가(스튜디오 무응답이나 큐 잠금이 6단계 연속, 몸 준비 안 됨, 시간 초과)다.
 
 ## 1. 연결 위치
 
-현재 로컬 `stdio` MCP 서버는 기존 Rust API의 제한된 조회와 검수 작업을 호출한다. 로그인한 계정의 상태, 옷장, 생성 작업, 검수 영수증을 조회하며 환경에서 변경을 허용한 경우 검사·검수 기록을 요청한다. 유료 생성과 외부 에셋 수집은 후속 범위다.
+현재 로컬 `stdio` MCP 서버는 기존 Rust API의 제한된 조회와 검수 작업을 호출한다. 로그인한 계정의 상태, 옷장, 생성 작업, 검수 영수증을 조회하며 환경에서 변경을 허용한 경우 검사·검수 기록을, 유료까지 허용한 경우 옷장 의상 생성을 요청한다. 다른 유료 생성과 외부 에셋 수집은 후속 범위다.
 
 ```text
 MCP 클라이언트
@@ -99,6 +121,7 @@ MCP 클라이언트
 | 파츠 역할 지정 `organize_character_parts` | `POST /api/characters/{id}/actions/organize_parts` | 실제 action 존재. 모든 메시를 하나의 역할에 배정하고 body coverage 기록 |
 | 캐릭터 검수 `record_character_review` | `POST /api/characters/{id}/actions/record_review` | MCP 등록됨. 무료 변경. operator, If-Match와 Idempotency-Key, 체크와 notes 필요 |
 | 네이티브 조립 검수 `record_native_review` | `POST /api/avatar-factory/jobs/{job_id}/native-parts/{version}/review` | MCP 등록됨. 무료 변경. operator, 조립 SHA와 Idempotency-Key, 체크와 notes 필요 |
+| 옷장 의상 생성 `start_garment`, `advance_garment_queue` | `POST /api/avatar-factory/variants/single-part` | MCP 등록됨(`MOGA_STUDIO_MCP_PAID=1` 필요). 유료. paid_operator와 Idempotency-Key 필요 |
 | 2D 사진·파츠 배치 편집 | `PUT /api/avatar-blueprints/{character_id}` | crop·placement·opacity·order 저장 API 존재. 3D 메시 편집 API와 구분 |
 | GLB 옷·소품 반입 | `POST /api/studio/glb-assets/upload`, `POST /api/studio/glb-assets` | 업로드 ID와 slot으로 등록 가능. 외부 출처·라이선스 증거 기록은 추가 필요 |
 | 3D 몸 기준 옷·헤어 fitting | `POST /api/studio/glb-assets/{asset_id}/prepare` 또는 `POST /api/avatar-factory/jobs/{job_id}/native-parts/refit` | 실제 계약 존재. `prepare`의 fit·rig는 gateway에서 모두 유료 분류; action별 분류 정리 필요 |
@@ -127,7 +150,7 @@ MCP 클라이언트
 
 모든 API가 이 계약을 이미 공유하지는 않는다. 카탈로그 import는 실행 중 같은 item을 unique index로 막지만 완료 이후 동일 요청의 idempotency replay 계약은 없다. 섬 저장은 `If-Match` 대신 JSON의 `expectedOwnerId`, `worldId`, `baseRevision`, `data`를 사용한다. 어댑터는 실제 endpoint의 계약을 유지하고 범용 헤더 하나로 안전하다고 가정하지 않는다. [카탈로그 수락](../server/src/imports.rs#L339), [섬 저장 입력](../server/src/homes.rs#L429).
 
-유료 생성 tool은 읽기 MCP 이후 별도 범위로 구현한다. 명시적인 유료 작업 요청, 대상과 설정, 작업 한도를 바탕으로 실행하며 현재 `FACTORY_ACCESS`, `paid_operator`, 서버 월별 한도를 그대로 통과해야 한다. 비용은 provider 실제 과금 영수증과 gateway 요청 수를 구분한다.
+유료 생성 tool은 옷장 의상만 구현했다(위 '옷장 의상 생성'). 명시적 설정(`MOGA_STUDIO_MCP_PAID=1`), 대상 몸과 의상, 호출당·실행당 상한으로 실행하며 `FACTORY_ACCESS`, `paid_operator`, 서버 월별 한도를 그대로 통과한다. 비용은 provider 실제 과금 영수증과 gateway 요청 수를 구분한다.
 
 ## 7. 검수와 에셋 반입에서 해결할 갭
 
@@ -143,7 +166,7 @@ MCP 클라이언트
 
 ## 8. 구현 검증 기준
 
-첫 MCP 구현은 fake Rust HTTP 응답으로 인증, tool별 허용 endpoint, 잘못된 ID 거절, 권한 오류 전달, 민감한 출력 제거, outputSchema 일치, 읽기 tool의 mutation 부재를 검사한다. 새 mutation을 붙이면 동일 키 재요청, 키 충돌, stale revision, 소유권 충돌, 작업 timeout 이후 기존 영수증 조회, drain 중 거절을 검증한다.
+첫 MCP 구현은 fake Rust HTTP 응답으로 인증, tool별 허용 endpoint, 잘못된 ID 거절, 권한 오류 전달, 민감한 출력 제거, outputSchema 일치, 읽기 tool의 mutation 부재를 검사한다. 새 mutation을 붙이면 동일 키 재요청, 키 충돌, stale revision, 소유권 충돌, 작업 timeout 이후 기존 영수증 조회, drain 중 거절을 검증한다. 옷장 의상 tool은 [가짜 게이트웨이 테스트](../backend/tests/api/test_studio_garments.py)로 두 설정 없이는 목록에 없음(stdio 포함), SinglePart와 같은 본문(프론트 소스의 Meshy 기본값·방식과 비교, backend 입력 모델 통과), key 전달과 재요청 시 작업 하나, 동시 3개·호출당 상한, 첫 거절에서 멈춤, 불확실 항목 자동 재전송 없음, URL·경로·키 입력 거절, CLI 실행 상한과 대기를 검사한다.
 
 현재 backend 테스트는 [conftest.py](../backend/tests/conftest.py#L1)가 `.env` 로딩을 막고 키·AWS·DB 설정을 비우며 임시 데이터 루트와 외부 연결 차단을 사용한다. 캐릭터 API, 공급자 실패·복구, 기록 DB, 파일 잠금, runtime admission, 옷장 범위 등을 다룬다. DB 테스트는 로컬 PostgreSQL이 없으면 skip될 수 있다. Rust 통합 테스트는 [common/mod.rs](../server/tests/common/mod.rs#L18)의 로컬 테스트 PostgreSQL에 임시 DB를 만든다.
 

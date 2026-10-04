@@ -5,11 +5,15 @@ and MOGA_STUDIO_SESSION set in the process environment. Mutations additionally
 require MOGA_STUDIO_MCP_WRITE=1. No dotenv loader or provider keys are used.
 Set MOGA_STUDIO_APP_ORIGIN when the gateway's configured APP_ORIGIN differs
 from its API origin (for example, a development frontend and local API).
+The paid garment tools (studio_garments.py) are listed only when
+MOGA_STUDIO_MCP_PAID=1 is set as well; `asset-studio-mcp garments ...` runs
+their queue from a terminal under the same two settings.
 """
 from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -36,6 +40,12 @@ _API_ERROR_CODES = frozenset({
     'idempotency_conflict', 'input_changed', 'invalid_key', 'invalid_review', 'not_found',
     'operator_only', 'parts_required', 'revision_conflict', 'review_busy', 'review_required',
     'review_evidence_missing', 'technical_failure', 'unauthorized',
+    # Single-part garment requests (studio_garments.py).
+    'insufficient_credits', 'provider_unavailable', 'storage_required', 'listing_pending', 'worker_running',
+    'base_changed', 'base_incomplete', 'body_changed', 'body_deleted', 'body_preparation_required',
+    'fitted_part_changed', 'image_changed', 'model_changed', 'reference_changed', 'invalid_slots',
+    'invalid_part_method', 'invalid_provider', 'invalid_fit_profile', 'invalid_description', 'invalid_bottom_kind',
+    'texture_prompt_required',
 })
 
 
@@ -48,13 +58,16 @@ class ReviewInput(BaseModel):
 
 
 class StudioClient:
-    def __init__(self, base_url: str, session: str, *, app_origin: str | None = None, writable=False, transport=None):
+    def __init__(self, base_url: str, session: str, *, app_origin: str | None = None, writable=False, paid=False,
+                 transport=None):
         origin = self.validate_origin(base_url, 'MOGA_STUDIO_API_URL')
         browser_origin = self.validate_origin(app_origin or origin, 'MOGA_STUDIO_APP_ORIGIN')
         if not re.fullmatch(r'[a-fA-F0-9]{64}', session):
             raise ValueError('MOGA_STUDIO_SESSION must be a valid session credential')
         self.origin = origin
         self.writable = writable
+        # Paid garment tools need both opt-ins (MOGA_STUDIO_MCP_WRITE=1 and MOGA_STUDIO_MCP_PAID=1).
+        self.paid = bool(writable and paid)
         self._session = session
         self._client = httpx.Client(base_url=self.origin, timeout=30, follow_redirects=False,
                                    transport=transport, headers={'Cookie': 'mogaesup_session='+session,
@@ -116,6 +129,9 @@ class StudioClient:
                 candidate = error.get('code') if isinstance(error, dict) else None
                 if candidate in _API_ERROR_CODES:
                     code = candidate
+                elif status == 503 and set(value) == {'detail'} and isinstance(value['detail'], str):
+                    # The character server's admission middleware refuses new mutations this way while it drains.
+                    code = 'draining'
             except (ValueError, AttributeError, TypeError):
                 pass
             return {'ok': False, 'status': status,
@@ -177,10 +193,14 @@ class StudioClient:
                              body=payload, headers={'Idempotency-Key': key})
 
 
-def build_server(client: StudioClient):
+def build_server(client: StudioClient, garments=None):
     from mcp.server.fastmcp import FastMCP
     from mcp.types import ToolAnnotations
-    server = FastMCP('mogaesup-studio', instructions='Read saved studio state; mutations use existing operation receipts. Never retry a timed-out mutation automatically.')
+    instructions = 'Read saved studio state; mutations use existing operation receipts. Never retry a timed-out mutation automatically.'
+    if client.writable and client.paid:
+        instructions += (' Garment tools start paid generation: keep one idempotency_key per intended garment or call,'
+                         ' and reuse it only to recover that call.')
+    server = FastMCP('mogaesup-studio', instructions=instructions)
     read_only = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
     mutation = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
@@ -220,14 +240,23 @@ def build_server(client: StudioClient):
     def record_native_review(job_id: FactoryId, version: FactoryId, expected_assembly_sha256: ArtifactSha,
                              idempotency_key: RequestKey, review: ReviewInput) -> dict[str, Any]:
         return client.native_review(job_id, version, expected_assembly_sha256, idempotency_key, review.model_dump())
+
+    if client.writable and client.paid:
+        from src.studio_garments import GarmentStudio, register_tools
+        register_tools(server, garments or GarmentStudio(client))
     return server
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ['garments']:
+        from src.studio_garments import cli
+        raise SystemExit(cli(argv[1:]))
+    writable = os.environ.get('MOGA_STUDIO_MCP_WRITE') == '1'
     try:
         client = StudioClient(os.environ.get('MOGA_STUDIO_API_URL', ''), os.environ.get('MOGA_STUDIO_SESSION', ''),
-                              app_origin=os.environ.get('MOGA_STUDIO_APP_ORIGIN'),
-                              writable=os.environ.get('MOGA_STUDIO_MCP_WRITE') == '1')
+                              app_origin=os.environ.get('MOGA_STUDIO_APP_ORIGIN'), writable=writable,
+                              paid=writable and os.environ.get('MOGA_STUDIO_MCP_PAID') == '1')
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     try:

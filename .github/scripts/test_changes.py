@@ -156,6 +156,10 @@ class ReleaseRouting(unittest.TestCase):
         self.assertEqual(self.route(), {"server_check", "backend_check", "frontend_check", "infra_check",
                                       "deploy_server", "deploy_web"})
 
+    def test_studio_screens_the_mcp_mirrors_run_its_tests(self):
+        self.commit("frontend/src/character/studio/garment-styles.json")
+        self.assertEqual(self.route(), {"frontend_check", "backend_check", "deploy_web"})
+
     def test_prop_generator_runs_its_tests(self):
         self.commit("scripts/props/generate.py")
         self.assertEqual(self.route(), {"backend_check", "infra_check"})

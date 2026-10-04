@@ -68,7 +68,7 @@
 
 ## 로컬 API 검수 MCP
 
-`uv sync --locked --extra studio-mcp` 후 `uv run --no-sync asset-studio-mcp`로 stdio 서버를 실행한다. 프로세스 환경의 `MOGA_STUDIO_API_URL`에는 Rust API origin을, `MOGA_STUDIO_SESSION`에는 기존 로그인 세션 자격 증명을 전달한다. Rust의 `APP_ORIGIN`과 API origin이 다르면 `MOGA_STUDIO_APP_ORIGIN`도 설정한다. 기본은 조회이며 `MOGA_STUDIO_MCP_WRITE=1`에서만 검사·캐릭터 검수·버전/SHA에 묶인 네이티브 조립 검수 기록이 가능하다. 유료 생성 tool은 없다. 서버의 회원 권한과 소유권 검사를 유지하며 비밀값·임의 URL·코드·파일 경로를 tool 인수로 받지 않는다. 전체 설정과 등록 tool은 [API MCP 명세](docs/studio-api-mcp-spec.md#현재-구현과-실행-설정)에 있다.
+`uv sync --locked --extra studio-mcp` 후 `uv run --no-sync asset-studio-mcp`로 stdio 서버를 실행한다. 프로세스 환경의 `MOGA_STUDIO_API_URL`에는 Rust API origin을, `MOGA_STUDIO_SESSION`에는 기존 로그인 세션 자격 증명을 전달한다. Rust의 `APP_ORIGIN`과 API origin이 다르면 `MOGA_STUDIO_APP_ORIGIN`도 설정한다. 기본은 조회이며 `MOGA_STUDIO_MCP_WRITE=1`에서만 검사·캐릭터 검수·버전/SHA에 묶인 네이티브 조립 검수 기록이 가능하다. `MOGA_STUDIO_MCP_PAID=1`까지 설정해야 회원 옷장 의상을 만드는 유료 tool이 목록에 생긴다. 스튜디오 단일 파츠 화면과 같은 요청을 게이트웨이(유료 작업 권한·`FACTORY_ACCESS=paid`·월 한도)로 보내고 호출마다 idempotency key를 받는다. 로컬 큐(`.data/studio-mcp/`)는 한 번에 3건까지 새로 접수하고 첫 거절에서 멈추며 응답이 불확실한 의상은 다시 보내지 않는다. 터미널에서는 `uv run --no-sync asset-studio-mcp garments --max-new 3 --until-empty --max-paid 9`가 같은 큐를 돌린다. 서버의 회원 권한과 소유권 검사를 유지하며 비밀값·임의 URL·코드·파일 경로를 tool 인수로 받지 않는다. 전체 설정과 등록 tool은 [API MCP 명세](docs/studio-api-mcp-spec.md#현재-구현과-실행-설정)에, 의상 tool·큐·종료 코드는 [옷장 의상 생성](docs/studio-api-mcp-spec.md#옷장-의상-생성-유료)에 있다.
 
 ## 검증
 
