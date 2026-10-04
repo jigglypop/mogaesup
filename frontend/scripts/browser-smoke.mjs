@@ -23,8 +23,10 @@ mkdirSync(SHOTS, { recursive: true });
 const suffix = randomBytes(3).toString('hex');
 const PASSWORD = randomBytes(16).toString('hex');
 const SCREENSHOT = { timeout: 90_000, animations: 'disabled' };
+// Chrome on this machine's GPU, as scripts/character-e2e.mjs runs it: a software renderer never finishes the WebGPU island.
 const browser = await chromium.launch({
-  args: ['--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan'],
+  channel: 'chrome',
+  args: ['--enable-unsafe-webgpu', '--enable-gpu', ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : [])],
 });
 const problems = [];
 
@@ -170,7 +172,7 @@ await step('visitor says hello to whoever is near', async () => {
 });
 await step('visitor writes in the guestbook', async () => {
   await guest.getByRole('tab', { name: '방명록' }).click();
-  await guest.getByPlaceholder('따뜻한 한마디').fill('섬이 정말 예뻐요');
+  await guest.getByLabel('한마디 남기기').fill('섬이 정말 예뻐요');
   await guest.getByRole('button', { name: '남기기' }).click();
   await guest.getByText('섬이 정말 예뻐요').waitFor();
   await guest.screenshot({ ...SCREENSHOT, path: join(SHOTS, 'guest-guestbook.png') });

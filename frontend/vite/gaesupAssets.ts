@@ -26,6 +26,8 @@ const FIGURES_KEPT = new Set(['man.glb']);
 /** A GLB directly in `gltf/` (not in `props/`, `nature/` or another folder) other than the kept fallback. */
 const isDroppedFigure = (path: string) =>
   path.endsWith('.glb') && !path.includes('/') && !path.includes('\\') && !FIGURES_KEPT.has(path);
+/** What the page cannot start without: the engine's WebAssembly and the fallback 미니미 (frontend/scripts/deploy-aws.ps1 checks the same). */
+const REQUIRED_FILES = ['wasm/gaesup_core.wasm', 'wasm/gaesup_gi.wasm', 'gltf/man.glb'];
 
 /**
  * Texture sizes for the figures (`gltf/*.glb`: the fallback 미니미 the package ships). The minihome
@@ -136,10 +138,13 @@ export function gaesupAssets(): Plugin {
       if (config.command !== 'build') return;
       const outDir = resolve(config.root, config.build.outDir);
       for (const mount of mounts) {
-        if (!existsSync(mount.dir)) continue;
+        // A package that moved these folders would otherwise build a site that cannot start the engine.
+        if (!existsSync(mount.dir)) throw new Error(`gaesup-world has no ${relative(root, mount.dir)}; its package layout changed`);
         const filter = (source: string) => mount.url !== '/gltf/' || !isDroppedFigure(relative(mount.dir, source));
         await cp(mount.dir, join(outDir, mount.url), { recursive: true, force: false, filter });
       }
+      const missing = REQUIRED_FILES.filter((file) => !existsSync(join(outDir, file)));
+      if (missing.length > 0) throw new Error(`The build lacks files the page needs: ${missing.join(', ')}`);
       const io = await createIO();
       const log = (message: string) => config.logger.info(message);
       await slimFigures(io, join(outDir, 'gltf'), log);

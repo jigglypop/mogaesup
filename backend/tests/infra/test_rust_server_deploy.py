@@ -178,9 +178,28 @@ def test_the_previous_binary_is_kept_before_the_swap_and_restored_after_a_failur
     keep = next(index for index, line in enumerate(lines) if '.prev.new' in line and line.startswith('if'))
     swap = next(index for index, line in enumerate(lines) if line.startswith('install -m 755 mogaesup-server'))
     bootstrap = next(index for index, line in enumerate(lines) if line.startswith('python3 bootstrap.py'))
-    assert trap < stopped < stop < keep < swapped < swap < bootstrap < lines.index('systemctl is-active mogaesup') < ok == len(lines) - 1
+    assert trap < stopped < stop < keep < swapped < swap < bootstrap < lines.index('systemctl is-active mogaesup') < ok
     # A failed copy of the previous binary must end the script, which `set -e` does not do inside an `&&` list.
     assert '&&' not in lines[keep]
+    # What follows the healthy release is housekeeping that cannot fail the install.
+    assert lines[ok + 1:] and all(line.endswith('|| true') for line in lines[ok + 1:])
+
+
+def test_every_wait_on_the_instance_is_bounded(deploy):
+    # SSM ends the script at its timeout without running the exit trap, so nothing may wait without a limit.
+    for line in install_script(deploy):
+        if 'curl ' in line:
+            assert '--max-time' in line, line
+    assert 'export PGCONNECT_TIMEOUT=10' in install_script(deploy)
+
+
+def test_the_certificate_bundle_is_replaced_whole(deploy):
+    lines = install_script(deploy)
+    download = next(index for index, line in enumerate(lines) if 'global-bundle.pem' in line and line.startswith('curl'))
+    assert lines[download].endswith('global-bundle.pem.new')
+    assert lines[download + 1] == 'mv -f /opt/mogaesup/global-bundle.pem.new /opt/mogaesup/global-bundle.pem'
+    # Before anything is stopped: a failed download leaves the running release alone.
+    assert download < lines.index('stopped=1')
 
 
 # The commands the script runs on the instance, as bash functions (a function beats the command of the same name).
@@ -193,8 +212,12 @@ systemctl() {
     is-active) if [ -f "$SB/state/running" ]; then echo active; else echo inactive; return 3; fi ;;
   esac
 }
+flock() { :; }
 curl() {
-  case "$*" in *127.0.0.1*) ;; *) return 0 ;; esac
+  case "$*" in
+    *127.0.0.1*) ;;
+    *) while [ $# -gt 0 ]; do if [ "$1" = -o ]; then echo bundle > "$2"; fi; shift; done; return 0 ;;
+  esac
   if [ -f "$SB/state/running" ] && grep -q GOOD "$SB/state/running"; then echo '{"status":"healthy"}'; return 0; fi
   return 22
 }
@@ -214,18 +237,20 @@ dnf() { :; }; aws() { :; }; chown() { :; }; chmod() { :; }; sleep() { :; }
 '''
 
 
-def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', **faults):
+def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', good=None, **faults):
     """Runs the install script on a fake instance under tmp_path: the binaries are text files, and one with GOOD in it
-    answers its health check once the service is started."""
+    answers its health check once the service is started. `good` is the last release that passed its health check."""
     sandbox = tmp_path.as_posix()
     if ' ' in sandbox:
         pytest.skip('the rendered script does not quote paths')
-    for folder in ('state', 'var/log', f'opt/mogaesup/releases/{RELEASE}'):
+    for folder in ('state', 'var/log', 'var/lock', f'opt/mogaesup/releases/{RELEASE}'):
         (tmp_path / folder).mkdir(parents=True)
     (tmp_path / f'opt/mogaesup/releases/{RELEASE}/mogaesup-server').write_text(new)
     if old is not None:
         (tmp_path / 'opt/mogaesup/mogaesup-server').write_text(old)
         (tmp_path / 'state/running').write_text(old)
+    if good is not None:
+        (tmp_path / 'opt/mogaesup/mogaesup-server.good').write_text(good)
     script = replace_host_paths('\n'.join(install_script(deploy)), {
         '/opt/mogaesup': f'{sandbox}/opt/mogaesup', '/var/': f'{sandbox}/var/'})
     # Two tries of each health wait instead of thirty: starting a command costs far more here than the wait it stands for.
@@ -236,13 +261,40 @@ def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', **faults):
     def read(path):
         return (tmp_path / path).read_text() if (tmp_path / path).is_file() else ''
     return SimpleNamespace(code=done.returncode, err=done.stderr.decode(errors='replace'), binary=read('opt/mogaesup/mogaesup-server'),
-                           prev=read('opt/mogaesup/mogaesup-server.prev'), running=read('state/running'),
-                           stops=read('calls.log').count('systemctl stop'), bootstrapped='bootstrap' in read('calls.log'))
+                           prev=read('opt/mogaesup/mogaesup-server.prev'), good=read('opt/mogaesup/mogaesup-server.good'),
+                           running=read('state/running'), stops=read('calls.log').count('systemctl stop'),
+                           bootstrapped='bootstrap' in read('calls.log'), journal=read('var/log/mogaesup-failed-release.log'),
+                           releases=sorted(path.name for path in (tmp_path / 'opt/mogaesup/releases').iterdir()))
 
 
 def test_a_release_that_comes_up_replaces_the_binary_and_keeps_the_old_one(deploy, bash, tmp_path):
     done = install(deploy, bash, tmp_path)
     assert done.code == 0 and (done.binary, done.prev, done.running) == ('NEW-GOOD', 'OLD-GOOD', 'NEW-GOOD')
+    assert done.good == 'NEW-GOOD'
+
+
+def test_a_failure_goes_back_to_the_last_release_that_answered(deploy, bash, tmp_path):
+    # An install the SSM timeout cut short left an unchecked binary behind; the last healthy one comes back instead.
+    done = install(deploy, bash, tmp_path, old='OLD-UNCHECKED-GOOD', good='OLD-GOOD', new='NEW-BAD')
+    assert done.code != 0 and (done.binary, done.running) == ('OLD-GOOD', 'OLD-GOOD')
+    assert done.prev == 'OLD-UNCHECKED-GOOD' and done.good == 'OLD-GOOD'
+
+
+def test_the_service_log_of_a_failed_start_stays_on_the_instance(deploy, bash, tmp_path):
+    # The command's output is printed in the pipeline's public log.
+    done = install(deploy, bash, tmp_path, new='NEW-BAD')
+    assert done.journal.strip() == 'journal tail' and 'journal tail' not in done.err
+    assert '/var/log/mogaesup-failed-release.log' in done.err
+
+
+def test_only_the_newest_release_folders_are_kept(deploy, bash, tmp_path):
+    older = [f'release-2026090{day}T000000Z' for day in range(1, 8)]
+    for at, name in enumerate(older):
+        folder = tmp_path / 'opt/mogaesup/releases' / name
+        folder.mkdir(parents=True)
+        os.utime(folder, (1_700_000_000 + at, 1_700_000_000 + at))
+    done = install(deploy, bash, tmp_path)
+    assert done.code == 0 and done.releases == sorted([*older[-4:], RELEASE])
 
 
 def test_a_release_that_never_gets_healthy_is_replaced_by_the_previous_binary(deploy, bash, tmp_path):

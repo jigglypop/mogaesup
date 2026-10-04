@@ -77,6 +77,15 @@ $forbidden = @($entries | Where-Object { $_ -match '(^|/)(\.env($|\.)|provider\.
 if ($forbidden.Count -gt 0) { throw 'Release archive contains a forbidden credential path.' }
 $unsafe = @($entries | Where-Object { $_ -match '(^/)|(^|/)\.\.(/|$)' })
 if ($unsafe.Count -gt 0) { throw 'Release archive contains an unsafe path.' }
+# The exclusions above match a name at any depth; none of them may drop a tracked release file (a package named build/).
+if ($gitCommit) {
+  $tracked = Invoke-Git (@('-c', 'core.quotePath=false', 'ls-files', '--') + $releasePaths)
+  if ($tracked.ExitCode -ne 0) { throw 'git ls-files of the release files failed.' }
+  $packed = New-Object 'System.Collections.Generic.HashSet[string]'
+  foreach ($entry in $entries) { [void]$packed.Add(($entry -replace '^\./', '')) }
+  $dropped = @($tracked.Lines | ForEach-Object { $_ -replace '^backend/infra/', 'infra/' } | Where-Object { -not $packed.Contains($_) })
+  if ($dropped.Count -gt 0) { throw "Release archive is missing tracked files: $($dropped -join ', ')" }
+}
 Move-Item -LiteralPath $archiveTemp -Destination $archive -Force
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 $key = 'releases/studio/' + $hash + '.tar.gz'

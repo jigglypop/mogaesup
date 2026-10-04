@@ -352,7 +352,9 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 if [[ "$healthy" != true ]]; then
-  docker logs --tail 100 "$candidate" >&2 || true
+  # Kept on the instance: this script's output is printed in the pipeline's public log.
+  docker logs --tail 100 "$candidate" > /var/log/asset-studio-failed-candidate.log 2>&1 || true
+  echo 'the failed candidate container log is in /var/log/asset-studio-failed-candidate.log' >&2
   restore_previous
   echo 'candidate health check failed; previous container restored' >&2
   exit 1

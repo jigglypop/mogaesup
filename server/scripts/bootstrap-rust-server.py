@@ -33,8 +33,10 @@ def parse_args(argv=None):
 
 
 def secret_value(arn, region):
+    # Bounded: the install runs this with the service stopped, inside SSM's execution timeout.
     return json.loads(subprocess.check_output(
-        ['aws', 'secretsmanager', 'get-secret-value', '--secret-id', arn, '--region', region]))['SecretString']
+        ['aws', 'secretsmanager', 'get-secret-value', '--secret-id', arn, '--region', region,
+         '--cli-connect-timeout', '10', '--cli-read-timeout', '30']))['SecretString']
 
 
 def read_env(path):
@@ -130,6 +132,7 @@ def main():
     env['PGPASSWORD'] = master['password']
     env['PGSSLMODE'] = 'verify-full'
     env['PGSSLROOTCERT'] = str(root / 'global-bundle.pem')
+    env.setdefault('PGCONNECT_TIMEOUT', '10')
     # A shared instance (another stack's) has no mogaesup database until the first bootstrap makes one.
     subprocess.run(['psql', '-h', args.endpoint, '-U', master['username'], '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'],
                    input="SELECT 'CREATE DATABASE mogaesup' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mogaesup')\\gexec\n",

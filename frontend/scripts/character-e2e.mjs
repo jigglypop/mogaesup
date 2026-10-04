@@ -454,7 +454,7 @@ if (browser) {
       const screens = [
         // The stage runner lists what each stage could redo.
         ['사진으로 전체 생성', admin.locator('.studio-root button[data-recommended]').first()],
-        ['기본몸', admin.locator('.wardrobe-body', { hasText: names.hero })],
+        ['기본 몸', admin.locator('.wardrobe-body', { hasText: names.hero })],
         // The common body is loaded and dressed in its saved outfit.
         ['파츠', admin.locator('.assembly-preview:not([data-assembly-ready=""])')],
       ];

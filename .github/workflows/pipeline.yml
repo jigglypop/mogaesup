@@ -1,8 +1,8 @@
 name: 점검과 배포
 
-# Pull requests and pushes to main run the checks of the parts they changed. A push to main that passes them deploys
-# what changed since the last successful run: server, then web, then studio. Infrastructure (CloudFormation) is never
-# applied here; the deploy role cannot do it.
+# Pull requests and pushes to main run the checks of the parts they changed. A run on main that passes them deploys each
+# part that changed since that part was last deployed: server, then web, then studio. Infrastructure (CloudFormation) is
+# never applied here; the deploy role cannot do it.
 on:
   pull_request:
   push:
@@ -18,10 +18,11 @@ on:
 permissions:
   contents: read
 
-# Deploys wait for each other and are never cancelled midway. A deploy that is still waiting when a newer push arrives is
-# replaced by it; the newer run compares with the last successful run, so nothing it skipped is lost.
+# Runs on main wait for each other and are never cancelled midway. One still waiting when a newer run arrives is replaced
+# by it; every run deploys what each part still lacks since its last deploy (.github/scripts/deploy_bases.py), so nothing
+# the replaced run would have deployed is lost. Pull requests and other branches only check, in a group of their own.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('check-{0}', github.ref) || 'production' }}
+  group: ${{ (github.event_name == 'pull_request' || github.ref != 'refs/heads/main') && format('check-{0}', github.ref) || 'production' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -30,6 +31,8 @@ env:
   # Checks and the release binary use this one compiler. A newer clippy (1.98 flags chunks_exact and Some(..).filter in
   # server/src/look_bake.rs and looks.rs) must be fixed in the code before this is raised.
   RUST_VERSION: 1.95.0
+  # The studio image installs this uv (backend/infra/Dockerfile); the checks resolve uv.lock with the same one.
+  UV_VERSION: 0.11.9
 
 jobs:
   changes:
@@ -47,23 +50,26 @@ jobs:
       deploy_web: ${{ steps.diff.outputs.deploy_web }}
       deploy_studio: ${{ steps.diff.outputs.deploy_studio }}
     steps:
+      # The routing compares commits by their file lists only, so the history comes without file contents.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: 마지막으로 성공한 실행
+          filter: blob:none
+      - name: 마지막으로 배포한 커밋
         id: previous
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          sha=$(gh api "repos/${{ github.repository }}/actions/workflows/pipeline.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // empty')
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        run: python3 .github/scripts/deploy_bases.py
       - name: 바뀐 곳
         id: diff
         env:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || steps.previous.outputs.sha }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || steps.previous.outputs.check }}
+          BASE_SERVER: ${{ steps.previous.outputs.server }}
+          BASE_WEB: ${{ steps.previous.outputs.web }}
+          BASE_STUDIO: ${{ steps.previous.outputs.studio }}
           TARGET: ${{ inputs.target }}
         run: bash .github/scripts/changes.sh
 
@@ -92,12 +98,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # factory_contract.rs runs the character server's auth.py through uv and skips itself without it.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
       - run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy --component rustfmt
           echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+      # Pull requests read main's cache; only main writes one, so they do not crowd it out.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
@@ -131,10 +142,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
       - run: uv sync --locked --extra studio-mcp
       - run: uv run --no-sync python -m compileall -q backend/src
+      # PostgreSQL runs beside this job, so the record database tests must not skip themselves here.
       - run: uv run --no-sync pytest -q
+        env:
+          REQUIRE_TEST_DATABASE: '1'
 
   frontend-check:
     needs: changes
@@ -145,12 +160,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run build
+      # `npm run build` would type-check again first.
+      - name: 빌드
+        run: npm exec --workspace frontend -- vite build
+      - name: 인라인 스크립트의 CSP 해시
+        run: python3 .github/scripts/check_csp.py --html frontend/index.html --template frontend/infra/aws-static.yaml
+      # deploy-web ships this build, so what goes live is what was checked, and no build tool runs where the deploy role
+      # can be assumed.
+      - name: 배포할 빌드
+        if: needs.changes.outputs.deploy_web == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-dist
+          path: |
+            frontend/dist
+            !frontend/dist/**/*.map
+          retention-days: 3
+          if-no-files-found: error
 
   infra-check:
     needs: changes
@@ -160,6 +191,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: .github/workflows/pipeline.yml
       - name: 워크플로 문법과 변경 감지
         run: |
           curl --fail --silent --show-error --location https://github.com/rhysd/actionlint/releases/download/v1.7.11/actionlint_1.7.11_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
@@ -198,6 +233,7 @@ jobs:
           echo "::error::점검이 실패해 배포하지 않습니다"
           exit 1
 
+  # .github/scripts/deploy_bases.py reads the deploy jobs by these ids (deploy-server, deploy-web, deploy-studio).
   deploy-server:
     needs: [changes, gate]
     if: ${{ !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.deploy_server == 'true' }}
@@ -208,11 +244,29 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Re-running an older run would put its commit back in production while every later run stays green.
+      - name: main의 최신 커밋인지 확인
+        if: github.run_attempt != '1'
+        run: |
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 실행을 다시 돌리면 운영이 되돌아가므로 main에서 새로 실행하세요"
+            exit 1
+          fi
+      # The crates and their release builds carry over between deploys; cargo rebuilds what changed.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/musl-cargo
+            server/target
+          key: musl-${{ env.RUST_VERSION }}-${{ hashFiles('server/Cargo.lock') }}
+          restore-keys: musl-${{ env.RUST_VERSION }}-
       - name: 리눅스 릴리스 바이너리
         working-directory: server
         run: >-
           docker run --rm
           -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/src/target
+          -v "$HOME/.cache/musl-cargo/registry":/usr/local/cargo/registry
           -v "$PWD":/src -w /src "rust:${RUST_VERSION}-alpine"
           sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -224,7 +278,7 @@ jobs:
         working-directory: server
         run: python3 scripts/deploy-rust-server.py --skip-provision
       - name: 운영 주소 확인
-        run: curl --fail --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors https://mogaesup.com/api/health
+        run: curl --fail --silent --show-error --max-time 10 --retry 5 --retry-delay 3 --retry-all-errors https://mogaesup.com/api/health
       - name: 설치 실패 기록
         if: failure()
         working-directory: server
@@ -244,12 +298,22 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # Re-running an older run would put its commit back in production while every later run stays green.
+      - name: main의 최신 커밋인지 확인
+        if: github.run_attempt != '1'
+        run: |
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 실행을 다시 돌리면 운영이 되돌아가므로 main에서 새로 실행하세요"
+            exit 1
+          fi
+      # The build frontend-check made and checked in this run.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run build
+          name: web-dist
+          path: frontend/dist
+      - name: 운영 CSP
+        run: python3 .github/scripts/check_csp.py --html frontend/dist/index.html --live https://mogaesup.com
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
@@ -262,7 +326,7 @@ jobs:
       - name: 운영 파일 형식
         run: |
           check() {
-            type=$(curl --fail --silent --show-error --head "https://mogaesup.com$1" | tr -d '\r' | awk -F': ' 'tolower($1) == "content-type" { print tolower($2) }')
+            type=$(curl --fail --silent --show-error --max-time 20 --head "https://mogaesup.com$1" | tr -d '\r' | awk -F': ' 'tolower($1) == "content-type" { print tolower($2) }')
             case "$type" in *"$2"*) echo "$1 $type" ;; *) echo "::error::$1 의 content-type이 $type 입니다"; exit 1 ;; esac
           }
           check "$(grep -oE '/assets/[^"]+\.js' frontend/dist/index.html | head -1)" javascript
@@ -278,11 +342,22 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Re-running an older run would put its commit back in production while every later run stays green.
+      - name: main의 최신 커밋인지 확인
+        if: github.run_attempt != '1'
+        run: |
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 실행을 다시 돌리면 운영이 되돌아가므로 main에서 새로 실행하세요"
+            exit 1
+          fi
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      # The instance stays off only when someone stopped it on purpose; this job does not start it.
+      # The instance powers itself off after two idle hours (backend/infra/idle-stop.sh), and this job does not start it.
+      # The studio then stays pending without holding back the server and web: once it is on, the next run on main (a
+      # push, or a manual run of any target) deploys it.
       - name: 스튜디오 인스턴스
         id: instance
         run: |
@@ -290,7 +365,7 @@ jobs:
           state=$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].State.Name' --output text)
           ping=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$id" --query 'InstanceInformationList[0].PingStatus' --output text)
           if [ "$state" != running ] || [ "$ping" != Online ]; then
-            echo "::error::스튜디오 인스턴스 $id 가 꺼져 있거나 SSM에 닿지 않습니다 (상태 $state, SSM $ping). 켠 뒤 이 워크플로를 target=studio로 다시 실행하세요"
+            echo "::error::스튜디오 인스턴스 $id 가 꺼져 있거나 SSM에 닿지 않습니다 (상태 $state, SSM $ping). 켠 뒤 main에서 이 워크플로를 target=studio로 실행하세요"
             exit 1
           fi
           echo "id=$id" >> "$GITHUB_OUTPUT"

@@ -4,6 +4,7 @@ Runs against a throwaway database on the compose PostgreSQL (server/docker-compo
 test_record_store; skipped when it is not running. The records are JSON, so they never reach S3, which is an empty stand-in.
 """
 import json
+import os
 from pathlib import Path
 import sys
 import uuid
@@ -33,6 +34,9 @@ def database():
     try:
         admin = psycopg.connect(ADMIN + ' dbname=postgres', autocommit=True)
     except psycopg.OperationalError as exc:
+        # CI runs PostgreSQL beside the tests (REQUIRE_TEST_DATABASE): there a missing database fails instead of skipping.
+        if os.environ.get('REQUIRE_TEST_DATABASE'):
+            pytest.fail(f'PostgreSQL at 127.0.0.1:55432 is required here: {exc}')
         pytest.skip(f'local PostgreSQL at 127.0.0.1:55432 is not running (docker compose up -d postgres in server/): {exc}')
     name = f'test_records_{uuid.uuid4().hex}'
     with admin:

@@ -63,19 +63,26 @@ $commandId = (($send.Text | ConvertFrom-Json).Command.CommandId)
 if (-not $commandId) { throw 'SSM did not return a command ID.' }
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds + 30)
-$invocation = $null
+# Pending until the instance reports otherwise. A lookup that fails (the invocation not registered yet, a throttled call)
+# is asked again until the deadline: `continue` in a do/while goes to its condition, so the loop must read as pending.
+$invocation = [pscustomobject]@{ Status = 'Pending' }
+$lookupFailure = $null
 do {
   Start-Sleep -Seconds 5
   $get = Invoke-Aws @('ssm', 'get-command-invocation', '--command-id', $commandId, '--instance-id', $InstanceId) -AllowFailure
   if ($get.ExitCode -ne 0) {
-    if ($get.Text -match 'InvocationDoesNotExist' -and (Get-Date) -lt $deadline) { continue }
-    throw 'Could not read the SSM command invocation.'
+    $lookupFailure = ($get.Text -split "`n" | Select-Object -Last 1)
+    continue
   }
+  $lookupFailure = $null
   $invocation = $get.Text | ConvertFrom-Json
   Write-Host "SSM command $commandId status: $($invocation.Status)"
 } while ($invocation.Status -in @('Pending', 'InProgress', 'Delayed') -and (Get-Date) -lt $deadline)
 
-if (-not $invocation -or $invocation.Status -in @('Pending', 'InProgress', 'Delayed')) { throw "SSM deployment is still non-terminal: $commandId. Inspect this existing command; do not submit the release again." }
+if ($invocation.Status -in @('Pending', 'InProgress', 'Delayed')) {
+  $last = if ($lookupFailure) { " The last lookup failed: $lookupFailure" } else { '' }
+  throw "SSM deployment is still non-terminal: $commandId. Inspect this existing command; do not submit the release again.$last"
+}
 if ($invocation.StandardOutputContent) { Write-Host $invocation.StandardOutputContent }
 if ($invocation.Status -ne 'Success') {
   if ($invocation.StandardErrorContent) { Write-Error $invocation.StandardErrorContent -ErrorAction Continue }

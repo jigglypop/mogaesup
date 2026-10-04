@@ -177,26 +177,40 @@ def bootstrap_command(args, outputs, studio_instance):
 def install_commands(release, bucket, bootstrap):
     """The SSM script lines that install a release. The binary being replaced is kept as mogaesup-server.prev, and the
     server.env and systemd unit the bootstrap rewrites as <file>.prev; once the service is stopped, any failure up to a
-    healthy new release (the exit trap) puts those back and starts the previous release again."""
+    healthy new release (the exit trap) puts those back and starts the previous release again: the last release that
+    answered its health check (mogaesup-server.good), or the binary it replaced when none has yet."""
     folder = f'/opt/mogaesup/releases/{release}'
     binary = '/opt/mogaesup/mogaesup-server'
-    health = 'curl -fsS http://127.0.0.1:8080/api/health'
+    bundle = '/opt/mogaesup/global-bundle.pem'
+    # Every wait is bounded: SSM ends the script at its execution timeout without running the exit trap.
+    health = 'curl -fsS --max-time 5 http://127.0.0.1:8080/api/health'
     return [
-        'set -eu', 'dnf install -y postgresql17 > /var/log/mogaesup-packages.log',
+        'set -eu',
+        # One install at a time; a second one would take the first one's binary as the previous release.
+        'exec 9>/var/lock/mogaesup-install.lock', "flock -n 9 || { echo 'another install is running' >&2; exit 3; }",
+        'dnf install -y postgresql17 > /var/log/mogaesup-packages.log',
         f'install -d -m 750 {folder}',
-        f'aws s3 cp s3://{bucket}/{release}/ {folder}/ --recursive --region {REGION} --no-progress --only-show-errors',
+        f'aws s3 cp s3://{bucket}/{release}/ {folder}/ --region {REGION} --recursive --no-progress --only-show-errors '
+        '--cli-connect-timeout 10 --cli-read-timeout 60',
         f'cd {folder}', 'sha256sum -c SHA256SUMS',
-        'curl --fail --silent --show-error https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /opt/mogaesup/global-bundle.pem',
+        # The running server reads the RDS certificates from this file: it is replaced whole or not at all.
+        f'curl --fail --silent --show-error --max-time 60 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o {bundle}.new',
+        f'mv -f {bundle}.new {bundle}',
+        'export PGCONNECT_TIMEOUT=10',
         'stopped=0; swapped=0; configured=0; ok=0',
         'restore() {',
         '  status=$?; trap - EXIT',
         '  if [ "$stopped" = 1 ] && [ "$ok" != 1 ]; then',
         '    [ "$status" != 0 ] || status=1',
         "    echo 'the new release did not come up; starting the previous one again' >&2",
-        '    journalctl -u mogaesup -n 40 --no-pager >&2 || true',
+        # The service's own log stays on the instance: the command's output reaches the pipeline's public log.
+        '    journalctl -u mogaesup -n 40 --no-pager > /var/log/mogaesup-failed-release.log 2>&1 || true',
+        "    echo 'the service log of the failed start is in /var/log/mogaesup-failed-release.log' >&2",
         '    systemctl stop mogaesup.service 2>/dev/null || true',
         '    if [ "$swapped" = 1 ]; then',
-        f'      if [ -f {binary}.prev ]; then install -m 755 -o root -g mogaesup {binary}.prev {binary} || true; else echo \'there is no previous binary to put back\' >&2; fi',
+        f'      if [ -f {binary}.good ]; then previous={binary}.good; else previous={binary}.prev; fi',
+        '      if [ -f "$previous" ]; then install -m 755 -o root -g mogaesup "$previous" ' + binary + ' || true; '
+        "else echo 'there is no previous binary to put back' >&2; fi",
         '    fi',
         '    if [ "$configured" = 1 ]; then',
         f'      for file in {SERVER_ENV} {SERVICE_UNIT}; do if [ -f "$file.prev" ]; then cp -p "$file.prev" "$file" || true; fi; done',
@@ -223,6 +237,9 @@ def install_commands(release, bucket, bootstrap):
         f'for attempt in $(seq 1 30); do if {health}; then break; fi; sleep 2; done',
         'systemctl is-active mogaesup', health,
         'ok=1',
+        # Housekeeping once the release answers; a failure here does not undo it.
+        f'cp -p {binary} {binary}.good.new && mv -f {binary}.good.new {binary}.good || true',
+        "ls -1dt /opt/mogaesup/releases/release-* | tail -n +6 | xargs -r rm -rf -- || true",
     ]
 
 

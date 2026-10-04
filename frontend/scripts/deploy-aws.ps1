@@ -62,7 +62,12 @@ try {
     Invoke-Native aws cloudformation deploy --region $Region --stack-name $StackName --template-file $template --parameter-overrides @overrides --no-fail-on-empty-changeset --tags application=mogaesup
   }
   $stack = Invoke-Native aws cloudformation describe-stacks --region $Region --stack-name $StackName --query 'Stacks[0]' --output json | ConvertFrom-Json
-  if ($stack.StackStatus -notin @('CREATE_COMPLETE', 'UPDATE_COMPLETE')) { throw "CloudFormation stack is not ready: $($stack.StackStatus)" }
+  # A rolled-back update leaves the stack as it was before that update, which a release can go onto.
+  if ($stack.StackStatus -eq 'UPDATE_ROLLBACK_COMPLETE') {
+    Write-Warning 'The last stack update was rolled back (UPDATE_ROLLBACK_COMPLETE); deploying onto the stack as it stands.'
+  } elseif ($stack.StackStatus -notin @('CREATE_COMPLETE', 'UPDATE_COMPLETE')) {
+    throw "CloudFormation stack is not ready: $($stack.StackStatus)"
+  }
   $outputs = @{}; foreach ($item in $stack.Outputs) { $outputs[$item.OutputKey] = $item.OutputValue }
   Write-Host "Stack $StackName $($stack.StackStatus): $($outputs.SiteUrl)"
   if ($ProvisionOnly) { return }
@@ -71,26 +76,54 @@ try {
     Invoke-Native npm run build
   }
   if (-not (Test-Path -LiteralPath (Join-Path $dist 'index.html'))) { throw 'dist/index.html is missing; build first.' }
+  # The engine's files the page cannot start without, checked before anything is uploaded.
+  $required = @(
+    @{ Path = 'wasm/gaesup_core.wasm'; Type = 'application/wasm' },
+    @{ Path = 'wasm/gaesup_gi.wasm'; Type = 'application/wasm' },
+    @{ Path = 'gltf/man.glb'; Type = 'model/gltf-binary' }
+  )
+  foreach ($asset in $required) {
+    if (-not (Test-Path -LiteralPath (Join-Path $dist $asset.Path))) { throw "Required runtime file is missing: $($asset.Path)" }
+  }
 
   # Old hashed chunks stay for tabs still open on the previous release; index.html goes last.
   $bucket = "s3://$($outputs.BucketName)"
+  # The WebAssembly keeps its name across engine releases while the hashed script that loads it changes, so browsers
+  # ask whether it changed every time instead of running an hour-old copy against a new script.
   $typed = @(
-    @{ Pattern = '*.glb'; Type = 'model/gltf-binary' },
-    @{ Pattern = '*.wasm'; Type = 'application/wasm' },
-    @{ Pattern = '*.woff2'; Type = 'font/woff2' }
+    @{ Pattern = '*.glb'; Type = 'model/gltf-binary'; Cache = 'public,max-age=3600' },
+    @{ Pattern = '*.wasm'; Type = 'application/wasm'; Cache = 'no-cache' },
+    @{ Pattern = '*.woff2'; Type = 'font/woff2'; Cache = 'public,max-age=3600' }
   )
   # Patterns are written as one `--option=value` token: PowerShell on Linux expands a lone '*' or '/*' argument into file names.
   $excludes = @('--exclude=index.html', '--exclude=assets/*', '--exclude=*.map')
   foreach ($entry in $typed) { $excludes += "--exclude=$($entry.Pattern)" }
   Invoke-Native aws s3 sync $dist $bucket --region $Region @excludes --cache-control 'public,max-age=3600' --no-progress --only-show-errors
   foreach ($entry in $typed) {
-    Invoke-Native aws s3 cp $dist $bucket --recursive --region $Region '--exclude=*' "--include=$($entry.Pattern)" '--exclude=assets/*' --content-type $entry.Type --cache-control 'public,max-age=3600' --no-progress --only-show-errors
+    Invoke-Native aws s3 cp $dist $bucket --recursive --region $Region '--exclude=*' "--include=$($entry.Pattern)" '--exclude=assets/*' --content-type $entry.Type --cache-control $entry.Cache --no-progress --only-show-errors
   }
-  Invoke-Native aws s3 cp (Join-Path $dist 'assets') "$bucket/assets" --recursive --region $Region '--exclude=*.map' --cache-control 'public,max-age=31536000,immutable' --no-progress --only-show-errors
+  # Scripts and stylesheets get their types named rather than guessed from the machine's MIME table.
+  $immutable = 'public,max-age=31536000,immutable'
+  $assets = Join-Path $dist 'assets'
+  Invoke-Native aws s3 cp $assets "$bucket/assets" --recursive --region $Region '--exclude=*' '--include=*.js' --content-type 'text/javascript; charset=utf-8' --cache-control $immutable --no-progress --only-show-errors
+  Invoke-Native aws s3 cp $assets "$bucket/assets" --recursive --region $Region '--exclude=*' '--include=*.css' --content-type 'text/css; charset=utf-8' --cache-control $immutable --no-progress --only-show-errors
+  Invoke-Native aws s3 cp $assets "$bucket/assets" --recursive --region $Region '--exclude=*.js' '--exclude=*.css' '--exclude=*.map' --cache-control $immutable --no-progress --only-show-errors
   Invoke-Native aws s3 cp (Join-Path $dist 'index.html') "$bucket/index.html" --region $Region --cache-control 'no-cache,max-age=0,must-revalidate' --content-type 'text/html; charset=utf-8' --no-progress --only-show-errors
 
   $invalidation = Invoke-Native aws cloudfront create-invalidation --distribution-id $outputs.DistributionId '--paths=/*' --output json | ConvertFrom-Json
-  Invoke-Native aws cloudfront wait invalidation-completed --distribution-id $outputs.DistributionId --id $invalidation.Invalidation.Id
+  # The release is live once index.html is uploaded (it is served without caching); a slow invalidation only delays the
+  # edges' older models and engine files, so a wait that runs out is a warning, not a failed release.
+  $invalidated = $false
+  foreach ($attempt in 1..2) {
+    try {
+      Invoke-Native aws cloudfront wait invalidation-completed --distribution-id $outputs.DistributionId --id $invalidation.Invalidation.Id
+      $invalidated = $true
+      break
+    } catch {
+      Write-Host "CloudFront invalidation $($invalidation.Invalidation.Id) is still in progress ($attempt)"
+    }
+  }
+  if (-not $invalidated) { Write-Warning "CloudFront invalidation $($invalidation.Invalidation.Id) did not finish within 20 minutes; edges keep older files until it does." }
 
   # The published page is this build, the API answers through the same origin, and a missing model is not the app.
   $site = $outputs.SiteUrl
@@ -98,13 +131,8 @@ try {
   $local = [IO.File]::ReadAllText((Join-Path $dist 'index.html'))
   if ($page.Content -ne $local) { throw 'Published index.html differs from dist/index.html.' }
   # These engine files must be the uploaded build, with types the browser can load.
-  foreach ($asset in @(
-    @{ Path = 'wasm/gaesup_core.wasm'; Type = 'application/wasm' },
-    @{ Path = 'wasm/gaesup_gi.wasm'; Type = 'application/wasm' },
-    @{ Path = 'gltf/man.glb'; Type = 'model/gltf-binary' }
-  )) {
+  foreach ($asset in $required) {
     $assetPath = Join-Path $dist $asset.Path
-    if (-not (Test-Path -LiteralPath $assetPath)) { throw "Required runtime file is missing: $($asset.Path)" }
     $assetUrl = "$site/$($asset.Path)"
     $assetHead = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $assetUrl
     if ([string]$assetHead.Headers['Content-Type'] -notlike "$($asset.Type)*") {

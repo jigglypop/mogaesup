@@ -93,6 +93,11 @@ Resources:
             Status: Enabled
             NoncurrentVersionExpiration: {NoncurrentDays: 14}
             AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}
+          # Every deploy uploads a new release-<time>/ folder; a rollback uses the binaries kept on the instance.
+          - Id: OldReleases
+            Status: Enabled
+            Prefix: release-
+            ExpirationInDays: 60
       Tags: [{Key: application, Value: mogaesup}]
   ApiSecurityGroup:
     Type: AWS::EC2::SecurityGroup
