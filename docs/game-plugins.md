@@ -117,6 +117,7 @@ impl Game for Relay {
 | `create(layout, ctx)` (`Kind`에 등록) | 방장의 `layout`을 검사하고 게임을 만든다. `Err`면 방장에게 `Error`가 가고 대기실이 그대로다. |
 | `view(viewer, now)` | 보는 사람별 화면. `Some(id)`는 참가자, `None`은 구경하는 사람. 비밀(역할, 내 다음 목표)은 그 주인의 화면에만 넣는다. 사람마다 직렬화한 화면을 비교해 바뀐 사람에게만 보내므로, 남은 시간 대신 절대 시각(`endsAt`, 서버 ms)을 넣는다. |
 | `act(player, action, ctx)` | 참가자의 행동. `Err(GameError)`는 그 사람에게만 가고, 거절한 행동은 아무것도 바꾸지 않는다(그때 낸 이벤트도 버려진다). |
+| `watch(viewer, action, ctx)` (선택) | 구경하는 사람의 `Act`(놓친 것을 달라는 요청 등). 기본은 거절(`not_player`)이다. |
 | `tick(ctx)` | 진행 중 `tick_hz`마다. 경과 시간은 `ctx.now()`의 차이로 잰다. |
 | `leave(player, ctx)` | 직접 나갔거나 방을 10초 넘게 떠난 사람. 이어 가거나 끝낸다. |
 | `result()` | `Some`이 되는 순간 `ended`가 되고 모두에게 보인다. |
@@ -128,7 +129,7 @@ impl Game for Relay {
 - `ctx.now()`: 서버 시각(ms, 단조 증가, Unix 시각에 가까움). `ctx.players()`: 참가 순서의 `Member { id, name }`(반복 중에도 `emit` 가능). `ctx.is_player(id)`, `ctx.name(id)`.
 - `ctx.position(id)` / `ctx.positions()`: 실시간 방에서 그 사람 페이지가 알린 위치 `[x, y, z]`. 아직 자리를 잡지 않았거나 방에 없으면 없다. 이번 호출 시점의 스냅샷이다.
 - `ctx.rng()`: 세션마다 시드가 다른 `StdRng`. `Games::new(kinds, Some(seed))`면 재현된다.
-- 이벤트: `ctx.emit(event)`(섬의 게임 소켓 모두), `ctx.emit_to(&[ids], event)`, `ctx.emit_one(id, event)`. 클라이언트에는 `{"type":"Event","kind":"<kind>","event":…}`로 가고 같은 변화의 `Session`보다 뒤에 도착한다. 놓쳐도 되는 일회성 알림에만 쓰고, 상태는 `view`에 둔다.
+- 이벤트: `ctx.emit(event)`(섬의 게임 소켓 모두), `ctx.emit_to(&[ids], event)`, `ctx.emit_one(id, event)`, `ctx.emit_except(&[ids], event)`(그 사람들만 빼고 모두). 클라이언트에는 `{"type":"Event","kind":"<kind>","event":…}`로 가고 같은 변화의 `Session`보다 뒤에 도착한다. 놓쳐도 되는 일회성 알림에만 쓰고, 상태는 `view`에 둔다.
 - `distance_xz`, `within(center, point, radius)`(땅 위 거리), `pick`, `pick_many`, `point`, `layout_points(layout, field, min, max)`(모양·개수·좌표: 유한, 각 축 |값| ≤ 200), `distinct(points, gap)`(가까운 점 하나로). 프레임은 16 KiB까지라 점은 200개쯤이 한도다.
 
 ### 프로토콜 요약

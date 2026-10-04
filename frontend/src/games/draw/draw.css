@@ -1,0 +1,81 @@
+/* 캐치마인드: the board, the drawer's tools, the guesses and the chat. */
+.mg-draw { display: grid; gap: 10px; }
+
+.mg-draw-head { display: flex; align-items: center; gap: 10px; min-height: 34px; }
+.mg-draw-turn {
+  flex: none;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--mg-tint);
+  color: var(--mg-muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 26px;
+  font-variant-numeric: tabular-nums;
+}
+.mg-draw-word { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.mg-draw-word small { flex: none; font-size: 12px; font-weight: 750; color: var(--mg-muted); }
+.mg-draw-word b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; font-weight: 850; letter-spacing: -0.02em; }
+.mg-draw-head .mg-game-timer { flex: none; font-size: 24px; }
+
+/* The same shape for everyone (board.ts ASPECT), at whatever width the panel has. */
+.mg-draw-board {
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--mg-draw-paper);
+  box-shadow: inset 0 0 0 1px var(--mg-hair-strong);
+}
+.mg-draw-canvas { display: block; width: 100%; height: 100%; }
+.mg-draw-canvas[data-editable] { touch-action: none; cursor: crosshair; }
+
+.mg-draw-tools { display: grid; gap: 8px; }
+.mg-draw-palette { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; }
+.mg-draw-palette button {
+  justify-self: center;
+  width: 100%;
+  max-width: 34px;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 2px solid var(--mg-glass-strong);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--mg-hair-strong);
+}
+.mg-draw-palette button[aria-checked='true'] { box-shadow: 0 0 0 2px var(--mg-primary); }
+.mg-draw-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.mg-draw-sizes { margin-right: auto; }
+.mg-draw-sizes > button { padding: 0 11px; }
+.mg-draw-sizes i { display: block; border-radius: 50%; background: currentColor; }
+
+.mg-draw-guess { display: flex; gap: 6px; }
+.mg-draw-guess .mg-field { flex: 1; min-width: 0; height: 40px; }
+
+.mg-draw-log {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-height: 52px;
+  max-height: 128px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: 12px;
+  background: var(--mg-tint);
+  font-size: 13px;
+}
+.mg-draw-log:empty { min-height: 0; padding: 0; background: none; }
+.mg-draw-log b { margin-right: 6px; font-weight: 800; }
+.mg-draw-log .is-good { color: var(--mg-good); }
+.mg-draw-log .is-answer { color: var(--mg-primary); font-weight: 800; }
+
+.mg-draw-mark { flex: none; width: 16px; height: 16px; color: var(--mg-muted); }
+.mg-draw-mark.is-good { color: var(--mg-good); }
+
+/* Phones: the board and its tools need more than the panel's usual height; it still ends above the bottom rail. */
+@media (max-width: 720px) {
+  .mg-game:has(.mg-draw) { max-height: calc(100dvh - var(--mg-edge) * 3 - 58px - 76px); }
+  .mg-draw-head .mg-game-timer { font-size: 22px; }
+}

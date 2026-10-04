@@ -1,3 +1,4 @@
+import { draw } from './draw';
 import type { GameDefinition } from './game';
 import { ox } from './ox';
 import { impostor } from './impostor';
@@ -15,6 +16,7 @@ export const GAMES: readonly GameDefinition[] = [
   impostor,
   redlight,
   tag,
+  draw,
 ];
 
 export const gameOf = (kind: string | null | undefined): GameDefinition | null => GAMES.find((game) => game.kind === kind) ?? null;

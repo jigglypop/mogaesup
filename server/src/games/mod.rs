@@ -14,7 +14,8 @@
 //! - `{"type":"Join"}`, `{"type":"Leave"}`: joins the lobby; leaves the session (in any phase).
 //! - `{"type":"Start","layout":{…}}`: the host starts the lobby's game once it has enough players. `layout` is data the
 //!   host's page computed from the island it has loaded (open spots, say), in the game's own shape; the game checks it.
-//! - `{"type":"Act","action":{…}}`: a player's move, in the game's own shape.
+//! - `{"type":"Act","action":{…}}`: a player's move, in the game's own shape (from someone watching, see
+//!   [`Game::watch`]).
 //! - `{"type":"Close"}`: the host ends the session for everyone.
 //! - `{"type":"Ping","ts":n}`: answered with `{"type":"Pong","ts":n}`.
 //!
@@ -88,6 +89,7 @@ registry! {
     impostor,
     redlight,
     tag,
+    draw,
 }
 
 /// Milliseconds on the server's clock: what games measure time in, and what views carry (`endsAt`). Monotonic, and
@@ -169,6 +171,8 @@ pub enum Audience {
     Everyone,
     /// These players' sockets only.
     Only(Vec<Uuid>),
+    /// Everyone but these players' sockets.
+    Except(Vec<Uuid>),
 }
 
 impl Audience {
@@ -176,6 +180,7 @@ impl Audience {
         match self {
             Self::Everyone => true,
             Self::Only(players) => players.contains(&user),
+            Self::Except(players) => !players.contains(&user),
         }
     }
 }
@@ -249,6 +254,11 @@ impl<'a> Ctx<'a> {
         self.events.push((Audience::Only(vec![player]), event));
     }
 
+    /// Sends `event` to everyone watching but these players (whoever it came from, say).
+    pub fn emit_except(&mut self, players: &[Uuid], event: Value) {
+        self.events.push((Audience::Except(players.to_vec()), event));
+    }
+
     /// The events emitted so far, in order.
     pub fn events(&self) -> &[(Audience, Value)] {
         &self.events
@@ -270,6 +280,12 @@ pub trait Game: Send {
 
     /// A player's action. Err refuses it, telling that player why; a refused action must change nothing.
     fn act(&mut self, player: Uuid, action: &Value, ctx: &mut Ctx) -> Result<(), GameError>;
+
+    /// An action from someone watching, not playing (asking for what they missed, say), as [`Game::act`] takes a
+    /// player's. Refused unless a game takes some.
+    fn watch(&mut self, _viewer: Uuid, _action: &Value, _ctx: &mut Ctx) -> Result<(), GameError> {
+        Err(NOT_PLAYER)
+    }
 
     /// Moves the game on; called [`Kind::tick_hz`] times a second while it plays (measure time by `ctx.now()`).
     fn tick(&mut self, ctx: &mut Ctx);
@@ -1062,16 +1078,20 @@ fn act(
     if session.phase != Phase::Playing {
         return Err(NOT_PLAYING);
     }
-    if !session.has(caller.user) {
-        return Err(NOT_PLAYER);
-    }
+    let playing = session.has(caller.user);
     let members = session.members();
     let positions = positions(&session.players, room);
     let game = session.game.as_mut().ok_or(NOT_PLAYING)?;
     let mut ctx = Ctx::new(now, &members, &positions, &mut session.rng);
-    game.act(caller.user, action, &mut ctx)?;
+    if playing {
+        game.act(caller.user, action, &mut ctx)?;
+    } else {
+        game.watch(caller.user, action, &mut ctx)?;
+    }
     let events = ctx.into_events();
-    session.active_at = now;
+    if playing {
+        session.active_at = now;
+    }
     session.settle(now);
     Ok(Outcome { opened: None, events })
 }

@@ -97,6 +97,8 @@
   --mg-redlight-marker: #f3e3cf;
   --mg-redlight-eye: #2a2238;
   --mg-tag-it: #ff3d8b;
+  /* 캐치마인드's paper: light in either theme, since the strokes keep their colours. */
+  --mg-draw-paper: #ffffff;
 }
 
 :root[data-theme='dark'] {
@@ -167,4 +169,5 @@
   --mg-redlight-marker: #f3e3cf;
   --mg-redlight-eye: #2a2238;
   --mg-tag-it: #ff3d8b;
+  --mg-draw-paper: #ecebf2;
 }

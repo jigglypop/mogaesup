@@ -243,6 +243,26 @@ fn secrets_reach_only_their_owner_and_unchanged_views_are_not_sent_again() {
 }
 
 #[test]
+fn an_event_may_skip_some_players_and_someone_watching_acts_only_where_the_game_lets_them() {
+    let Lobby { games, a, b, mut sa, mut sb, room, .. } = lobby();
+    let watcher = person("w");
+    let mut sw = connect(&games, &watcher, "pw");
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, T0);
+    for socket in [&mut sa, &mut sb, &mut sw] {
+        socket.frames();
+    }
+    games.hub().islands[ISLAND].announce("tally", vec![(Audience::Except(vec![a.id]), json!({"type": "aside"}))]);
+    assert!(sa.frames().is_empty());
+    let aside = json!({"type": "Event", "kind": "tally", "event": {"type": "aside"}});
+    assert_eq!((sb.frames(), sw.frames()), (vec![aside.clone()], vec![aside]));
+    assert!(Audience::Except(vec![a.id]).includes(b.id) && !Audience::Except(vec![b.id]).includes(b.id));
+    // The tally takes nothing from people watching: refused as before, and nothing changes.
+    sw.send(&games, json!({"type": "Act", "action": {"add": 1}}), &room, T0 + 1);
+    assert_eq!(errors(&sw.frames()), ["not_player"]);
+    assert!(sa.frames().is_empty());
+}
+
+#[test]
 fn ticks_see_where_each_player_stands_by_their_own_peer() {
     let Lobby { games, a, b, mut sa, room, id, .. } = lobby();
     sa.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, T0);
