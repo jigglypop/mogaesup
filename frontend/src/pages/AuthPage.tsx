@@ -6,9 +6,11 @@ import { problemText } from '../api/client';
 import { useAuth } from '../auth/AuthProvider';
 import { returnPath } from '../auth/signIn';
 import { Icon } from '../ui/icons';
+import { useTabs } from '../ui/tabs';
 import { Loading } from './Loading';
 
 type Mode = 'login' | 'signup';
+const MODES: readonly Mode[] = ['login', 'signup'];
 
 /**
  * `/`: sign in or sign up. Afterwards, and for a visitor already signed in, it goes back to `?next=` (a path on this
@@ -22,6 +24,12 @@ export function AuthPage() {
   const [mode, setMode] = useState<Mode>('login');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // The form is the panel of whichever tab is chosen. A sign-in error means nothing on the sign-up form, and the
+  // other way round.
+  const tabs = useTabs(MODES, mode, (chosen) => {
+    setMode(chosen);
+    setError('');
+  });
 
   if (status === 'loading') return <Loading />;
   if (user) return <Navigate to={next ?? `/@${user.username}`} replace />;
@@ -58,23 +66,14 @@ export function AuthPage() {
           </span>
           모개숲
         </h1>
-        <div className="mg-tabs" role="tablist">
-          {(['login', 'signup'] as const).map((item) => (
-            <button
-              key={item}
-              role="tab"
-              aria-selected={mode === item}
-              onClick={() => {
-                // A sign-in error means nothing on the sign-up form, and the other way round.
-                setMode(item);
-                setError('');
-              }}
-            >
+        <div className="mg-tabs" {...tabs.list}>
+          {MODES.map((item) => (
+            <button key={item} type="button" {...tabs.tab(item)}>
               {item === 'login' ? '로그인' : '가입하기'}
             </button>
           ))}
         </div>
-        <form className="mg-auth-form" onSubmit={submit}>
+        <form className="mg-auth-form" onSubmit={submit} {...tabs.panel(mode)}>
           <label className="mg-label">
             아이디
             <input

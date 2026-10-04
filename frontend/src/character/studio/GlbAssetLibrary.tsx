@@ -10,7 +10,7 @@ import { glbAssetsApi, glbAssetRecovery, glbPreparationRecovery, glbAssetSlots, 
 import './glb-assets.css';
 
 type Props = { slot?: GlbAssetSlot; bases: FactoryJob[]; defaultBaseId?: string; onJob: (job: FactoryJob) => void };
-const labels: Record<GlbAssetSlot, string> = { ...partLabels, body: '기본몸', hair: '헤어', hat: '모자·장식', top: '상의', bottom: '하의', shoes: '신발', weapon: '무기', tool: '도구', glasses: '안경', prop: '기물' };
+const labels: Record<GlbAssetSlot, string> = { ...partLabels, body: '기본 몸', hair: '헤어', hat: '모자·장식', top: '상의', bottom: '하의', shoes: '신발', weapon: '무기', tool: '도구', glasses: '안경', prop: '기물' };
 const operationLabels: Record<string, string> = { accepted: '접수됨', pipeline_queued: '대기', pipeline_running: '처리 중', running: '처리 중', review_required: '저장 완료', complete: '저장 완료', failed: '중단', pipeline_paused: '이어가기 필요', recovery_required: '이어가기 필요' };
 
 export function GlbAssetLibrary({ slot, bases, defaultBaseId, onJob }: Props) {

@@ -53,9 +53,21 @@ function decodeTuck(coverage: WardrobeCoverage): Tuck | null {
   return { anchors: decode(coverage.anchors, (buffer, length) => new Int32Array(buffer, 0, length)),
     moves: decode(coverage.tucks, (buffer, length) => new Float32Array(buffer, 0, length)), keys: coverage.anchor_keys };
 }
-function unionBits(target: Record<string, Uint8Array>, hidden: Record<string, string>) {
-  for (const [key, value] of Object.entries(hidden)) {
-    const bits = decodeBits(value);
+type DecodedCoverage = { hidden: Record<string, Uint8Array>; over: Record<string, Uint8Array> | null; tuck: Tuck | null };
+const decodedCoverages = new WeakMap<WardrobeCoverage, DecodedCoverage>();
+/** A coverage's bitsets and tuck, decoded once when it arrives rather than on every pass over what is worn. */
+function decodeCoverage(coverage: WardrobeCoverage): DecodedCoverage {
+  let decoded = decodedCoverages.get(coverage);
+  if (!decoded) {
+    const bitsets = (values: Record<string, string>) => Object.fromEntries(Object.entries(values).map(([key, value]) => [key, decodeBits(value)]));
+    decoded = { hidden: bitsets(coverage.hidden), over: coverage.over ? bitsets(coverage.over) : null, tuck: decodeTuck(coverage) };
+    decodedCoverages.set(coverage, decoded);
+  }
+  return decoded;
+}
+/** Adds `bitsets` to `target`; a decoded bitset is shared, never written to. */
+function unionBits(target: Record<string, Uint8Array>, bitsets: Record<string, Uint8Array>) {
+  for (const [key, bits] of Object.entries(bitsets)) {
     target[key] = target[key] ? target[key].map((byte, index) => byte | (bits[index] || 0)) : bits;
   }
 }
@@ -88,7 +100,7 @@ export default function Wardrobe() {
   const reloadParts = useCallback(async (signal?: AbortSignal) => {
     if (!body) return [];
     const value = await factoryApi.wardrobeParts(body.job_id, signal);
-    if (!sameBody(value.body)) throw new Error('옷장 몸 버전이 바뀌었습니다. 몸과 파츠를 다시 불러와 주세요.');
+    if (!sameBody(value.body)) throw new Error('옷장 몸 버전이 바뀌었어요. 몸과 파츠를 다시 불러와 주세요.');
     library.setValue(value);
     return value.parts;
   }, [body?.job_id, body?.version, body?.body_sha256, library.setValue]);
@@ -231,21 +243,26 @@ export default function Wardrobe() {
     }
     return () => controller.abort();
   }, [appliedKey, body?.job_id, body?.version, body?.geometry_sha256, coverageAttempt]);
+  // Which worn parts are moved or resized. Hidden skin and tucks depend on that, not on how far a slider has gone, so
+  // dragging one leaves them be until a part starts or stops being edited.
+  const editedKey = Object.entries(partEdits).filter(([, edit]) => !isDefaultPartEdit(edit)).map(([key]) => key).sort().join('|');
+  const latestEdits = useRef(partEdits);
+  latestEdits.current = partEdits;
   useEffect(() => {
     if (!viewer) return;
     const top = applied.current.top;
     if (top && applied.current.bottom && coverages[coverageKey(top)]?.covers_bottom) {
-      setNotice('상의가 하의 구간까지 덮어 하의를 벗겼습니다.'); takeOff('bottom'); return;
+      setNotice('상의가 하의 구간까지 덮어 하의를 벗겼어요.'); takeOff('bottom'); return;
     }
     const union: Record<string, Uint8Array> = {};
     const originalCoverage = (part: WardrobePart) => {
-      const edit = partEdits[keyOf(part, part.slot)];
+      const edit = latestEdits.current[keyOf(part, part.slot)];
       return !edit || isDefaultPartEdit(edit) ? coverages[coverageKey(part)] : undefined;
     };
     for (const part of Object.values(applied.current)) {
       // Source coverage no longer proves that moved or resized geometry covers the same skin.
       const coverage = originalCoverage(part);
-      if (coverage) unionBits(union, coverage.hidden);
+      if (coverage) unionBits(union, decodeCoverage(coverage).hidden);
     }
     viewer.setHiddenBodyTriangles(Object.keys(union).length ? union : null);
     // Garments from different jobs overlap by centimetres: an inner garment (a waistband) is pressed
@@ -254,18 +271,19 @@ export default function Wardrobe() {
     // head (a raised hood), never under a hood lying on the back.
     for (const [slotName, part] of Object.entries(applied.current)) {
       const coverage = coverages[coverageKey(part)];
-      const tuck = coverage && decodeTuck(coverage);
+      const tuck = coverage && decodeCoverage(coverage).tuck;
       if (!tuck) continue;
       const outer: Record<string, Uint8Array> = {};
       for (const over of coverage.under || []) {
         const covering = applied.current[over] && originalCoverage(applied.current[over]);
         if (!covering) continue;
-        if (slotName !== 'hair') unionBits(outer, covering.over || covering.hidden);
-        else if (covering.covers_head) unionBits(outer, covering.over || covering.hidden);
+        const bits = decodeCoverage(covering);
+        if (slotName !== 'hair') unionBits(outer, bits.over || bits.hidden);
+        else if (covering.covers_head) unionBits(outer, bits.over || bits.hidden);
       }
       viewer.setTucked(slotName, tuck, Object.keys(outer).length ? outer : null);
     }
-  }, [appliedKey, coverages, partEdits, viewer]);
+  }, [appliedKey, coverages, editedKey, viewer]);
 
   function applyOutfit(outfit: PreviewOutfit, listed: WardrobePart[]) {
     const next: Worn = {};
@@ -275,7 +293,7 @@ export default function Wardrobe() {
       const part = listed.find(item => item.slot === slotName && item.job_id === ref.job_id && item.version === ref.version && item.sha256 === ref.sha256)
         // A refit gives the job a new version; its current part in that slot is the same part refitted.
         || listed.find(item => item.slot === slotName && item.job_id === ref.job_id);
-      if (!part) { setWearError(`${labels[slotName] || slotName} 파츠를 옷장에서 찾을 수 없습니다.`); return; }
+      if (!part) { setWearError(`${labels[slotName] || slotName} 파츠를 옷장에서 찾을 수 없어요.`); return; }
       next[slotName] = part;
     }
     setWearError(''); setWorn(next); setHairColor(outfit.hair_color || null);
@@ -284,7 +302,7 @@ export default function Wardrobe() {
       return edit && ref && part.version === ref.version && part.sha256 === ref.sha256 ? [[keyOf(part, slotName), edit]] : [];
     })));
     const removed = Object.keys(outfit.parts).filter(slot => !slots.includes(slot));
-    setNotice(removed.length ? `겹치는 머리 파츠를 벗겼습니다: ${removed.map(slot => labels[slot] || slot).join(', ')}` : '');
+    setNotice(removed.length ? `겹치는 머리 파츠를 벗겼어요: ${removed.map(slot => labels[slot] || slot).join(', ')}` : '');
     setColors(current => {
       const updated = { ...current };
       Object.entries(next).forEach(([slotName, part]) => {
@@ -311,10 +329,22 @@ export default function Wardrobe() {
       viewer.setPartColors(part.slot, palette.material, palette.mask, palette.regions.map(region => region.light), [0, 1, 2, 3].map(index => chosen[String(index)] || null));
     }
   }, [appliedKey, palettes, colors, viewer]);
+  // The edit the viewer last applied per slot, so a slider's step reshapes only the part it moves. Other worn parts, new
+  // coverage, another viewer or a failed pass apply every slot again.
+  const shownEdits = useRef<{ viewer: ModelViewer; appliedKey: string; coverages: Record<string, WardrobeCoverage>; edits: Record<string, PartEdit | undefined> } | null>(null);
   useEffect(() => {
     if (!viewer) return;
+    const shown = shownEdits.current;
+    const before = shown && shown.viewer === viewer && shown.appliedKey === appliedKey && shown.coverages === coverages ? shown.edits : null;
+    const edits: Record<string, PartEdit | undefined> = {};
+    shownEdits.current = null;
     try {
-      for (const [slotName, part] of Object.entries(applied.current)) if ((EDITABLE_PARTS as readonly string[]).includes(slotName)) viewer.setPartEdit(slotName, partEdits[keyOf(part, slotName)] || null);
+      for (const [slotName, part] of Object.entries(applied.current)) {
+        if (!(EDITABLE_PARTS as readonly string[]).includes(slotName)) continue;
+        const edit = edits[slotName] = partEdits[keyOf(part, slotName)];
+        if (!before || before[slotName] !== edit) viewer.setPartEdit(slotName, edit || null);
+      }
+      shownEdits.current = { viewer, appliedKey, coverages, edits };
       setEditError('');
     } catch (reason) { setEditError((reason as Error).message); }
   }, [appliedKey, partEdits, coverages, viewer]);
@@ -326,7 +356,7 @@ export default function Wardrobe() {
     const restored = () => { if (restoreLook.current) { restoreLook.current = false; setLookReady(true); } };
     if (outfit && bodies.value && !registered.some(item => item.job_id === outfit.body.job_id && item.version === outfit.body.version)) {
       pendingOutfit.current = null; restored();
-      setWearError('저장된 몸 버전을 옷장에서 찾을 수 없습니다.'); return;
+      setWearError('저장된 몸 버전을 옷장에서 찾을 수 없어요.'); return;
     }
     if (modelError || (!libraryMatchesBody && library.error) || (!bodies.value && bodies.error)) restored();
     if (!outfit || !viewer || !body || outfit.body.job_id !== body.job_id || outfit.body.version !== body.version || !libraryMatchesBody) return;
@@ -338,7 +368,7 @@ export default function Wardrobe() {
   function toggle(part: WardrobePart) {
     setWearError(''); setNotice('');
     const dress = worn.top && coverages[coverageKey(worn.top)]?.covers_bottom;
-    if (part.slot === 'bottom' && dress && !worn.bottom) setNotice('하의를 입어 원피스 상의를 벗겼습니다.');
+    if (part.slot === 'bottom' && dress && !worn.bottom) setNotice('하의를 입어 원피스 상의를 벗겼어요.');
     setWorn(current => {
       const next = { ...current }, prior = current[part.slot];
       if (prior && keyOf(prior, part.slot) === keyOf(part, part.slot)) delete next[part.slot];
@@ -361,7 +391,7 @@ export default function Wardrobe() {
     setLoadedId(id); setOutfitName(outfit.name);
     if (body && outfit.body.job_id === body.job_id && outfit.body.version === body.version) applyOutfit(outfit, parts);
     else if (registered.some(item => item.job_id === outfit.body.job_id && item.version === outfit.body.version)) { pendingOutfit.current = outfit; setBodyId(outfit.body.job_id); }
-    else setWearError('이 조합의 옷장 몸이 등록돼 있지 않거나 버전이 바뀌었습니다.');
+    else setWearError('이 조합의 옷장 몸이 등록돼 있지 않거나 버전이 바뀌었어요.');
   }
   async function saveOutfit() {
     if (!body || !libraryMatchesBody || !outfits.value || busy) return;
@@ -445,7 +475,7 @@ export default function Wardrobe() {
   if (bodies.value && registered.length === 0) {
     // Bodies are registered on the base body screen, which only paid operators open.
     return <div className="wardrobe workspace-content"><div className="workspace-heading"><h1>옷장</h1></div>
-      <p className="wardrobe-empty">등록된 옷장 몸이 없습니다.{paidOperator && <> <Link to={studioHref({ tab: 'character', mode: 'body' })}>기본몸 화면에서 등록</Link></>}</p></div>;
+      <p className="wardrobe-empty">등록된 옷장 몸이 없어요.{paidOperator && <> <Link to={studioHref({ tab: 'character', mode: 'body' })}>기본 몸 화면에서 등록</Link></>}</p></div>;
   }
   return <div className="wardrobe workspace-content">
     <div className="workspace-heading"><h1>옷장</h1>
@@ -459,7 +489,7 @@ export default function Wardrobe() {
         <div className="meshy-clips"><button disabled={!viewer} aria-pressed={motion === -1} onClick={() => { viewer?.play(-1); setMotion(-1); }}>기본 자세</button>
           {clips.map(clip => <button key={clip.index} disabled={!viewer} aria-pressed={motion === clip.index} onClick={() => { viewer?.play(clip.index); setMotion(clip.index); }}>{clip.name}</button>)}</div>
         {worn.hair && <div className="wardrobe-hair-color"><label>헤어 색상<input type="color" value={hairColor || '#8a7998'} onChange={event => setHairColor(event.target.value)} /></label>
-          <span>{hairColor || '원본 색상'}</span><button type="button" onClick={() => setHairColor(null)}>원본 색상</button></div>}
+          <span>{hairColor || '원래 색'}</span><button type="button" onClick={() => setHairColor(null)}>원래 색</button></div>}
         {(!viewer || wearing) && !modelError && !(bodies.error && !body) && <p role="status">{viewer ? '파츠를 입히는 중…' : '옷장 몸을 불러오는 중…'}</p>}
         {bodies.error && <p role="alert">{bodies.error} <button type="button" onClick={() => void bodies.refresh()}>몸 목록 다시 불러오기</button></p>}
         {modelError && <p role="alert">{modelError} <button type="button" onClick={() => setAttempt(value => value + 1)}>다시 불러오기</button></p>}
@@ -472,9 +502,9 @@ export default function Wardrobe() {
           <button key={slotName} type="button" {...tabs.tab(slotName)}>
             {labels[slotName] || slotName} <span>{parts.filter(part => part.slot === slotName).length}</span></button>)}</div>
         {body && !libraryMatchesBody && !library.error && <p role="status">파츠 목록을 불러오는 중…</p>}
-        {library.value && !libraryMatchesBody && <p role="alert">몸과 파츠의 버전이 다릅니다. 새 몸의 파츠를 기다리는 중입니다.</p>}
+        {library.value && !libraryMatchesBody && <p role="alert">몸과 파츠의 버전이 달라요. 새 몸의 파츠를 기다리는 중이에요.</p>}
         {library.error && <p role="alert">{library.error}</p>}
-        {libraryMatchesBody && parts.length === 0 && <p className="wardrobe-empty">이 몸으로 만든 파츠가 없습니다.</p>}
+        {libraryMatchesBody && parts.length === 0 && <p className="wardrobe-empty">이 몸으로 만든 파츠가 없어요.</p>}
         <div className="wardrobe-cards" {...(activeSlot ? tabs.panel(activeSlot) : {})}>{parts.filter(part => part.slot === activeSlot).map(part => {
           const wornPart = worn[part.slot], selected = !!wornPart && keyOf(wornPart, part.slot) === keyOf(part, part.slot);
           return <button key={keyOf(part, part.slot)} type="button" className="wardrobe-card" aria-pressed={selected} disabled={!viewer || !lookReady} onClick={() => toggle(part)}>
@@ -488,7 +518,7 @@ export default function Wardrobe() {
         {unfitted.length > 0 && <ul className="wardrobe-unfit">{unfitted.map(item => <li key={keyOf(item, item.slot)}>
           <strong>{item.name}</strong><small>{labels[item.slot] || item.slot} · {fitReason(item.reason)}</small></li>)}</ul>}
         <div className="wardrobe-worn"><h2>입은 파츠</h2>
-          {Object.keys(worn).length === 0 ? <p className="wardrobe-empty">기본 몸만 입고 있습니다.</p>
+          {Object.keys(worn).length === 0 ? <p className="wardrobe-empty">기본 몸만 입고 있어요.</p>
             : <ul>{slotOrder.filter(slotName => worn[slotName]).map(slotName => <li key={slotName}>
               <span>{labels[slotName] || slotName}</span><strong>{worn[slotName]?.name}</strong>
               <button type="button" onClick={() => takeOff(slotName)}>벗기기</button></li>)}</ul>}

@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act, useState } from 'react';
 import type { RapierRigidBody } from '@react-three/rapier';
 import type { Group } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,9 +13,11 @@ vi.mock('gaesup-world', async (original) => ({
 }));
 vi.mock('../../api/endpoints', () => ({ authApi: { realtimeTicket: ticket } }));
 
+import { MemoryRouter } from 'react-router-dom';
+
 import type { RealtimeTicket, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
-import { LiveAvatars, LiveRoom } from '../live';
+import { ChatBar, LiveAvatars, LiveRoom } from '../live';
 
 const user: User = { id: 'viewer-a', username: 'a', displayName: '방문자 A', role: 'user' };
 const other: User = { id: 'viewer-b', username: 'b', displayName: '방문자 B', role: 'user' };
@@ -103,6 +105,37 @@ describe('방문자 연결과 캐릭터 전달', () => {
     const view = await mount(room(null));
     await flush();
     expect(ticket).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  it('방이 새 값을 내도 사람과 말이 그대로면 아바타를 다시 그리지 않는다', async () => {
+    // A moving visitor: the room answers a new object each time, with the same players and words.
+    let move!: () => void;
+    multiplayer.mockImplementation(() => {
+      const [, set] = useState(0);
+      move = () => set((count) => count + 1);
+      return { ...live };
+    });
+    const view = await mount(room(null));
+    const drawn = avatars.mock.calls.length, rendered = multiplayer.mock.calls.length;
+    await act(async () => move());
+    expect(multiplayer.mock.calls.length).toBeGreaterThan(rendered);
+    expect(avatars).toHaveBeenCalledTimes(drawn);
+    await view.unmount();
+  });
+});
+
+describe('로그인하지 않은 방문자의 말하기 자리', () => {
+  it('로그인 링크만 두고, 로그인한 뒤 이 섬으로 돌아온다', async () => {
+    const view = await mount(
+      <MemoryRouter initialEntries={['/@host']}>
+        <ChatBar signedIn={false} />
+      </MemoryRouter>,
+    );
+    const links = [...view.container.querySelectorAll('a')];
+    expect(links.map((link) => link.textContent)).toEqual(['로그인']);
+    expect(links[0]?.getAttribute('href')).toBe('/?next=%2F%40host');
+    expect(view.container.textContent).toBe('로그인');
     await view.unmount();
   });
 });

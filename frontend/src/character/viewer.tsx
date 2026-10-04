@@ -25,6 +25,9 @@ const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPe
 const release = (gltf: GLTF) => disposeObjectResources(gltf.scenes);
 /** Where the walking preview drops the character; one vector, so re-renders do not respawn it. */
 const START = new THREE.Vector3(0, .12, 0);
+/** Clip names for each motion of the walking preview, matched once per model rather than every frame. */
+const MOTIONS = { jump: /^jump$/i, fall: /^fall$/i, run: /run|running/i, walk: /walk|walking/i, idle: /idle|standing/i };
+const AIRBORNE = /^jump$|^fall$/i;
 
 class PreviewBoundary extends Component<{ children: ReactNode; onError(error: Error): void }, { failed: boolean }> {
   override state = { failed: false };
@@ -40,6 +43,10 @@ function CharacterScene({ model, animation, onReady, onWorld }: ViewProps) {
   const outer = useRef<THREE.Group>(null!);
   const inner = useRef<THREE.Group>(null!);
   const mixer = useMemo(() => new THREE.AnimationMixer(model.gltf.scene), [model]);
+  const clips = useMemo(() => {
+    const find = (pattern: RegExp) => model.gltf.animations.findIndex(clip => pattern.test(clip.name));
+    return { jump: find(MOTIONS.jump), fall: find(MOTIONS.fall), run: find(MOTIONS.run), walk: find(MOTIONS.walk), idle: find(MOTIONS.idle) };
+  }, [model]);
   const playing = useRef(-2);
   const ready = useRef(false), sample = useRef(0);
   useEffect(() => { ready.current = false; playing.current = -2; }, [model]);
@@ -66,8 +73,8 @@ function CharacterScene({ model, animation, onReady, onWorld }: ViewProps) {
   useFrame((_, delta) => {
     if (!body.current || !outer.current) return;
     const velocity = body.current.linvel(), speed = Math.hypot(velocity.x, velocity.z);
-    const pattern = velocity.y > .8 ? /^jump$/i : velocity.y < -1 ? /^fall$/i : speed > 5 ? /run|running/i : speed > .1 ? /walk|walking/i : /idle|standing/i;
-    const matched = animation >= 0 ? animation : model.gltf.animations.findIndex(clip => pattern.test(clip.name));
+    const motion = velocity.y > .8 ? clips.jump : velocity.y < -1 ? clips.fall : speed > 5 ? clips.run : speed > .1 ? clips.walk : clips.idle;
+    const matched = animation >= 0 ? animation : motion;
     // A missing airborne clip keeps the last real action playing. Never turn a
     // missing jump/fall into an unlabeled clip or a frozen rest pose.
     const requested = matched < 0 && playing.current >= 0 ? playing.current : matched;
@@ -76,7 +83,7 @@ function CharacterScene({ model, animation, onReady, onWorld }: ViewProps) {
       const clip = requested >= 0 ? model.gltf.animations[requested] : undefined;
       if (clip) {
         const action = mixer.clipAction(clip).reset();
-        action.setLoop(/^jump$|^fall$/i.test(clip.name) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+        action.setLoop(AIRBORNE.test(clip.name) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
         action.clampWhenFinished = true; action.fadeIn(.12).play();
       }
       playing.current = requested;
@@ -159,7 +166,7 @@ function CardScene({ model, animation, cardView, onReady, onError }: ViewProps) 
     model.gltf.scene.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(model.gltf.scene);
     if (bounds.isEmpty()) {
-      onError(new Error('모델의 표시 가능한 경계를 찾을 수 없습니다.'));
+      onError(new Error('모델의 표시 가능한 경계를 찾을 수 없어요.'));
       return;
     }
     const center = bounds.getCenter(new THREE.Vector3());
@@ -377,9 +384,12 @@ export class ModelViewer {
     this.badge.textContent = value === 'webgpu' ? 'WebGPU · gaesup-world' : 'WebGL 호환 모드 · gaesup-world';
   };
   private onWorld = (position: { x: number; y: number; z: number }, meshes: number) => {
-    this.container.dataset.world = 'gaesup-world';
-    this.container.dataset.characterPosition = JSON.stringify(position);
-    this.container.dataset.characterMeshes = String(meshes);
+    // Several times a second while the preview runs; writing an attribute counts as a DOM change even when it is the
+    // same, so only a new value is written.
+    const dataset = this.container.dataset, at = JSON.stringify(position), count = String(meshes);
+    if (dataset.world !== 'gaesup-world') dataset.world = 'gaesup-world';
+    if (dataset.characterPosition !== at) dataset.characterPosition = at;
+    if (dataset.characterMeshes !== count) dataset.characterMeshes = count;
   };
   private onReady = () => {
     this.retired.forEach(release); this.retired = [];
@@ -403,22 +413,25 @@ export class ModelViewer {
    */
   async snapshot(type = 'image/webp') {
     const store = this.store;
-    if (!store || this.disposed) throw new Error('3D 미리보기가 준비되지 않았습니다.');
+    if (!store || this.disposed) throw new Error('3D 미리보기가 준비되지 않았어요.');
     store.getState().advance(store.getState().clock.elapsedTime);
     await new Promise(requestAnimationFrame);
-    if (this.disposed || store !== this.store) throw new Error('3D 미리보기가 닫혔습니다.');
+    if (this.disposed || store !== this.store) throw new Error('3D 미리보기가 닫혔어요.');
     store.getState().advance(store.getState().clock.elapsedTime);
     return { src: this.canvas.toDataURL(type, .92), renderer: this.container.dataset.renderer || '' };
   }
   async load(url: string, options: { sha256?: string; wardrobe?: boolean } = {}) {
     const token = ++this.generation;
+    // The renderer starts while the file downloads and parses, not after; a failure is reported where it is awaited.
+    const ready = this.initialize();
+    ready.catch(() => {});
     this.request?.abort(); this.finish?.();
     this.request = new AbortController();
     let content: ArrayBuffer;
-    try { content = await downloadBytes(url, { signal: this.request.signal, refused: '모델 파일을 불러올 수 없습니다.' }); }
+    try { content = await downloadBytes(url, { signal: this.request.signal, refused: '모델 파일을 불러올 수 없어요.' }); }
     catch (error) { throw loadFailure(error, '모델 파일'); }
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', content))).map(value => value.toString(16).padStart(2, '0')).join('');
-    if (options.sha256 && options.sha256 !== digest) throw new Error('모델이 고정한 몸 버전과 다릅니다.');
+    if (options.sha256 && options.sha256 !== digest) throw new Error('모델이 고정한 몸 버전과 달라요.');
     const gltf = await new GLTFLoader().parseAsync(content, '');
     if (this.disposed || token !== this.generation) { release(gltf); return []; }
     matteCharacter(gltf.scene);
@@ -444,7 +457,7 @@ export class ModelViewer {
     let rigged = false; gltf.scene.traverse(object => { if (object instanceof THREE.SkinnedMesh) rigged = true; });
     this.model = { gltf, rigged, restorePose: captureRestPose(gltf.scene), url: `${url}${url.includes('?') ? '&' : '?'}sha256=${digest}` }; this.animation = -1;
     this.container.dataset.modelSha256 = digest;
-    await this.initialize();
+    await ready;
     if (this.disposed || token !== this.generation) return [];
     await new Promise<void>((resolve, reject) => { this.finish = resolve; this.fail = reject; this.render(); });
     return gltf.animations.map((clip, index) => ({ index, name: clip.name || `Animation ${index + 1}` }));
@@ -468,7 +481,7 @@ export class ModelViewer {
     return !this.disposed;
   }
   async savedExpression(maps: { material: number; url: string; sha256: string }[]) {
-    if (!this.expressions) throw new Error(this.expressionError || '표정 텍스쳐가 준비되지 않았습니다.');
+    if (!this.expressions) throw new Error(this.expressionError || '표정 텍스처가 준비되지 않았어요.');
     const expressions = this.expressions;
     const applied = await expressions.saved(maps);
     if (!applied || this.disposed || expressions !== this.expressions) return false;
@@ -476,7 +489,7 @@ export class ModelViewer {
     return true;
   }
   wear(parts: Wearable[]) {
-    if (!this.wardrobe) return Promise.reject(new Error('공용 골격 옷장이 준비되지 않았습니다.'));
+    if (!this.wardrobe) return Promise.reject(new Error('공용 골격 옷장이 준비되지 않았어요.'));
     return this.wardrobe.equip(parts).then(applied => { if (applied) this.render(); return applied; });
   }
   setHairColor(color: string | null) { this.wardrobe?.setHairColor(color); this.render(); }

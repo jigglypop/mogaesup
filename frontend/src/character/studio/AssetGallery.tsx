@@ -9,7 +9,7 @@ import { AssetProductionStatus } from './AssetProductionStatus';
 
 const assetSlots = ['body', ...variantSlots, 'hairFront', 'hairBack', 'head'];
 const partCategories = [
-  ['body', '기본몸'], ['hair', '헤어'], ['all', '전체'], ['headwear', '머리·장식'], ['top', '상의'],
+  ['body', '기본 몸'], ['hair', '헤어'], ['all', '전체'], ['headwear', '머리·장식'], ['top', '상의'],
   ['bottom', '하의'], ['shoes', '신발'], ['equipment', '장비'],
 ] as const;
 
@@ -95,7 +95,7 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
         ? nativeState.artifacts.find(artifact => artifact.name === 'model.glb') : undefined);
     const generated = root.artifacts.find(artifact => artifact.name === 'generated-body.glb');
     const model = assembly ? { ...assembly, label: '조립 저장본' }
-      : generated ? { ...generated, label: '기본몸 생성본 · 조립 전' } : undefined;
+      : generated ? { ...generated, label: '기본 몸 생성본 · 조립 전' } : undefined;
     return [{ root, parts, versions, preview, assembly, assembledVersion, model }];
   });
 
@@ -135,7 +135,7 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
   function assetCard(item: (typeof items)[number], compact = false) {
     const { key, job, slot, label, name, image, generatedModel, nativeModel } = item;
     return <article className={`asset-gallery-card ${compact ? 'compact' : ''}`} key={key}>
-      <AssetModelPreview model={nativeModel ? { ...nativeModel, label: slot === 'body' ? '기본몸 저장본' : '피팅 저장본' }
+      <AssetModelPreview model={nativeModel ? { ...nativeModel, label: slot === 'body' ? '기본 몸 저장본' : '피팅 저장본' }
         : generatedModel ? { ...generatedModel, label: job.input_kind === 'glb' ? '등록한 GLB 원본' : '파츠 생성본 · 조립 전' } : undefined}
         image={image} name={name} emptyLabel={image ? '3D 생성 전' : '아직 저장된 결과 없음'} />
       <AssetProductionStatus job={job} slot={slot} hasModel={!!(nativeModel || generatedModel)} hasAssembly={!!nativeModel} compact />
@@ -172,7 +172,7 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
       <AssetProductionStatus job={assembly ? assembledVersion : root} hasModel={!!model} hasAssembly={!!assembly} />
       <div className="asset-character-heading"><div><strong>{characterName(root)}</strong><small>{versions.length}개 버전 · {parts.length}개 파츠</small></div><button onClick={() => onOpen(assembly ? assembledVersion : root)}>캐릭터 열기</button></div>
       <div className="asset-character-actions">{!trash && assembly && <button onClick={() => onCompose(assembledVersion)}>조합·표정 편집</button>}{(!trash || characterDeleted(root)) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(root, 'character', !trash)}>{trash ? '캐릭터 전체 복원' : '캐릭터 전체 삭제'}</button>}</div>
-      <details><summary>저장 버전 · {versions.length}</summary><div className="asset-character-versions">{versions.map(version => <div className="asset-character-version" key={version.id}><button onClick={() => onOpen(version)}>{version.part_name || (version.base_job_id ? version.requested_slots?.map(slot => partLabels[slot] || slot).join(', ') || '파츠 조합' : '기본몸 조합')}<small>{new Date(version.created_at).toLocaleString()}</small></button>{!trash && version.assembly_version && <button onClick={() => onCompose(version)}>조합 편집·저장</button>}{!characterDeleted(version) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(version, 'version', !trash)}>{trash ? '조합 복원' : '조합 삭제'}</button>}</div>)}</div></details>
+      <details><summary>저장 버전 · {versions.length}</summary><div className="asset-character-versions">{versions.map(version => <div className="asset-character-version" key={version.id}><button onClick={() => onOpen(version)}>{version.part_name || (version.base_job_id ? version.requested_slots?.map(slot => partLabels[slot] || slot).join(', ') || '파츠 조합' : '기본 몸 조합')}<small>{new Date(version.created_at).toLocaleString()}</small></button>{!trash && version.assembly_version && <button onClick={() => onCompose(version)}>조합 편집·저장</button>}{!characterDeleted(version) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(version, 'version', !trash)}>{trash ? '조합 복원' : '조합 삭제'}</button>}</div>)}</div></details>
       <details><summary>연결 파츠 · {parts.length}</summary><div className="asset-character-parts">{parts.map(item => assetCard(item, true))}</div></details>
     </article>)}</div> : <p className="asset-gallery-empty">{query ? '검색 결과가 없습니다.' : trash ? '삭제한 에셋이 없습니다.' : '저장된 캐릭터가 없습니다.'}</p>
       : filtered.length ? <><div className={`asset-gallery-grid category-${filter}`}>{shown.map(item => assetCard(item))}</div>{visible < filtered.length && <button className="asset-gallery-more" onClick={() => setVisible(count => count + 24)}>더 보기 · {filtered.length-visible}개</button>}</>

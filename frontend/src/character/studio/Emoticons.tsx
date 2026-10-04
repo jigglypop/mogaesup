@@ -93,7 +93,7 @@ export default function Emoticons() {
           onChange={event => setDraft(value => ({ ...value, prompt: event.target.value, edited: true }))} /></label>
         <div className="generation-form-actions">
           <button type="button" disabled={inputLocked || !defaultPrompt} onClick={() => setDraft(value => ({ ...value, prompt: defaultPrompt, edited: false }))}>기본 표정 프롬프트</button>
-          <button className="generation-submit" disabled={busy || !!recovery.error || (!pending && (!listing.value?.capabilities.ready || !selection.value || !draft.name.trim() || !draft.prompt.trim()))}>
+          <button className="generation-submit is-primary" disabled={busy || !!recovery.error || (!pending && (!listing.value?.capabilities.ready || !selection.value || !draft.name.trim() || !draft.prompt.trim()))}>
             {busy ? '요청 확인 중' : pending ? '같은 요청 복구' : '원화 생성 · 이미지 1회'}
           </button>
         </div>

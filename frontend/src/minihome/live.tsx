@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -18,6 +19,7 @@ import { defaultMultiplayerConfig, RemotePlayers, useMultiplayer, type Multiplay
 
 import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
+import { useSignInPath } from '../auth/signIn';
 import { Icon } from '../ui/icons';
 import { MINIME_SCALE } from './character';
 import { peerColor } from './peers';
@@ -118,11 +120,20 @@ function useLiveRoom(options: {
   return live;
 }
 
-const LiveContext = createContext<Multiplayer | null>(null);
+/** What the room's screens read: who is here, what they say, and the way to talk. */
+type Live = Pick<Multiplayer, 'isConnected' | 'players' | 'speechByPlayerId' | 'localSpeechText' | 'sendChat'>;
+const LiveContext = createContext<Live | null>(null);
 
 /** Opens the live room for everything below it; render it under `GaesupWorld`, whose runtime the tracking reads. */
 export function LiveRoom({ children, ...options }: Parameters<typeof useLiveRoom>[0] & { children: ReactNode }) {
-  const live = useLiveRoom(options);
+  const { isConnected, players, speechByPlayerId, localSpeechText, sendChat } = useLiveRoom(options);
+  // The room answers a new object on every update, a visitor's moves (several a second) and pings included, and every
+  // reader of this context re-renders with its value, the island's canvas too (R3F bridges contexts into it). Moves reach
+  // the avatars through `players` itself; the value changes only when one of these does.
+  const live = useMemo(
+    () => ({ isConnected, players, speechByPlayerId, localSpeechText, sendChat }),
+    [isConnected, players, speechByPlayerId, localSpeechText, sendChat],
+  );
   return <LiveContext.Provider value={live}>{children}</LiveContext.Provider>;
 }
 
@@ -145,18 +156,16 @@ export function usePresence() {
   return { connected: true, count: others.length + 1, others };
 }
 
-/** Who is here with you, and a line to say to whoever stands near. */
+/** Who is here with you, and a line to say to whoever stands near; signed out, the way in (and back to this island). */
 export function ChatBar({ signedIn }: { signedIn: boolean }) {
   const live = useLive();
+  const signIn = useSignInPath();
   const [text, setText] = useState('');
   if (!signedIn) {
     return (
-      <div className="mg-chatbar mg-glass is-hint">
-        <span>로그인하면 같이 걷고 말할 수 있어요</span>
-        <Link className="mg-btn is-primary is-small" to="/">
-          로그인
-        </Link>
-      </div>
+      <Link className="mg-btn is-primary mg-chatbar-signin" to={signIn}>
+        로그인
+      </Link>
     );
   }
   if (!live?.isConnected) {

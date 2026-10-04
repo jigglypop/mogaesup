@@ -20,6 +20,10 @@ const typing = (event: KeyboardEvent) => {
   const target = event.target;
   return target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null;
 };
+/** Keys a tablist moves between its tabs with (ui/tabs.ts); on a tab they are the tablist's, not the view's. */
+const TAB_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End']);
+const tabbing = (event: KeyboardEvent) =>
+  TAB_KEYS.has(event.key) && event.target instanceof Element && event.target.closest('[role=tablist]') !== null;
 
 /**
  * The decorating shortcuts. They listen on the window's capture phase, ahead of the world's own key handling, and
@@ -32,7 +36,7 @@ export function useEditKeys(session: EditSession, actions: { save: () => void })
     const { history, held } = session;
     const down = (event: KeyboardEvent) => {
       const state = session.getState();
-      if (!state.active || event.isComposing || typing(event)) return;
+      if (!state.active || event.isComposing || typing(event) || tabbing(event)) return;
       const handled = () => event.preventDefault();
 
       if (state.help) {

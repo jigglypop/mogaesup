@@ -70,6 +70,8 @@ export function ExplorePage() {
   const [before, setBefore] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
+  /** Counts 다시 불러오기 presses: each asks for the first page again. */
+  const [attempt, setAttempt] = useState(0);
   // Another search drops whatever is still on its way for the one before it.
   const asking = useRef<AbortController | null>(null);
   const firstReady = useRef(false);
@@ -101,7 +103,7 @@ export function ExplorePage() {
       },
     );
     return () => controller.abort();
-  }, [search]);
+  }, [search, attempt]);
 
   const loadMore = () => {
     const controller = asking.current;
@@ -141,7 +143,19 @@ export function ExplorePage() {
           )}
           <ExploreSearch query={query} onQuery={(text) => setParams(text ? { q: text } : {}, { replace: true })} />
         </div>
-        {error && <p className="mg-error">{error}</p>}
+        {error && (
+          <div className="mg-explore-error">
+            <p className="mg-error" role="alert">
+              {error}
+            </p>
+            {/* A page after the first fails under 더 보기, which asks for it again. */}
+            {!homes && (
+              <button className="mg-btn is-small" onClick={() => setAttempt((count) => count + 1)}>
+                <Icon name="rotate" /> 다시 불러오기
+              </button>
+            )}
+          </div>
+        )}
         {!homes && !error && <p className="mg-empty" role="status">불러오는 중…</p>}
         {homes?.length === 0 && <p className="mg-empty">{search ? '찾는 섬이 없어요' : '아직 공개된 섬이 없어요'}</p>}
         <ul className="mg-islands">

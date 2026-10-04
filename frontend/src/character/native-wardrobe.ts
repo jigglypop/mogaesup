@@ -54,7 +54,7 @@ export class NativeWardrobe {
   private hairControls = new Map<MeshStandardMaterial, (color: string | null) => void>();
 
   setHairColor(color: string | null) {
-    if (color !== null && !/^#[0-9a-f]{6}$/i.test(color)) throw new Error('올바른 헤어 색상을 선택하세요.');
+    if (color !== null && !/^#[0-9a-f]{6}$/i.test(color)) throw new Error('올바른 헤어 색상을 골라 주세요.');
     this.hairColor = color;
     this.hairControls.forEach(update => update(color));
   }
@@ -200,39 +200,39 @@ export class NativeWardrobe {
     });
     for (const rig of rigs) for (const bone of rig.bones) {
       const prior = this.bones.get(bone.name);
-      if (!bone.name || (prior && prior.bone !== bone)) throw new Error('기준 몸의 본 이름이 중복되어 의상을 연결할 수 없습니다.');
+      if (!bone.name || (prior && prior.bone !== bone)) throw new Error('기준 몸의 본 이름이 중복되어 의상을 연결할 수 없어요.');
       this.bones.set(bone.name, { bone, matrix: this.baseInverse.clone().multiply(bone.matrixWorld), parent: (bone.parent as Bone)?.isBone ? bone.parent!.name : null });
     }
-    if (!this.bones.size) throw new Error('기준 몸의 공용 골격이 없습니다.');
+    if (!this.bones.size) throw new Error('기준 몸의 공용 골격이 없어요.');
   }
 
   private async load(spec: Wearable): Promise<Entry> {
     const cached = this.loaded.get(spec.id);
     if (cached) {
-      if (cached.spec.sha256 !== spec.sha256 || cached.spec.slot !== spec.slot || cached.spec.url !== spec.url) throw new Error('같은 의상의 파일 버전이 변경되었습니다.');
+      if (cached.spec.sha256 !== spec.sha256 || cached.spec.slot !== spec.slot || cached.spec.url !== spec.url) throw new Error('같은 의상의 파일 버전이 바뀌었어요.');
       cached.touched = performance.now(); return cached;
     }
     const pending = this.loading.get(spec.id);
     if (pending) {
       const entry = await pending;
-      if (entry.spec.sha256 !== spec.sha256 || entry.spec.slot !== spec.slot || entry.spec.url !== spec.url) throw new Error('동시에 선택한 의상 버전이 다릅니다.');
+      if (entry.spec.sha256 !== spec.sha256 || entry.spec.slot !== spec.slot || entry.spec.url !== spec.url) throw new Error('동시에 고른 의상 버전이 달라요.');
       return entry;
     }
     const request = (async () => {
       let bytes: ArrayBuffer;
-      try { bytes = await downloadBytes(spec.url, { signal: this.lifetime.signal, refused: '의상 모델을 불러올 수 없습니다.' }); }
+      try { bytes = await downloadBytes(spec.url, { signal: this.lifetime.signal, refused: '의상 모델을 불러올 수 없어요.' }); }
       catch (error) { throw loadFailure(error, '의상 모델'); }
       const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(v => v.toString(16).padStart(2, '0')).join('');
-      if (digest !== spec.sha256) throw new Error('의상 파일이 검수한 버전과 다릅니다.');
+      if (digest !== spec.sha256) throw new Error('의상 파일이 검수한 버전과 달라요.');
       const source = await new GLTFLoader().parseAsync(bytes, '');
       matteCharacter(source.scene);
       const entry: Entry = { spec, source, group: new Group(), skeletons: new Set(), touched: performance.now(), keys: new Map(), pivot: new Vector3(), rest: new Map(), originalGeometries: new Set() };
       try {
-        if (this.disposed) throw new Error('옷장 화면이 닫혔습니다.');
+        if (this.disposed) throw new Error('옷장 화면이 닫혔어요.');
         source.scene.updateMatrixWorld(true);
         const meshes: SkinnedMesh[] = [];
         source.scene.traverse(object => { if ((object as SkinnedMesh).isSkinnedMesh) meshes.push(object as SkinnedMesh); });
-        if (!meshes.length || meshes.some(mesh => standardSlot(mesh) !== spec.slot)) throw new Error('공용 골격에 맞춘 해당 슬롯의 의상 파일이 필요합니다.');
+        if (!meshes.length || meshes.some(mesh => standardSlot(mesh) !== spec.slot)) throw new Error('공용 골격에 맞춘 해당 슬롯의 의상 파일이 필요해요.');
         for (const mesh of meshes) {
           // "mesh:primitive", matching the server's layering anchors (the typings omit primitives).
           const mapping = source.parser.associations.get(mesh) as { meshes?: number; primitives?: number } | undefined;
@@ -256,14 +256,14 @@ export class NativeWardrobe {
         }
         for (const mesh of meshes) {
           const native = mesh.skeleton;
-          if (native.bones.length !== this.bones.size) throw new Error('의상의 골격 규격이 기준 몸과 다릅니다.');
+          if (native.bones.length !== this.bones.size) throw new Error('의상의 골격 규격이 기준 몸과 달라요.');
           const names = new Set<string>();
           const targets = native.bones.map(bone => {
             const rest = this.bones.get(bone.name);
             const parent = (bone.parent as Bone)?.isBone ? bone.parent!.name : null;
             if (!rest || names.has(bone.name) || rest.parent !== parent ||
                 rest.matrix.elements.some((v, i) => Math.abs(v - (bone.matrixWorld.elements[i] ?? 0)) > 1e-4)) {
-              throw new Error('의상의 본 위치·구조가 고정 몸과 맞지 않습니다. 다시 피팅해야 합니다.');
+              throw new Error('의상의 본 위치·구조가 고정 몸과 맞지 않아요. 다시 피팅해야 해요.');
             }
             names.add(bone.name); return rest.bone;
           });
@@ -289,11 +289,11 @@ export class NativeWardrobe {
         const matrices = new Map<number, Matrix4>();
         for (const mesh of entry.rest.keys()) {
           const matrix = mesh.matrix, values = matrix.elements;
-          if (values.some(value => !Number.isFinite(value)) || Math.abs(matrix.determinant()) < 1e-12 || [values[3]!, values[7]!, values[11]!, values[15]! - 1].some(value => Math.abs(value) > 1e-8)) entry.editProblem = '파츠의 변환을 읽지 못해 크기를 조정할 수 없습니다.';
+          if (values.some(value => !Number.isFinite(value)) || Math.abs(matrix.determinant()) < 1e-12 || [values[3]!, values[7]!, values[11]!, values[15]! - 1].some(value => Math.abs(value) > 1e-8)) entry.editProblem = '파츠의 변환을 읽지 못해 크기를 조정할 수 없어요.';
           const association = source.parser.associations.get(mesh) as { meshes?: number } | undefined;
           if (association?.meshes === undefined) continue;
           const previous = matrices.get(association.meshes);
-          if (previous && !previous.equals(matrix)) entry.editProblem = '서로 다른 위치에서 공유하는 파츠 메시의 크기를 조정할 수 없습니다.';
+          if (previous && !previous.equals(matrix)) entry.editProblem = '서로 다른 위치에서 공유하는 파츠 메시의 크기를 조정할 수 없어요.';
           matrices.set(association.meshes, matrix);
         }
         for (const [mesh, rest] of entry.rest) for (let index = 0; index < rest.position.length; index += 3) bounds.expandByPoint(point.fromArray(rest.position, index).applyMatrix4(mesh.matrix));
@@ -306,9 +306,9 @@ export class NativeWardrobe {
   }
 
   async equip(parts: Wearable[]): Promise<boolean> {
-    if (this.disposed) throw new Error('옷장 화면이 닫혔습니다.');
-    if (new Set(parts.map(p => p.slot)).size !== parts.length || new Set(parts.map(p => p.id)).size !== parts.length) throw new Error('한 슬롯에는 의상 하나만 선택하세요.');
-    if (hasConflictingPartSlots(parts.map(part => part.slot))) throw new Error('전체 헤어와 앞·뒷머리 또는 기존 머리 파츠를 함께 입을 수 없습니다.');
+    if (this.disposed) throw new Error('옷장 화면이 닫혔어요.');
+    if (new Set(parts.map(p => p.slot)).size !== parts.length || new Set(parts.map(p => p.id)).size !== parts.length) throw new Error('한 슬롯에는 의상 하나만 골라 주세요.');
+    if (hasConflictingPartSlots(parts.map(part => part.slot))) throw new Error('전체 헤어와 앞·뒷머리 또는 기존 머리 파츠를 함께 입을 수 없어요.');
     const generation = ++this.generation;
     parts.forEach(part => this.references.set(part.id, (this.references.get(part.id) || 0)+1));
     try {

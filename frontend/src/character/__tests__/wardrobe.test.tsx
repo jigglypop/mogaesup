@@ -15,7 +15,7 @@ const auth = vi.hoisted(() => ({ user: null as unknown }));
 vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: auth.user, status: 'signedIn' }) }));
 
 // The WebGPU viewer is not what is tested: it only has to take parts on and off and say what it was told.
-const viewers = vi.hoisted(() => [] as { wear: ReturnType<typeof vi.fn>; setPartColors: ReturnType<typeof vi.fn>; setHiddenBodyTriangles: ReturnType<typeof vi.fn>; setTucked: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }[]);
+const viewers = vi.hoisted(() => [] as { wear: ReturnType<typeof vi.fn>; setPartColors: ReturnType<typeof vi.fn>; setHiddenBodyTriangles: ReturnType<typeof vi.fn>; setTucked: ReturnType<typeof vi.fn>; setPartEdit: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }[]);
 /** How many of the next body loads fail. */
 const bodyLoads = vi.hoisted(() => ({ failing: 0 }));
 vi.mock('../viewer', () => ({
@@ -176,6 +176,36 @@ describe('옷장', () => {
     await unmount();
   });
 
+  it('슬라이더를 끄는 동안 수정 중인 파츠가 그대로면 피부와 누름은 그대로 두고 그 파츠만 다시 맞춘다', async () => {
+    const hair = part('hair-job', 'hair', '헤어'), hat = part('hat-job', 'hat', '모자'); parts = [hair, hat];
+    const encode = (values: Uint8Array) => btoa(String.fromCharCode(...values));
+    const anchor = encode(new Uint8Array(new Int32Array([0]).buffer)), move = encode(new Uint8Array(new Float32Array([0, 0, -.01]).buffer));
+    vi.mocked(factoryApi.wardrobeCoverage).mockImplementation(async (_body, item) => item.slot === 'hat'
+      ? { slot: 'hat', hidden: { '0:0': encode(new Uint8Array([2])) }, triangles: {}, covers_bottom: false, covers_head: true }
+      : { slot: 'hair', hidden: { '0:0': encode(new Uint8Array([1])) }, triangles: {}, covers_bottom: false, anchors: { '0:0': anchor }, tucks: { '0:0': move }, anchor_keys: ['0:0'], under: ['hat'] });
+    const saved: Look = { request: { body: { jobId: body.job_id, version: body.version }, parts: Object.fromEntries(parts.map(item => [item.slot, { jobId: item.job_id, version: item.version, sha256: item.sha256 }])), hairColor: null, colors: {}, partEdits: { hat: { scale: [.8, .8, .8], translation: [0, .05, 0] } } }, status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '' };
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+    const { container, unmount } = await open(); await settle();
+    const viewer = viewers[0]!;
+    const hides = viewer.setHiddenBodyTriangles.mock.calls.length, tucks = viewer.setTucked.mock.calls.length;
+    viewer.setPartEdit.mockClear();
+    const width = container.querySelector<HTMLInputElement>('input[aria-label="모자·머리 장식 가로 크기"]')!;
+    expect(width.closest('fieldset')?.disabled).toBe(false);
+    for (const value of ['.85', '.9', '.95']) await type(width, value);
+    await settle();
+    expect(viewer.setHiddenBodyTriangles).toHaveBeenCalledTimes(hides);
+    expect(viewer.setTucked).toHaveBeenCalledTimes(tucks);
+    expect(viewer.setPartEdit.mock.calls.map(([slot]) => slot)).toEqual(['hat', 'hat', 'hat']);
+    expect(viewer.setPartEdit).toHaveBeenLastCalledWith('hat', { scale: [.95, .8, .8], translation: [0, .05, 0] });
+    // Editing the hair too leaves no source coverage to trust: the skin shows again and the hair is no longer pressed.
+    await type(container.querySelector<HTMLInputElement>('input[aria-label="헤어 가로 크기"]')!, '1.05'); await settle();
+    expect(viewer.setHiddenBodyTriangles).toHaveBeenCalledTimes(hides + 1);
+    expect(viewer.setHiddenBodyTriangles).toHaveBeenLastCalledWith(null);
+    expect(viewer.setTucked).toHaveBeenLastCalledWith('hair', expect.any(Object), null);
+    expect(viewer.setPartEdit).toHaveBeenLastCalledWith('hair', { scale: [1.05, 1, 1], translation: [0, 0, 0] });
+    await unmount();
+  });
+
   it('내 캐릭터의 최초 읽기를 기다리는 동안 빈 조합으로 저장하지 못한다', async () => {
     let answer!: (value: { look: Look | null }) => void;
     vi.mocked(lookApi.mine).mockImplementationOnce(() => new Promise(resolve => { answer = resolve; }));
@@ -240,7 +270,7 @@ describe('옷장', () => {
     vi.mocked(lookApi.mine).mockResolvedValue({ look: { request, status: 'ready', worn: true, modelUrl: '/models/old.glb', error: null, updatedAt: '' } });
     const save = vi.spyOn(lookApi, 'save').mockImplementation(async request => ({ look: { request, status: 'baking', worn: false, modelUrl: null, error: null, updatedAt: '' } }));
     const { container, unmount } = await open(); await settle();
-    expect(container.textContent).toContain('겹치는 머리 파츠를 벗겼습니다: 앞머리');
+    expect(container.textContent).toContain('겹치는 머리 파츠를 벗겼어요: 앞머리');
     expect(viewers[0]!.wear.mock.calls.at(-1)![0].map((value: { slot: string }) => value.slot)).toEqual(['hair']);
     await click(button(container, '내 캐릭터로 입기')); await settle();
     expect(Object.keys(save.mock.calls[0]![0].parts)).toEqual(['hair']);
@@ -255,7 +285,7 @@ describe('옷장', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30000); }); await settle();
     expect(vi.mocked(factoryApi.wardrobeParts).mock.calls.length).toBeGreaterThan(before + 1);
     expect(cardNames(container)).toEqual([]);
-    expect(container.textContent).toContain('몸과 파츠의 버전이 다릅니다');
+    expect(container.textContent).toContain('몸과 파츠의 버전이 달라요');
     expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(true);
     await unmount();
   });
@@ -588,17 +618,17 @@ describe('옷장', () => {
       auth.user = user(...permissions);
       const { container, unmount } = await open();
       await settle();
-      expect(container.querySelector('.wardrobe-empty')?.textContent).toBe('등록된 옷장 몸이 없습니다.');
+      expect(container.querySelector('.wardrobe-empty')?.textContent).toBe('등록된 옷장 몸이 없어요.');
       expect(container.querySelector('.wardrobe-empty a')).toBeNull();
       await unmount();
     });
 
-    it('기본몸 화면을 여는 유료 운영자에게는 그 화면으로 가는 링크를 보인다', async () => {
+    it('기본 몸 화면을 여는 유료 운영자에게는 그 화면으로 가는 링크를 보인다', async () => {
       auth.user = user('operator', 'paid_operator');
       const { container, unmount } = await open();
       await settle();
       const link = container.querySelector<HTMLAnchorElement>('.wardrobe-empty a');
-      expect(link?.textContent).toBe('기본몸 화면에서 등록');
+      expect(link?.textContent).toBe('기본 몸 화면에서 등록');
       expect(link?.getAttribute('href')).toBe('/admin/studio/make/body');
       await unmount();
     });

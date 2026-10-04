@@ -80,7 +80,7 @@ export default function Prompts() {
   }
 
   return <div className="workspace-content prompt-manager" aria-busy={busy}>
-    <div className="workspace-heading"><h1>프롬프트 관리</h1><div className="prompt-actions">
+    <div className="workspace-heading"><h1>프롬프트</h1><div className="prompt-actions">
       <span role="status">{busy ? '저장 중' : message || (dirty.length ? `${dirty.length}개 미저장` : '저장된 기본값')}</span>
       <button disabled={busy || listing.loading} onClick={() => void listing.refresh()}>새로고침</button>
       <button className="prompt-save" disabled={busy || !catalog?.can_save || !dirty.length || !!conflicts.length || invalid} onClick={() => void save()}>변경 저장</button>

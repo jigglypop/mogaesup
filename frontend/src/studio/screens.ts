@@ -8,7 +8,7 @@ export type Section = { title: string; screens: Screen[] };
 /** Each route and the studio screen (its `tab` and `mode` query) it shows. */
 const MAKE: Screen[] = [
   { path: '/admin/studio/make/photo', label: '사진으로 전체 생성', tab: 'character', mode: 'photo', paid: true },
-  { path: '/admin/studio/make/body', label: '기본몸', tab: 'character', mode: 'body', paid: true },
+  { path: '/admin/studio/make/body', label: '기본 몸', tab: 'character', mode: 'body', paid: true },
   { path: '/admin/studio/make/parts', label: '파츠', tab: 'character', mode: 'parts', paid: true },
   { path: '/admin/studio/assets/animals', label: '동물', tab: 'animals', paid: true },
   { path: '/admin/studio/assets/props', label: '기물', tab: 'props', paid: true },

@@ -21,10 +21,23 @@ export function cameraMoved(seen: ArrayLike<number>, elements: ArrayLike<number>
 }
 
 /**
- * gaesup-world's `IdleFrameRate` (1.7.0) with one change: the camera counts as moving only past {@link CAMERA_STILL}.
- * The engine's own can come back once it compares with a tolerance. Draws every display frame within `after` seconds of
- * input, a moving camera or walking residents, and `fps` frames a second after that. It paces the canvas itself
- * (`frameloop="never"` while mounted); simulation keeps its own clock.
+ * Whether `event` is input to the world in `world` (the element the canvas takes its pointer events on): a pointer, wheel
+ * or touch on it, or a key while it, or nothing, has focus. A mouse moving over the side panel or a line typed into the
+ * chat leaves an idle island at its idle rate. Keys that move the player reach the world's input too, which wakes it.
+ */
+export function isWorldInput(event: Event, world: Element | null | undefined): boolean {
+  const target = event.target;
+  if (world && target instanceof Node && world.contains(target)) return true;
+  // With nothing focused the keys are the world's: WorldKeyboard hands it the movement keys, the editor reads its shortcuts.
+  return event.type.startsWith('key') && (!(target instanceof Element) || target === document.body || target === document.documentElement);
+}
+
+/**
+ * gaesup-world's `IdleFrameRate` (1.7.0) with two changes: the camera counts as moving only past {@link CAMERA_STILL},
+ * and only input to the world counts ({@link isWorldInput}), not input anywhere on the page. The engine's own can come
+ * back once it does both. Draws every display frame within `after` seconds of input, a moving camera or walking
+ * residents, and `fps` frames a second after that. It paces the canvas itself (`frameloop="never"` while mounted);
+ * simulation keeps its own clock.
  */
 export function IdleFrameRate({ fps = 30, after = 2 }: { fps?: number; after?: number }) {
   const get = useThree((state) => state.get);
@@ -55,6 +68,10 @@ export function IdleFrameRate({ fps = 30, after = 2 }: { fps?: number; after?: n
   useEffect(() => {
     const gate = createIdleFrameGate({ fps, afterMs: after * 1000 });
     const wake = () => gate.activity(performance.now());
+    const onInput = (event: Event) => {
+      const { events, gl } = get();
+      if (isWorldInput(event, events.connected ?? gl.domElement)) wake();
+    };
     wake();
     let last = performance.now();
     // The camera's world matrix when it last moved; a camera still gliding after input keeps the full rate.
@@ -76,12 +93,12 @@ export function IdleFrameRate({ fps = 30, after = 2 }: { fps?: number; after?: n
       advance(elapsed.current, false, state);
       flushGlobalEffects('after', time);
     });
-    for (const type of ACTIVITY) window.addEventListener(type, wake, { capture: true, passive: true });
+    for (const type of ACTIVITY) window.addEventListener(type, onInput, { capture: true, passive: true });
     // Gamepads send no DOM events: a change the world's input sees counts too.
     const offInput = input.subscribe?.(wake);
     return () => {
       cancelAnimationFrame(request);
-      for (const type of ACTIVITY) window.removeEventListener(type, wake, { capture: true });
+      for (const type of ACTIVITY) window.removeEventListener(type, onInput, { capture: true });
       offInput?.();
     };
   }, [after, fps, get, input, scheduler]);

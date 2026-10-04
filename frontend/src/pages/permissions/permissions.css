@@ -31,7 +31,9 @@
   color: var(--mg-ink);
   text-align: left;
 }
-.mg-perm-list button:hover { border-color: var(--mg-hair-strong); }
+@media (hover: hover) {
+  .mg-perm-list button:hover { border-color: var(--mg-hair-strong); }
+}
 .mg-perm-list button[aria-pressed='true'] { border: 2px solid var(--mg-primary); background: var(--mg-primary-soft); }
 
 .mg-perm-person { display: grid; gap: 12px; padding: 16px; min-width: 0; }
@@ -82,7 +84,9 @@
   background: transparent;
   color: var(--mg-muted);
 }
-.mg-perm-tag button:hover:not(:disabled) { background: var(--mg-glass-strong); color: var(--mg-bad); }
+@media (hover: hover) {
+  .mg-perm-tag button:hover:not(:disabled) { background: var(--mg-glass-strong); color: var(--mg-bad); }
+}
 .mg-perm-tag svg { width: 14px; height: 14px; }
 
 /* Explanations and expansions */

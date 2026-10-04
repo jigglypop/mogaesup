@@ -101,7 +101,6 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
             disabled={posting}
             maxLength={300}
             rows={2}
-            placeholder="따뜻한 한마디"
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => event.stopPropagation()}
           />
@@ -116,9 +115,9 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
           </div>
         </form>
       ) : (
-        <p className="mg-compose mg-card mg-muted">
-          <Link to={signIn}>로그인</Link>하면 방명록을 남길 수 있어요.
-        </p>
+        <Link className="mg-btn is-small" to={signIn}>
+          로그인
+        </Link>
       )}
       {error && (
         <p className="mg-error" role="alert">

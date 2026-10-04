@@ -12,7 +12,7 @@
 .tile-preview-gate{display:grid;place-items:center;color:var(--muted);font-size:12px}
 .tile-material-viewport{width:100%;height:100%}
 .tile-material-viewport canvas{display:block;width:100%;height:100%;touch-action:none}
-.tile-renderer-label{position:absolute;z-index:2;top:12px;left:12px;padding:3px 8px;border-radius:999px;background:var(--mg-glass);color:var(--muted);font-size:10px;font-weight:700;pointer-events:none}
+.tile-renderer-label{position:absolute;z-index:2;top:12px;left:12px;padding:3px 8px;border-radius:999px;background:var(--mg-glass);color:var(--muted);font-size:11px;font-weight:700;pointer-events:none}
 
 .tile-material-viewport[data-renderer=webgl-fallback] .tile-renderer-label{background:var(--mg-warn-soft);color:var(--warning)}
 

@@ -12,7 +12,7 @@ type AssetModelPreviewProps = {
   emptyLabel: string;
   detail?: boolean;
   autoLoad?: boolean;
-  /** Play an animation clip once the model is loaded: this clip name when present, otherwise the first. */
+  /** Play an animation clip while the preview is pointed at or holds focus: this clip name when present, otherwise the first. */
   animate?: boolean;
   clip?: string;
 };
@@ -31,6 +31,12 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
   const [selectedModel, setSelectedModel] = useState(() => choices[0] ? modelIdentity(choices[0]) : '');
   const activeModel = choices.find(item => modelIdentity(item) === selectedModel) || choices[0];
   const [visible, setVisible] = useState(false);
+  // Once shown, the viewer stays when the card scrolls away (it stops drawing off screen) instead of being built,
+  // downloaded and parsed again when the card comes back.
+  const [seen, setSeen] = useState(false);
+  // A gallery card plays its clip only while pointed at or focused; moving cards would each draw every frame.
+  const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false);
+  const clipIndex = useRef(-1);
   const [view, setView] = useState<View>(activeModel && autoLoad ? 'model' : 'image');
   const [cardView, setCardView] = useState<CardView>('front');
   const [wireframe, setWireframe] = useState(false);
@@ -54,7 +60,7 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
     const observer = new IntersectionObserver(entries => {
       const nextVisible = entries.some(entry => entry.isIntersecting);
       setVisible(nextVisible);
-      if (!nextVisible) { setLoading(false); setReady(false); }
+      if (nextVisible) setSeen(true);
     }, { threshold: 0.01 });
     observer.observe(element);
     return () => observer.disconnect();
@@ -73,7 +79,7 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
 
   useEffect(() => {
     const element = viewerMount.current;
-    if (!element || !modelUrl || view !== 'model' || !visible) return;
+    if (!element || !modelUrl || view !== 'model' || !seen) return;
     let active = true;
     let instance: import('../viewer').ModelViewer | undefined;
     setLoading(true);
@@ -89,7 +95,7 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       return instance.load(modelUrl, { sha256: modelSha256 });
     }).then(clips => {
       if (!active) return;
-      if (animate && clips?.length) instance?.play(Math.max(0, clips.findIndex(item => item.name === clip)));
+      clipIndex.current = animate && clips?.length ? Math.max(0, clips.findIndex(item => item.name === clip)) : -1;
       setReady(true);
       setLoading(false);
     }).catch(reason => {
@@ -106,8 +112,12 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       instance?.dispose();
       if (viewer.current === instance) viewer.current = null;
     };
-  }, [animate, attempt, clip, modelKey, modelSha256, modelUrl, view, visible]);
+  }, [animate, attempt, clip, modelKey, modelSha256, modelUrl, view, seen]);
 
+  const engaged = hovered || focused;
+  useEffect(() => {
+    if (ready && clipIndex.current >= 0) viewer.current?.play(engaged ? clipIndex.current : -1);
+  }, [engaged, ready]);
   useEffect(() => { viewer.current?.setCardView(cardView); }, [cardView, ready]);
   useEffect(() => { if (ready) viewer.current?.setWireframe(wireframe); }, [wireframe, ready]);
 
@@ -121,7 +131,10 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       : !ready ? image ? '3D 불러오는 중 · 2D 이미지' : modelUrl ? '3D 불러오는 중' : undefined
         : modelLabel;
 
-  return <div className="asset-model-preview-group"><div className={`asset-model-preview ${detail ? 'detail' : ''}`} aria-busy={loading}>
+  return <div className="asset-model-preview-group"><div className={`asset-model-preview ${detail ? 'detail' : ''}`} aria-busy={loading}
+    onPointerEnter={animate ? () => setHovered(true) : undefined} onPointerLeave={animate ? () => setHovered(false) : undefined}
+    onFocus={animate ? () => setFocused(true) : undefined}
+    onBlur={animate ? event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); } : undefined}>
     {showImage && <img src={image!.url} alt={`${name} 2D 이미지`} loading="lazy" />}
     {!image && (view === 'image' || !activeModel || !visible || loading || error) && <div className="asset-model-preview-empty">{activeModel ? view === 'image' ? '저장된 3D' : loading ? '3D 불러오는 중' : error ? '3D 미리보기 오류' : '3D 미리보기 준비 중' : emptyLabel}</div>}
     <div className="asset-model-preview-canvas" ref={viewerMount} />

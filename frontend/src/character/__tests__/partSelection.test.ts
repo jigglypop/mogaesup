@@ -25,7 +25,7 @@ describe('머리 파츠 조합', () => {
     const mesh = new SkinnedMesh(new BufferGeometry(), new MeshStandardMaterial()); mesh.bind(new Skeleton([head])); body.add(mesh);
     const wardrobe = new NativeWardrobe(body);
     try {
-      await expect(wardrobe.equip(['hair', 'hairFront'].map(slot => ({ id: slot, slot, url: '/should-not-load.glb', sha256: 'unused' })))).rejects.toThrow('함께 입을 수 없습니다');
+      await expect(wardrobe.equip(['hair', 'hairFront'].map(slot => ({ id: slot, slot, url: '/should-not-load.glb', sha256: 'unused' })))).rejects.toThrow('함께 입을 수 없어요');
       expect(body.children).toHaveLength(2);
     } finally { wardrobe.dispose(); mesh.geometry.dispose(); mesh.material.dispose(); }
   });

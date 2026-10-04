@@ -68,7 +68,7 @@ type SaveStatus = { tone: 'good' | 'busy' | 'warn' | 'bad'; label: string; detai
 
 /** The one-line save status the decorating bar shows, and what it means. */
 export function describeStatus(state: SaverState): SaveStatus {
-  if (state.phase === 'loading') return { tone: 'busy', label: '불러오는 중', detail: '저장된 섬을 불러오고 있어요. 다 불러오면 꾸밀 수 있어요.' };
+  if (state.phase === 'loading') return { tone: 'busy', label: '불러오는 중', detail: '저장된 섬을 불러오고 있어요.' };
   if (state.phase === 'loadFailed') {
     return { tone: 'bad', label: '불러오지 못함', detail: state.problem?.message ?? '섬을 불러오지 못했어요. 다시 불러와 주세요.' };
   }
@@ -77,7 +77,8 @@ export function describeStatus(state: SaverState): SaveStatus {
   }
   if (state.saving) return { tone: 'busy', label: '저장 중…', detail: '섬을 저장하고 있어요.' };
   if (state.problem) return { tone: 'bad', label: '저장 못 함', detail: state.problem.message };
-  if (state.dirty) return { tone: 'warn', label: '저장 안 된 변경', detail: '손을 멈추면 곧 자동으로 저장돼요. 바로 저장하려면 Ctrl+S를 눌러요.' };
+  // Saving now (Ctrl+S) is on the 저장 button's title and in the shortcut help.
+  if (state.dirty) return { tone: 'warn', label: '저장 안 된 변경', detail: '곧 자동으로 저장돼요.' };
   return {
     tone: 'good',
     label: '저장됨',

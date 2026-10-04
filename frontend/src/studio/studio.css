@@ -1,4 +1,7 @@
 /* The character studio inside the app: its screens stand on the page as the app's glass panels, their tokens and controls pointed at 모개숲's. */
+/* 운영's heading and tabs where the other 운영 pages have them, at the top of a glass panel. */
+.mg-studio-head { margin-bottom: 16px; }
+.mg-studio-head > .mg-panel-head { margin-bottom: 0; }
 .mg-studio { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 16px; align-items: start; }
 .mg-studio-nav { position: sticky; top: calc(var(--mg-edge) + 72px); display: grid; gap: 14px; padding: 14px; }
 .mg-studio-nav section { display: grid; gap: 2px; }
@@ -66,13 +69,22 @@
 
 /* A screen's main surfaces are the app's glass panels. */
 .studio-root.studio-root :is(.asset-gallery, .management-panel, .character-input, .character-result, .base-body-compose,
-  .base-body-results, .generation-compose, .generation-library, .generation-result, .prompt-list, .prompt-editor, .wardrobe-bodies) {
+  .base-body-results, .generation-compose, .generation-library, .generation-result, .prompt-list, .prompt-editor, .wardrobe-bodies,
+  .animal-create, .glb-asset-library) {
   border: 1px solid var(--mg-line);
   border-radius: var(--mg-r-panel);
   background: var(--mg-glass);
   box-shadow: var(--mg-shadow);
   backdrop-filter: var(--mg-blur);
   -webkit-backdrop-filter: var(--mg-blur);
+}
+/* Inside a part's panel the GLB library is a card in it, not a second panel. */
+.studio-root.studio-root .single-part-flow .glb-asset-library {
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* Controls look like the app's (.mg-btn, .mg-field, .mg-tabs). `:where` keeps them under each screen's own rules. */
@@ -192,6 +204,8 @@
 
 @media (max-width: 720px) {
   .mg-studio-stage { min-height: 0; }
+  .mg-studio-head > .mg-panel-head { gap: 10px; }
+  .mg-studio-head .mg-title { font-size: 24px; }
 }
 @media (max-width: 720px), (max-height: 500px) {
   /* The 3D view never fills the phone, so there is always page around it to scroll with a thumb. */

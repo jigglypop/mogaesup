@@ -1,5 +1,4 @@
-/* 모개숲 glass tokens. One set of names; the dark theme swaps values only, for the page or for one `.mg-dark` panel.
-   The studio's own tokens alias these. */
+/* 모개숲 glass tokens. One set of names; the dark theme swaps values only. The studio's own tokens alias these. */
 @font-face {
   font-family: 'Gaesup Sans';
   src: url('/fonts/GaesupSansVariable.woff2') format('woff2');
@@ -21,6 +20,7 @@
   --mg-primary-soft: rgba(106, 77, 224, 0.12);
   --mg-accent: #ff7a59;
   --mg-accent-ink: #1d1830;
+  --mg-accent-soft: rgba(255, 122, 89, 0.18);
   --mg-good: #13764f;
   --mg-good-soft: rgba(19, 118, 79, 0.12);
   --mg-warn: #8a5a12;
@@ -57,7 +57,8 @@
   --mg-field: rgba(255, 255, 255, 0.82);
   --mg-tint: rgba(29, 24, 48, 0.05);
   --mg-surface: #f4f2f8;
-  --mg-sunken: #e9e6f1;
+  /* Behind a modal dialog, over the page. */
+  --mg-scrim: rgba(20, 16, 36, 0.32);
 
   --mg-blur: blur(22px) saturate(1.6);
   --mg-blur-menu: blur(16px) saturate(1.5);
@@ -77,8 +78,7 @@
     #eef1ea;
 }
 
-:root[data-theme='dark'],
-.mg-dark {
+:root[data-theme='dark'] {
   color-scheme: dark;
   --mg-ink: #edf0fa;
   --mg-muted: #a9a3bd;
@@ -88,6 +88,7 @@
   --mg-primary-soft: rgba(183, 165, 237, 0.16);
   --mg-accent: #ff9a7a;
   --mg-accent-ink: #1f173c;
+  --mg-accent-soft: rgba(255, 154, 122, 0.16);
   --mg-good: #7fd8b1;
   --mg-good-soft: rgba(127, 216, 177, 0.14);
   --mg-warn: #e6bd8e;
@@ -121,7 +122,7 @@
   --mg-field: rgba(12, 11, 22, 0.55);
   --mg-tint: rgba(255, 255, 255, 0.06);
   --mg-surface: #151622;
-  --mg-sunken: #0d0e17;
+  --mg-scrim: rgba(0, 0, 0, 0.5);
 
   --mg-shadow: 0 18px 48px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --mg-shadow-soft: 0 6px 18px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.06);

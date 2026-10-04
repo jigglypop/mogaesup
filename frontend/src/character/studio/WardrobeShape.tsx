@@ -41,18 +41,18 @@ export function WardrobeShape({ part, label, reload, replace }: {
       const rebuilt = await pollUntil(
         stop => factoryApi.nativeParts(part.job_id, stop),
         state => {
-          if (['failed', 'recovery_required', 'qc_failed'].includes(state.status)) throw new Error(state.error || '다시 만들지 못했습니다.');
+          if (['failed', 'recovery_required', 'qc_failed'].includes(state.status)) throw new Error(state.error || '다시 만들지 못했어요.');
           return state.status === 'review_required' && state.version && state.version !== part.version ? state.version : undefined;
         }, { attempts: 151, delayMs: POLL_MS, signal });
       if (signal.aborted) return;
-      if (!rebuilt) throw new Error('다시 만들기가 끝나지 않았습니다.');
+      if (!rebuilt) throw new Error('다시 만들기가 끝나지 않았어요.');
       // The job listing behind the wardrobe refreshes every few seconds.
       const next = await pollUntil(
         stop => reload(stop),
         parts => parts.find(item => item.job_id === part.job_id && item.slot === part.slot && item.version !== part.version),
         { attempts: 15, delayMs: POLL_MS, immediate: true, signal });
       if (signal.aborted) return;
-      if (!next) throw new Error('새 버전이 옷장에 아직 보이지 않습니다.');
+      if (!next) throw new Error('새 버전이 옷장에 아직 보이지 않아요.');
       replace(next);
     } catch (reason) {
       if (signal.aborted) return;

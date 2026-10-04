@@ -73,7 +73,7 @@ function Autosaved({
   multiline?: boolean;
   allowEmpty?: boolean;
   maxLength: number;
-  placeholder: string;
+  placeholder?: string;
   'aria-label': string;
 }) {
   const [draft, setDraft] = useState(() => openingText(storageKey, value));
@@ -232,7 +232,7 @@ export function About({
           </label>
           <label className="mg-label">
             상태 메시지
-            <Autosaved key={`${profile.ownerId}:status`} storageKey={draftKey(profile.ownerId, 'status')} value={profile.statusMessage} onSave={saveStatus} maxLength={60} placeholder="오늘은 어떤 날인가요" aria-label="상태 메시지" multiline allowEmpty />
+            <Autosaved key={`${profile.ownerId}:status`} storageKey={draftKey(profile.ownerId, 'status')} value={profile.statusMessage} onSave={saveStatus} maxLength={60} aria-label="상태 메시지" multiline allowEmpty />
           </label>
           <div className="mg-label">
             오늘 기분

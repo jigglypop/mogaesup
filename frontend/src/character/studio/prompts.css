@@ -7,7 +7,7 @@
 .prompt-groups{margin:22px 0}
 .prompt-groups button{display:inline-flex;align-items:center;gap:6px}
 .prompt-groups span{font-size:11px;color:var(--muted)}
-.prompt-groups i{font-size:10px;color:var(--accent-text)}
+.prompt-groups i{font-size:11px;color:var(--accent-text)}
 .prompt-layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:20px;align-items:start}
 .prompt-list,.prompt-editor{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--glass);padding:22px;min-width:0}
 .prompt-list nav{display:flex;flex-direction:column;gap:6px;margin-top:18px}

@@ -264,6 +264,12 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const spawn = useMemo(() => spawnFor(isOwner ? null : (viewer?.username ?? null)), [isOwner, viewer?.username]);
   const playerRef = useRef<RapierRigidBody>(null!);
   const visualRotationRef = useRef<Group>(null!);
+  // The same elements on every render, so the memoized scene skips the renders of this page (the panels, the live room).
+  const visitors = useMemo(() => <LiveAvatars playerRef={playerRef} />, []);
+  const residentsWorld = useMemo(
+    () => <ResidentsWorld runtime={runtime} residents={residents} items={npcItems} greetings={greetings} />,
+    [runtime, residents, npcItems, greetings],
+  );
   const changeSettings = useCallback(
     (next: Partial<SceneSettings>) => setSettings((current) => ({ ...current, ...next })),
     [setSettings],
@@ -357,19 +363,24 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const hidden = () => {
       if (document.visibilityState === 'hidden') void saver.flush();
     };
-    const leaving = (event: BeforeUnloadEvent) => {
-      void saver.flush();
-      if (unsaved) event.preventDefault();
-    };
     document.addEventListener('visibilitychange', hidden);
     window.addEventListener('pagehide', saver.flush);
-    window.addEventListener('beforeunload', leaving);
     return () => {
       document.removeEventListener('visibilitychange', hidden);
       window.removeEventListener('pagehide', saver.flush);
-      window.removeEventListener('beforeunload', leaving);
     };
-  }, [isOwner, saver, unsaved]);
+  }, [isOwner, saver]);
+  // Only while there is something to ask about (as edit/leave.ts does): a page with a beforeunload listener is one
+  // Firefox does not keep for Back and Forward. The flushes above save the rest.
+  useEffect(() => {
+    if (!unsaved) return undefined;
+    const leaving = (event: BeforeUnloadEvent) => {
+      void saver.flush();
+      event.preventDefault();
+    };
+    window.addEventListener('beforeunload', leaving);
+    return () => window.removeEventListener('beforeunload', leaving);
+  }, [saver, unsaved]);
   const resetIsland = () => runtime.buildingStore.getState().hydrate(createVillage());
   const reloaded = () => {
     world.history.stop();
@@ -390,8 +401,8 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                 playerRef={playerRef}
                 visualRotationRef={visualRotationRef}
                 spawn={spawn}
-                visitors={<LiveAvatars playerRef={playerRef} />}
-                residents={<ResidentsWorld runtime={runtime} residents={residents} items={npcItems} greetings={greetings} />}
+                visitors={visitors}
+                residents={residentsWorld}
               />
             </EditContext.Provider>
           </div>
@@ -406,7 +417,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                 <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} ownerId={profile.ownerId} />
               ) : (
                 <p className="mg-edit-wait mg-glass" role="status">
-                  {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요. 다 불러오면 꾸밀 수 있어요.' : '섬을 불러와야 꾸밀 수 있어요.'}
+                  {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요.' : '섬을 불러와야 꾸밀 수 있어요.'}
                 </p>
               )}
               <EditHelp session={session} />
@@ -464,7 +475,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                   <span className="mg-avatar is-round" data-tone={toneOf(profile.username)}>
                     {initialOf(profile.ownerName)}
                   </span>
-                  {profile.ownerName}의 섬 이야기
+                  <span className="mg-side-open-label">{profile.ownerName}의 섬 이야기</span>
                 </button>
               )}
 

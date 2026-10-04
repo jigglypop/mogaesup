@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { homeApi, homesPath, layoutApi } from '../endpoints';
+import { setSessionOwner } from '../../auth/sessionWork';
+import { homeApi, homesPath, layoutApi, socialApi } from '../endpoints';
 
 describe('섬 목록 주소', () => {
   it('정한 것만 붙인다', () => {
@@ -77,6 +78,56 @@ describe('섬 목록 주소', () => {
       const result = homeApi.list({ q: '모' }, controller.signal);
       controller.abort();
       await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+    });
+  });
+
+  describe('이웃 신청 목록', () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const list = () => new Response(JSON.stringify({ received: [], sent: [] }), { status: 200 });
+    beforeEach(() => vi.stubGlobal('fetch', fetchMock));
+    afterEach(() => {
+      fetchMock.mockReset();
+      vi.unstubAllGlobals();
+    });
+
+    it('종과 이웃 탭이 함께 물으면 한 번만 읽고, 끝난 뒤에는 새로 읽는다', async () => {
+      fetchMock.mockImplementation(async () => list());
+      const bell = socialApi.requests();
+      const tab = socialApi.requests();
+      expect(tab).toBe(bell);
+      await Promise.all([bell, tab]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await socialApi.requests();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('신청을 수락하면 그 전에 떠난 읽기에 끼지 않고 새로 읽는다', async () => {
+      let answer!: (response: Response) => void;
+      fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { answer = resolve; }));
+      fetchMock.mockImplementation(async () => list());
+      const before = socialApi.requests();
+      await socialApi.accept('r1', {});
+      const after = socialApi.requests();
+      expect(after).not.toBe(before);
+      expect(fetchMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${String(url)}`)).toEqual([
+        'GET /api/ilchon-requests',
+        'POST /api/ilchon-requests/r1/accept',
+        'GET /api/ilchon-requests',
+      ]);
+      answer(list());
+      await Promise.all([before, after]);
+    });
+
+    it('다른 사람이 로그인하기 전에 떠난 읽기는 나누지 않는다', async () => {
+      fetchMock.mockImplementation(async () => list());
+      setSessionOwner('u1');
+      const before = socialApi.requests();
+      setSessionOwner('u2');
+      const after = socialApi.requests();
+      expect(after).not.toBe(before);
+      await Promise.all([before, after]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      setSessionOwner(null);
     });
   });
 });

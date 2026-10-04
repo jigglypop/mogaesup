@@ -171,7 +171,7 @@ export function AdminPage() {
   const startImport = async (fields: ImportFields & { kind: CatalogKind; factoryJobId: string }) => {
     try {
       await queue.start(fields);
-      setNotice({ tone: 'ok', text: `${fields.label}: 가져오기를 시작했어요. 다른 일을 해도 뒤에서 계속돼요.` });
+      setNotice({ tone: 'ok', text: `${fields.label}: 가져오기를 시작했어요` });
       return true;
     } catch (problem) {
       setNotice({ tone: 'error', text: problemText(problem) });

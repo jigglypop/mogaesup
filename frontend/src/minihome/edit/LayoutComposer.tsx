@@ -30,13 +30,17 @@ function PreviewModel({ url }: { url: string }) {
   return scene ? <primitive object={scene} dispose={null} /> : null;
 }
 
-/** A separate canvas shows decoded models without touching the island store or its autosaver. */
+/**
+ * A separate canvas shows decoded models without touching the island store or its autosaver. Nothing in it moves on its
+ * own, so it draws only when something changes: a model arriving, a resize, or the orbit controls (which ask for frames
+ * while they turn and glide).
+ */
 export function LayoutPreview({ proposal }: { proposal: LayoutProposal }) {
   const { min, max, color } = proposal.floor;
   const cx = (min[0] + max[0]) / 2, cz = (min[1] + max[1]) / 2;
   const distance = Math.max(max[0] - min[0], max[1] - min[1]);
   return <div className="mg-layout-canvas" aria-label="배치 미리보기">
-    <Canvas gl={createWorldRenderer} shadows camera={{ position: [cx + distance, distance * 1.1, cz + distance], fov: 42 }}>
+    <Canvas gl={createWorldRenderer} dpr={[1, 1.5]} frameloop="demand" shadows camera={{ position: [cx + distance, distance * 1.1, cz + distance], fov: 42 }}>
       <color attach="background" args={['#cde4e8']} />
       <ambientLight intensity={1.5} />
       <directionalLight position={[cx + 12, 24, cz + 8]} intensity={2.5} />

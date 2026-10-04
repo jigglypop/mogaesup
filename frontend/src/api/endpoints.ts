@@ -1,3 +1,4 @@
+import { sessionEpoch } from '../auth/sessionWork';
 import { api } from './client';
 import type {
   AdminCatalogItem,
@@ -28,6 +29,7 @@ import type {
   ProfileChanges,
   RealtimeTicket,
   Registration,
+  SavedHomeWorld,
   SaveHomeWorld,
   StudioPower,
   User,
@@ -66,8 +68,17 @@ export const homeApi = {
   world: (username: string, worldId: string, signal?: AbortSignal) =>
     api<HomeWorld | undefined>(`/homes/${segment(username)}/world?worldId=${segment(worldId)}`, { signal }),
   /** An island is up to 2MB, so a save may take longer than other requests before it counts as unanswered. */
-  saveWorld: (body: SaveHomeWorld, signal?: AbortSignal) => api<HomeWorld>('/homes/me/world', { method: 'PUT', body, signal, timeoutMs: 60_000 }),
+  saveWorld: (body: SaveHomeWorld, signal?: AbortSignal) => api<SavedHomeWorld>('/homes/me/world', { method: 'PUT', body, signal, timeoutMs: 60_000 }),
 };
+
+type IlchonRequests = { received: IlchonRequest[]; sent: IlchonRequest[] };
+/**
+ * The read of the viewer's 이웃 requests on its way, with the session it was sent in. The bell and the island's 이웃 tab
+ * ask at the same moments (opening the island, a change made in either), so they share it; never across a sign-in.
+ */
+let requestsRead: { epoch: number; read: Promise<IlchonRequests> } | null = null;
+/** A change to the requests: a read already on its way may predate it, so the next one goes to the server. */
+const changesRequests = <T>(call: Promise<T>) => call.finally(() => { requestsRead = null; });
 
 export const socialApi = {
   guestbook: (username: string, before?: string, signal?: AbortSignal) =>
@@ -78,12 +89,21 @@ export const socialApi = {
   ilchons: (username: string) => api<{ ilchons: Ilchon[] }>(`/homes/${segment(username)}/ilchons`),
   status: (username: string) => api<IlchonStatus>(`/ilchon/${segment(username)}`),
   request: (username: string, body: IlchonAsk) =>
-    api<{ relation: 'requested' }>(`/ilchon/${segment(username)}/request`, { method: 'POST', body }),
+    changesRequests(api<{ relation: 'requested' }>(`/ilchon/${segment(username)}/request`, { method: 'POST', body })),
   unlink: (username: string) => api<void>(`/ilchon/${segment(username)}`, { method: 'DELETE' }),
-  requests: () => api<{ received: IlchonRequest[]; sent: IlchonRequest[] }>('/ilchon-requests'),
+  /** Joins a read of this session still on its way rather than sending another. */
+  requests: () => {
+    const epoch = sessionEpoch();
+    if (requestsRead?.epoch === epoch) return requestsRead.read;
+    const read = api<IlchonRequests>('/ilchon-requests'), entry = { epoch, read };
+    requestsRead = entry;
+    const done = () => { if (requestsRead === entry) requestsRead = null; };
+    read.then(done, done);
+    return read;
+  },
   accept: (id: string, body: { name?: string }) =>
-    api<IlchonStatus>(`/ilchon-requests/${segment(id)}/accept`, { method: 'POST', body }),
-  dismiss: (id: string) => api<void>(`/ilchon-requests/${segment(id)}`, { method: 'DELETE' }),
+    changesRequests(api<IlchonStatus>(`/ilchon-requests/${segment(id)}/accept`, { method: 'POST', body })),
+  dismiss: (id: string) => changesRequests(api<void>(`/ilchon-requests/${segment(id)}`, { method: 'DELETE' })),
 };
 
 /** The public lists change only when an admin publishes, so an island opened soon after another reuses them. */

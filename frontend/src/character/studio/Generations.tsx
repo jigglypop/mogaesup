@@ -94,7 +94,7 @@ export default function Generations() {
   const canCreate = !!capability?.ready && !!name.trim() && !!prompt.trim() && !inputLocked;
 
   return <div className="workspace-content generations" aria-busy={busy}>
-    <div className="workspace-heading"><h1>오브젝트 생성</h1></div>
+    <div className="workspace-heading"><h1>기물</h1></div>
     <section className="generation-compose">
       <div className="generation-fields">
         <label>분류<select value={pending?.input.category || category} disabled={inputLocked} onChange={event => selectCategory(event.target.value)}>{categoryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
@@ -102,7 +102,7 @@ export default function Generations() {
         <label>최대 텍스처 크기<select value={pending?.input.size || size} disabled={inputLocked} onChange={event => setSize(Number(event.target.value) as GenerationSize)}>{[256, 512, 1024].map(value => <option key={value} value={value}>{value} × {value}</option>)}</select></label>
         <label className="generation-prompt">프롬프트<textarea value={pending?.input.prompt ?? prompt} maxLength={8000} disabled={inputLocked} onChange={event => { setPrompt(event.target.value); setPromptEdited(true); }} /></label>
         <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: kind })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
-        <div className="generation-form-actions"><button type="button" disabled={inputLocked || !currentDefault} onClick={() => { setPrompt(currentDefault); setPromptEdited(false); }}>기본값 복원</button><button className="generation-submit" disabled={!canCreate && !pending} onClick={() => void perform(async () => {
+        <div className="generation-form-actions"><button type="button" disabled={inputLocked || !currentDefault} onClick={() => { setPrompt(currentDefault); setPromptEdited(false); }}>기본값 복원</button><button className="generation-submit is-primary" disabled={!canCreate && !pending} onClick={() => void perform(async () => {
           const input = pending?.input || { kind, category, name: name.trim(), prompt: prompt.trim(), size };
           const result = await generationsApi.create(input);
           setSelected(result.id);

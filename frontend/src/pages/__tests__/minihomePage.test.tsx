@@ -3,7 +3,7 @@ import { act, useEffect, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { HomeView, User } from '../../api/types';
+import type { HomeView, User, VisitCounter } from '../../api/types';
 import { mount } from '../../__tests__/mount';
 import type { MinihomeProps } from '../../minihome/Minihome';
 import { MinihomePage } from '../MinihomePage';
@@ -24,7 +24,7 @@ vi.mock('../../minihome/Minihome', () => ({
       opened(view.isOwner);
       return () => closed();
     }, [view]);
-    return <p className="island">{viewer?.username ?? '-'}</p>;
+    return <p className="island" data-visits={view.visits.today}>{viewer?.username ?? '-'}</p>;
   },
 }));
 vi.mock('../../minihome/figures', () => ({ FALLBACK_MINIME: 'man', prefetchModels: () => {} }));
@@ -119,5 +119,44 @@ describe('섬 화면과 세션', () => {
     expect(get).toHaveBeenCalledWith('mogae');
     expect(opened).toHaveBeenCalledExactlyOnceWith(false);
     await unmount();
+  });
+
+  it('방문 집계를 기다리지 않고 섬을 열고, 집계가 오면 그 수를 보인다', async () => {
+    serve();
+    let count!: (value: VisitCounter) => void;
+    visit.mockReturnValue(new Promise<VisitCounter>((resolve) => { count = resolve; }));
+    auth = { status: 'signedIn', user: other, lapsed: null };
+    const { container, unmount } = await mount(page(false));
+    await settle();
+    expect(container.querySelector('.island')?.getAttribute('data-visits')).toBe('1');
+    await act(async () => count({ today: 7, total: 30 }));
+    expect(container.querySelector('.island')?.getAttribute('data-visits')).toBe('7');
+    await unmount();
+  });
+
+  it('방문 집계가 실패해도 섬은 그대로 열린다', async () => {
+    serve();
+    visit.mockRejectedValue(new Error('offline'));
+    auth = { status: 'signedIn', user: other, lapsed: null };
+    const { container, unmount } = await mount(page(false));
+    await settle();
+    expect(container.querySelector('.island')?.getAttribute('data-visits')).toBe('1');
+    await unmount();
+  });
+
+  it('꾸미기 서랍의 스튜디오 가구 목록은 섬 주인에게만 받는다', async () => {
+    serve();
+    const kinds = () => items.mock.calls.map(([kind]) => kind);
+    auth = { status: 'signedIn', user: other, lapsed: null };
+    const visitor = await mount(page(false));
+    await settle();
+    expect(kinds()).not.toContain('furniture');
+    await visitor.unmount();
+
+    auth = { status: 'signedIn', user: mogae, lapsed: null };
+    const owner = await mount(page(false));
+    await settle();
+    expect(kinds()).toContain('furniture');
+    await owner.unmount();
   });
 });

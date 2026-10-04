@@ -44,7 +44,7 @@ export default function Textures() {
   };
 
   return <div className="workspace-content texture-workspace">
-    <h1>기본 바닥 타일</h1>
+    <h1>바닥 타일</h1>
     <form className="texture-form" onSubmit={generate}>
       <label>표면<select disabled={busy} value={surface} onChange={event => setSurface(event.target.value)}>
         {Object.entries(surfaces).map(([key, label]) => <option key={key} value={key}>{label}</option>)}

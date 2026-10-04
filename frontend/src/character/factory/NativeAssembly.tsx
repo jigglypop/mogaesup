@@ -15,7 +15,7 @@ import { NativeReview } from './NativeReview';
 import { compatiblePartSlots, hasConflictingPartSlots, partLabels as labels, selectPartSlot } from './parts';
 
 const views = [['front', '정면'], ['side', '왼쪽'], ['back', '후면'], ['opposite', '오른쪽']] as const;
-const reviewGroups = [['', '전체'], ['body', '기본몸'], ['wardrobe', '의상'], ['head', '머리 착용 모습'], ['hair', '머리카락'], ['hairFront', '앞머리'], ['hairBack', '뒷머리'], ['hat', '머리 장식']] as const;
+const reviewGroups = [['', '전체'], ['body', '기본 몸'], ['wardrobe', '의상'], ['head', '머리 착용 모습'], ['hair', '머리카락'], ['hairFront', '앞머리'], ['hairBack', '뒷머리'], ['hat', '머리 장식']] as const;
 const equal = (a: string[], b: string[]) => a.length === b.length && a.every(slot => b.includes(slot));
 type Pending = { key: string; revision: string; input: Pick<NativeOutfit, 'body_sha256' | 'slots' | 'hair_color'> };
 function readPending(key: string): Pending | null {

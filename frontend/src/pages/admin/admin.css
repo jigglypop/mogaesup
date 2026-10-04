@@ -6,13 +6,17 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  margin: -8px 0 16px;
   padding: 6px 6px 6px 14px;
+  border-radius: 12px;
+  background: var(--mg-primary-soft);
+  font-weight: 700;
 }
 .mg-admin-message.is-error { background: var(--mg-bad-soft); color: var(--mg-bad); }
 .mg-admin-message .mg-icon-btn { flex: none; }
 
 .mg-badge.is-error { background: var(--mg-bad-soft); color: var(--mg-bad); }
-.mg-admin-good { color: var(--mg-good) !important; font-weight: 700; }
+.mg-admin-card .mg-admin-good { color: var(--mg-good); font-weight: 700; }
 .mg-admin-fineprint { font-size: 12px; color: var(--mg-muted); overflow-wrap: anywhere; }
 .mg-admin-fineprint code, .mg-admin-card code, .mg-admin-import code, .mg-admin-versions code, .mg-admin-name-cell code {
   font-family: var(--mg-mono);
@@ -49,7 +53,9 @@
   line-height: 0;
   transition: transform 0.15s;
 }
-.mg-admin-thumb-button:hover { transform: translateY(-1px); }
+@media (hover: hover) {
+  .mg-admin-thumb-button:hover { transform: translateY(-1px); }
+}
 .mg-admin-form { display: grid; gap: 10px; }
 .mg-admin-form .mg-field { height: 40px; }
 
@@ -144,7 +150,7 @@
   overscroll-behavior: contain;
 }
 .mg-admin-dialog.is-wide { width: min(860px, calc(100vw - 32px)); }
-.mg-admin-dialog::backdrop { background: rgba(20, 16, 36, 0.38); backdrop-filter: blur(2px); }
+.mg-admin-dialog::backdrop { background: var(--mg-scrim); backdrop-filter: blur(2px); }
 .mg-admin-dialog-panel { display: grid; gap: 12px; padding: 16px 20px 20px; }
 .mg-admin-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .mg-admin-dialog-head h2 { min-width: 0; overflow-wrap: anywhere; }
@@ -215,8 +221,10 @@
 }
 .mg-admin-inline span { overflow-wrap: anywhere; }
 .mg-admin-inline svg { width: 14px; height: 14px; flex: none; color: var(--mg-muted); opacity: 0.55; }
-.mg-admin-inline:hover:not(:disabled) { border-color: var(--mg-hair-strong); background: var(--mg-field); }
-.mg-admin-inline:hover:not(:disabled) svg { opacity: 1; }
+@media (hover: hover) {
+  .mg-admin-inline:hover:not(:disabled) { border-color: var(--mg-hair-strong); background: var(--mg-field); }
+  .mg-admin-inline:hover:not(:disabled) svg { opacity: 1; }
+}
 .mg-admin-inline:disabled { cursor: default; opacity: 0.6; }
 .mg-admin-emoji .mg-admin-inline span { font-size: 18px; line-height: 1; }
 .mg-admin-inline-edit { display: grid; gap: 4px; min-width: 90px; }

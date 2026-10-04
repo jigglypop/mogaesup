@@ -1,6 +1,9 @@
 /* The island: the world fills the window and glass panels float over it. */
 .mg-world {
   --mg-side: 380px;
+  /* gaesup-world's notes (its ToastHost) come where the app's own do, over the panels like them. */
+  --gaesup-toast-top: calc(var(--mg-edge) + 72px);
+  --gaesup-z-toast: 45;
   position: fixed;
   inset: 0;
   overflow: hidden;
@@ -11,6 +14,18 @@
 .mg-world-canvas canvas { display: block; touch-action: none; }
 /* Nothing on the island scrolls the page, so a drag past a panel's end must not pull-to-refresh or bounce it. */
 html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
+/* ...in the app's glass and type. Only on the notes: the engine's nameplates over people keep their own dark pills. */
+.mg-world > [role='log'] {
+  --gaesup-toast-info: var(--mg-glass-strong);
+  --gaesup-toast-success: var(--mg-glass-strong);
+  --gaesup-toast-warn: var(--mg-glass-strong);
+  --gaesup-toast-error: var(--mg-glass-strong);
+  --gaesup-toast-reward: var(--mg-glass-strong);
+  --gaesup-toast-mail: var(--mg-glass-strong);
+  --gaesup-ui-text: var(--mg-ink);
+  --gaesup-ui-font: var(--mg-font);
+  --gaesup-ui-blur: var(--mg-blur-menu);
+}
 
 .mg-world-loading {
   position: absolute;
@@ -30,7 +45,7 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
 .mg-island-name { display: grid; line-height: 1.2; min-width: 0; }
 .mg-island-name h1 { font-size: 15px; font-weight: 850; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .mg-island-name small { font-size: 12px; font-weight: 650; color: var(--mg-muted); }
-.mg-presence { color: var(--mg-accent-ink); background: rgba(255, 122, 89, 0.18); }
+.mg-presence { color: var(--mg-accent-ink); background: var(--mg-accent-soft); }
 :root[data-theme='dark'] .mg-presence { color: var(--mg-ink); }
 .mg-time { gap: 8px; height: 46px; font-size: 14px; }
 .mg-time svg { width: 18px; height: 18px; color: var(--mg-warn); }
@@ -65,10 +80,13 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   z-index: 18;
   top: calc(var(--mg-edge) + 72px);
   right: var(--mg-edge);
+  /* No wider than the panel it opens; a long name is cut short. */
+  max-width: var(--mg-side);
   height: 48px;
   padding: 0 16px 0 6px;
 }
 .mg-side-open .mg-avatar { width: 36px; height: 36px; }
+.mg-side-open-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* One column no wider than the panel, so a long status line is cut short instead of pushing 편집 under the close button. */
 .mg-profile { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding-right: 34px; }
@@ -80,20 +98,13 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
 
 .mg-list-count { margin: 16px 2px 8px; font-size: 12px; font-weight: 800; color: var(--mg-muted); }
 .mg-list-count b { color: var(--mg-ink); }
-.mg-center { text-align: center; }
-.mg-row { display: flex; flex-wrap: wrap; gap: 8px; }
-.mg-row-end { display: flex; justify-content: flex-end; gap: 8px; }
-.mg-link { padding: 0; border: 0; background: none; color: var(--mg-primary); font-size: 12px; font-weight: 750; }
-@media (hover: hover) {
-  .mg-link:hover { text-decoration: underline; }
-}
 
 .mg-compose { display: grid; gap: 8px; padding: 14px; }
+/* The card is the field: it shows the focus its borderless text area cannot. */
+.mg-compose:focus-within { border-color: var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft); }
 .mg-compose-label { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
 .mg-compose textarea { width: 100%; min-height: 48px; padding: 0; border: 0; outline: none; background: transparent; resize: none; line-height: 1.5; }
-.mg-compose textarea::placeholder { color: var(--mg-muted); }
 .mg-compose-foot { display: flex; align-items: center; justify-content: space-between; }
-p.mg-compose { display: block; font-size: 13px; }
 
 .mg-entries { list-style: none; margin: 0; padding: 0; display: grid; }
 .mg-entries li { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 12px 4px; border-top: 1px solid var(--mg-hair); }
@@ -163,7 +174,10 @@ p.mg-compose { display: block; font-size: 13px; }
   padding: 0 8px 0 10px;
   border-radius: 999px;
 }
-.mg-chatbar.is-hint { justify-content: center; gap: 12px; width: auto; padding: 0 10px 0 20px; font-size: 13px; font-weight: 700; color: var(--mg-muted); }
+.mg-chatbar.is-hint { justify-content: center; gap: 12px; width: auto; padding: 0 20px; font-size: 13px; font-weight: 700; color: var(--mg-muted); }
+/* A signed-out visitor gets the way in where the chat bar would be. */
+.mg-chatbar-signin { justify-self: center; }
+.mg-chatbar:focus-within { border-color: var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft), var(--mg-shadow); }
 .mg-chatbar-people { display: flex; }
 .mg-chatbar-people i {
   display: grid;
@@ -260,6 +274,8 @@ p.mg-compose { display: block; font-size: 13px; }
   display: flex;
   align-items: center;
   gap: 8px;
+  width: max-content;
+  max-width: calc(100% - var(--mg-edge) * 2);
   padding: 12px 18px;
   border-radius: 999px;
   font-weight: 750;
@@ -326,8 +342,10 @@ p.mg-compose { display: block; font-size: 13px; }
 .mg-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .mg-drawer-head .mg-tabs > button { height: 34px; }
 .mg-drawer-search { display: flex; align-items: center; gap: 8px; width: 220px; height: 38px; padding: 0 12px; border-radius: 12px; background: var(--mg-field); border: 1px solid var(--mg-hair-strong); color: var(--mg-muted); }
+.mg-drawer-search:focus-within { border-color: var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft); }
 .mg-drawer-search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--mg-ink); }
-.mg-pieces { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 4px; scrollbar-width: thin; }
+/* Room for a piece's focus ring inside the scrolling row, which clips whatever leaves it. */
+.mg-pieces { display: flex; gap: 10px; overflow-x: auto; padding: 5px; scrollbar-width: thin; }
 .mg-piece {
   flex: none;
   display: grid;
@@ -344,12 +362,15 @@ p.mg-compose { display: block; font-size: 13px; }
   font-size: 13px;
   font-weight: 750;
 }
-.mg-piece:hover { border-color: var(--mg-hair-strong); }
-.mg-piece[aria-pressed='true'], .mg-piece[aria-checked='true'] { border: 2px solid var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft); }
+@media (hover: hover) {
+  .mg-piece:hover { border-color: var(--mg-hair-strong); }
+}
+/* Chosen is a filled card; the ring around a piece is left to keyboard focus. */
+.mg-piece[aria-pressed='true'], .mg-piece[aria-checked='true'] { border-color: var(--mg-primary); background: var(--mg-primary-soft); }
 .mg-piece svg { width: 44px; height: 44px; color: var(--mg-ink); opacity: 0.85; }
 .mg-piece img { width: 56px; height: 56px; object-fit: contain; }
 .mg-piece span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mg-piece-swatch { width: 48px; height: 48px; border-radius: 14px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08); }
+.mg-piece-swatch { width: 48px; height: 48px; border-radius: 14px; box-shadow: inset 0 0 0 1px var(--mg-hair-strong); }
 .mg-drawer .mg-empty { padding: 30px 12px; }
 
 /* 주민 in the decorating drawer: pick one, name it and give it a line; the placed ones below */
@@ -446,7 +467,9 @@ p.mg-compose { display: block; font-size: 13px; }
     height: 58vh;
     border-radius: 24px;
   }
-  .mg-side-open { top: auto; bottom: calc(var(--mg-edge) + 76px); }
+  .mg-side-open { top: auto; bottom: calc(var(--mg-edge) + 76px); max-width: calc(100% - var(--mg-edge) * 2); }
+  /* A note that wraps to two lines is a card, not a pill. */
+  .mg-toast { border-radius: var(--mg-r-card); }
   .mg-world-bottom, .mg-world.has-panel .mg-world-bottom { left: var(--mg-edge); right: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); }
   .mg-world.has-panel .mg-world-bottom { display: none; }
   .mg-keys { display: none; }
@@ -498,13 +521,14 @@ p.mg-compose { display: block; font-size: 13px; }
      nowhere else) takes a smaller share. */
   .mg-chatbar-people { display: none; }
   .mg-chatbar-said { max-width: 30%; }
-  .mg-chatbar.is-hint { max-width: 100%; padding-left: 16px; }
+  .mg-chatbar.is-hint { max-width: 100%; padding: 0 16px; }
   .mg-keys.is-touch { display: none; }
   .mh-status, .mg-world.has-panel .mh-status { right: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); }
 }
 
 /* A phone on its side: slim bars (see the shell), a compact panel head, and no hints. */
 @media (max-height: 500px) and (min-width: 721px) {
+  .mg-world { --gaesup-toast-top: calc(var(--mg-edge) + 58px); }
   .mg-side, .mg-side-open, .mh-status, .mg-toast { top: calc(var(--mg-edge) + 58px); }
   .mg-side { gap: 10px; padding: 14px; }
   .mg-side-body { margin: 0 -14px -14px; padding: 2px 14px 14px; }
@@ -515,7 +539,5 @@ p.mg-compose { display: block; font-size: 13px; }
 
 @media (pointer: coarse) {
   .mg-form .mg-tabs > button { height: 40px; }
-  /* Text links get a fingertip-sized hit area without moving anything. */
-  .mg-link { padding: 10px 6px; margin: -10px -6px; }
   .mg-side-body a:not([class]) { padding: 10px 0; }
 }

@@ -101,8 +101,13 @@ export default function StudioPage() {
 function Studio({ sections, screen, pathname, sleep }: { sections: Section[]; screen: Screen; pathname: string; sleep: StudioSleep | null }) {
   const usage = useFactoryUsage();
   return (
-    <PageShell title="캐릭터 공장" wide>
-      <AdminTabs />
+    <PageShell title="운영" wide>
+      <section className="mg-glass mg-panel mg-studio-head">
+        <div className="mg-panel-head">
+          <h1 className="mg-title">운영</h1>
+          <AdminTabs />
+        </div>
+      </section>
       <div className="mg-studio">
         <nav className="mg-studio-nav mg-glass" aria-label="캐릭터 공장">
           {sections.map((section) => (

@@ -20,6 +20,7 @@ import {
 
 import type { CatalogItem } from '../api/types';
 import { Icon } from '../ui/icons';
+import { useTabs } from '../ui/tabs';
 import { FURNITURE, ISLAND_FLOORS, LIVING, NATURE, SHELVES, type ModelPiece, type Piece, type Shelf } from './edit/catalog';
 import { useEditState } from './edit/context';
 import { EditIcon, PieceIcon } from './edit/icons';
@@ -44,6 +45,7 @@ const HINTS: Record<Exclude<EditTool, 'select'>, Record<EditPart, string>> = {
   paint: { object: '물건은 칠할 수 없어요', tile: '바닥 칸을 눌러 고른 바닥으로 칠해요', wall: '벽을 눌러 고른 벽으로 바꿔요' },
   erase: { object: '치울 물건을 눌러요', tile: '지울 바닥 칸을 눌러요', wall: '지울 벽을 눌러요' },
 };
+const SHELF_IDS = SHELVES.map((item) => item.id);
 const QUARTERS = [0, 90, 180, 270];
 const QUARTER = Math.PI / 2;
 /** Stairs and ramps face a way; a box or round tile looks the same turned. */
@@ -177,6 +179,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
     // Residents are placed and weather is picked from the drawer; a click on the island must not drop the last chosen piece.
     if (next === 'residents' || next === 'weather') session.setTool('select');
   };
+  const shelfTabs = useTabs(SHELF_IDS, shelf, chooseShelf);
   /** Picking a floor or wall means using it: the select tool gives way to placing, painting and erasing stay. */
   const toPlace = () => {
     if (session.getState().tool === 'select') session.setTool('place');
@@ -452,9 +455,9 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
       <section className={`mg-drawer mg-glass${tool === 'select' && selected ? ' is-behind' : ''}`} aria-label="놓을 것">
         <div className="mg-drawer-head">
           <LayoutComposer session={session} residents={residents} studioItems={studioItems} ownerId={ownerId} />
-          <div className="mg-tabs is-fit" role="tablist" aria-label="종류">
+          <div className="mg-tabs is-fit" {...shelfTabs.list} aria-label="종류">
             {SHELVES.map((item) => (
-              <button key={item.id} role="tab" aria-selected={shelf === item.id} onClick={() => chooseShelf(item.id)}>
+              <button key={item.id} {...shelfTabs.tab(item.id)}>
                 {item.label}
               </button>
             ))}
@@ -465,9 +468,13 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
           </label>
         </div>
         {shelf === 'residents' ? (
-          <ResidentsShelf session={session} residents={residents} items={npcItems} query={query} />
+          <div {...shelfTabs.panel(shelf)}>
+            <ResidentsShelf session={session} residents={residents} items={npcItems} query={query} />
+          </div>
         ) : (
-          <div className="mg-pieces">{tiles}</div>
+          <div className="mg-pieces" {...shelfTabs.panel(shelf)}>
+            {tiles}
+          </div>
         )}
       </section>
     </>

@@ -12,6 +12,9 @@ body {
   letter-spacing: -0.01em;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* Korean breaks between words, not inside one; a word longer than the line still breaks. */
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 *, *::before, *::after { box-sizing: border-box; }
 button, input, textarea, select { font: inherit; color: inherit; letter-spacing: inherit; }
@@ -139,6 +142,8 @@ h1, h2, h3, h4, p { margin: 0; }
 }
 .mg-chip svg { width: 15px; height: 15px; }
 .mg-chip.is-soft { background: var(--mg-tint); border-color: transparent; }
+/* A chip's own close button stays inside the chip. */
+.mg-chip .mg-icon-btn.is-quiet { width: 24px; height: 24px; margin-right: -6px; }
 .mg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--mg-accent); flex: none; }
 .mg-dot.is-good { background: var(--mg-good); }
 .mg-badge {
@@ -294,7 +299,14 @@ textarea.mg-field { height: auto; min-height: 76px; padding: 11px 14px; resize: 
 .mg-avatar[data-tone='2'] { background: var(--mg-tone-2); color: var(--mg-tone-2-ink); }
 .mg-avatar[data-tone='3'] { background: var(--mg-tone-3); color: var(--mg-tone-3-ink); }
 
-/* Text helpers */
+/* Layout and text helpers */
+.mg-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.mg-row-end { display: flex; justify-content: flex-end; gap: 8px; }
+.mg-center { text-align: center; }
+.mg-link { padding: 0; border: 0; background: none; color: var(--mg-primary); font-size: 12px; font-weight: 750; }
+@media (hover: hover) {
+  .mg-link:hover { text-decoration: underline; }
+}
 .mg-muted { color: var(--mg-muted); }
 .mg-error { color: var(--mg-bad); font-size: 13px; font-weight: 650; }
 .mg-empty { padding: 28px 12px; text-align: center; color: var(--mg-muted); font-size: 13px; }
@@ -318,8 +330,16 @@ textarea.mg-field { height: auto; min-height: 76px; padding: 11px 14px; resize: 
   .mg-tabs > button, .mg-tabs > a { height: 40px; }
   .mg-check { min-height: 40px; }
   .mg-check input { width: 20px; height: 20px; }
+  /* Text links get a fingertip-sized hit area without moving anything. */
+  .mg-link { padding: 10px 6px; margin: -10px -6px; }
+  /* A chip with a close button grows to give the button 32px. */
+  .mg-chip:has(> .mg-icon-btn) { height: 36px; }
+  .mg-chip .mg-icon-btn.is-quiet { width: 32px; height: 32px; margin-right: -8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
+  /* A bar that would slide to and fro stands full and dimmed instead of stopping part way. Its own rules load later,
+     hence :root. */
+  :root .mg-progress.is-indeterminate i, :root .mg-wake-bar i { width: 100%; transform: none; opacity: 0.45; }
 }

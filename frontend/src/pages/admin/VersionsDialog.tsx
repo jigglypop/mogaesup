@@ -63,7 +63,7 @@ export function VersionsDialog({
         </p>
       )}
       {versions === null && !problem && <p className="mg-empty">버전 기록을 불러오는 중…</p>}
-      {versions?.length === 0 && <p className="mg-empty">기록된 버전이 없어요. 기본 미니미는 버전을 두지 않아요.</p>}
+      {versions?.length === 0 && <p className="mg-empty">기록된 버전이 없어요</p>}
       <ol className="mg-admin-versions">
         {versions?.map((version) => (
           <li key={version.id} className={version.current ? 'is-current' : undefined}>

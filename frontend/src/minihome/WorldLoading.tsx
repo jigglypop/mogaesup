@@ -24,7 +24,8 @@ export function WorldLoading() {
           <Icon name="island" />
         </span>
         <b>{STAGE[stage]}</b>
-        <small>{detail}</small>
+        {/* The count changes with every file; only the stage above is read out. */}
+        <small aria-hidden="true">{detail}</small>
         <span className="mg-progress"><i style={{ width: `${Math.round(progress * 100)}%` }} /></span>
       </div>
     </div>

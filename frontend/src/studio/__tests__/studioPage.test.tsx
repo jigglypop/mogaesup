@@ -51,7 +51,7 @@ describe('캐릭터 공장 화면', () => {
   it('유료 작업자는 만들기 화면 전부와 관리 화면을 본다', async () => {
     auth.user = user('operator', 'paid_operator');
     const { container, unmount } = await open('/admin/studio/make/body');
-    expect(menu(container)).toEqual(['사진으로 전체 생성', '기본몸', '파츠', '동물', '기물', '바닥 타일', '2D 이모티콘', '에셋 라이브러리', '프롬프트']);
+    expect(menu(container)).toEqual(['사진으로 전체 생성', '기본 몸', '파츠', '동물', '기물', '바닥 타일', '2D 이모티콘', '에셋 라이브러리', '프롬프트']);
     expect(where(container)).toBe('/admin/studio/make/body');
     expect(container.textContent).toContain('작업 화면');
     await unmount();

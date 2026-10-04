@@ -156,4 +156,22 @@ describe('둘러보기 화면', () => {
     expect(names(container)).toEqual([]);
     await unmount();
   });
+
+  it('첫 쪽을 불러오지 못하면 알리고, 다시 불러오기로 같은 검색을 다시 묻는다', async () => {
+    list.mockRejectedValueOnce(new Error('offline'));
+    const { container, unmount } = await open('/explore?q=%EB%AA%A8');
+    await flush();
+    expect(container.querySelector('[role=alert]')?.textContent).toBe('목록을 불러오지 못했어요');
+    const retry = [...container.querySelectorAll('button')].find((button) => button.textContent?.trim() === '다시 불러오기');
+    expect(retry).toBeDefined();
+
+    list.mockResolvedValueOnce({ homes: page(2) });
+    await act(async () => retry!.click());
+    await flush();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list.mock.calls[1]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '모' });
+    expect(names(container)).toEqual(['섬0', '섬1']);
+    expect(container.querySelector('[role=alert]')).toBeNull();
+    await unmount();
+  });
 });

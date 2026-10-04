@@ -178,8 +178,10 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
         </ul>
       )}
       {!viewer && (
-        <p className="mg-muted mg-center">
-          <Link to={signIn}>로그인</Link>하면 이웃 신청을 할 수 있어요.
+        <p className="mg-center">
+          <Link className="mg-btn is-small" to={signIn}>
+            로그인
+          </Link>
         </p>
       )}
       {error && (

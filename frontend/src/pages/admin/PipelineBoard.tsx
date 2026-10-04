@@ -69,11 +69,7 @@ function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
           </button>
         </div>
       )}
-      {mode === 'update' && imported ? (
-        <p className="mg-admin-fineprint">
-          모델·대표 그림·애니메이션만 새로 바뀌어요. 공개 상태·이름·이모지·순서는 그대로 두고, 지금 모델은 버전 기록에 남아 언제든 되돌릴 수 있어요.
-        </p>
-      ) : (
+      {!(mode === 'update' && imported) && (
         <>
           <div className="mg-label">
             종류
@@ -134,7 +130,7 @@ function CharacterCard({
     onPreview({
       title: character.name,
       url: character.modelUrl,
-      note: `가져오면 복사할 모델이에요 (${character.sourceRef}).`,
+      note: `원본: ${character.sourceRef}`,
     });
   return (
     <article className={`mg-admin-card${group === 'update' ? ' is-update' : ''}`}>

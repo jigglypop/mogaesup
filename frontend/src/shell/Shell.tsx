@@ -168,12 +168,24 @@ function Notifications() {
   useEffect(() => {
     if (!user) return undefined;
     void reload();
-    const timer = setInterval(() => void reload(), 60_000);
+    // A hidden tab skips the minute's check and makes it up as soon as it is shown again.
+    let missed = false;
+    const timer = setInterval(() => {
+      if (document.hidden) missed = true;
+      else void reload();
+    }, 60_000);
+    const shown = () => {
+      if (document.hidden || !missed) return;
+      missed = false;
+      void reload();
+    };
     const changed = () => void reload();
     window.addEventListener(REQUESTS_CHANGED, changed);
+    document.addEventListener('visibilitychange', shown);
     return () => {
       clearInterval(timer);
       window.removeEventListener(REQUESTS_CHANGED, changed);
+      document.removeEventListener('visibilitychange', shown);
     };
   }, [user, reload]);
   if (!user) return null;

@@ -8,7 +8,7 @@ describe('캐릭터 공장 메뉴', () => {
     expect(sections.map((section) => section.title)).toEqual(['만들기', '관리']);
     expect(sections[0]?.screens.map((screen) => screen.label)).toEqual([
       '사진으로 전체 생성',
-      '기본몸',
+      '기본 몸',
       '파츠',
       '동물',
       '기물',

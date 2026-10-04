@@ -22,7 +22,7 @@ export type RestGeometry = { position: Float32Array; normal?: Float32Array; tang
 export function restGeometry(geometry: BufferGeometry): RestGeometry {
   const read = (name: string) => geometry.getAttribute(name) as BufferAttribute | undefined;
   const positions = read('position');
-  if (!positions || !(positions.array instanceof Float32Array)) throw new Error('파츠 위치 데이터를 읽지 못했습니다.');
+  if (!positions || !(positions.array instanceof Float32Array)) throw new Error('파츠 위치 데이터를 읽지 못했어요.');
   return { position: positions.array.slice(),
     ...(read('normal')?.array instanceof Float32Array ? { normal: (read('normal')!.array as Float32Array).slice() } : {}),
     ...(read('tangent')?.array instanceof Float32Array ? { tangent: (read('tangent')!.array as Float32Array).slice() } : {}) };

@@ -4,7 +4,7 @@ import { Link, Navigate } from 'react-router-dom';
 
 import { ApiRequestError } from '../api/client';
 import { catalogApi, homeApi, lookApi } from '../api/endpoints';
-import type { CatalogItem, HomeView, Look } from '../api/types';
+import type { CatalogItem, HomeView, Look, VisitCounter } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { playerModelUrl } from '../minihome/character';
@@ -55,22 +55,35 @@ export function MinihomePage({ username, editing }: { username: string; editing:
     setProblem(null);
     (async () => {
       const own = viewerName === username;
-      // One round trip: the visit and the visitor's own home do not wait for this home to arrive.
-      const [view, minimes, furniture, npcs, viewerLook, mine, visited] = await Promise.all([
+      // The island does not wait for its visit to be counted: the count joins the view whenever it comes (or the view
+      // keeps its own when counting fails).
+      let visits: VisitCounter | null = null;
+      let shown = false;
+      void homeApi.visit(username, visitorId()).then(
+        (counted) => {
+          if (!counted || controller.signal.aborted) return;
+          visits = counted;
+          if (shown) setLoaded((current) => current && { ...current, view: { ...current.view, visits: counted } });
+        },
+        () => undefined,
+      );
+      // Studio furniture fills only the owner's decorating drawer.
+      const studioFurniture = () => catalogApi.items('furniture').catch(() => ({ items: [] }));
+      const ownFurniture = own ? studioFurniture() : null;
+      // One round trip: the visitor's own home does not wait for this home to arrive.
+      const [view, minimes, npcs, viewerLook, mine] = await Promise.all([
         own ? homeApi.mine() : homeApi.get(username),
         catalogApi.items('minime'),
-        catalogApi.items('furniture').catch(() => ({ items: [] })),
         catalogApi.items('npc').catch(() => ({ items: [] })),
         viewerName ? lookApi.mine().then(({ look }) => look, () => null) : null,
         viewerName && !own ? homeApi.get(viewerName).catch(() => null) : null,
-        homeApi.visit(username, visitorId()).catch(() => null),
       ]);
-      const visits = visited ?? view.visits;
+      const furniture = view.isOwner ? await (ownFurniture ?? studioFurniture()) : { items: [] };
       if (controller.signal.aborted) return;
       const viewerMinime = view.isOwner ? view.profile.minime : (mine?.profile.minime ?? FALLBACK_MINIME);
       prefetchModels([playerModelUrl(viewerLook, viewerMinime, minimes.items)]);
       setLoaded({
-        view: { ...view, visits },
+        view: { ...view, visits: visits ?? view.visits },
         minimes: minimes.items,
         furniture: furniture.items,
         npcs: npcs.items,
@@ -78,6 +91,7 @@ export function MinihomePage({ username, editing }: { username: string; editing:
         viewerLook,
         as: viewerName,
       });
+      shown = true;
     })().catch((error: unknown) => {
       if (controller.signal.aborted) return;
       setProblem(

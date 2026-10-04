@@ -16,7 +16,7 @@ vi.mock('../studio/AssetGallery', () => ({ AssetGallery: () => null }));
 vi.mock('../studio/GlbAssetLibrary', () => ({ GlbAssetLibrary: () => null }));
 const user = (...permissions: PermissionName[]): User => ({ id: 'u1', username: 'mogae', displayName: '모개', role: 'user', permissions });
 
-describe('에셋 관리의 만들기 버튼', () => {
+describe('에셋 라이브러리의 만들기 버튼', () => {
   let previous: string;
   beforeEach(() => {
     previous = `${location.pathname}${location.search}`;
@@ -43,10 +43,10 @@ describe('에셋 관리의 만들기 버튼', () => {
     expect(await actions(null)).toEqual(['GLB 등록']);
   });
 
-  it('유료 작업자는 기본몸·헤어 만들기 화면으로 갈 수 있다', async () => {
+  it('유료 작업자는 기본 몸·헤어 만들기 화면으로 갈 수 있다', async () => {
     auth.user = user('operator', 'paid_operator');
-    expect(await actions(null)).toEqual(['기본몸 추가', '헤어 생성', 'GLB 등록']);
-    expect(await actions({ connected: true, access: 'paid', paidThisMonth: 0, paidMonthly: 5 })).toEqual(['기본몸 추가', '헤어 생성', 'GLB 등록']);
+    expect(await actions(null)).toEqual(['기본 몸 추가', '헤어 생성', 'GLB 등록']);
+    expect(await actions({ connected: true, access: 'paid', paidThisMonth: 0, paidMonthly: 5 })).toEqual(['기본 몸 추가', '헤어 생성', 'GLB 등록']);
   });
 
   it('서버가 유료 작업을 막아 두었으면 유료 작업자에게도 보이지 않는다', async () => {

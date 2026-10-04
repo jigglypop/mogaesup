@@ -165,7 +165,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
     {pending && !bases.some(item => item.id === pending.input.base_job_id) && <option value={pending.input.base_job_id}>{pending.input.base_job_id}</option>}
     {baseOptions.map(item => <option key={item.id} value={item.id}>{name(item)} · {worn(item).join('·') || '기본 몸'}</option>)}
   </select></label>;
-  const baseStatus = pending ? '' : !bases.length ? '완성된 기본 몸 없음 · 기본몸에서 먼저 생성하세요'
+  const baseStatus = pending ? '' : !bases.length ? '완성된 기본 몸 없음 · 기본 몸에서 먼저 생성하세요'
     : !base ? '기준 캐릭터를 선택하세요' : native && native.status !== 'review_required' ? '기준 캐릭터 조립 확인 중' : '';
   const outputSettings = <><MeshyOptionsEditor key={slot} scope={slot} value={pending?.input.meshy_options || meshy.options} disabled={inputLocked} onChange={meshy.setOptions} onUploading={setMeshyUploading} />{meshy.storageError && <p role="alert">{meshy.storageError}</p>}</>;
 

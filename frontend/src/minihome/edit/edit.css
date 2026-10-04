@@ -17,7 +17,8 @@
   color: var(--mg-muted);
 }
 
-/* Notes over the world sit under the tool bar while decorating. */
+/* Notes over the world sit under the tool bar while decorating, the engine's too. */
+.mg-world.is-editing { --gaesup-toast-top: calc(var(--mg-edge) + 136px); }
 .mg-world.is-editing .mg-toast, .mg-world.is-editing .mg-conflict { top: calc(var(--mg-edge) + 136px); }
 
 /* Save state */
@@ -63,7 +64,7 @@
 .mg-edit-notice { padding: 8px 12px; border-radius: 12px; background: var(--mg-warn-soft); color: var(--mg-warn); font-size: 13px; font-weight: 700; }
 
 /* Shortcut help */
-.mg-help-backdrop { position: absolute; inset: 0; z-index: 50; display: grid; place-items: center; padding: var(--mg-edge); background: rgba(20, 16, 36, 0.28); }
+.mg-help-backdrop { position: absolute; inset: 0; z-index: 50; display: grid; place-items: center; padding: var(--mg-edge); background: var(--mg-scrim); }
 .mg-help { width: min(880px, 100%); max-height: 100%; overflow-y: auto; padding: 22px 24px 24px; display: grid; gap: 16px; scrollbar-width: thin; }
 .mg-help > header { display: flex; align-items: center; justify-content: space-between; }
 .mg-help-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px 24px; }
@@ -122,7 +123,7 @@
 .mg-tabs.is-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .mg-tabs.is-grid > button { padding: 0 4px; }
 
-.mg-layout-backdrop { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: var(--mg-edge); background: rgba(20, 16, 36, .32); }
+.mg-layout-backdrop { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: var(--mg-edge); background: var(--mg-scrim); }
 .mg-layout-dialog { width: min(920px, 100%); max-height: calc(100dvh - var(--mg-edge) * 2); overflow-y: auto; padding: 22px; display: grid; gap: 14px; }
 .mg-layout-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .mg-layout-dialog h2 { font-size: 18px; margin: 0; }
