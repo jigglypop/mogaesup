@@ -23,6 +23,7 @@ import {
   useMultiplayer,
   useUIConfigStore,
   type MultiplayerConfig,
+  type PlayerState,
 } from 'gaesup-world';
 
 import { authApi } from '../api/endpoints';
@@ -157,6 +158,14 @@ export const useLive = () => useContext(LiveContext);
 export function useLiveSelf(): { connected: boolean; peer: string | null } {
   const live = useLive();
   return { connected: !!live?.isConnected, peer: live?.localPlayerId ?? null };
+}
+
+/**
+ * Everyone else in the room by `client_id` (a game player's `peer`), each with the state they last sent; null outside
+ * the room. Entries change in place as people move, without a render: read positions when they are needed (in a frame).
+ */
+export function useLivePlayers(): ReadonlyMap<string, PlayerState> | null {
+  return useLive()?.players ?? null;
 }
 
 /** Everyone else in the room, each in their own 미니미, but those a game hides; mount inside the world's physics. */

@@ -90,6 +90,7 @@ registry! {
     redlight,
     tag,
     draw,
+    soccer,
 }
 
 /// Milliseconds on the server's clock: what games measure time in, and what views carry (`endsAt`). Monotonic, and

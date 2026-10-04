@@ -99,6 +99,10 @@
   --mg-tag-it: #ff3d8b;
   /* 캐치마인드's paper: light in either theme, since the strokes keep their colours. */
   --mg-draw-paper: #ffffff;
+  /* 축구's two teams (panel swatches, rings and goals) and the field's chalk and ball; hex: three.js reads them. */
+  --mg-soccer-a: #e5484d;
+  --mg-soccer-b: #2f7cf6;
+  --mg-soccer-line: #ffffff;
 }
 
 :root[data-theme='dark'] {
@@ -170,4 +174,7 @@
   --mg-redlight-eye: #2a2238;
   --mg-tag-it: #ff3d8b;
   --mg-draw-paper: #ecebf2;
+  --mg-soccer-a: #ff7a7d;
+  --mg-soccer-b: #6ea8ff;
+  --mg-soccer-line: #f4f4f4;
 }

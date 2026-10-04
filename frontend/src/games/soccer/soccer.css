@@ -1,0 +1,21 @@
+/* 축구's panel, on games.css: the clock with its kickoff mark, each team's colour, the result line and the kick key. */
+.mg-soccer-clock { display: flex; align-items: center; gap: 10px; }
+.mg-game-scores .mg-soccer-swatch { flex: none; min-width: 0; width: 10px; height: 10px; border-radius: 50%; }
+.mg-soccer-swatch[data-team='a'] { background: var(--mg-soccer-a); }
+.mg-soccer-swatch[data-team='b'] { background: var(--mg-soccer-b); }
+.mg-game-scores li > .mg-badge { flex: none; }
+.mg-soccer-verdict { font-size: 18px; font-weight: 850; letter-spacing: -0.02em; }
+.mg-soccer-kick kbd {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font: 800 11px/18px var(--mg-font);
+  text-align: center;
+  opacity: 0.8;
+}
+/* No keyboard to press it on. */
+@media (pointer: coarse) {
+  .mg-soccer-kick kbd { display: none; }
+}
