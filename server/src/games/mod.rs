@@ -85,6 +85,7 @@ macro_rules! registry {
 registry! {
     treasure,
     ox,
+    impostor,
 }
 
 /// Milliseconds on the server's clock: what games measure time in, and what views carry (`endsAt`). Monotonic, and

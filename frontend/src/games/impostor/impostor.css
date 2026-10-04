@@ -1,0 +1,45 @@
+/* 임포스터's panel: role, progress, tasks, the meeting and its talk. Colours are the glass tokens only. */
+.mg-impostor-role { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; }
+.mg-impostor-badge[data-role='crew'] { background: var(--mg-good-soft); color: var(--mg-good); }
+.mg-impostor-badge[data-role='impostor'] { background: var(--mg-bad-soft); color: var(--mg-bad); }
+.mg-impostor .mg-badge.mg-impostor-mine { background: var(--mg-primary-soft); color: var(--mg-primary); }
+
+.mg-impostor-progress { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
+.mg-impostor-progress .mg-progress { flex: 1; width: auto; min-width: 0; }
+.mg-impostor-progress b, .mg-impostor-count { font-variant-numeric: tabular-nums; }
+
+.mg-impostor-tasks li[data-done] > span { color: var(--mg-muted); text-decoration: line-through; }
+
+.mg-impostor-verdict { display: grid; gap: 6px; font-size: 13px; font-weight: 700; }
+.mg-impostor-tally { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-weight: 650; }
+.mg-impostor-tally li { display: flex; align-items: baseline; gap: 8px; }
+.mg-impostor-tally small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mg-muted); font-size: 12px; }
+
+.mg-impostor-head { font-size: 14px; font-weight: 800; letter-spacing: -0.02em; }
+.mg-impostor-clock { display: flex; align-items: center; gap: 10px; }
+.mg-impostor-clock .mg-impostor-count { margin-left: auto; font-size: 14px; }
+.mg-impostor-seats li { gap: 6px; }
+.mg-impostor-seats li[data-out] > span:first-child { color: var(--mg-muted); text-decoration: line-through; }
+.mg-impostor-seats li[aria-current='true'] { background: var(--mg-primary-soft); }
+
+.mg-impostor-talk { display: grid; gap: 6px; }
+.mg-impostor-talk ol {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+  max-height: 168px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--mg-r-control);
+  background: var(--mg-tint);
+  font-size: 13px;
+}
+.mg-impostor-talk li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; overflow-wrap: anywhere; }
+.mg-impostor-talk li[data-ghost] { color: var(--mg-muted); }
+.mg-impostor-talk li[data-mine] b { color: var(--mg-primary); }
+.mg-impostor-talk form { display: flex; gap: 6px; }
+.mg-impostor-talk .mg-field { flex: 1; min-width: 0; height: 36px; }
+
+.mg-impostor-winner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 22px; font-weight: 850; letter-spacing: -0.03em; }

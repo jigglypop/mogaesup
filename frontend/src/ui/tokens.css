@@ -74,6 +74,12 @@
   --mg-edge: 20px;
   --mg-rail: 78px;
 
+  /* 임포스터 in the island's canvas (hex: three.js reads them): station pads, the viewer's own lit, the table, bodies. */
+  --mg-impostor-pad: #9a93b5;
+  --mg-impostor-task: #22a493;
+  --mg-impostor-table: #a87650;
+  --mg-impostor-body: #e5534b;
+
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(200, 186, 255, 0.5), transparent 62%),
     radial-gradient(60vmax 40vmax at 100% 4%, rgba(190, 232, 196, 0.55), transparent 58%),
@@ -133,6 +139,11 @@
 
   --mg-shadow: 0 18px 48px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --mg-shadow-soft: 0 6px 18px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  --mg-impostor-pad: #7d7699;
+  --mg-impostor-task: #3cc9b6;
+  --mg-impostor-table: #93653f;
+  --mg-impostor-body: #f06a62;
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(110, 88, 190, 0.35), transparent 62%),
