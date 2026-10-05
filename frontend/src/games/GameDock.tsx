@@ -1,6 +1,7 @@
 import './games.css';
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 
 import { Icon } from '../ui/icons';
 import type { GameSession } from './protocol';
@@ -10,11 +11,11 @@ import { openSpots } from './spots';
 import { standing } from './teleport';
 
 /** The host's layout for `session`'s game, from the island this page has loaded; throws when the game refuses. */
-function layoutFor(room: GameRoomValue, session: GameSession): unknown {
+function layoutFor(room: GameRoomValue, session: GameSession, options: unknown): unknown {
   const definition = gameOf(session.kind);
   if (!definition) throw new Error('없는 게임이에요.');
   const building = room.building();
-  return definition.layout({ building, spots: () => openSpots(building), position: standing(room.playerRef.current), session });
+  return definition.layout({ building, spots: () => openSpots(building), position: standing(room.playerRef.current), session, options });
 }
 
 /**
@@ -28,6 +29,8 @@ export function GameDock() {
   const active = useActiveGame();
   const [open, setOpen] = useState(false);
   const [problem, setProblem] = useState('');
+  // The host's lobby settings, for the kind they were made for.
+  const [settings, setSettings] = useState<{ kind: string; options: unknown } | null>(null);
   const toggle = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLElement>(null);
   const focusPanel = useRef(false);
@@ -63,16 +66,19 @@ export function GameDock() {
     event.stopPropagation();
     fold();
   };
+  const options = settings && settings.kind === session?.kind ? settings.options : undefined;
   const start = () => {
     if (!session) return;
     setProblem('');
     try {
-      client.start(layoutFor(room, session));
+      client.start(layoutFor(room, session, options));
     } catch (cause) {
       setProblem(cause instanceof Error && cause.message ? cause.message : '시작하지 못했어요.');
     }
   };
   const said = error?.message ?? problem;
+  const Lobby = definition?.Lobby;
+  const Overlay = session?.phase === 'playing' ? active?.definition.Overlay : undefined;
 
   let body;
   if (!connected) {
@@ -106,6 +112,9 @@ export function GameDock() {
             </li>
           ))}
         </ul>
+        {host && Lobby && (
+          <Lobby session={session} options={options} setOptions={(next) => setSettings({ kind: session.kind, options: next })} />
+        )}
         <div className="mg-game-actions">
           {plays ? (
             <button type="button" className="mg-btn is-small" onClick={client.leave}>
@@ -201,6 +210,7 @@ export function GameDock() {
           )}
         </section>
       )}
+      {active && Overlay && createPortal(<Overlay {...active.props} />, document.body)}
     </>
   );
 }

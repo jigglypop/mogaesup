@@ -9,7 +9,7 @@
 //! # Protocol (JSON text frames, 16 KiB at most)
 //!
 //! Client → server:
-//! - `{"type":"Open","kind":"treasure"}`: opens a lobby when the island has no session; the sender hosts it and is its
+//! - `{"type":"Open","kind":"impostor"}`: opens a lobby when the island has no session; the sender hosts it and is its
 //!   first player. The host of a lobby or of a finished game may open again: a lobby of `kind` with the same players.
 //! - `{"type":"Join"}`, `{"type":"Leave"}`: joins the lobby; leaves the session (in any phase).
 //! - `{"type":"Start","layout":{…}}`: the host starts the lobby's game once it has enough players. `layout` is data the
@@ -26,7 +26,7 @@
 //!   not in the room), `you` (the viewer's user id), `game` (the game's view for this viewer, null in the lobby),
 //!   `result` (once ended), `seq` (rises with every update the session sends) and `now` (the server's clock in ms, for
 //!   countdowns).
-//! - `{"type":"Event","kind":"treasure","event":{…}}`: something a game announced ([`Ctx::emit`]).
+//! - `{"type":"Event","kind":"impostor","event":{…}}`: something a game announced ([`Ctx::emit`]).
 //! - `{"type":"Error","code":"not_host","message":"…"}`: why a message was refused, to its sender only.
 //! - `{"type":"Pong","ts":n}`.
 //!
@@ -40,8 +40,9 @@
 //!
 //! A game is a plugin: one file `games/<name>.rs` with a type implementing [`Game`] and a
 //! `pub(crate) const KIND: Kind = Kind::new(…)` (its name, player limits, tick rate and `create`), and its name on one
-//! line of the `registry!` below. The client side is a folder `frontend/src/games/<name>/` and one line in its
-//! registry. `docs/game-plugins.md` walks through both; `treasure` is the reference.
+//! line of the `registry!` below (a game with more than one file is a folder `games/<name>/` with its `mod.rs`). The
+//! client side is a folder `frontend/src/games/<name>/` and one line in its registry. `docs/game-plugins.md` walks
+//! through both; `impostor` is the one the island runs.
 
 use axum::{
     Router,
@@ -84,13 +85,7 @@ macro_rules! registry {
 
 // The plugin point: one line per game.
 registry! {
-    treasure,
-    ox,
     impostor,
-    redlight,
-    tag,
-    draw,
-    soccer,
 }
 
 /// Milliseconds on the server's clock: what games measure time in, and what views carry (`endsAt`). Monotonic, and

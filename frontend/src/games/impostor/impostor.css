@@ -1,4 +1,4 @@
-/* 임포스터's panel: role, progress, tasks, the meeting and its talk. Colours are the glass tokens only. */
+/* 임포스터: its panel (role, progress, tasks, the meeting and its talk), the lobby settings and what lies over the page while it plays. Colours are the glass tokens only. */
 .mg-impostor-role { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; }
 .mg-impostor-badge[data-role='crew'] { background: var(--mg-good-soft); color: var(--mg-good); }
 .mg-impostor-badge[data-role='impostor'] { background: var(--mg-bad-soft); color: var(--mg-bad); }
@@ -43,3 +43,163 @@
 .mg-impostor-talk .mg-field { flex: 1; min-width: 0; height: 36px; }
 
 .mg-impostor-winner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 22px; font-weight: 850; letter-spacing: -0.03em; }
+
+.mg-impostor-broken { font-size: 13px; font-weight: 800; color: var(--mg-bad); }
+
+/* The host's lobby settings. */
+.mg-impostor-lobby { display: grid; gap: 8px; }
+.mg-impostor-bots, .mg-impostor-side { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
+.mg-impostor-bots > span:first-child, .mg-impostor-side > span { min-width: 3.5em; }
+.mg-impostor-bots .mg-icon-btn { width: 32px; height: 32px; font-size: 16px; font-weight: 800; }
+.mg-impostor-bots b { min-width: 1.5em; text-align: center; font-variant-numeric: tabular-nums; }
+.mg-impostor-bots .mg-impostor-count { margin-left: auto; font-size: 12px; color: var(--mg-muted); }
+.mg-impostor-bots .mg-impostor-count.is-short { color: var(--mg-bad); }
+.mg-impostor-side .mg-field { flex: 1; min-width: 0; height: 34px; }
+
+/* Over the page while it plays: the buttons in reach, bottom right as Among Us has them. */
+.mg-impostor-actions {
+  position: fixed;
+  z-index: 31;
+  right: var(--mg-edge);
+  bottom: calc(var(--mg-edge) + 116px);
+  display: flex;
+  flex-wrap: wrap-reverse;
+  justify-content: flex-end;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(420px, calc(100% - var(--mg-edge) * 2));
+}
+.mg-impostor-actions > .mg-btn { min-width: 84px; height: 48px; font-size: 14px; font-weight: 800; box-shadow: var(--mg-shadow-soft); }
+.mg-impostor-sabotage, .mg-impostor-vents { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; width: 100%; }
+
+.mg-impostor-alarm {
+  position: fixed;
+  z-index: 31;
+  top: calc(var(--mg-edge) + 72px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border: 2px solid var(--mg-bad);
+  color: var(--mg-bad);
+  font-weight: 850;
+}
+.mg-impostor-alarm .mg-game-timer { font-size: 22px; }
+.mg-impostor-held { display: flex; gap: 6px; }
+.mg-impostor-held i { width: 12px; height: 12px; border-radius: 50%; border: 2px solid currentColor; }
+.mg-impostor-held i[data-held] { background: currentColor; }
+
+/* A lights-out: the crew see only a little around the middle of the screen, where their character walks. */
+.mg-impostor-dark {
+  position: fixed;
+  z-index: 16;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 44%, transparent 0, transparent 9vmin, var(--mg-impostor-dark) 26vmin);
+}
+
+.mg-impostor-splash {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  pointer-events: none;
+  text-align: center;
+  animation: mg-impostor-splash 2.6s ease both;
+}
+.mg-impostor-splash b { font-size: clamp(36px, 8vw, 72px); font-weight: 900; letter-spacing: -0.04em; text-shadow: 0 4px 24px var(--mg-scrim); }
+.mg-impostor-splash span { font-size: 18px; font-weight: 800; text-shadow: 0 2px 12px var(--mg-scrim); }
+.mg-impostor-splash[data-tone='crew'] b { color: var(--mg-good); }
+.mg-impostor-splash[data-tone='impostor'] b, .mg-impostor-splash[data-tone='alarm'] b { color: var(--mg-bad); }
+@keyframes mg-impostor-splash {
+  0% { opacity: 0; transform: scale(0.92); }
+  12%, 82% { opacity: 1; transform: none; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mg-impostor-splash { animation: none; }
+}
+
+/* The task being played. */
+.mg-impostor-task {
+  position: fixed;
+  z-index: 40;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(360px, calc(100% - var(--mg-edge) * 2));
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+.mg-impostor-task:focus { outline: none; }
+.mg-impostor-solved { font-size: 14px; font-weight: 800; color: var(--mg-good); }
+.mg-impostor-task .mg-progress { width: 100%; height: 14px; }
+
+.mg-wires { display: grid; grid-template-columns: 44px 1fr 44px; gap: 6px; height: 200px; }
+.mg-wires-side { display: grid; grid-template-rows: repeat(4, 1fr); gap: 10px; }
+.mg-wires-side button { border: 0; border-radius: 10px; background: var(--wire); box-shadow: var(--mg-shadow-soft); }
+.mg-wires-side button[aria-pressed='true'] { outline: 3px solid var(--mg-ink); outline-offset: 2px; }
+.mg-wires-side button:disabled { opacity: 0.55; }
+.mg-wires svg { width: 100%; height: 100%; }
+.mg-wires line { stroke-width: 6; vector-effect: non-scaling-stroke; stroke-linecap: round; }
+
+.mg-swipe { display: grid; gap: 8px; }
+.mg-swipe input { width: 100%; height: 44px; accent-color: var(--mg-primary); }
+.mg-swipe p { font-size: 13px; font-weight: 800; color: var(--mg-bad); }
+
+.mg-numbers { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.mg-numbers .mg-btn { height: 44px; padding: 0; font-size: 16px; font-weight: 850; }
+.mg-numbers .mg-btn[aria-pressed='true'] { background: var(--mg-good-soft); color: var(--mg-good); }
+
+.mg-calibrate { display: grid; gap: 10px; }
+.mg-calibrate-track { position: relative; height: 28px; border-radius: 14px; background: var(--mg-tint); overflow: hidden; }
+.mg-calibrate-mark { position: absolute; top: 0; bottom: 0; background: var(--mg-good-soft); }
+.mg-calibrate-needle {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 6px;
+  margin-left: -3px;
+  border-radius: 3px;
+  background: var(--mg-primary);
+  animation: mg-calibrate-sweep linear infinite;
+}
+@keyframes mg-calibrate-sweep {
+  0%, 100% { left: 0; }
+  50% { left: 100%; }
+}
+
+.mg-fuel { display: grid; gap: 10px; }
+
+/* Names over the bots, in the island's canvas. */
+.mg-impostor-name {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--mg-glass-strong);
+  color: var(--mg-ink);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Beside the island's story panel while it is open, as the game panel goes (the panel is 380px, 330px below 1100px). */
+body:has(.mg-world.has-panel) .mg-impostor-actions { right: calc(var(--mg-edge) * 2 + 380px); }
+@media (max-width: 1100px) {
+  body:has(.mg-world.has-panel) .mg-impostor-actions { right: calc(var(--mg-edge) * 2 + 330px); }
+}
+@media (max-width: 860px) {
+  body:has(.mg-world.has-panel) .mg-impostor-actions { right: var(--mg-edge); }
+}
+
+@media (max-width: 720px) {
+  .mg-impostor-actions { bottom: calc(var(--mg-edge) + 140px); }
+  .mg-impostor-actions > .mg-btn { min-width: 72px; height: 44px; }
+  .mg-impostor-alarm { top: calc(var(--mg-edge) + 58px); }
+}

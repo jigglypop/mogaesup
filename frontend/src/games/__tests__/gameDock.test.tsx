@@ -1,15 +1,20 @@
 import { act } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// The dock over the real 보물찾기 and a game for two or three (to see 시작 wait for players).
+// The dock over the real 임포스터 and a game for two or three (to see 시작 wait for players, settings and an overlay).
 vi.mock('../registry', async () => {
-  const { treasure } = await import('../treasure');
+  const { impostor } = await import('../impostor');
   const pair = {
-    kind: 'pair', label: '둘이서', minPlayers: 2, maxPlayers: 3, layout: () => ({ goal: 3 }),
+    kind: 'pair', label: '둘이서', minPlayers: 2, maxPlayers: 3,
+    layout: ({ options }: { options: unknown }) => ({ goal: (options as { goal?: number } | undefined)?.goal ?? 3 }),
+    Lobby: ({ options, setOptions }: { options: unknown; setOptions: (options: unknown) => void }) => (
+      <button type="button" onClick={() => setOptions({ goal: 5 })}>목표 {(options as { goal?: number } | undefined)?.goal ?? 3}</button>
+    ),
     Panel: () => <p>둘이서 진행</p>, Result: () => <p>둘이서 결과</p>,
+    Overlay: () => <p className="pair-overlay">둘이서 위</p>,
     attention: (view: { ask?: number } | null) => (view?.ask ? `ask-${view.ask}` : null),
   };
-  const GAMES = [treasure, pair];
+  const GAMES = [impostor, pair];
   return { GAMES, gameOf: (kind: string | null | undefined) => GAMES.find((game) => game.kind === kind) ?? null };
 });
 
@@ -97,9 +102,9 @@ describe('섬의 게임 패널', () => {
     expect(toggle().getAttribute('aria-expanded')).toBe('true');
     expect(document.activeElement).toBe(panel());
     const names = [...panel()!.querySelectorAll('.mg-game-list button')].map((item) => item.textContent);
-    expect(names).toEqual(['보물찾기', '둘이서']);
-    await press('보물찾기');
-    expect(client.open).toHaveBeenCalledWith('treasure');
+    expect(names).toEqual(['임포스터', '둘이서']);
+    await press('임포스터');
+    expect(client.open).toHaveBeenCalledWith('impostor');
   });
 
   it('연결 중이면 그 상태만 보이고, Esc로 접으면 버튼으로 돌아간다', async () => {
@@ -128,8 +133,11 @@ describe('섬의 게임 패널', () => {
     set({ session: session({ players: [me, friend] }) });
     expect(button('시작')!.textContent).toBe('시작 2명');
     expect(button('시작')!.disabled).toBe(false);
+    // The host's settings go with the start; others do not see them.
+    await press('목표 3');
+    expect(button('목표 5')).toBeDefined();
     await press('시작');
-    expect(client.start).toHaveBeenCalledWith({ goal: 3 });
+    expect(client.start).toHaveBeenCalledWith({ goal: 5 });
     await press('나가기');
     expect(client.leave).toHaveBeenCalled();
   });
@@ -147,34 +155,43 @@ describe('섬의 게임 패널', () => {
     expect(button('참가')!.disabled).toBe(true);
   });
 
-  it('보물찾기 방장의 시작은 섬의 빈 자리를 보낸다', async () => {
-    const { toggle, press, client } = await dock({ session: session({ kind: 'treasure' }) });
+  it('임포스터 방장은 봇과 혼자일 때의 역할을 정하고, 시작은 섬의 배치와 그 설정을 보낸다', async () => {
+    const { toggle, press, button, client, panel } = await dock({ session: session({ kind: 'impostor' }) });
     await act(() => toggle().click());
+    expect(panel()!.querySelector('.mg-impostor-bots b')!.textContent).toBe('5');
+    expect(button('시작')!.disabled).toBe(false);
+    await press('봇 빼기');
+    expect(panel()!.querySelector('.mg-impostor-bots b')!.textContent).toBe('4');
+    const side = panel()!.querySelector<HTMLSelectElement>('.mg-impostor-side select')!;
+    await act(() => {
+      side.value = 'impostor';
+      side.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     await press('시작');
-    const layout = client.start.mock.calls[0]![0] as { spots: [number, number, number][] };
-    expect(layout.spots.length).toBeGreaterThanOrEqual(12);
-    expect(layout.spots.length).toBeLessThanOrEqual(200);
+    const layout = client.start.mock.calls[0]![0] as { stations: unknown[]; walk: unknown[]; bots: number; role: string | null };
+    expect([layout.bots, layout.role]).toEqual([4, 'impostor']);
+    expect(layout.stations.length).toBeGreaterThanOrEqual(6);
+    expect(layout.walk.length).toBeGreaterThan(0);
   });
 
-  it('게임이 시작되면 참가한 사람의 패널이 열려 남은 시간과 점수를 보여 준다', async () => {
-    const { toggle, panel, button, set } = await dock({ session: session({ kind: 'treasure', players: [me, friend] }) });
+  it('게임이 시작되면 참가한 사람의 패널이 열리고, 게임이 페이지 위에 그리는 것은 패널을 접어도 남는다', async () => {
+    const { toggle, panel, button, set } = await dock({ session: session({ players: [me, friend] }) });
     expect(panel()).toBeNull();
-    const view = {
-      gems: [{ id: 1, position: [0, 0, 0], value: 3 }],
-      scores: [{ id: me.id, name: '나', score: 1 }, { id: friend.id, name: '친구', score: 4 }],
-      endsAt: NOW + 95_000,
-    };
-    set({ session: session({ kind: 'treasure', phase: 'playing', players: [me, friend], game: view }) });
+    set({ session: session({ phase: 'playing', players: [me, friend], game: {} }) });
     expect(toggle().getAttribute('aria-expanded')).toBe('true');
-    expect(panel()!.querySelector('[role="timer"]')!.textContent).toBe('1:35');
-    const rows = [...panel()!.querySelectorAll('.mg-game-scores li')];
-    expect(rows.map((row) => row.textContent)).toEqual(['친구4', '나1']);
-    expect(rows[1]!.getAttribute('aria-current')).toBe('true');
+    expect(panel()!.textContent).toContain('둘이서 진행');
+    expect(document.body.querySelector('.pair-overlay')!.textContent).toBe('둘이서 위');
     expect(button('나가기')).toBeDefined();
     expect(button('닫기')).toBeDefined();
     // A refusal is said in the panel.
     set({ error: { code: 'bad_action', message: '할 수 없는 행동이에요.' } });
     expect(panel()!.querySelector('[role="alert"]')!.textContent).toBe('할 수 없는 행동이에요.');
+    await act(() => toggle().click());
+    expect(panel()).toBeNull();
+    expect(document.body.querySelector('.pair-overlay')).not.toBeNull();
+    // Gone once it ends.
+    set({ session: session({ phase: 'ended', players: [me, friend], game: {}, result: {} }) });
+    expect(document.body.querySelector('.pair-overlay')).toBeNull();
   });
 
   it('접어 둔 패널은 게임이 답을 기다릴 때마다 한 번씩 다시 열린다', async () => {
@@ -193,21 +210,13 @@ describe('섬의 게임 패널', () => {
   });
 
   it('끝나면 결과를 보여 주고, 방장은 다시 하거나 닫고 다른 사람은 나간다', async () => {
-    const ended = session({
-      kind: 'treasure', phase: 'ended', players: [me, friend],
-      game: { gems: [], scores: [], endsAt: NOW },
-      result: { ranking: [
-        { id: friend.id, name: '친구', score: 4, rank: 1 },
-        { id: me.id, name: '나', score: 4, rank: 1 },
-      ] },
-    });
+    const ended = session({ phase: 'ended', players: [me, friend], game: {}, result: {} });
     const host = await dock({ session: ended });
     await act(() => host.toggle().click());
-    const rows = [...host.panel()!.querySelectorAll('.mg-game-scores li')].map((row) => row.textContent);
-    expect(rows).toEqual(['1위친구4점', '1위나4점']);
+    expect(host.panel()!.textContent).toContain('둘이서 결과');
     expect(host.button('나가기')).toBeUndefined();
     await host.press('다시 하기');
-    expect(host.client.open).toHaveBeenCalledWith('treasure');
+    expect(host.client.open).toHaveBeenCalledWith('pair');
     await host.press('닫기');
     expect(host.client.close).toHaveBeenCalled();
     await host.view.unmount();

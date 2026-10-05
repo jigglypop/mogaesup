@@ -211,7 +211,7 @@ async fn 네_사람이_임포스터를_하며_처치하고_신고해_회의의_�
     let dead = everyone[victim].session(|session| session["game"]["alive"] == false).await;
     assert_eq!(dead["game"]["bodies"][0]["victim"], json!(target));
     assert_eq!(everyone[victim].event("killed").await, json!({"type": "killed"}));
-    let seen = everyone[other].session(|session| session["game"]["dead"] == json!([target])).await;
+    let seen = everyone[other].session(|session| session["game"]["hidden"] == json!([target])).await;
     assert_eq!(seen["game"]["bodies"][0]["name"], everyone[victim].name);
 
     // Another walks up to the body and reports it: everyone alive gets a seat at the table.
@@ -271,14 +271,17 @@ async fn 네_사람이_임포스터를_하며_처치하고_신고해_회의의_�
     );
     assert_eq!(ended["result"]["winner"], "crew");
     assert_eq!(ended["result"]["reason"], "impostorsOut");
-    let revealed: Vec<(String, String)> = ended["result"]["players"]
+    // In the order they joined, which the sockets' own tasks decide: compared as sets.
+    let mut revealed: Vec<(String, String)> = ended["result"]["players"]
         .as_array()
         .unwrap()
         .iter()
         .map(|player| (player["id"].as_str().unwrap().to_owned(), player["role"].as_str().unwrap().to_owned()))
         .collect();
-    let dealt: Vec<(String, String)> =
+    let mut dealt: Vec<(String, String)> =
         everyone.iter().zip(&roles).map(|(member, role)| (member.id.clone(), (*role).to_owned())).collect();
+    revealed.sort();
+    dealt.sort();
     assert_eq!(revealed, dealt);
     let votes = &ended["game"]["lastMeeting"]["votes"];
     assert_eq!(votes.as_array().unwrap().len(), 3);

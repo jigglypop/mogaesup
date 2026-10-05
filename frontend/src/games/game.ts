@@ -27,7 +27,7 @@ export type GameProps<View = unknown> = {
 
 export type GameResultProps<View = unknown, Result = unknown> = GameProps<View> & { result: Result };
 
-/** What the host's page knows when it starts a game: the island it has loaded and where the host stands. */
+/** What the host's page knows when it starts a game: the island it has loaded, where the host stands, and what they set. */
 export type LayoutContext = {
   building: BuildingSerializedState;
   /** Open walkable spots on that island (`openSpots` in spots.ts), at most 200. */
@@ -35,6 +35,15 @@ export type LayoutContext = {
   /** The host's character, when it stands somewhere yet. */
   position: Vec3 | null;
   session: GameSession;
+  /** What the host set in the lobby (`Lobby`); undefined when they set nothing or the game has no settings. */
+  options: unknown;
+};
+
+/** What a game's lobby settings get: the host's choices so far (undefined until they choose), and how to change them. */
+export type LobbyProps = {
+  session: GameSession;
+  options: unknown;
+  setOptions: (options: unknown) => void;
 };
 
 /** One game on the client: its server `kind`, its name, and what it draws. */
@@ -54,6 +63,10 @@ export type GameDefinition<View = unknown, Result = unknown> = {
   World?: ComponentType<GameProps<View>>;
   /** The result in the game panel once the game has ended. */
   Result: ComponentType<GameResultProps<View, Result>>;
+  /** The host's settings in the lobby, which `layout` gets as `options`. */
+  Lobby?: ComponentType<LobbyProps>;
+  /** Over the whole page while the game plays, whether the panel is open or folded (an alarm, a task's screen). */
+  Overlay?: ComponentType<GameProps<View>>;
   /**
    * A key for something the player must answer in the panel (a meeting's vote): each new key brings the folded panel up
    * again, once; null when nothing waits.

@@ -460,5 +460,5 @@ fn every_registered_game_has_its_own_kind_and_limits_the_server_keeps() {
         assert!(kind.max_players <= ISLAND_CAPACITY, "{}", kind.kind);
         assert!((1..=MAX_TICK_HZ).contains(&kind.tick_hz), "{}", kind.kind);
     }
-    assert!(KINDS.iter().any(|kind| kind.kind == "treasure"));
+    assert!(KINDS.iter().any(|kind| kind.kind == "impostor"));
 }

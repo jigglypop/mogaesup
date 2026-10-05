@@ -5,6 +5,8 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import type { GameProps, GameResultProps } from '../game';
 import { clock, useRemaining } from '../time';
 import type { ImpostorLine, ImpostorMeeting, ImpostorOutcome, ImpostorRole, ImpostorView } from './index';
+import { SABOTAGE_NAMES } from './Overlay';
+import { TASK_NAMES } from './tasks';
 
 /** The longest line the server takes. */
 const MAX_TEXT = 120;
@@ -13,6 +15,7 @@ const REASON: Record<ImpostorOutcome['reason'], string> = {
   tasks: '작업을 모두 마쳤어요',
   impostorsOut: '임포스터가 모두 사라졌어요',
   parity: '임포스터가 크루만큼 남았어요',
+  meltdown: '원자로가 녹아내렸어요',
 };
 
 type Act = GameProps['act'];
@@ -41,7 +44,7 @@ function Role({ view, names, you }: { view: ImpostorView; names: Names; you: str
   );
 }
 
-function Progress({ done, total }: ImpostorView['progress']) {
+function Progress({ done, total }: NonNullable<ImpostorView['progress']>) {
   return (
     <div className="mg-impostor-progress">
       <span>전체 작업</span>
@@ -61,20 +64,17 @@ function Seconds({ at, serverNow }: { at: number; serverNow: () => number }) {
 
 function Tasks({ view, serverNow }: { view: ImpostorView; serverNow: () => number }) {
   const fake = view.role === 'impostor';
-  const name = fake ? '가짜 작업' : '작업';
   return (
     <ol className="mg-game-scores mg-impostor-tasks" aria-label={fake ? '가짜 작업' : '내 작업'}>
-      {view.tasks.map((task, index) => (
+      {view.tasks.map((task) => (
         <li key={task.station} data-done={task.done || undefined}>
-          <span>
-            {name} {index + 1}
-          </span>
+          <span>{TASK_NAMES[view.stationKinds[task.station] ?? 'wires']}</span>
           {task.done ? (
             <b>완료</b>
           ) : (
             view.working?.station === task.station && (
               <b>
-                <Seconds at={view.working.endsAt} serverNow={serverNow} />
+                <Seconds at={view.working.readyAt} serverNow={serverNow} />
               </b>
             )
           )}
@@ -84,63 +84,18 @@ function Tasks({ view, serverNow }: { view: ImpostorView; serverNow: () => numbe
   );
 }
 
-function Work({ view, act, serverNow }: { view: ImpostorView; act: Act; serverNow: () => number }) {
-  const left = useRemaining(view.working?.endsAt ?? 0, serverNow);
-  const busy = !!view.working;
-  return (
-    <button type="button" className="mg-btn is-small is-primary" disabled={busy || view.near.station === null} onClick={() => act({ do: 'task' })}>
-      {busy ? `작업 중 ${seconds(left)}` : '작업'}
-    </button>
-  );
-}
-
-function Kill({ kill, names, act, serverNow }: { kill: NonNullable<ImpostorView['kill']>; names: Names; act: Act; serverNow: () => number }) {
-  const wait = useRemaining(kill.readyAt, serverNow);
-  const target = kill.targets[0];
-  const name = target && names.get(target);
-  return (
-    <button type="button" className="mg-btn is-small is-danger" disabled={wait > 0 || !target} onClick={() => target && act({ do: 'kill', target })}>
-      {wait > 0 ? `처치 ${seconds(wait)}` : name ? `처치 · ${name}` : '처치'}
-    </button>
-  );
-}
-
-function Emergency({ view, act, serverNow }: { view: ImpostorView; act: Act; serverNow: () => number }) {
-  const wait = useRemaining(view.emergencyFrom, serverNow);
-  const left = view.emergencyLeft > 0;
-  return (
-    <button type="button" className="mg-btn is-small" disabled={!left || wait > 0 || !view.near.table} onClick={() => act({ do: 'meeting' })}>
-      {left && wait > 0 ? `긴급 회의 ${seconds(wait)}` : '긴급 회의'}
-    </button>
-  );
-}
-
-/** The viewer's buttons: 작업 for the crew (ghosts too), 처치 for a living impostor, 신고 and 긴급 회의 for the living. */
-function Actions({ view, names, act, serverNow }: { view: ImpostorView; names: Names; act: Act; serverNow: () => number }) {
-  const body = view.near.body;
-  return (
-    <div className="mg-game-actions">
-      {view.role === 'crew' && <Work view={view} act={act} serverNow={serverNow} />}
-      {view.kill && <Kill kill={view.kill} names={names} act={act} serverNow={serverNow} />}
-      {view.alive && (
-        <button type="button" className="mg-btn is-small" disabled={body === null} onClick={() => body !== null && act({ do: 'report', body })}>
-          신고
-        </button>
-      )}
-      {view.alive && <Emergency view={view} act={act} serverNow={serverNow} />}
-    </div>
-  );
-}
-
 /** How the last meeting ended, and who voted for whom. */
 function Verdict({ last, names }: { last: NonNullable<ImpostorView['lastMeeting']>; names: Names }) {
   const said = last.ejected ? `${last.name}님이 추방됐어요 · ${last.impostor ? '임포스터' : '크루'}였어요` : '아무도 추방되지 않았어요';
+  const remaining = `임포스터 ${last.remaining}명 남음`;
   const tally = new Map<string | null, string[]>();
   for (const { voter, target } of last.votes) tally.set(target, [...(tally.get(target) ?? []), voter]);
   const rows = [...tally].sort((a, b) => b[1].length - a[1].length);
   return (
     <section className="mg-impostor-verdict" aria-label="지난 회의">
-      <p>{said}</p>
+      <p>
+        {said} <span className="mg-badge">{remaining}</span>
+      </p>
       {rows.length > 0 && (
         <ul className="mg-impostor-tally">
           {rows.map(([target, voters]) => (
@@ -209,15 +164,16 @@ function Talk({ lines, you, act, label, open }: { lines: ImpostorLine[]; you: st
   );
 }
 
-/** Between meetings: role, the last verdict, progress, tasks and buttons; the dead also talk among themselves. */
+/** Between meetings: role, the last verdict, the sabotage underway, progress and tasks; the dead also talk among themselves. */
 function Roaming({ view, session, me, act, serverNow, names }: GameProps<ImpostorView> & { names: Names }) {
+  const comms = view.progress === null;
   return (
     <div className="mg-game-hud mg-impostor">
       <Role view={view} names={names} you={session.you} />
       {view.lastMeeting && <Verdict last={view.lastMeeting} names={names} />}
-      <Progress {...view.progress} />
-      {view.role && <Tasks view={view} serverNow={serverNow} />}
-      {me && view.role && <Actions view={view} names={names} act={act} serverNow={serverNow} />}
+      {view.sabotage && <p className="mg-impostor-broken">{SABOTAGE_NAMES[view.sabotage.kind]}</p>}
+      {view.progress && <Progress {...view.progress} />}
+      {view.role && !comms && <Tasks view={view} serverNow={serverNow} />}
       {me && view.alive === false && <Talk lines={view.talk} you={session.you} act={act} label="유령 대화" open />}
     </div>
   );
@@ -229,7 +185,6 @@ function Meeting({ view, session, me, act, serverNow, names, meeting }: GameProp
   const voting = meeting.stage === 'vote';
   const living = view.alive === true;
   const open = voting && living && !meeting.myVote;
-  const dead = new Set(view.dead);
   const head =
     meeting.reason === 'report' && meeting.body
       ? `${meeting.callerName}님이 ${meeting.body.name}님을 신고했어요`
@@ -252,10 +207,11 @@ function Meeting({ view, session, me, act, serverNow, names, meeting }: GameProp
       </div>
       <ul className="mg-game-players mg-impostor-seats" aria-label="투표">
         {view.players.map((player) => {
-          const out = !player.alive || dead.has(player.id);
+          const out = !player.alive;
           return (
             <li key={player.id} data-out={out || undefined} aria-current={player.id === session.you ? 'true' : undefined}>
               <span>{player.name}</span>
+              {player.bot && <span className="mg-badge">봇</span>}
               {out && <span className="mg-badge">탈락</span>}
               {meeting.myVote?.target === player.id && <span className="mg-badge mg-impostor-mine">내 표</span>}
               {open && !out && (
@@ -302,6 +258,7 @@ export function ImpostorResult({ result, session }: GameResultProps<ImpostorView
         {result.players.map((player) => (
           <li key={player.id} aria-current={player.id === session.you ? 'true' : undefined}>
             <span>{player.name}</span>
+            {player.bot && <span className="mg-badge">봇</span>}
             {(player.left || !player.alive) && <i>{player.left ? '나감' : '탈락'}</i>}
             <RoleBadge role={player.role} />
           </li>

@@ -29,9 +29,6 @@
   --mg-bad-soft: rgba(210, 69, 61, 0.12);
   /* A status dot or mark in the warning tone (text in that tone is --mg-warn). */
   --mg-warn-dot: #d99a2b;
-  /* 보물찾기's gems in the island's canvas (hex: three.js reads them), the same in either theme. */
-  --mg-gem: #2f9bff;
-  --mg-gem-gold: #ffb81c;
 
   /* Someone's initial tile, one of four pastels (data-tone 0-3): fill and letter. */
   --mg-tone-0: linear-gradient(160deg, #efe9ff, #dcd3fb);
@@ -74,11 +71,29 @@
   --mg-edge: 20px;
   --mg-rail: 78px;
 
-  /* 임포스터 in the island's canvas (hex: three.js reads them): station pads, the viewer's own lit, the table, bodies. */
+  /* 임포스터 in the island's canvas (hex: three.js reads them): station pads, the viewer's own lit, the table, bodies,
+     vents, a broken panel's alarm and the bots' visors; the dark of a lights-out over the page. */
   --mg-impostor-pad: #9a93b5;
   --mg-impostor-task: #22a493;
   --mg-impostor-table: #a87650;
   --mg-impostor-body: #e5534b;
+  --mg-impostor-vent: #4f5563;
+  --mg-impostor-alarm: #ff4d4f;
+  --mg-impostor-visor: #9fd8ef;
+  --mg-impostor-dark: rgba(6, 8, 20, 0.94);
+  /* The crew's colours: bots wear them, and the wires of a task (hex: three.js reads them). */
+  --mg-crew-0: #d6302f;
+  --mg-crew-1: #2f55d4;
+  --mg-crew-2: #1f8a43;
+  --mg-crew-3: #e65fb6;
+  --mg-crew-4: #ef8a1c;
+  --mg-crew-5: #f2d43d;
+  --mg-crew-6: #4a525c;
+  --mg-crew-7: #dfe6f1;
+  --mg-crew-8: #7a45c7;
+  --mg-crew-9: #85572c;
+  --mg-crew-10: #3fd6c8;
+  --mg-crew-11: #7bd84a;
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(200, 186, 255, 0.5), transparent 62%),
@@ -86,23 +101,6 @@
     radial-gradient(70vmax 50vmax at 60% 112%, rgba(247, 219, 176, 0.45), transparent 62%),
     #eef1ea;
 
-  /* OX 퀴즈's O and X: the zones on the island (hex: three.js reads them) and their letters in the panel. */
-  --mg-ox-o: #2f6fe4;
-  --mg-ox-x: #d93a40;
-  /* 무궁화 꽃이 피었습니다 and 술래잡기 in the island's canvas (hex: three.js reads them): the lights, the marker at the
-     finish, and the ring around an it. */
-  --mg-redlight-wait: #ffb81c;
-  --mg-redlight-go: #2fbf71;
-  --mg-redlight-stop: #ff4d4f;
-  --mg-redlight-marker: #f3e3cf;
-  --mg-redlight-eye: #2a2238;
-  --mg-tag-it: #ff3d8b;
-  /* 캐치마인드's paper: light in either theme, since the strokes keep their colours. */
-  --mg-draw-paper: #ffffff;
-  /* 축구's two teams (panel swatches, rings and goals) and the field's chalk and ball; hex: three.js reads them. */
-  --mg-soccer-a: #e5484d;
-  --mg-soccer-b: #2f7cf6;
-  --mg-soccer-line: #ffffff;
 }
 
 :root[data-theme='dark'] {
@@ -158,23 +156,12 @@
   --mg-impostor-task: #3cc9b6;
   --mg-impostor-table: #93653f;
   --mg-impostor-body: #f06a62;
+  --mg-impostor-vent: #6b7180;
+  --mg-impostor-alarm: #ff6b6b;
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(110, 88, 190, 0.35), transparent 62%),
     radial-gradient(60vmax 40vmax at 100% 4%, rgba(50, 110, 90, 0.3), transparent 58%),
     radial-gradient(70vmax 50vmax at 60% 112%, rgba(140, 90, 60, 0.25), transparent 62%),
     #10111c;
-
-  --mg-ox-o: #82a9ff;
-  --mg-ox-x: #ff8e8a;
-  --mg-redlight-wait: #ffb81c;
-  --mg-redlight-go: #2fbf71;
-  --mg-redlight-stop: #ff4d4f;
-  --mg-redlight-marker: #f3e3cf;
-  --mg-redlight-eye: #2a2238;
-  --mg-tag-it: #ff3d8b;
-  --mg-draw-paper: #ecebf2;
-  --mg-soccer-a: #ff7a7d;
-  --mg-soccer-b: #6ea8ff;
-  --mg-soccer-line: #f4f4f4;
 }

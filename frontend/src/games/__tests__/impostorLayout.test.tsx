@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { at, createVillage } from '../../minihome/village';
-import { flat, impostorLayout } from '../impostor/layout';
+import { defaultOptions, flat, impostorLayout, optionsFor } from '../impostor/layout';
 import type { GameSession, Vec3 } from '../protocol';
 import { gameOf } from '../registry';
 import { openSpots } from '../spots';
@@ -53,13 +53,45 @@ describe('임포스터 배치', () => {
 
   it('등록된 임포스터는 서버와 같은 kind와 인원이고, 섬에서 바로 배치를 만든다', () => {
     const game = gameOf('impostor')!;
-    expect([game.kind, game.label, game.minPlayers, game.maxPlayers]).toEqual(['impostor', '임포스터', 4, 15]);
+    expect([game.kind, game.label, game.minPlayers, game.maxPlayers]).toEqual(['impostor', '임포스터', 1, 15]);
     const building = createVillage();
-    const layout = game.layout({ building, spots: () => village, position: null, session: { kind: 'impostor' } as GameSession }) as {
+    const session = { kind: 'impostor', players: [{ id: 'me', name: '나', peer: 'p' }] } as GameSession;
+    const layout = game.layout({ building, spots: () => village, position: null, session, options: undefined }) as {
       stations: Vec3[];
       table: Vec3;
+      vents: Vec3[];
+      walk: Vec3[];
+      bots: number;
+      role: string | null;
     };
     expect(layout.stations.length).toBeGreaterThanOrEqual(6);
-    for (const point of [layout.table, ...layout.stations]) for (const value of point) expect(Math.abs(value)).toBeLessThanOrEqual(200);
+    // Alone: five bots make a table of six, and the side is dealt.
+    expect([layout.bots, layout.role]).toEqual([5, null]);
+    // Vents away from the table, the stations and one another; the walk is every open spot, up to four hundred.
+    expect(layout.vents.length).toBeGreaterThanOrEqual(2);
+    expect(layout.vents.length).toBeLessThanOrEqual(4);
+    for (const vent of layout.vents) {
+      expect(village).toContainEqual(vent);
+      for (const place of [layout.table, ...layout.stations]) expect(flat(vent, place)).toBeGreaterThanOrEqual(5);
+    }
+    for (const [a, b] of pairs(layout.vents)) expect(flat(a, b)).toBeGreaterThanOrEqual(5);
+    expect(layout.walk.length).toBeGreaterThan(layout.stations.length);
+    expect(layout.walk.length).toBeLessThanOrEqual(400);
+    // The whole layout fits the game socket's 16 KiB frames.
+    expect(JSON.stringify({ type: 'Start', layout }).length).toBeLessThan(16 * 1024);
+    for (const point of [layout.table, ...layout.stations, ...layout.vents, ...layout.walk]) {
+      for (const value of point) expect(Math.abs(value)).toBeLessThanOrEqual(200);
+    }
+    const chosen = game.layout({ building, spots: () => village, position: null, session, options: { bots: 3, role: 'impostor' } }) as typeof layout;
+    expect([chosen.bots, chosen.role]).toEqual([3, 'impostor']);
+  });
+
+  it('봇은 넷이 안 되면 여섯을 채울 만큼으로 시작하고, 서버가 받는 범위를 넘지 않으며, 역할은 혼자일 때만 고른다', () => {
+    expect([1, 2, 3, 4, 8].map((people) => defaultOptions(people).bots)).toEqual([5, 4, 3, 0, 0]);
+    expect(optionsFor(undefined, 2)).toEqual({ bots: 4, role: 'random' });
+    expect(optionsFor({ bots: 12, role: 'crew' }, 1)).toEqual({ bots: 9, role: 'crew' });
+    expect(optionsFor({ bots: 9, role: 'crew' }, 10)).toEqual({ bots: 5, role: 'random' });
+    expect(optionsFor({ bots: -2, role: 'boss' }, 1)).toEqual({ bots: 0, role: 'random' });
+    expect(optionsFor({ bots: 2.5 }, 1)).toEqual({ bots: 5, role: 'random' });
   });
 });

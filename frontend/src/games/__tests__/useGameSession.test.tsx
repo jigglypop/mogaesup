@@ -52,7 +52,7 @@ const pass = (value: string, owner = viewer): RealtimeTicket => ({ ticket: value
 const flush = () => act(async () => void (await Promise.resolve()));
 const wait = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
 const lobby = (now = 5_000_000) => ({
-  kind: 'treasure', phase: 'lobby', host: viewer.id, you: viewer.id, seq: 1, now,
+  kind: 'impostor', phase: 'lobby', host: viewer.id, you: viewer.id, seq: 1, now,
   players: [{ id: viewer.id, name: '에이', peer: 'peer-1' }], game: null, result: null,
 });
 
@@ -88,16 +88,16 @@ describe('섬의 게임 소켓', () => {
     latest().open();
     expect(api.connected).toBe(true);
     latest().receive({ type: 'Session', session: lobby(Date.now() + 60_000) });
-    expect(api.session).toMatchObject({ kind: 'treasure', phase: 'lobby', players: [{ name: '에이', peer: 'peer-1' }] });
+    expect(api.session).toMatchObject({ kind: 'impostor', phase: 'lobby', players: [{ name: '에이', peer: 'peer-1' }] });
     expect(Math.abs(api.serverNow() - (Date.now() + 60_000))).toBeLessThan(50);
 
-    expect(api.open('treasure')).toBe(true);
+    expect(api.open('impostor')).toBe(true);
     expect(api.start({ spots: [[0, 0, 0]] })).toBe(true);
     expect(api.act({ dig: true })).toBe(true);
     expect(api.leave()).toBe(true);
     expect(api.close()).toBe(true);
     expect(latest().sent).toEqual([
-      { type: 'Open', kind: 'treasure' },
+      { type: 'Open', kind: 'impostor' },
       { type: 'Start', layout: { spots: [[0, 0, 0]] } },
       { type: 'Act', action: { dig: true } },
       { type: 'Leave' },
@@ -106,10 +106,10 @@ describe('섬의 게임 소켓', () => {
 
     const heard = vi.fn();
     const stop = api.onEvent(heard);
-    latest().receive({ type: 'Event', kind: 'treasure', event: { type: 'collected', value: 3 } });
-    expect(heard).toHaveBeenCalledWith({ kind: 'treasure', event: { type: 'collected', value: 3 } });
+    latest().receive({ type: 'Event', kind: 'impostor', event: { type: 'killed', value: 3 } });
+    expect(heard).toHaveBeenCalledWith({ kind: 'impostor', event: { type: 'killed', value: 3 } });
     stop();
-    latest().receive({ type: 'Event', kind: 'treasure', event: {} });
+    latest().receive({ type: 'Event', kind: 'impostor', event: {} });
     expect(heard).toHaveBeenCalledTimes(1);
 
     latest().receive({ type: 'Error', code: 'not_host', message: '방장만 할 수 있어요.' });
@@ -119,7 +119,7 @@ describe('섬의 게임 소켓', () => {
 
     // Frames it does not know change nothing.
     const before = api.session;
-    latest().receive({ type: 'Session', session: { kind: 'treasure' } });
+    latest().receive({ type: 'Session', session: { kind: 'impostor' } });
     latest().receive({ type: 'Whatever' });
     expect(api.session).toBe(before);
 

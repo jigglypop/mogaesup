@@ -1,24 +1,10 @@
-import { draw } from './draw';
 import type { GameDefinition } from './game';
 import { impostor } from './impostor';
-import { ox } from './ox';
-import { redlight } from './redlight';
-import { soccer } from './soccer';
-import { tag } from './tag';
-import { treasure } from './treasure';
 
 /**
  * The plugin point: every game the dock offers, in this order. A game is a folder `./<name>/` whose `index.ts` exports
  * its `defineGame(...)`, imported above and listed on one line below (see docs/game-plugins.md).
  */
-export const GAMES: readonly GameDefinition[] = [
-  impostor,
-  soccer,
-  redlight,
-  tag,
-  ox,
-  draw,
-  treasure,
-];
+export const GAMES: readonly GameDefinition[] = [impostor];
 
 export const gameOf = (kind: string | null | undefined): GameDefinition | null => GAMES.find((game) => game.kind === kind) ?? null;

@@ -82,7 +82,7 @@ async fn game(app: &TestApp, base: &str, island: &str, cookie: &str, peer: &str)
 }
 
 #[tokio::test]
-async fn 섬에_함께_있는_두_사람이_보물찾기를_열고_보석을_줍고_닫는다() {
+async fn 섬에_함께_있는_두_사람이_봇과_임포스터를_열고_시작하고_닫는다() {
     let app = TestApp::new(None).await;
     let host = app.register("hunt_a", "에이").await;
     let guest = app.register("hunt_b", "비").await;
@@ -91,7 +91,7 @@ async fn 섬에_함께_있는_두_사람이_보물찾기를_열고_보석을_줍
     let base = serve(&app).await;
 
     let (_room_a, peer_a) = enter(&app, &base, "hunt_a", &host, [0.0, 0.0, 0.0]).await;
-    let (mut room_b, peer_b) = enter(&app, &base, "hunt_a", &guest, [10.0, 0.0, 10.0]).await;
+    let (_room_b, peer_b) = enter(&app, &base, "hunt_a", &guest, [10.0, 0.0, 10.0]).await;
 
     // Only someone in the island's live room gets a game socket, and only with a peer of their own.
     assert_eq!(game(&app, &base, "hunt_a", &outsider, &peer_a).await.err(), Some(409));
@@ -101,7 +101,7 @@ async fn 섬에_함께_있는_두_사람이_보물찾기를_열고_보석을_줍
     assert_eq!(next(&mut game_a, "Session").await.unwrap()["session"], Value::Null);
     assert_eq!(next(&mut game_b, "Session").await.unwrap()["session"], Value::Null);
 
-    send(&mut game_a, json!({"type": "Open", "kind": "treasure"})).await;
+    send(&mut game_a, json!({"type": "Open", "kind": "impostor"})).await;
     let lobby = session_where(&mut game_b, |session| session["phase"] == "lobby").await;
     assert_eq!(lobby["host"], json!(a));
     assert_eq!(lobby["you"], json!(b));
@@ -110,36 +110,24 @@ async fn 섬에_함께_있는_두_사람이_보물찾기를_열고_보석을_줍
     let joined = session_where(&mut game_a, |session| players(session) == 2).await;
     assert_eq!(joined["players"][1], json!({"id": b, "name": "비", "peer": peer_b}));
 
-    // Only the host starts.
-    send(&mut game_b, json!({"type": "Start", "layout": {"spots": []}})).await;
+    // Only the host starts, and two people need bots to make a table.
+    let stations: Vec<[f64; 3]> = (0..6).map(|index| [f64::from(index) * 8.0 - 20.0, 0.0, -30.0]).collect();
+    let layout = |bots: u64| json!({"table": [0.0, 0.0, 0.0], "stations": stations, "bots": bots});
+    send(&mut game_b, json!({"type": "Start", "layout": layout(2)})).await;
     let refused = next(&mut game_b, "Error").await.unwrap();
     assert_eq!(
         (refused["code"].as_str(), refused["message"].as_str()),
         (Some("not_host"), Some("방장만 할 수 있어요."))
     );
-
-    // Twenty open spots, none within reach of where either player stands.
-    let spots: Vec<[f64; 3]> =
-        (0..20).map(|index| [f64::from(index % 5) * 4.0 - 30.0, 0.0, f64::from(index / 5) * 4.0 - 30.0]).collect();
-    send(&mut game_a, json!({"type": "Start", "layout": {"spots": spots}})).await;
+    send(&mut game_a, json!({"type": "Start", "layout": layout(1)})).await;
+    assert_eq!(next(&mut game_a, "Error").await.unwrap()["code"], "few_players");
+    send(&mut game_a, json!({"type": "Start", "layout": layout(2)})).await;
     let playing = session_where(&mut game_b, |session| session["phase"] == "playing").await;
-    let gems = playing["game"]["gems"].as_array().unwrap().clone();
-    assert_eq!(gems.len(), 10);
-    assert!(playing["game"]["endsAt"].as_u64().unwrap() > playing["now"].as_u64().unwrap() + 100_000);
-    assert_eq!(
-        playing["game"]["scores"],
-        json!([{"id": a, "name": "에이", "score": 0}, {"id": b, "name": "비", "score": 0}])
-    );
-
-    // B walks onto a gem in the live room; the server picks it up on its next tick.
-    let gem = &gems[0];
-    send(&mut room_b, json!({"type": "Update", "state": {"position": gem["position"]}})).await;
-    let scored = session_where(&mut game_b, |session| session["game"]["scores"][1]["score"].as_u64() > Some(0)).await;
-    assert_eq!(scored["game"]["scores"][1]["score"], gem["value"]);
-    assert!(scored["game"]["gems"].as_array().unwrap().iter().all(|left| left["id"] != gem["id"]));
-    let event = next_where(&mut game_a, "Event", |event| event["event"]["type"] == "collected").await.unwrap();
-    assert_eq!(event["kind"], "treasure");
-    assert_eq!(event["event"]["player"], json!(b));
+    let shown = playing["game"]["players"].as_array().unwrap();
+    assert_eq!(shown.len(), 4);
+    assert_eq!(shown.iter().filter(|player| player["bot"] == true).count(), 2);
+    assert_eq!(playing["game"]["bots"].as_array().unwrap().len(), 2);
+    assert!(["crew", "impostor"].contains(&playing["game"]["role"].as_str().unwrap()));
 
     // A refused action reaches only its sender; a ping is answered.
     send(&mut game_b, json!({"type": "Act", "action": {"dig": true}})).await;
@@ -197,7 +185,7 @@ async fn 섬이_닫히면_게임_소켓도_닫히고_방을_떠난_사람은_게
     let (room_b, peer_b) = enter(&app, &base, "away_a", &guest, [3.0, 0.0, 3.0]).await;
     let mut game_a = game(&app, &base, "away_a", &host, &peer_a).await.unwrap();
     let mut game_b = game(&app, &base, "away_a", &guest, &peer_b).await.unwrap();
-    send(&mut game_a, json!({"type": "Open", "kind": "treasure"})).await;
+    send(&mut game_a, json!({"type": "Open", "kind": "impostor"})).await;
     session_where(&mut game_b, |session| session["phase"] == "lobby").await;
     send(&mut game_b, json!({"type": "Join"})).await;
     session_where(&mut game_a, |session| players(session) == 2).await;

@@ -1,6 +1,6 @@
 # 섬 게임 플러그인
 
-섬마다 게임 세션 하나를 서버가 돌린다. 게임 하나는 **서버 파일 하나**(`server/src/games/<name>.rs`)와 **클라이언트 폴더 하나**(`frontend/src/games/<name>/`), 그리고 양쪽 등록부에 **한 줄씩**이다. 참고 구현은 보물찾기(`server/src/games/treasure.rs`, `frontend/src/games/treasure/`)다. 프레임워크는 `server/src/games/mod.rs`와 `frontend/src/games/`의 나머지 파일이다.
+섬마다 게임 세션 하나를 서버가 돌린다. 게임 하나는 **서버 파일 하나**(`server/src/games/<name>.rs`)와 **클라이언트 폴더 하나**(`frontend/src/games/<name>/`), 그리고 양쪽 등록부에 **한 줄씩**이다. 파일이 여럿인 게임은 서버에서 폴더(`server/src/games/<name>/mod.rs`)로 둔다. 지금 섬이 돌리는 게임은 임포스터(`server/src/games/impostor/`, `frontend/src/games/impostor/`) 하나이고, 아래 예제는 가상의 `relay`다. 프레임워크는 `server/src/games/mod.rs`와 `frontend/src/games/`의 나머지 파일이다.
 
 ## 동작
 
@@ -16,7 +16,7 @@
 
 ```rust
 registry! {
-    treasure,
+    impostor,
     relay,
 }
 ```
@@ -147,6 +147,8 @@ frontend/src/games/relay/
   index.ts    view·result 타입과 defineGame(...)
   Panel.tsx   진행 중 HUD와 결과
   World.tsx   섬 캔버스(R3F) 안의 표시
+  Lobby.tsx   (선택) 방장의 대기실 설정
+  Overlay.tsx (선택) 진행 중 페이지 위에 늘 보이는 것
 ```
 
 `frontend/src/games/registry.ts`에 import 한 줄과 `GAMES` 목록 한 줄을 더한다. 목록 순서가 게임 패널의 순서다.
@@ -160,11 +162,15 @@ export const relay = defineGame<RelayView, RelayOutcome>({
   layout: ({ spots }) => ({ flags: spots().filter((_, index) => index % 12 === 0).slice(0, 8) }),
   Panel: RelayPanel,
   World: RelayWorld,    // 선택
+  Lobby: RelayLobby,    // 선택
+  Overlay: RelayOverlay, // 선택
   Result: RelayResult,
 });
 ```
 
-- `layout(ctx)`: 방장의 시작이 보낼 값. `ctx.building`(불러온 섬의 `BuildingSerializedState`), `ctx.spots()`(`openSpots`: 걸을 수 있고 아무것도 놓이지 않은 바닥 칸 가운데, 북서쪽부터, cm 반올림, 200개까지. 모자라면 섬 범위 격자를 더한다), `ctx.position`(방장 위치), `ctx.session`. 던지면 그 메시지가 방장에게 보인다.
+- `layout(ctx)`: 방장의 시작이 보낼 값. `ctx.building`(불러온 섬의 `BuildingSerializedState`), `ctx.spots()`(`openSpots`: 걸을 수 있고 아무것도 놓이지 않은 바닥 칸 가운데, 북서쪽부터, cm 반올림, 200개까지. 모자라면 섬 범위 격자를 더한다), `ctx.position`(방장 위치), `ctx.session`, `ctx.options`(방장이 `Lobby`에서 정한 값, 없으면 undefined). 던지면 그 메시지가 방장에게 보인다.
+- `Lobby`(선택): 대기실에서 방장에게만 보이는 설정(`LobbyProps`: `session`, `options`, `setOptions`). 정한 값은 그 게임의 `layout`이 `options`로 받아 시작에 실어 보낸다(임포스터의 봇 수와 혼자일 때의 역할). 서버는 그 값도 layout처럼 검사한다.
+- `Overlay`(선택): 진행 중에 패널을 접어도 페이지 위(`document.body`)에 그려지는 것. 같은 `GameProps`를 받는다(임포스터의 행동 버튼, 작업 미니게임, 사보타주 경보, 정전의 어둠).
 - `attention(view)`(선택): 플레이어가 패널에서 답해야 하는 것(임포스터의 회의 투표)이 있으면 그 키를, 없으면 null을 돌려준다. 키가 새로 바뀔 때마다 접힌 패널이 한 번 다시 열린다.
 - `Panel`, `World`, `Result`가 받는 값(`GameProps<View>`): `session`, `view`(=`session.game`, 이 사람의 화면), `me`(참가자면 내 항목), `act(action)`, `onEvent(listener)`(이 게임의 이벤트만, 해제 함수를 돌려준다), `serverNow()`, `teleport(ground)`. `Result`는 `result`도 받는다. 함수들은 게임 동안 같은 것이라 effect 의존성에 넣어도 된다.
 - 시간: `useRemaining(view.endsAt, serverNow)`와 `clock(ms)`(`../time`).
@@ -176,12 +182,12 @@ export const relay = defineGame<RelayView, RelayOutcome>({
 ## 화면 규칙
 
 - 입력, 상태, 실제 결과, 가능한 작업만 둔다. 규칙 설명·안내·홍보 문구, 준비 중 표시를 넣지 않는다.
-- 글래스 토큰(`--mg-*`, `frontend/src/ui/tokens.css`)과 `ui.css`의 `.mg-btn`, `.mg-badge`, `.mg-error` 등, 게임 패널의 `games.css` 클래스(`.mg-game-hud`, `.mg-game-timer`, `.mg-game-scores`, `.mg-game-actions`)를 쓴다. `tokens.css` 밖에 색을 쓰지 않는다. 3D 재질 색은 토큰을 더하고 `getComputedStyle(document.documentElement).getPropertyValue('--mg-…')`로 읽는다(보물찾기 `World.tsx`).
+- 글래스 토큰(`--mg-*`, `frontend/src/ui/tokens.css`)과 `ui.css`의 `.mg-btn`, `.mg-badge`, `.mg-error` 등, 게임 패널의 `games.css` 클래스(`.mg-game-hud`, `.mg-game-timer`, `.mg-game-scores`, `.mg-game-actions`)를 쓴다. `tokens.css` 밖에 색을 쓰지 않는다. 3D 재질 색은 토큰을 더하고 `getComputedStyle(document.documentElement).getPropertyValue('--mg-…')`로 읽는다(임포스터 `World.tsx`).
 - 짧은 이름, '-어요' 말투. 버튼은 `<button>`으로, 키보드로 쓸 수 있고 포커스가 보여야 하며 360px 폭에서 깨지지 않아야 한다.
 - 캔버스 안 표시는 `raycast={() => null}`로 클릭 이동을 가리지 않는다.
 
 ## 테스트
 
-- 서버(게임 파일 안 `#[cfg(test)]`): `Ctx::new(now, &members, &positions, &mut StdRng::seed_from_u64(…))`로 `create`·`tick`·`act`·`leave`·`result`를 시간과 위치를 직접 넣어 부른다. layout 거절, 판정, 끝, 결과, 비밀이 주인 화면에만 있는지, `ctx.events()`로 이벤트 대상을 확인한다. `treasure.rs`의 테스트가 예다. 실제 소켓 흐름이 필요하면 `server/tests/games.rs`처럼 방에 들어가 `Update`로 움직인다.
+- 서버(게임 파일 안 `#[cfg(test)]`): `Ctx::new(now, &members, &positions, &mut StdRng::seed_from_u64(…))`로 `create`·`tick`·`act`·`leave`·`result`를 시간과 위치를 직접 넣어 부른다. layout 거절, 판정, 끝, 결과, 비밀이 주인 화면에만 있는지, `ctx.events()`로 이벤트 대상을 확인한다. `impostor/tests.rs`가 예다(봇이 끝까지 하는 판도 시계를 넣어 돌린다). 실제 소켓 흐름이 필요하면 `server/tests/games.rs`처럼 방에 들어가 `Update`로 움직인다.
 - 클라이언트: `frontend/src/games/__tests__/gameDock.test.tsx`처럼 가짜 client로 `Panel`·`Result`를 그려 확인하고, `layout`을 섬(`createVillage()`)으로 단위 테스트한다. `registry.test.ts`가 등록 전체를 검사한다.
 - 검증: `server/`에서 `cargo fmt --check`, `rustfmt --edition 2024 --check $(find src/games -name '*.rs')`(게임 모듈은 `registry!` 안에서 선언되어 `cargo fmt`가 보지 않는다), `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. 루트에서 `npm run typecheck`, `npm test`, `npm run build`.
