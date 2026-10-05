@@ -16,7 +16,7 @@ import garmentStyles from './garment-styles.json';
 import { request } from '../api';
 import { AssetModelPreview } from './AssetModelPreview';
 
-type GarmentStyle = { slot: string; name: string; brief: string; bottom_kind?: string; reference?: string; model?: { url: string; sha256: string } };
+type GarmentStyle = { slot: string; name: string; brief: string; bottom_kind?: string; hair_length?: string; reference?: string; model?: { url: string; sha256: string } };
 
 const methodOptions: Partial<Record<string, [PartMethod, string][]>> = {
   top: [['worn', '입힌 채 3D 생성'], ['body_shell', '몸에 맞춰 만들기'], ['isolated', '단독 3D 생성']],
@@ -63,7 +63,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const inputLocked = busy || meshyUploading || !!pending || !!recovery.error;
   // Sleeve and ease only change the single-view method's prompt (see garment-fit); other methods ignore them.
   const askFit = fitsByPrompt(pending?.input.part_method || partMethod);
-  // Designed garments for this slot: picking one fills its name, brief and lower-garment kind.
+  // Designed garments for this slot: picking one fills its name, brief, lower-garment kind and hair length.
   const styles = (garmentStyles.garments as GarmentStyle[]).filter(item => item.slot === slot);
   const chosenStyle = styles.find(item => item.name === partName);
   const styleReference = chosenStyle?.reference;
@@ -73,6 +73,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
     setPartName(style?.name || '');
     setBrief(style ? `${style.brief} ${garmentStyles.style}` : '');
     if (style && 'bottom_kind' in style) setBottomKind(style.bottom_kind as 'pants' | 'skirt');
+    if (style && 'hair_length' in style) setHairLength(style.hair_length as 'short' | 'long');
   };
   const batchMode = slot === 'hair' && inputMode === 'batch' && !pending;
 

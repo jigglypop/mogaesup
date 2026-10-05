@@ -96,8 +96,8 @@ def plain_text(value: str, field: str) -> str:
 
 
 class GarmentRequest(BaseModel):
-    """One garment for a wardrobe body: a designed garment (`design_id` from list_garment_options), or a short `brief`
-    with its `slot` and wardrobe `name`."""
+    """One garment for a wardrobe body: a designed garment (`design_id` from list_garment_options; it brings its own
+    bottom_kind or hair_length), or a short `brief` with its `slot` and wardrobe `name`."""
     model_config = ConfigDict(extra='forbid', strict=True)
     body_job_id: FactoryId
     design_id: DesignId | None = None
@@ -138,6 +138,7 @@ class _Design(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     brief: str = Field(min_length=10, max_length=1500)
     bottom_kind: Literal['pants', 'skirt'] | None = None
+    hair_length: Literal['short', 'long'] | None = None
 
 
 class _Catalog(BaseModel):
@@ -173,15 +174,16 @@ def load_catalog(path: Path = CATALOG_PATH) -> tuple[str, dict[str, _Design]]:
     designs = {}
     for design in catalog.garments:
         identifier = design_id(design.slot, design.name)
-        if identifier in designs or (design.bottom_kind and design.slot != 'bottom'):
+        if (identifier in designs or (design.bottom_kind and design.slot != 'bottom')
+                or (design.hair_length and design.slot != 'hair')):
             raise GarmentError('catalog_unavailable', 'The studio garment catalog has a duplicate or invalid garment')
         designs[identifier] = design
     return catalog.style.strip(), designs
 
 
 def garment_spec(garment: GarmentRequest, style: str, designs: dict[str, _Design]) -> dict:
-    """What a garment asks for. A designed garment is sent as SinglePart sends a chosen style (its name, and its brief
-    followed by the catalog's style sentence); a brief gets the same style sentence."""
+    """What a garment asks for. A designed garment is sent as SinglePart sends a chosen style (its name, its brief
+    followed by the catalog's style sentence, and its bottom kind or hair length); a brief gets the same style sentence."""
     if garment.design_id is not None:
         design = designs.get(garment.design_id)
         if design is None:
@@ -190,6 +192,8 @@ def garment_spec(garment: GarmentRequest, style: str, designs: dict[str, _Design
                 'design_id': garment.design_id}
         if design.bottom_kind:
             spec['bottom_kind'] = design.bottom_kind
+        if design.hair_length:
+            spec['hair_length'] = design.hair_length
         return spec
     spec = {'slot': garment.slot, 'name': garment.name, 'description': f'{garment.brief} {style}'.strip()}
     if garment.bottom_kind:
@@ -467,7 +471,8 @@ class GarmentStudio:
             return exc.answer()
         data = {'slots': list(SLOTS), 'style': style,
                 'garments': [{'id': identifier, 'slot': design.slot, 'name': design.name.strip(), 'brief': design.brief,
-                              **({'bottom_kind': design.bottom_kind} if design.bottom_kind else {})}
+                              **({'bottom_kind': design.bottom_kind} if design.bottom_kind else {}),
+                              **({'hair_length': design.hair_length} if design.hair_length else {})}
                              for identifier, design in designs.items()]}
         response = self._get('/api/avatar-factory/wardrobe/bodies')
         if response['ok'] and isinstance(response['data'], dict):

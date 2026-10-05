@@ -55,7 +55,7 @@ describe('파츠 하나 만들기', () => {
     localStorage.clear();
   });
 
-  const open = (slot: 'top' | 'bottom') =>
+  const open = (slot: 'top' | 'bottom' | 'hair') =>
     mount(
       <SinglePart
         slot={slot}
@@ -148,6 +148,19 @@ describe('파츠 하나 만들기', () => {
       bottom_kind: 'skirt',
       fit_profile: { revision: 'garment-fit-v1', kind: 'skirt', ease: 'source' },
     });
+    await unmount();
+  });
+
+  it('디자인 헤어를 고르면 그 헤어 길이를 채워 보낸다', async () => {
+    const { container, unmount } = await open('hair');
+    await settle();
+    await submit(container, '하나 생성');
+    await choose(container, '스타일', '로우 포니테일');
+    expect(select(container, '헤어 길이').value).toBe('long');
+    await choose(container, '스타일', '레이어드 C컬 롭');
+    expect(select(container, '헤어 길이').value).toBe('short');
+    await submit(container, '헤어 하나 생성');
+    expect(singlePart.mock.calls[0]?.[0]).toMatchObject({ slot: 'hair', hair_length: 'short', part_method: 'worn', part_name: '레이어드 C컬 롭' });
     await unmount();
   });
 

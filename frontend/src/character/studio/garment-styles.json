@@ -151,6 +151,208 @@
       "slot": "hat",
       "name": "크림 헤드폰",
       "brief": "Chunky over-ear wireless headphones in cream white with a padded headband resting over the hair and round cushioned ear cups."
+    },
+    {
+      "slot": "hair",
+      "name": "레이어드 C컬 롭",
+      "brief": "Mid-length lob for a chibi character in T pose, tips resting on the shoulder line and turning inward in one soft C-curl all around. Centre part with two broad curtain-bang locks that open above the eyebrows and a few wide layers framing the cheeks, warm chocolate brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "구름 숏 보브",
+      "brief": "Rounded jaw-length bob shaped like a soft cloud, full puffy volume over the crown and sides, ends tucked inward and a neat tapered nape. Short rounded fringe resting just above the eyebrows, dark cocoa brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "빅시 컷",
+      "brief": "Bixie cut between a bob and a pixie, ending just below the ears with chunky rounded layers, soft volume on top, a short neat nape and a long side-swept fringe that sweeps across the forehead above the eyebrows, caramel brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "텍스처 크롭",
+      "brief": "Short men's textured crop with a rounded top of chunky tousled clumps, a short straight fringe well above the eyebrows and short tapered sides and nape kept as a thin solid hair shell, never bare scalp. Natural black with a soft brown tint. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "소프트 멀릿",
+      "brief": "Soft baby mullet with a short rounded front and sides and a little extra length at the back that flips out gently at the nape. Short textured fringe above the eyebrows, dark ash brown, the back built as one continuous rounded piece. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "쉼표 머리",
+      "brief": "Comma hair, a medium-short men's cut whose fringe is swept to one side and curls inward at the tip like a comma beside one temple, keeping both eyebrows readable. Rounded volume on top, sides falling just over the ears, a short tidy nape, deep espresso brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "엘리자벳 펌 롱 웨이브",
+      "brief": "Long Elizabeth perm falling to the waist, big soft inward waves from the cheeks down and rounded inward-curled ends. Centre part with long curtain bangs flowing into the waves, warm caramel brown, the long hair hanging behind the shoulders in a few broad wavy clumps. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "롱 레이어드 사이드뱅",
+      "brief": "Long straight layered hair reaching the waist, face-framing layers starting at the jawline and a long side bang parted to one side above the eyebrows. Natural dark brown, the back falling as one broad layered sheet behind the shoulders. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "루즈 하프업 웨이브",
+      "brief": "Loose half-up hairstyle, the top section gathered into a small soft knot at the back of the crown with a compact tie in the same hair colour, the rest falling to the waist in gentle broad waves behind the shoulders. Two soft face-framing locks at the cheeks and a fringe parted above the eyebrows, milk-tea brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "로우 포니테일",
+      "brief": "Low ponytail tied at the nape with a compact tie in the same hair colour, the tail falling straight down the back to the waist as one broad rounded piece. Soft curtain bangs parted above the eyebrows and smooth sides tucked behind the ears, natural black, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "top",
+      "name": "카키 유틸리티 셔켓",
+      "brief": "Original unbranded khaki utility shirt-jacket for a chibi character in T pose, hip length and worn closed. Simple point collar, five large round buttons down the front, two broad patch pockets with plain flaps on the chest, loose straight sleeves with simple cuffs, soft matte cotton twill, clear collar and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "코코아 숏 코트",
+      "brief": "Original unbranded cocoa brown short wool-blend coat reaching the hips, single-breasted with three large round buttons and a wide rounded collar, two large flap pockets at the hips, relaxed boxy body and long straight sleeves, soft matte felted surface, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "카멜 스웨이드 크롭 재킷",
+      "brief": "Cropped boxy collarless jacket in soft matte camel suede ending at the waist, round neckline, four large round buttons down the front, slightly dropped shoulders and long straight sleeves, smooth brushed surface without stitching detail or shine."
+    },
+    {
+      "slot": "top",
+      "name": "네이비 하프집업 맨투맨",
+      "brief": "Relaxed navy sweatshirt with a cream ribbed stand collar and a short half zip at the chest with one large rounded pull, ribbed cuffs and hem, dropped shoulders, long sleeves, soft matte brushed cotton."
+    },
+    {
+      "slot": "top",
+      "name": "그레이시 블루 후드 집업",
+      "brief": "Zip-up hoodie in soft greyish blue with the hood DOWN, lying flat on the upper back and shoulders, never worn on the head. Full front zipper in a matching colour, two broad side pockets, white drawstrings, ribbed cuffs and hem, relaxed fit, long sleeves."
+    },
+    {
+      "slot": "top",
+      "name": "크림 숏패딩",
+      "brief": "Matte cream short puffer jacket ending at the waist, five wide rounded horizontal baffles, a tall stand collar, a cocoa brown zipper, elastic cuffs and puffy long sleeves, soft nylon with no shine."
+    },
+    {
+      "slot": "top",
+      "name": "밤비 테디 퍼 재킷",
+      "brief": "Cropped teddy faux-fur jacket in warm fawn brown with a cream shawl collar, a hidden front closure, two big rounded patch pockets and puffy long sleeves. The plush pile is shown as a soft matte rounded surface, never as individual fibers or hairs."
+    },
+    {
+      "slot": "top",
+      "name": "코위찬 숄칼라 니트 집업",
+      "brief": "Chunky knit zip-up cardigan in oatmeal cream with a wide shawl collar and one broad band of simple large cocoa zigzag pattern across the chest and sleeves, cocoa zipper, ribbed cuffs and hem, relaxed fit. The knit is a soft matte surface without fine stitch detail."
+    },
+    {
+      "slot": "top",
+      "name": "베이지 숏 트렌치",
+      "brief": "Short beige trench jacket reaching the hips, double-breasted with two rows of three large buttons, a wide notched collar, a matching belt tied at the waist, long straight sleeves with simple cuffs, soft matte cotton gabardine."
+    },
+    {
+      "slot": "top",
+      "name": "라벤더 박시 니트",
+      "brief": "Boxy crew-neck sweater in pale lavender with broad dropped shoulders, slightly puffed long sleeves, wide ribbed cuffs and a wide ribbed hem at the hips, plain front with no pattern, soft matte knit shown as a smooth surface."
+    },
+    {
+      "slot": "bottom",
+      "name": "네이비 와이드 스트레이트 팬츠",
+      "brief": "Plain navy wide straight-leg trousers reaching the ankles, a neat flat waistband, one soft crease down each leg, two separate leg openings, soft matte fabric, relaxed fit.",
+      "bottom_kind": "pants"
+    },
+    {
+      "slot": "bottom",
+      "name": "모카 벌룬 팬츠",
+      "brief": "Mocha brown balloon pants with a defined waistband, roomy rounded legs that curve out at the thighs and taper softly to narrow ankle hems, two separate leg openings, a few broad gentle folds, soft matte fabric.",
+      "bottom_kind": "pants"
+    },
+    {
+      "slot": "bottom",
+      "name": "그레이 스트레이트 데님",
+      "brief": "Grey-wash straight-leg jeans at full length with a clean ankle hem, a mid-rise waistband and simple front pockets, relaxed straight fit, two separate leg openings, soft matte denim with no rips.",
+      "bottom_kind": "pants"
+    },
+    {
+      "slot": "bottom",
+      "name": "크림 벌룬 미디 스커트",
+      "brief": "Cream cotton balloon midi skirt with a smooth flat waistband, puffing out into a round volume and gathering back in at a calf-length hem, one continuous open hem with no legs inside, soft matte fabric.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "bottom",
+      "name": "빅체크 A라인 스커트",
+      "brief": "Knee-length A-line skirt in a bold oversized check of cocoa brown and cream with only a few large squares across the front, smooth waistband, one continuous open hem, soft matte wool.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "bottom",
+      "name": "올리브 카고 미디 스커트",
+      "brief": "Olive green utility cargo midi skirt reaching the calves, straight shape with a small front slit, two large flap pockets on the sides, simple waistband, one continuous open hem, soft matte cotton.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "bottom",
+      "name": "버건디 박스 플리츠 미니스커트",
+      "brief": "Burgundy mini skirt ending above the knees with four wide box pleats around, a smooth waistband, one continuous open hem, soft matte wool.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "shoes",
+      "name": "버건디 스웨이드 모카신",
+      "brief": "Pair of burgundy suede moccasins with rounded moc toes, one large stitched apron seam across the top, a simple wide strap across the instep and thin flat cream soles, matte surface, correct left and right foot openings."
+    },
+    {
+      "slot": "shoes",
+      "name": "카멜 슬라우치 부츠",
+      "brief": "Pair of camel suede slouch boots reaching mid-calf, soft shafts settling into three broad rounded folds, rounded toes, low block heels and thin soles, matte suede with no buckles."
+    },
+    {
+      "slot": "shoes",
+      "name": "초콜릿 메리제인과 크림 양말",
+      "brief": "Pair of chocolate brown round-toe Mary Jane flats with a single strap and one large round button, worn with cream ankle socks folded once, thin flat soles, matte finish."
+    },
+    {
+      "slot": "shoes",
+      "name": "핑크 발레 스니커즈",
+      "brief": "Pair of pale pink ballet sneakers, a soft ballet-flat upper with a low rounded toe and one thin elastic strap over the instep, a slim cream rubber sole wrapping a little up the toe, matte suede-like surface."
+    },
+    {
+      "slot": "shoes",
+      "name": "코코아 첼시 부츠",
+      "brief": "Pair of cocoa brown ankle Chelsea boots with cream elastic side panels, a pull tab at the back, rounded toes and a low chunky cream sole, matte smooth leather."
+    },
+    {
+      "slot": "shoes",
+      "name": "모카 스웨이드 클로그와 양말",
+      "brief": "Pair of mocha suede clogs with big rounded toes, a closed upper and an open back, a thick cork-coloured footbed and flat soles, worn with chunky cream wool socks, matte surface."
+    },
+    {
+      "slot": "shoes",
+      "name": "다크 브라운 니하이 부츠",
+      "brief": "Pair of dark brown knee-high riding boots with straight smooth shafts ending just below the knees, rounded toes, low stacked heels, matte leather with no buckles or zips."
+    },
+    {
+      "slot": "shoes",
+      "name": "올리브 트레일 스니커 부츠",
+      "brief": "Pair of olive and cream trail sneaker boots covering the ankles, padded collars, a few large lace loops with thick round laces and a chunky rounded lug sole in cocoa brown, matte surface."
+    },
+    {
+      "slot": "hat",
+      "name": "네이비 볼캡",
+      "brief": "Plain soft baseball cap in faded navy with a rounded crown, a gently curved front brim and no logo or text, sitting over the hair."
+    },
+    {
+      "slot": "hat",
+      "name": "코코아 트래퍼 햇",
+      "brief": "Cocoa brown padded trapper hat with a cream faux-fur lining showing at the front brim and on two ear flaps that hang beside the cheeks, leaving the face open, sitting over the hair. The fur is a soft matte rounded surface with no individual fibers."
     }
   ]
 }

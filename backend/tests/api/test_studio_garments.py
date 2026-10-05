@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from src.studio_garments import (MAX_IN_FLIGHT, SINGLE_PART, STATE_DIR, GarmentRequest, GarmentStudio, cli, design_id,
-                                 garment_spec, load_catalog, single_part_request)
+                                 garment_spec, load_catalog, plain_text, single_part_request)
 from src.studio_mcp import StudioClient, build_server, main
 
 SESSION = 'a'*64
@@ -28,6 +28,8 @@ SNEAKERS = design_id('shoes', '파스텔 청키 스니커즈')
 BUCKET_HAT = design_id('hat', '파스텔 버킷햇')
 HOODIE = design_id('top', '버터 옐로 오버핏 후드티')
 JOGGERS = design_id('bottom', '그레이 조거 팬츠')
+LOB = design_id('hair', '레이어드 C컬 롭')
+PONYTAIL = design_id('hair', '로우 포니테일')
 GARMENT_TOOLS = {'list_garment_options', 'start_garment', 'get_garment_job', 'enqueue_garments', 'get_garment_queue',
                  'advance_garment_queue', 'resolve_garment_item'}
 
@@ -232,6 +234,11 @@ def test_designed_garments_are_sent_as_single_part_sends_a_chosen_style():
     for identifier, slot in ((SNEAKERS, 'shoes'), (BUCKET_HAT, 'hat')):
         assert request(identifier) == {**common, 'slot': slot, 'bottom_kind': 'source', 'meshy_options': meshy(slot),
             'part_name': DESIGNS[identifier]['name'], 'description': f"{DESIGNS[identifier]['brief']} {style}"}
+    # A designed hairstyle carries its length, as SinglePart sets it when the style is chosen.
+    for identifier, length in ((LOB, 'short'), (PONYTAIL, 'long')):
+        assert request(identifier) == {**common, 'slot': 'hair', 'hair_length': length, 'bottom_kind': 'source',
+            'meshy_options': meshy('hair'), 'part_method': 'worn', 'part_name': DESIGNS[identifier]['name'],
+            'description': f"{DESIGNS[identifier]['brief']} {style}"}
     # Every designed garment is a request the character server's own input model takes as it is.
     from src.api.avatar_factory import SinglePartVariantInput
     for identifier in DESIGNS:
@@ -261,15 +268,30 @@ def test_catalog_is_the_studio_file_validated_and_never_written(studio, gateway,
     result = studio.options()
     assert result['ok'] and len(result['data']['garments']) == len(CATALOG['garments']) == len(DESIGNS)
     assert {item['id'] for item in result['data']['garments']} == set(DESIGNS)
+    listed = {item['id']: item for item in result['data']['garments']}
+    assert listed[LOB]['hair_length'] == 'short' and listed[SKIRT]['bottom_kind'] == 'skirt'
+    assert 'hair_length' not in listed[BLOUSON] and 'bottom_kind' not in listed[BLOUSON]
     assert result['data']['bodies'] == [{'job_id': BODY, 'version': VERSION, 'name': '모개', 'body_type': 'female', 'is_default': True}]
     assert (STUDIO_UI/'garment-styles.json').read_bytes() == before
+    first = CATALOG['garments'][0]
     for broken in ('{"style": "x", "garments": []}', '{not json',
-                   json.dumps({'style': CATALOG['style'], 'garments': [CATALOG['garments'][0]]*2})):
+                   json.dumps({'style': CATALOG['style'], 'garments': [first]*2}),
+                   json.dumps({'style': CATALOG['style'], 'garments': [{**first, 'hair_length': 'short'}]}),
+                   json.dumps({'style': CATALOG['style'], 'garments': [{**first, 'bottom_kind': 'pants'}]}),
+                   json.dumps({'style': CATALOG['style'], 'garments': [{**DESIGNS[LOB], 'hair_length': 'source'}]})):
         (tmp_path/'styles.json').write_text(broken, encoding='utf-8')
         other = GarmentStudio(studio.client, catalog_path=tmp_path/'styles.json', state_dir=tmp_path)
         assert other.options()['error']['code'] == 'catalog_unavailable'
         assert other.start(designed(BLOUSON)[0], 'start-key-0001')['error']['code'] == 'catalog_unavailable'
     assert not gateway.posts()
+
+
+def test_design_ids_stay_with_their_names_and_every_design_is_plain_text():
+    # IDs the queue and earlier runs already hold: new designs are appended, existing names never change.
+    assert (BLOUSON, SKIRT, SNEAKERS, BUCKET_HAT, HOODIE, JOGGERS) == (
+        'top-d19edc1d', 'bottom-04b014d5', 'shoes-784a85d3', 'hat-24d67c53', 'top-6cb296a2', 'bottom-5aeeafe7')
+    for item in CATALOG['garments']:
+        assert plain_text(item['name'], 'name') == item['name'] and plain_text(item['brief'], 'brief') == item['brief']
 
 
 # Keys ------------------------------------------------------------------------
