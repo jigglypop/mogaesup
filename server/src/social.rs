@@ -21,7 +21,15 @@ use crate::{
 };
 
 const MAX_GUESTBOOK_ENTRIES: i64 = 2_000;
-const MAX_PENDING_REQUESTS: i64 = 100;
+/// One member's entries standing in one guestbook, and written there in a day (deleted ones too). A few accounts cannot
+/// fill someone's guestbook to its cap in a day, and the owner clears one writer's entries at once (`clear_author`).
+/// The owner's own entries are not limited.
+const ENTRIES_PER_AUTHOR: i64 = 100;
+const ENTRIES_PER_AUTHOR_A_DAY: i64 = 10;
+/// Pending 일촌 requests one account has sent, and has received. Each is capped on its own: requests piling up from
+/// others never stop someone sending their own, and the received ones are dismissed at once (`dismiss_received`).
+const MAX_SENT_REQUESTS: i64 = 100;
+const MAX_RECEIVED_REQUESTS: i64 = 100;
 /// Guestbook entries in the rate window (ten minutes): each member's own, and all from one address. An address may be
 /// a whole school or mobile carrier, so it is charged only for entries that could be written.
 const ENTRIES_PER_MEMBER: u32 = 30;
@@ -49,12 +57,12 @@ async fn pair_transaction(db: &PgPool, left: Uuid, right: Uuid) -> ApiResult<Tra
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/homes/{username}/guestbook", get(guestbook).post(write))
+        .route("/api/homes/{username}/guestbook", get(guestbook).post(write).delete(clear_author))
         .route("/api/guestbook/{id}", delete(remove))
         .route("/api/homes/{username}/ilchons", get(ilchons))
         .route("/api/ilchon/{username}", get(status).delete(unlink))
         .route("/api/ilchon/{username}/request", post(request))
-        .route("/api/ilchon-requests", get(requests))
+        .route("/api/ilchon-requests", get(requests).delete(dismiss_received))
         .route("/api/ilchon-requests/{id}", delete(dismiss))
         .route("/api/ilchon-requests/{id}/accept", post(accept))
 }
@@ -157,6 +165,25 @@ async fn write(
     if count >= MAX_GUESTBOOK_ENTRIES {
         return Err(conflict("guestbook_full", "방명록이 가득 찼어요. 글을 정리한 뒤 다시 남겨 주세요."));
     }
+    if author.id != home.owner_id {
+        let (standing, today): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE deleted_at IS NULL), count(*) FILTER (WHERE created_at > now() - interval '1 day')
+             FROM guestbook_entries WHERE home_owner_id = $1 AND author_id = $2",
+        )
+        .bind(home.owner_id)
+        .bind(author.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if standing >= ENTRIES_PER_AUTHOR {
+            return Err(conflict("guestbook_author_full", "이 방명록에 남긴 글이 너무 많아요."));
+        }
+        if today >= ENTRIES_PER_AUTHOR_A_DAY {
+            return Err(conflict(
+                "guestbook_author_full",
+                "오늘은 이 방명록에 더 남길 수 없어요. 내일 다시 남겨 주세요.",
+            ));
+        }
+    }
     sqlx::query(
         "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body, secret) VALUES ($1, $2, $3, $4, $5)",
     )
@@ -185,6 +212,36 @@ async fn remove(State(state): State<AppState>, headers: HeaderMap, Path(id): Pat
     }
     sqlx::query("UPDATE guestbook_entries SET deleted_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct AuthorQuery {
+    author: String,
+}
+
+/// `DELETE /api/homes/{username}/guestbook?author=<username>`: every entry one member left in the guestbook, removed
+/// by its owner (or a moderator) at once. Answers `{"deleted": n}`.
+async fn clear_author(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<AuthorQuery>,
+) -> ApiResult<Json<Value>> {
+    let viewer = current_user(&state, &headers).await?;
+    let (home, is_owner) = visible_home(&state, &name, Some(&viewer)).await?;
+    if !is_owner && !Checker::new(&state.db).allows(Subject::User(viewer.id), &MODERATOR).await? {
+        return Err(forbidden("forbidden", "주인만 지울 수 있습니다."));
+    }
+    let author = other(&state, &query.author).await?;
+    let deleted = sqlx::query(
+        "UPDATE guestbook_entries SET deleted_at = now()
+         WHERE home_owner_id = $1 AND author_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(home.owner_id)
+    .bind(author)
+    .execute(&state.db)
+    .await?;
+    Ok(Json(json!({"deleted": deleted.rows_affected()})))
 }
 
 const ILCHON_SELECT: &str =
@@ -350,22 +407,22 @@ async fn request(
     if received.is_some() {
         return Err(conflict("request_received", "상대가 먼저 일촌을 신청했습니다."));
     }
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM ilchon_requests WHERE (from_id = $1 OR to_id = $1) AND NOT (from_id = $1 AND to_id = $2)",
-    )
-    .bind(viewer.id)
-    .bind(other)
-    .fetch_one(&mut *tx)
-    .await?;
-    let target_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM ilchon_requests WHERE (from_id = $1 OR to_id = $1) AND NOT (from_id = $2 AND to_id = $1)",
-    )
-    .bind(other)
-    .bind(viewer.id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if count >= MAX_PENDING_REQUESTS || target_count >= MAX_PENDING_REQUESTS {
+    // Asking the same person again only renews the request already counted.
+    let sent: i64 = sqlx::query_scalar("SELECT count(*) FROM ilchon_requests WHERE from_id = $1 AND to_id <> $2")
+        .bind(viewer.id)
+        .bind(other)
+        .fetch_one(&mut *tx)
+        .await?;
+    if sent >= MAX_SENT_REQUESTS {
         return Err(conflict("requests_full", "대기 중인 일촌 신청을 정리해 주세요."));
+    }
+    let inbox: i64 = sqlx::query_scalar("SELECT count(*) FROM ilchon_requests WHERE to_id = $1 AND from_id <> $2")
+        .bind(other)
+        .bind(viewer.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if inbox >= MAX_RECEIVED_REQUESTS {
+        return Err(conflict("their_requests_full", "상대가 받은 일촌 신청이 가득 찼어요."));
     }
     sqlx::query(
         "INSERT INTO ilchon_requests (id, from_id, to_id, name, their_name, message) VALUES ($1, $2, $3, $4, $5, $6)
@@ -489,4 +546,15 @@ async fn dismiss(State(state): State<AppState>, headers: HeaderMap, Path(id): Pa
     }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/ilchon-requests`: every 일촌 request the caller has received, dismissed at once. Answers
+/// `{"dismissed": n}`. Under the caller's own advisory lock, as every count of their requests is.
+async fn dismiss_received(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let viewer = current_user(&state, &headers).await?;
+    let mut tx = pair_transaction(&state.db, viewer.id, viewer.id).await?;
+    let dismissed =
+        sqlx::query("DELETE FROM ilchon_requests WHERE to_id = $1").bind(viewer.id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"dismissed": dismissed.rows_affected()})))
 }

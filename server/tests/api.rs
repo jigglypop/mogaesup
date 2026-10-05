@@ -1213,10 +1213,22 @@ async fn 한_회원의_섬은_여덟_개만_남고_새로_저장하면_가장_�
     assert_eq!(kept().await, ids(&[1, 3, 4, 5, 6, 7, 8, 9]));
     assert_eq!(save("minihome-v3".into(), 1).await.body["revision"], 2);
 
-    // Five more at once: all are kept, and what is pushed out is the oldest of the rest, so the cap holds.
-    let replies = futures_util::future::join_all((10..=14).map(|at| save(format!("minihome-v{at}"), 0))).await;
-    let statuses: Vec<StatusCode> = replies.iter().map(|reply| reply.status).collect();
-    assert_eq!(statuses, [StatusCode::OK; 5], "{:?}", replies.iter().map(|reply| &reply.body).collect::<Vec<_>>());
+    // Five more at once: one member's saves are stored one at a time (the others are told to save again, as the page
+    // does), all are kept in the end, and what is pushed out is the oldest of the rest, so the cap holds.
+    let mut pending: Vec<u32> = (10..=14).collect();
+    while !pending.is_empty() {
+        let replies = futures_util::future::join_all(pending.iter().map(|at| save(format!("minihome-v{at}"), 0))).await;
+        let mut again = Vec::new();
+        for (at, reply) in pending.iter().zip(&replies) {
+            match (reply.status, reply.body["code"].as_str()) {
+                (StatusCode::OK, _) => {}
+                (StatusCode::TOO_MANY_REQUESTS, Some("world_saving")) => again.push(*at),
+                other => panic!("{at}: {other:?} {:?}", reply.body),
+            }
+        }
+        assert!(again.len() < pending.len(), "one of them is always stored");
+        pending = again;
+    }
     assert_eq!(kept().await, ids(&[1, 3, 9, 10, 11, 12, 13, 14]));
 
     // The count is per member, and any id is fine.

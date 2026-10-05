@@ -69,19 +69,29 @@ fn login(username: &str, password: &str) -> Option<serde_json::Value> {
 }
 
 #[tokio::test]
-async fn concurrent_logins_reserve_the_accounts_remaining_failure_budget_and_success_refunds_it() {
+async fn a_burst_of_wrong_passwords_passes_the_accounts_budget_by_the_hashing_slots_at_most() {
     let app = TestApp::new(None).await;
     app.register("login_budget", "Member").await;
     for _ in 0..49 {
         rate_record(&app.state, "login-failed:login_budget".into());
     }
+    // A right password costs nothing.
     let ok = app.call("POST", "/api/auth/login", login("login_budget", "correct horse battery"), None).await;
     assert_eq!(ok.status, StatusCode::OK);
+    // One place was left. Checks hold nothing while they wait; the budget is looked at again once a hashing slot is
+    // held, and two run at once, so at most two are checked.
     let replies =
         join_all((0..5).map(|_| app.call("POST", "/api/auth/login", login("login_budget", "wrong password"), None)))
             .await;
-    assert_eq!(replies.iter().filter(|reply| reply.status == StatusCode::UNAUTHORIZED).count(), 1);
-    assert_eq!(replies.iter().filter(|reply| reply.status == StatusCode::TOO_MANY_REQUESTS).count(), 4);
+    let statuses: Vec<StatusCode> = replies.iter().map(|reply| reply.status).collect();
+    let checked = statuses.iter().filter(|status| **status == StatusCode::UNAUTHORIZED).count();
+    assert!((1..=2).contains(&checked), "{statuses:?}");
+    assert!(statuses.iter().all(|status| matches!(
+        *status,
+        StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    )));
+    let spent = app.call("POST", "/api/auth/login", login("login_budget", "correct horse battery"), None).await;
+    assert_eq!(spent.status, StatusCode::TOO_MANY_REQUESTS);
     app.cleanup().await;
 }
 
@@ -344,7 +354,7 @@ async fn concurrent_ilchon_requests_share_the_recipients_pending_cap() {
         app.call("POST", "/api/ilchon/request_cap/request", Some(body), Some(&right))
     );
     assert_eq!([&a, &b].iter().filter(|reply| reply.status == StatusCode::CREATED).count(), 1);
-    assert_eq!([&a, &b].iter().filter(|reply| reply.body["code"] == "requests_full").count(), 1);
+    assert_eq!([&a, &b].iter().filter(|reply| reply.body["code"] == "their_requests_full").count(), 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ilchon_requests WHERE to_id = $1")
             .bind(target)
@@ -353,6 +363,86 @@ async fn concurrent_ilchon_requests_share_the_recipients_pending_cap() {
             .unwrap(),
         100
     );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_few_writers_cannot_fill_someone_elses_guestbook_and_the_owner_clears_one_at_once() {
+    let app = TestApp::new(None).await;
+    let host = app.register("cap_host", "Host").await;
+    let guest = app.register("cap_guest", "Guest").await;
+    let friend = app.register("cap_friend", "Friend").await;
+    let book = "/api/homes/cap_host/guestbook";
+    let write = |cookie: &str| {
+        let cookie = cookie.to_owned();
+        let app = &app;
+        async move { app.call("POST", book, Some(json!({"body": "hello"})), Some(&cookie)).await }
+    };
+    // Ten a day from one writer in one guestbook.
+    for _ in 0..10 {
+        assert_eq!(write(&guest).await.status, StatusCode::CREATED);
+    }
+    let refused = write(&guest).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::CONFLICT, Some("guestbook_author_full")));
+    assert_eq!(write(&friend).await.status, StatusCode::CREATED, "other writers are not held back");
+    // The owner is not limited in their own guestbook.
+    for _ in 0..12 {
+        assert_eq!(write(&host).await.status, StatusCode::CREATED);
+    }
+
+    // Only the owner (or a moderator) clears one writer's entries, all at once.
+    let path = format!("{book}?author=cap_guest");
+    assert_eq!(app.call("DELETE", &path, None, Some(&friend)).await.status, StatusCode::FORBIDDEN);
+    let cleared = app.call("DELETE", &path, None, Some(&host)).await;
+    assert_eq!((cleared.status, cleared.body["deleted"].as_u64()), (StatusCode::OK, Some(10)));
+    let listing = app.call("GET", book, None, Some(&host)).await;
+    assert_eq!(listing.body["total"], 13);
+    assert!(listing.body["entries"].as_array().unwrap().iter().all(|entry| entry["author"]["username"] != "cap_guest"));
+    // Deleted entries still count toward the day, so clearing does not hand the writer a new ten.
+    assert_eq!(write(&guest).await.body["code"], "guestbook_author_full");
+    let unknown = app.call("DELETE", &format!("{book}?author=nobody_at_all"), None, Some(&host)).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+    // A hundred standing entries from one writer, written over earlier days, are as many as they may keep there.
+    let (owner, writer) = (app.user_id("cap_host").await, app.user_id("cap_friend").await);
+    sqlx::query(
+        "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body, created_at)
+         SELECT gen_random_uuid(), $1, $2, 'earlier', now() - interval '2 days' FROM generate_series(1, 99)",
+    )
+    .bind(owner)
+    .bind(writer)
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(write(&friend).await.body["code"], "guestbook_author_full");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn requests_piling_up_from_others_do_not_stop_someone_asking_and_they_dismiss_them_at_once() {
+    let app = TestApp::new(None).await;
+    let target = app.register("inbox_full", "Target").await;
+    let friend = app.register("inbox_friend", "Friend").await;
+    let third = app.register("inbox_third", "Third").await;
+    let id = app.user_id("inbox_full").await;
+    sqlx::query("INSERT INTO users (id, username, display_name, password_hash) SELECT gen_random_uuid(), 'piling_' || n, 'Piling', 'unused fixture' FROM generate_series(1, 100) AS n")
+        .execute(&app.state.db).await.unwrap();
+    sqlx::query("INSERT INTO ilchon_requests (id, from_id, to_id, name, their_name) SELECT gen_random_uuid(), id, $1, 'friend', 'friend' FROM users WHERE username LIKE 'piling_%'")
+        .bind(id).execute(&app.state.db).await.unwrap();
+    let body = json!({"name": "friend", "theirName": "friend"});
+    let full = app.call("POST", "/api/ilchon/inbox_full/request", Some(body.clone()), Some(&friend)).await;
+    assert_eq!((full.status, full.body["code"].as_str()), (StatusCode::CONFLICT, Some("their_requests_full")));
+    // A full inbox does not stop its owner asking someone.
+    let asked = app.call("POST", "/api/ilchon/inbox_friend/request", Some(body.clone()), Some(&target)).await;
+    assert_eq!(asked.status, StatusCode::CREATED);
+    // Every received request goes at once; the sent one stays.
+    let dismissed = app.call("DELETE", "/api/ilchon-requests", None, Some(&target)).await;
+    assert_eq!((dismissed.status, dismissed.body["dismissed"].as_u64()), (StatusCode::OK, Some(100)));
+    let mine = app.call("GET", "/api/ilchon-requests", None, Some(&target)).await;
+    assert_eq!(mine.body["received"].as_array().unwrap().len(), 0);
+    assert_eq!(mine.body["sent"].as_array().unwrap().len(), 1);
+    let again = app.call("POST", "/api/ilchon/inbox_full/request", Some(body), Some(&third)).await;
+    assert_eq!(again.status, StatusCode::CREATED);
     app.cleanup().await;
 }
 

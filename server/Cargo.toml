@@ -19,6 +19,7 @@ argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+flate2 = "1"
 futures-util = "0.3"
 gltf-json = { version = "1.4.1", features = ["names", "extras", "extensions", "KHR_materials_unlit"] }
 hex = "0.4"
@@ -27,7 +28,7 @@ object_store = { version = "0.12.5", default-features = false, features = ["aws"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "json", "chrono", "migrate"] }
 tokio = { version = "1", features = ["full"] }

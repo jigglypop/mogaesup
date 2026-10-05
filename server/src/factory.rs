@@ -70,6 +70,10 @@ const UNAVAILABLE: ApiError =
 const TIMED_OUT: ApiError =
     ApiError::new(StatusCode::GATEWAY_TIMEOUT, "factory_timeout", "캐릭터 서버가 제때 답하지 않았습니다.");
 const TOO_LARGE: ApiError = ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "model_too_large", "모델 파일이 너무 큽니다.");
+/// The character server refused this server's own credentials (401 or 403): its operator token, API key or gateway key
+/// is wrong. Not passed on as it came, since the app reads a 401 as its own sign-in having ended.
+const FACTORY_AUTH: ApiError =
+    ApiError::new(StatusCode::BAD_GATEWAY, "factory_auth", "캐릭터 서버가 이 서버의 인증을 받지 않았습니다.");
 
 /// The HMAC key exactly as the character server's `auth.py` (backend/src) derives it: the stripped secret, used decoded when Python's
 /// `base64.b64decode(secret, validate=False)` yields at least 32 bytes, otherwise as its UTF-8 bytes.
@@ -645,6 +649,10 @@ async fn forward(
         }
     }
     let upstream = send(state, signed_as(request, factory, username, member)).await?;
+    if matches!(upstream.status(), reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) {
+        tracing::error!(status = %upstream.status(), "Character server refused this server's credentials");
+        return Err(FACTORY_AUTH);
+    }
     let mut response = Response::builder().status(upstream.status().as_u16());
     for name in FORWARDED_RESPONSE_HEADERS {
         if let Some(value) = upstream.headers().get(name.as_str()) {

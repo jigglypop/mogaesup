@@ -57,6 +57,7 @@ const TEXTURE_EDGE_BUDGET: u32 = 1024;
 const HEIGHT_RANGE: RangeInclusive<f64> = 0.3..=3.0;
 
 const NOT_GLB: ApiError = bad("not_glb", "GLB 파일이 아닙니다.");
+const COMPRESSED: ApiError = bad("draco", "Draco로 압축한 GLB는 받지 않습니다.");
 const CHECKSUM: ApiError = bad("factory_checksum", "받은 모델이 캐릭터 서버의 기록과 다릅니다. 다시 시도해 주세요.");
 const NOT_PLAYABLE: ApiError =
     bad("not_playable", "미니미로 쓰려면 리깅(스킨)과 idle·walk 애니메이션이 있어야 합니다.");
@@ -203,6 +204,11 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
         return Err(NOT_GLB);
     };
     report.check("glb", Level::Ok, format!("GLB 파일 {}", size_text(bytes.len())));
+    // The app's pages cannot decode Draco (its decoder lives on a CDN the CSP keeps out): refused before anything else.
+    if details.required.iter().any(|name| name == glb::DRACO) {
+        report.check("compression", Level::Error, "Draco로 압축한 메시는 섬에서 그릴 수 없습니다.");
+        return Err(COMPRESSED);
+    }
     let resident = kind == "npc";
     let character = kind == "minime" || resident;
     // What a character must have is only worth noting on furniture.
@@ -846,6 +852,19 @@ mod tests {
         web_checks(&mut report, 900, 900, false, &[]);
         assert_eq!(levels(&report), [("slim", Level::Info), ("file_size", Level::Ok)]);
         assert_eq!(size_text(900), "1 KB");
+    }
+
+    #[test]
+    fn draco_compressed_models_are_refused() {
+        let model = glb::join(
+            &json!({"asset": {"version": "2.0"}, "extensionsUsed": [glb::DRACO], "extensionsRequired": [glb::DRACO]}),
+            &[],
+        );
+        let mut report = Report::default();
+        assert_eq!(verify("furniture", &model, None, &mut report).unwrap_err().code, "draco");
+        assert!(report.checks.iter().any(|check| check.code == "compression" && check.level == Level::Error));
+        let plain = glb::join(&json!({"asset": {"version": "2.0"}}), &[]);
+        assert!(verify("furniture", &plain, None, &mut Report::default()).is_ok());
     }
 
     #[test]

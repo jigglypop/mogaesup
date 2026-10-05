@@ -369,8 +369,9 @@ async fn 한_계정은_실시간_연결을_네_개까지만_열고_닫으면_다
     let guest = app.register("guest_k", "손님").await;
     let base = serve(&app).await;
     let mut sockets = Vec::new();
-    for _ in 0..4 {
-        sockets.push(connect(&base, "host_k", &ticket(&app, &guest).await, ORIGIN).await.unwrap());
+    // Two on someone else's island (an account holds no more there) and two on its own.
+    for island in ["host_k", "host_k", "guest_k", "guest_k"] {
+        sockets.push(connect(&base, island, &ticket(&app, &guest).await, ORIGIN).await.unwrap());
     }
     // The fifth is turned away whichever island it asks for; another account is not held back.
     assert!(connect(&base, "host_k", &ticket(&app, &guest).await, ORIGIN).await.is_err());
@@ -380,7 +381,7 @@ async fn 한_계정은_실시간_연결을_네_개까지만_열고_닫으면_다
     sockets.pop().unwrap().close(None).await.unwrap();
     let mut reopened = false;
     for _ in 0..40 {
-        if connect(&base, "host_k", &ticket(&app, &guest).await, ORIGIN).await.is_ok() {
+        if connect(&base, "guest_k", &ticket(&app, &guest).await, ORIGIN).await.is_ok() {
             reopened = true;
             break;
         }
@@ -476,5 +477,63 @@ async fn 끊겼던_링크가_한꺼번에_보낸_움직임은_연결을_끊지_�
         send(&mut guest_socket, json!({"type": "Ping", "ts": 1})).await;
     }
     assert_eq!(closed(&mut guest_socket).await, Some(4429));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 들어오기만_하고_참가하지_않는_소켓은_자리를_오래_잡지_못한다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_j", "호스트").await;
+    let guest = app.register("guest_j", "손님").await;
+    let base = serve(&app).await;
+    let mut idle = connect(&base, "host_j", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    let mut joined = connect(&base, "host_j", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    send(&mut joined, json!({"type": "Join", "room_id": "host_j", "color": "#ff7a59"})).await;
+    next(&mut joined, "Welcome").await.unwrap();
+    let code = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(Ok(message)) = idle.next().await {
+            if let Message::Close(frame) = message {
+                return frame.map(|frame| u16::from(frame.code));
+            }
+        }
+        None
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, Some(4408));
+    send(&mut joined, json!({"type": "Ping", "ts": 3})).await;
+    assert_eq!(next(&mut joined, "Pong").await.unwrap()["ts"], 3, "a joined socket stays");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 붐비는_공개_섬에도_주인은_들어오고_한_주소는_자리를_다_잡지_못한다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_f", "호스트").await;
+    let base = serve(&app).await;
+    let from = |address: &str| {
+        let address = address.to_owned();
+        move |base: &str, ticket: &str| {
+            let mut request = format!("{base}/api/rooms/host_f?ticket={ticket}").into_client_request().unwrap();
+            request.headers_mut().insert(header::ORIGIN, ORIGIN.parse().unwrap());
+            request.headers_mut().insert("x-forwarded-for", address.parse().unwrap());
+            request
+        }
+    };
+    // One address (a /64) fills only part of the room, whatever accounts it signs up.
+    let mut crowd = Vec::new();
+    let mut refused = 0;
+    for at in 0..12 {
+        let cookie = app.register(&format!("crowd_{at}"), "방문객").await;
+        let request = from("2001:db8:1:2::9")(&base, &ticket(&app, &cookie).await);
+        match connect_async(request).await {
+            Ok((stream, _)) => crowd.push(stream),
+            Err(_) => refused += 1,
+        }
+    }
+    assert_eq!((crowd.len(), refused), (10, 2));
+    // The owner gets in from that very address.
+    let request = from("2001:db8:1:2::77")(&base, &ticket(&app, &host).await);
+    assert!(connect_async(request).await.is_ok());
     app.cleanup().await;
 }

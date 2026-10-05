@@ -64,6 +64,8 @@ pub struct AppState {
     pub looks: Arc<Semaphore>,
     /// The character server's instance, started again when it has powered itself off.
     pub power: studio_power::StudioPower,
+    /// Island saves under way and island loads kept compressed.
+    pub homes: homes::Homes,
 }
 
 impl AppState {
@@ -81,6 +83,7 @@ impl AppState {
             imports: Arc::new(Semaphore::new(imports::SLOTS)),
             looks: Arc::new(Semaphore::new(looks::MAX_BAKING)),
             power,
+            homes: homes::Homes::default(),
         }
     }
 }
@@ -90,6 +93,8 @@ pub fn router(state: AppState) -> Router {
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))
         .route("/logout", post(auth::logout))
+        .route("/logout-others", post(auth::logout_others))
+        .route("/password", post(auth::change_password))
         .route("/me", get(auth::me))
         .route("/realtime-ticket", post(auth::realtime_ticket))
         .layer(DefaultBodyLimit::max(4096))

@@ -81,14 +81,19 @@ pub async fn problem(db: &PgPool, domains: &Map<String, Value>) -> ApiResult<Opt
         Ok(items) => items,
         Err(problem) => return Ok(Some(problem)),
     };
+    Ok(unknown(db, &items).await?.then_some("resident_npc"))
+}
+
+/// Whether any of `items` (each once, as [`shape`] gives them) is no 주민 in the catalog.
+pub async fn unknown(db: &PgPool, items: &[String]) -> ApiResult<bool> {
     if items.is_empty() {
-        return Ok(None);
+        return Ok(false);
     }
     let known: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog_items WHERE id = ANY($1) AND kind = 'npc'")
-        .bind(&items)
+        .bind(items)
         .fetch_one(db)
         .await?;
-    Ok((known != items.len() as i64).then_some("resident_npc"))
+    Ok(known != items.len() as i64)
 }
 
 #[cfg(test)]

@@ -44,7 +44,8 @@ pub async fn protect(State(state): State<AppState>, request: Request, next: Next
         }
     }
     let mut response = next.run(request).await;
-    // The character server's answers pass as they came.
+    // The character server's answers pass as they came, but for its refusals of this server's own credentials
+    // (`factory::forward`).
     if !studio {
         response = rejection_as_json(response);
     }
@@ -84,18 +85,26 @@ fn rejection_as_json(response: Response) -> Response {
 const RATE_WINDOW: Duration = Duration::from_secs(600);
 const RATE_KEYS: usize = 50_000;
 
-/// Fixed ten-minute windows per key. Expired windows are swept at most every thirty seconds, and a full table drops its
-/// oldest windows: a flood of new keys must never refuse existing callers. Site-wide counters are never dropped that
-/// way, or a flood could reset them.
+/// Fixed ten-minute windows per key. Expired windows are swept at most every thirty seconds; a full table is swept at
+/// once and then drops a tenth of its windows, those holding the fewest events first. A flood of new keys must never
+/// refuse existing callers, and it must not wipe the windows that hold something either: wrong-password windows go
+/// only once no other kind is left, and site-wide counters never, or a flood could reset them.
 #[derive(Default)]
 pub struct RateTable {
     windows: HashMap<String, (Instant, u32)>,
     swept: Option<Instant>,
+    /// Requests under way per key (see [`rate_running`]); a key is here only while one is.
+    running: HashMap<String, u32>,
 }
 
 /// A counter for the whole site (`register-created`): its key names no caller, so it has no `:`.
 fn site_wide(key: &str) -> bool {
     !key.contains(':')
+}
+
+/// A window of wrong passwords (`login-failed…`): dropping one would hand its guesses back.
+fn guards_passwords(key: &str) -> bool {
+    key.starts_with("login-failed")
 }
 
 impl RateTable {
@@ -117,10 +126,7 @@ impl RateTable {
         let now = Instant::now();
         self.sweep(now);
         if self.windows.len() >= RATE_KEYS && !self.windows.contains_key(&key) {
-            let mut starts: Vec<Instant> = self.windows.values().map(|(start, _)| *start).collect();
-            starts.sort_unstable();
-            let cutoff = starts[starts.len() / 10];
-            self.windows.retain(|key, (start, _)| *start > cutoff || site_wide(key));
+            self.make_room(now);
         }
         let entry = self.windows.entry(key).or_insert((now, 0));
         if now.duration_since(entry.0) >= RATE_WINDOW {
@@ -130,11 +136,38 @@ impl RateTable {
         entry.1
     }
 
+    /// Room in a full table: expired windows go first, then a tenth of the table, the windows holding the fewest events
+    /// first and the oldest among equals. Wrong-password windows go only once no other kind is left; site-wide counters
+    /// never go.
+    fn make_room(&mut self, now: Instant) {
+        self.swept = None;
+        self.sweep(now);
+        if self.windows.len() < RATE_KEYS {
+            return;
+        }
+        let mut order: Vec<(bool, u32, Instant, &String)> = self
+            .windows
+            .iter()
+            .filter(|(key, _)| !site_wide(key))
+            .map(|(key, (start, count))| (guards_passwords(key), *count, *start, key))
+            .collect();
+        order.sort_unstable();
+        let dropped: Vec<String> = order.into_iter().take(RATE_KEYS / 10).map(|(.., key)| key.clone()).collect();
+        for key in dropped {
+            self.windows.remove(&key);
+        }
+    }
+
+    /// Takes back one event of the window that began at `started`. A window left empty goes, so refused requests leave
+    /// no keys behind to fill the table.
     fn refund(&mut self, key: &str, started: Instant) {
         if let Some((window, count)) = self.windows.get_mut(key)
             && *window == started
         {
             *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.windows.remove(key);
+            }
         }
     }
 }
@@ -196,6 +229,40 @@ pub fn rate_record(state: &AppState, key: String) {
     if let Ok(mut table) = state.attempts.lock() {
         table.record(key);
     }
+}
+
+/// One of the places for requests under way for a key, held until it is dropped (see [`rate_running`]).
+pub struct Running {
+    table: Arc<Mutex<RateTable>>,
+    key: String,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Ok(mut table) = self.table.lock()
+            && let Some(running) = table.running.get_mut(&self.key)
+        {
+            *running -= 1;
+            if *running == 0 {
+                table.running.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Takes one of `max` places for requests under way for `key`; None while they are all taken. Nothing is kept once
+/// the request ends, whatever its outcome.
+pub fn rate_running(state: &AppState, key: &str, max: u32) -> ApiResult<Option<Running>> {
+    let mut table = state.attempts.lock().map_err(internal)?;
+    let running = table.running.entry(key.to_owned()).or_insert(0);
+    if *running >= max {
+        if *running == 0 {
+            table.running.remove(key);
+        }
+        return Ok(None);
+    }
+    *running += 1;
+    Ok(Some(Running { table: state.attempts.clone(), key: key.to_owned() }))
 }
 
 /// The viewer address CloudFront appended to X-Forwarded-For. Earlier entries come from the client and are ignored;
@@ -291,5 +358,57 @@ mod tests {
         assert!(table.windows.len() < RATE_KEYS, "the oldest per-caller windows made room");
         assert_eq!(table.windows.get("register-created").map(|(_, count)| *count), Some(599));
         assert!(!table.windows.contains_key("visits-address:0"));
+    }
+
+    #[test]
+    fn a_flood_of_new_keys_cannot_wipe_wrong_password_windows() {
+        let mut table = RateTable::default();
+        let start = Instant::now();
+        // The oldest windows of all: an address and an account that ran out of guesses, and a busy address.
+        table.windows.insert("login-failed-address:203.0.113.7".into(), (start, 30));
+        table.windows.insert("login-failed:victim".into(), (start, 50));
+        table.windows.insert("register-address:203.0.113.8".into(), (start, 20));
+        // A flood of one-event windows, made later, fills the table.
+        for at in 0..RATE_KEYS {
+            table.windows.insert(format!("visits-address:{at}"), (start + Duration::from_nanos(at as u64 + 1), 1));
+        }
+        table.swept = Some(Instant::now());
+        // Even a wrong-password window holding one event outlasts the flood.
+        table.windows.insert("login-failed:other".into(), (start, 1));
+        for at in 0..RATE_KEYS {
+            table.record(format!("visits-address:new{at}"));
+        }
+        assert!(table.windows.len() <= RATE_KEYS);
+        assert_eq!(table.count("login-failed-address:203.0.113.7"), 30);
+        assert_eq!(table.count("login-failed:victim"), 50);
+        assert_eq!(table.count("login-failed:other"), 1);
+        assert_eq!(
+            table.count("register-address:203.0.113.8"),
+            20,
+            "a window with more events outlasts one-event ones"
+        );
+
+        // A table of nothing but wrong-password windows drops those holding the fewest guesses.
+        let mut table = RateTable::default();
+        table.windows.insert("login-failed:locked".into(), (start, 50));
+        for at in 0..RATE_KEYS {
+            table.windows.insert(format!("login-failed:guess{at}"), (start + Duration::from_nanos(at as u64 + 1), 1));
+        }
+        table.swept = Some(Instant::now());
+        table.record("login-failed:new".into());
+        assert!(table.windows.len() < RATE_KEYS);
+        assert_eq!(table.count("login-failed:locked"), 50);
+    }
+
+    #[test]
+    fn refunded_windows_leave_no_key_behind() {
+        let mut table = RateTable::default();
+        table.record("login-failed:someone".into());
+        let started = table.windows["login-failed:someone"].0;
+        table.record("login-failed:someone".into());
+        table.refund("login-failed:someone", started);
+        assert_eq!(table.count("login-failed:someone"), 1);
+        table.refund("login-failed:someone", started);
+        assert!(!table.windows.contains_key("login-failed:someone"));
     }
 }

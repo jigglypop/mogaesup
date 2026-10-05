@@ -820,3 +820,36 @@ async fn 입히는_동안_미니미를_고르면_끝난_모습을_입히지_않�
     assert_eq!((third["status"].as_str(), worn(&third)), (Some("ready"), true), "{third}");
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn 마지막으로_입힌_모습을_다시_저장하면_다시_굽지_않고_바로_입는다() {
+    let (app, studio, _admin, member) = resident_app().await;
+    assert_eq!(app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await.status, StatusCode::ACCEPTED);
+    let ready = settled(&app, &member).await;
+    assert_eq!(ready["status"], "ready", "{ready}");
+    let fetched = studio.seen.lock().unwrap().len();
+    // Taken off for a 미니미, then saved again as it was: worn at once, from the model already stored.
+    app.call("PATCH", "/api/homes/me", Some(json!({"minime": "man"})), Some(&member)).await;
+    let again = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
+    assert_eq!(again.status, StatusCode::OK, "{:?}", again.body);
+    let worn = &again.body["look"];
+    assert_eq!((worn["status"].as_str(), worn["worn"].as_bool()), (Some("ready"), Some(true)), "{worn}");
+    assert_eq!((&worn["modelUrl"], &worn["report"]), (&ready["modelUrl"], &ready["report"]));
+    assert_eq!(worn["revision"].as_i64(), ready["revision"].as_i64().map(|revision| revision + 1));
+    assert_eq!(studio.seen.lock().unwrap().len(), fetched, "nothing was asked of the studio");
+
+    // After a look that failed, the last one assembled comes back the same way; any other look is assembled as ever.
+    assert_eq!(app.call("PUT", "/api/looks/me", Some(look("tall")), Some(&member)).await.status, StatusCode::ACCEPTED);
+    assert_eq!(settled(&app, &member).await["status"], "failed");
+    let back = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
+    assert_eq!(back.status, StatusCode::OK, "{:?}", back.body);
+    assert_eq!(
+        (back.body["look"]["status"].as_str(), back.body["look"]["error"].clone()),
+        (Some("ready"), Value::Null)
+    );
+    let other = app.call("PUT", "/api/looks/me", Some(recolored("hats", "#0000ff")), Some(&member)).await;
+    assert_eq!(other.status, StatusCode::ACCEPTED);
+    assert_eq!(settled(&app, &member).await["status"], "ready");
+    assert_eq!(stored_models(&app), 2);
+    app.cleanup().await;
+}

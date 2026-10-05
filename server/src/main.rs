@@ -1,5 +1,5 @@
 use anyhow::Context;
-use mogaesup_server::{AppState, auth, config::Config, imports, looks, router, runtime::ProcessLock};
+use mogaesup_server::{AppState, auth, config::Config, imports, looks, models, router, runtime::ProcessLock};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 
@@ -50,6 +50,7 @@ async fn run(db: PgPool, config: Config) -> anyhow::Result<()> {
         auth::bootstrap_admin(&state, &username, &password).await.context("bootstrap admin")?;
     }
     auth::spawn_cleanup(db);
+    models::spawn_sweep(state.clone());
     let address = env::var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     tracing::info!(%address, "mogaesup server ready");

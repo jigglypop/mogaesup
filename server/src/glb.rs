@@ -160,7 +160,13 @@ pub struct Details {
     /// Width, height and depth of the unanimated model in metres: position bounds through the node transforms.
     pub size: Option<[f64; 3]>,
     pub textures: Vec<Texture>,
+    /// The glTF extensions a reader must know to draw the model (`extensionsRequired`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
 }
+
+/// Draco mesh compression: browsers decode it with a script from Google's servers, which the app's CSP does not allow.
+pub const DRACO: &str = "KHR_draco_mesh_compression";
 
 impl Details {
     pub fn summary(&self) -> Summary {
@@ -294,6 +300,12 @@ pub fn details(bytes: &[u8]) -> Option<Details> {
             .flatten()
             .enumerate()
             .map(|(at, animation)| animation["name"].as_str().map_or_else(|| format!("#{at}"), str::to_owned))
+            .collect(),
+        required: json["extensionsRequired"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|name| name.as_str().map(str::to_owned))
             .collect(),
         meshes: count("meshes"),
         materials: count("materials"),

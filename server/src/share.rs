@@ -15,8 +15,15 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{DynamicImage, ImageFormat, ImageReader, codecs::jpeg::JpegEncoder, imageops::FilterType};
 use sha2::{Digest, Sha256};
-use std::{io::Cursor, sync::LazyLock};
-use tokio::sync::Semaphore;
+use std::{
+    io::Cursor,
+    sync::{
+        LazyLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::{
     AppState,
@@ -37,6 +44,11 @@ const JPEG_QUALITY: u8 = 86;
 const MAX_DECODE_BYTES: u64 = 96 * 1024 * 1024;
 /// Pictures decoded at once, across the server.
 static DECODING: Semaphore = Semaphore::const_new(2);
+/// Pictures waiting for a decoding slot at most, each holding its request's body, and how long one waits: past either,
+/// the sender is told to try again instead of the bodies piling up.
+const MAX_WAITING: usize = 6;
+const DECODE_WAIT: Duration = Duration::from_secs(10);
+static WAITING: AtomicUsize = AtomicUsize::new(0);
 /// The site's own picture (frontend/public), for the site and every island without one of its own.
 pub const SITE_PICTURE: &str = "/share.jpg";
 const SITE_NAME: &str = "모개숲";
@@ -52,6 +64,11 @@ static POLICY: LazyLock<String> = LazyLock::new(|| {
 pub const INVALID_PICTURE: ApiError = bad("invalid_picture", "JPEG나 PNG 사진만 올릴 수 있어요.");
 pub const PICTURE_TOO_LARGE: ApiError =
     ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "picture_too_large", "사진이 너무 커요.");
+const PICTURE_BUSY: ApiError = ApiError::new(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "picture_busy",
+    "사진을 올리는 사람이 많아요. 잠시 뒤에 다시 올려 주세요.",
+);
 
 /// The page's routes. They answer HTML with headers of their own, so they stay outside the API's JSON middleware.
 pub fn router(state: AppState) -> Router {
@@ -69,7 +86,7 @@ pub async fn picture(data: String) -> ApiResult<Vec<u8>> {
     if encoded.len() > MAX_PICTURE_BYTES.div_ceil(3) * 4 {
         return Err(PICTURE_TOO_LARGE);
     }
-    let permit = DECODING.acquire().await.map_err(internal)?;
+    let permit = decoding_slot(DECODE_WAIT).await?;
     let start = data.len() - encoded.len();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -78,6 +95,37 @@ pub async fn picture(data: String) -> ApiResult<Vec<u8>> {
     })
     .await
     .map_err(internal)?
+}
+
+/// One place waiting for a decoding slot, given back when dropped.
+struct Waiting;
+
+impl Waiting {
+    fn take() -> Option<Self> {
+        WAITING
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_WAITING).then_some(n + 1))
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        WAITING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A decoding slot, waited for at most `wait` and by at most [`MAX_WAITING`] pictures at once; [`PICTURE_BUSY`] past
+/// either.
+async fn decoding_slot(wait: Duration) -> ApiResult<SemaphorePermit<'static>> {
+    if let Ok(permit) = DECODING.try_acquire() {
+        return Ok(permit);
+    }
+    let _waiting = Waiting::take().ok_or(PICTURE_BUSY)?;
+    match tokio::time::timeout(wait, DECODING.acquire()).await {
+        Ok(permit) => permit.map_err(internal),
+        Err(_) => Err(PICTURE_BUSY),
+    }
 }
 
 /// [`picture`]'s work on the decoded bytes.
@@ -273,6 +321,31 @@ mod tests {
         assert_eq!(escape("두 줄\n상태"), "두 줄 상태");
         assert_eq!(description(" 모개 ", "  두 줄\n 상태  "), "모개 · 두 줄 상태");
         assert_eq!(description("모개", " \n "), "모개");
+    }
+
+    #[tokio::test]
+    async fn pictures_wait_for_a_decoding_slot_only_so_long_and_only_so_many() {
+        // Both slots busy: a picture waits its time, then is turned away.
+        let held = DECODING.acquire_many(2).await.unwrap();
+        let started = std::time::Instant::now();
+        let error = decoding_slot(Duration::from_millis(50)).await.unwrap_err();
+        assert_eq!((error.status, error.code), (StatusCode::SERVICE_UNAVAILABLE, "picture_busy"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(WAITING.load(Ordering::Acquire), 0, "the waiting place is given back");
+        // Once the queue is full, the next one is turned away at once, and a slot set free goes to one waiting.
+        let waiters: Vec<_> = (0..MAX_WAITING).map(|_| tokio::spawn(decoding_slot(Duration::from_secs(30)))).collect();
+        while WAITING.load(Ordering::Acquire) < MAX_WAITING {
+            tokio::task::yield_now().await;
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(decoding_slot(Duration::from_secs(30)).await.unwrap_err().code, "picture_busy");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(held);
+        for waiter in waiters {
+            drop(waiter.await.unwrap().unwrap());
+        }
+        assert_eq!(WAITING.load(Ordering::Acquire), 0);
+        drop(decoding_slot(Duration::from_millis(50)).await.unwrap());
     }
 
     #[test]

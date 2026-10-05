@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -8,9 +8,20 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor},
+};
+use serde_json::{Map, Value, json, value::RawValue};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgRow};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    io::Write,
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::{
@@ -28,6 +39,20 @@ const MAX_WORLD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SAVE_BYTES: usize = MAX_WORLD_BYTES + 64 * 1024;
 /// Island saves one member may make in the rate window (ten minutes): the autosave writes about every ten seconds.
 const WORLD_SAVES_PER_WINDOW: u32 = 120;
+/// Island saves read, checked and stored at once, site-wide. Each holds its body (up to 2 MiB) and the envelope to
+/// store until it is stored, and nothing is read before a save has its slot.
+const SAVE_SLOTS: usize = 4;
+/// How long a save waits for a slot before it is turned away; the page saves again later.
+const SAVE_WAIT: Duration = Duration::from_secs(10);
+/// Nodes of the residents domain read into memory at most: twelve residents take a few hundred.
+const MAX_RESIDENT_NODES: usize = 2048;
+/// When a world save last bumped its island's place in the listing: an island edited for an hour moves to the top
+/// once every so often, not with every autosave, so pages of the listing stay put while someone reads them.
+const LISTED_EVERY: &str = "10 minutes";
+/// Island loads by members counted in the rate window (ten minutes), per member.
+const WORLD_READS_PER_MEMBER: u32 = 600;
+/// Loaded worlds kept compressed for the next load, in bytes in all.
+const WORLD_CACHE_BYTES: usize = 16 * 1024 * 1024;
 /// Islands (worlds) one member keeps, and their bytes in all. The app uses one at a time and moves to a new id when its
 /// layout changes, so a save past either pushes out the least recently updated others instead of locking the member out.
 const MAX_WORLDS: i64 = 8;
@@ -59,6 +84,107 @@ const WORLD_CUT_SHORT: ApiError = ApiError::new(
 );
 const PICTURE_CUT_SHORT: ApiError =
     ApiError::new(StatusCode::BAD_REQUEST, "incomplete_picture", "사진을 끝까지 받지 못했어요. 다시 올려 주세요.");
+const SAVES_BUSY: ApiError = ApiError::new(
+    StatusCode::TOO_MANY_REQUESTS,
+    "world_busy",
+    "지금 섬을 저장하는 사람이 많아요. 잠시 뒤에 다시 저장해 주세요.",
+);
+const SAVE_RUNNING: ApiError = ApiError::new(
+    StatusCode::TOO_MANY_REQUESTS,
+    "world_saving",
+    "앞선 저장이 아직 끝나지 않았어요. 잠시 뒤에 다시 저장해 주세요.",
+);
+const INVALID_RESIDENTS: ApiError = bad("invalid_residents", "섬에 둘 수 없는 주민이 있습니다.");
+
+/// Island saves under way and island loads already compressed: what the server keeps between requests for them.
+#[derive(Clone)]
+pub struct Homes {
+    /// See [`SAVE_SLOTS`].
+    saving: Arc<Semaphore>,
+    /// Members with a save under way: one at a time each.
+    members: Arc<Mutex<HashSet<Uuid>>>,
+    worlds: Arc<Mutex<WorldCache>>,
+}
+
+impl Default for Homes {
+    fn default() -> Self {
+        Self { saving: Arc::new(Semaphore::new(SAVE_SLOTS)), members: Default::default(), worlds: Default::default() }
+    }
+}
+
+/// A member's save under way; dropped (however the request ends), the member may save again.
+struct Saving {
+    members: Arc<Mutex<HashSet<Uuid>>>,
+    member: Uuid,
+}
+
+impl Drop for Saving {
+    fn drop(&mut self) {
+        self.members.lock().unwrap_or_else(|error| error.into_inner()).remove(&self.member);
+    }
+}
+
+impl Homes {
+    /// `member`'s save, unless one of theirs is still under way.
+    fn begin(&self, member: Uuid) -> ApiResult<Saving> {
+        if !self.members.lock().unwrap_or_else(|error| error.into_inner()).insert(member) {
+            return Err(SAVE_RUNNING);
+        }
+        Ok(Saving { members: self.members.clone(), member })
+    }
+
+    fn worlds(&self) -> MutexGuard<'_, WorldCache> {
+        self.worlds.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+/// A world as last sent: its revision and save time, and the response body gzipped.
+#[derive(Clone)]
+struct CachedWorld {
+    revision: i64,
+    updated_at: DateTime<Utc>,
+    gzipped: Bytes,
+    used: u64,
+}
+
+/// Loaded worlds by owner and world id, gzipped, the least recently used dropped past [`WORLD_CACHE_BYTES`]. Each is
+/// checked against the stored revision before it is sent, so a save makes it stale at once.
+#[derive(Default)]
+struct WorldCache {
+    entries: HashMap<(Uuid, String), CachedWorld>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl WorldCache {
+    fn get(&mut self, owner: Uuid, world: &str) -> Option<CachedWorld> {
+        self.clock += 1;
+        let entry = self.entries.get_mut(&(owner, world.to_owned()))?;
+        entry.used = self.clock;
+        Some(entry.clone())
+    }
+
+    fn put(&mut self, owner: Uuid, world: &str, revision: i64, updated_at: DateTime<Utc>, gzipped: Bytes) {
+        if gzipped.len() > WORLD_CACHE_BYTES / 4 {
+            return;
+        }
+        self.clock += 1;
+        let entry = CachedWorld { revision, updated_at, gzipped, used: self.clock };
+        self.bytes += entry.gzipped.len();
+        if let Some(old) = self.entries.insert((owner, world.to_owned()), entry) {
+            self.bytes -= old.gzipped.len();
+        }
+        while self.bytes > WORLD_CACHE_BYTES {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, entry)| entry.used).map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(gone) = self.entries.remove(&oldest) {
+                self.bytes -= gone.gzipped.len();
+            }
+        }
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -198,25 +324,42 @@ impl Page {
     }
 }
 
+/// The listing's columns and order: newest first by when the island last changed, which a world save moves at most
+/// every [`LISTED_EVERY`], ties by owner, so the pages a cursor (`before`) walks stay put.
+const LISTING_SELECT: &str =
+    "SELECT u.username, u.display_name AS owner_name, h.title, h.status_message, h.emoji, h.updated_at, h.visits_total
+     FROM homes h JOIN users u ON u.id = h.owner_id
+     WHERE h.visibility = 'public' AND h.updated_at < $1";
+const LISTING_ORDER: &str = "ORDER BY h.updated_at DESC, h.owner_id DESC LIMIT $2";
+
 /// `GET /api/homes?q=`: public islands, newest first; `q` keeps the ones whose owner's username or name, or title,
-/// holds it (capitals do not matter). Searches are counted per address; the plain listing is not.
+/// holds it (capitals do not matter). Searches are counted per address; the plain listing is not. A search looks the
+/// owners and the titles up apart, each where the trigram indexes (when the database has them) find them.
 async fn list(State(state): State<AppState>, headers: HeaderMap, Query(page): Query<Page>) -> ApiResult<Json<Value>> {
     let pattern = page.pattern()?;
-    if pattern.is_some() {
-        rate_limit(&state, format!("home-search:{}", client_address(&headers)), SEARCHES_PER_ADDRESS)?;
-    }
-    let rows = sqlx::query(
-        "SELECT u.username, u.display_name AS owner_name, h.title, h.status_message, h.emoji, h.updated_at, h.visits_total
-         FROM homes h JOIN users u ON u.id = h.owner_id
-         WHERE h.visibility = 'public' AND h.updated_at < $1
-           AND ($3::text IS NULL OR u.username ILIKE $3 OR u.display_name ILIKE $3 OR h.title ILIKE $3)
-         ORDER BY h.updated_at DESC LIMIT $2",
-    )
-    .bind(page.before())
-    .bind(page.limit())
-    .bind(pattern)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = match pattern {
+        Some(pattern) => {
+            rate_limit(&state, format!("home-search:{}", client_address(&headers)), SEARCHES_PER_ADDRESS)?;
+            sqlx::query(&format!(
+                "{LISTING_SELECT} AND h.owner_id IN (
+                   SELECT id FROM users WHERE username ILIKE $3 OR display_name ILIKE $3
+                   UNION SELECT owner_id FROM homes WHERE title ILIKE $3)
+                 {LISTING_ORDER}"
+            ))
+            .bind(page.before())
+            .bind(page.limit())
+            .bind(pattern)
+            .fetch_all(&state.db)
+            .await?
+        }
+        None => {
+            sqlx::query(&format!("{LISTING_SELECT} {LISTING_ORDER}"))
+                .bind(page.before())
+                .bind(page.limit())
+                .fetch_all(&state.db)
+                .await?
+        }
+    };
     let homes: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -479,15 +622,47 @@ fn world_id(value: &str) -> ApiResult<&str> {
 
 /// `{worldId, revision, data, updatedAt}` with the stored envelope (`data`, the text PostgreSQL keeps) written in as it
 /// is, not parsed and written again.
-fn world_response(row: &PgRow, data: &str) -> Response {
-    let body = format!(
+fn world_body(row: &PgRow, data: &str) -> String {
+    format!(
         r#"{{"worldId":{},"revision":{},"data":{},"updatedAt":{}}}"#,
         Value::from(row.get::<String, _>("world_id")),
         row.get::<i64, _>("revision"),
         data,
         json!(row.get::<DateTime<Utc>, _>("updated_at")),
-    );
-    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+    )
+}
+
+/// A world's body as it is sent: gzipped, past the response compression that would compress it again for each load.
+fn gzipped_world(gzipped: Bytes) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CONTENT_ENCODING, "gzip"),
+            (header::VARY, "accept-encoding"),
+        ],
+        gzipped,
+    )
+        .into_response()
+}
+
+fn gzip(body: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(body)?;
+    encoder.finish()
+}
+
+/// Whether the request takes a gzipped body (`Accept-Encoding: gzip`, not at q=0).
+fn takes_gzip(headers: &HeaderMap) -> bool {
+    headers.get_all(header::ACCEPT_ENCODING).iter().filter_map(|value| value.to_str().ok()).any(|value| {
+        value.split(',').any(|coding| {
+            let mut parts = coding.split(';');
+            let name = parts.next().unwrap_or_default().trim();
+            let weight = parts
+                .find_map(|param| param.trim().strip_prefix("q=").map(|q| q.trim().parse::<f32>().unwrap_or(0.0)))
+                .unwrap_or(1.0);
+            (name.eq_ignore_ascii_case("gzip") || name == "*") && weight > 0.0
+        })
+    })
 }
 
 /// A stored world's entity tag: its revision and the microsecond it was saved. The revision alone could come back: a
@@ -510,7 +685,9 @@ fn known_world(headers: &HeaderMap) -> Option<(i64, DateTime<Utc>)> {
 
 /// 204 until the owner first saves: a fresh island is the normal state, not an error. A world comes with its
 /// [`world_tag`] and is checked again before each reuse; a browser that holds the stored one gets a 304, and the
-/// envelope is not even read out of storage. Who may view the island is checked first either way.
+/// envelope is not even read out of storage. Who may view the island is checked first either way. Loads are counted
+/// per address for visitors and per member for members. A world goes out gzipped once for every load of the same
+/// revision (see [`WorldCache`]), so the database sends it and the server compresses it once per save.
 async fn world(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -518,48 +695,79 @@ async fn world(
     Query(query): Query<WorldQuery>,
 ) -> ApiResult<Response> {
     let viewer = optional_user(&state, &headers).await?;
-    if viewer.is_none() {
-        rate_limit(&state, format!("world-read:{}", client_address(&headers)), WORLD_READS_PER_ADDRESS)?;
+    match &viewer {
+        None => rate_limit(&state, format!("world-read:{}", client_address(&headers)), WORLD_READS_PER_ADDRESS)?,
+        Some(user) => rate_limit(&state, format!("world-read-member:{}", user.id), WORLD_READS_PER_MEMBER)?,
     }
     let (home, _) = visible_home(&state, &name, viewer.as_ref()).await?;
+    let world = world_id(&query.world_id)?;
     let (revision, saved_at) = known_world(&headers).unzip();
+    let gzip_taken = takes_gzip(&headers);
+    let cached = if gzip_taken { state.homes.worlds().get(home.owner_id, world) } else { None };
     let row = sqlx::query(
         "SELECT world_id, revision, updated_at,
-           CASE WHEN revision = $3 AND updated_at = $4 THEN NULL ELSE data::text END AS data
+           CASE WHEN (revision = $3 AND updated_at = $4) OR (revision = $5 AND updated_at = $6) THEN NULL
+             ELSE data::text END AS data
          FROM home_worlds WHERE owner_id = $1 AND world_id = $2",
     )
     .bind(home.owner_id)
-    .bind(world_id(&query.world_id)?)
+    .bind(world)
     .bind(revision)
     .bind(saved_at)
+    .bind(cached.as_ref().map(|cached| cached.revision))
+    .bind(cached.as_ref().map(|cached| cached.updated_at))
     .fetch_optional(&state.db)
     .await?;
     let Some(row) = row else { return Ok(StatusCode::NO_CONTENT.into_response()) };
-    let mut response = match row.get::<Option<&str>, _>("data") {
-        Some(data) => world_response(&row, data),
-        None => StatusCode::NOT_MODIFIED.into_response(),
+    let stored: (i64, DateTime<Utc>) = (row.get("revision"), row.get("updated_at"));
+    let mut response = if (revision, saved_at) == (Some(stored.0), Some(stored.1)) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else if let Some(cached) = cached.filter(|cached| (cached.revision, cached.updated_at) == stored) {
+        gzipped_world(cached.gzipped)
+    } else {
+        let data: &str = row.get::<Option<&str>, _>("data").ok_or_else(|| internal("a world without its data"))?;
+        let body = world_body(&row, data);
+        if gzip_taken {
+            let gzipped = Bytes::from(
+                tokio::task::spawn_blocking(move || gzip(body.as_bytes()))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?,
+            );
+            state.homes.worlds().put(home.owner_id, world, stored.0, stored.1, gzipped.clone());
+            gzipped_world(gzipped)
+        } else {
+            ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
     };
-    let tag = HeaderValue::from_str(&world_tag(row.get("revision"), row.get("updated_at"))).map_err(internal)?;
+    let tag = HeaderValue::from_str(&world_tag(stored.0, stored.1)).map_err(internal)?;
     let headers = response.headers_mut();
     headers.insert(header::ETAG, tag);
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
     Ok(response)
 }
 
+/// A save request. The envelope (`data`) stays the text it came as: it is checked as it is read (see [`scan_world`])
+/// and stored as it is, never built into a tree of values (one of up to 2 MiB would take tens of megabytes).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SaveWorld {
+struct SaveWorld<'a> {
     /// The account the page was loaded for. Missing/null is not a current-account fallback.
     expected_owner_id: Option<Uuid>,
     world_id: String,
     base_revision: i64,
-    data: Map<String, Value>,
+    #[serde(borrow)]
+    data: &'a RawValue,
+}
+
+/// Whether `key` ends with `suffix`, capitals aside.
+fn ends_with_ignoring_case(key: &str, suffix: &str) -> bool {
+    key.len() >= suffix.len() && key.as_bytes()[key.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
 }
 
 /// Keys whose string values a visitor's browser fetches: model, texture and image URLs.
 fn fetched_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key.ends_with("url") || key.ends_with("texture")
+    ends_with_ignoring_case(key, "url") || ends_with_ignoring_case(key, "texture")
 }
 
 /// Assets the platform serves, and inline images; anything else would make visitors fetch a stranger's host.
@@ -584,6 +792,353 @@ pub fn safe_asset_url(value: &str) -> bool {
     })
 }
 
+/// What reading a save envelope found: the runtime's envelope rules, text the database cannot keep (a NUL), asset
+/// URLs off the platform, and the residents domain, the one part kept as a value (it is small, and checked against the
+/// catalog).
+#[derive(Default)]
+struct Scan {
+    /// `version`: a whole number of at least 1.
+    version: bool,
+    /// `savedAt`: a finite number of at least 0.
+    saved_at: bool,
+    /// `domains`: an object of at most [`MAX_DOMAINS`] domains, once read.
+    domains: Option<bool>,
+    nul: bool,
+    url: bool,
+    residents: Option<Value>,
+    /// The residents domain was larger than any island's could be: reading stopped there.
+    crowded: bool,
+}
+
+impl Scan {
+    /// Why the envelope may not be stored, the runtime's rules first.
+    fn problem(&self) -> Option<&'static str> {
+        if !self.version {
+            Some("version")
+        } else if !self.saved_at {
+            Some("savedAt")
+        } else if self.domains != Some(true) {
+            Some("domains")
+        } else if self.nul {
+            Some("nul")
+        } else if self.url {
+            Some("url")
+        } else {
+            None
+        }
+    }
+}
+
+/// A number seen where the envelope wants one.
+#[derive(Clone, Copy)]
+enum Seen {
+    Whole(i64),
+    Number(f64),
+    Other,
+}
+
+/// Reads any JSON value without keeping it: a NUL in a key or string is noted, and so, inside the domains (`urls`), is
+/// a string under a fetched key ([`fetched_key`]) that is not one of the platform's assets.
+struct Walk<'s> {
+    scan: &'s mut Scan,
+    urls: bool,
+    /// The value sits under a fetched key.
+    fetched: bool,
+}
+
+impl<'de> DeserializeSeed<'de> for Walk<'_> {
+    type Value = Seen;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Seen, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Walk<'_> {
+    type Value = Seen;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Seen, E> {
+        Ok(Seen::Other)
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Seen, E> {
+        Ok(Seen::Whole(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Seen, E> {
+        Ok(i64::try_from(value).map_or(Seen::Number(value as f64), Seen::Whole))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Seen, E> {
+        Ok(Seen::Number(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<Seen, E> {
+        Ok(Seen::Other)
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Seen, E> {
+        self.scan.nul |= value.contains('\0');
+        self.scan.url |= self.urls && self.fetched && !safe_asset_url(value);
+        Ok(Seen::Other)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Seen, A::Error> {
+        while items.next_element_seed(Walk { scan: &mut *self.scan, urls: self.urls, fetched: false })?.is_some() {}
+        Ok(Seen::Other)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Seen, A::Error> {
+        while let Some(fetched) = entries.next_key_seed(Key { scan: &mut *self.scan })? {
+            entries.next_value_seed(Walk { scan: &mut *self.scan, urls: self.urls, fetched })?;
+        }
+        Ok(Seen::Other)
+    }
+}
+
+/// An object's key: a NUL in it is noted; whether a string under it is fetched comes back.
+struct Key<'s> {
+    scan: &'s mut Scan,
+}
+
+impl<'de> DeserializeSeed<'de> for Key<'_> {
+    type Value = bool;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Key<'_> {
+    type Value = bool;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a key")
+    }
+
+    fn visit_str<E>(self, key: &str) -> Result<bool, E> {
+        self.scan.nul |= key.contains('\0');
+        Ok(fetched_key(key))
+    }
+}
+
+/// The envelope itself: `{version, savedAt, domains, …}`.
+struct Envelope<'s> {
+    scan: &'s mut Scan,
+}
+
+impl<'de> DeserializeSeed<'de> for Envelope<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Envelope<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a save envelope")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<(), A::Error> {
+        while let Some(key) = entries.next_key::<String>()? {
+            self.scan.nul |= key.contains('\0');
+            let walk = Walk { scan: &mut *self.scan, urls: false, fetched: false };
+            match key.as_str() {
+                "version" => {
+                    let seen = entries.next_value_seed(walk)?;
+                    self.scan.version = matches!(seen, Seen::Whole(version) if version >= 1);
+                }
+                "savedAt" => {
+                    let saved = match entries.next_value_seed(walk)? {
+                        Seen::Whole(at) => Some(at as f64),
+                        Seen::Number(at) => Some(at),
+                        Seen::Other => None,
+                    };
+                    self.scan.saved_at = saved.is_some_and(|at| at.is_finite() && at >= 0.0);
+                }
+                "domains" => {
+                    self.scan.residents = None;
+                    entries.next_value_seed(Domains { scan: &mut *self.scan })?;
+                }
+                _ => {
+                    entries.next_value_seed(walk)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The envelope's domains: an object of at most [`MAX_DOMAINS`], each read as a [`Walk`] that checks URLs, the
+/// residents domain kept as a value.
+struct Domains<'s> {
+    scan: &'s mut Scan,
+}
+
+impl<'de> DeserializeSeed<'de> for Domains<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Domains<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("the domains")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+        self.scan.domains = Some(false);
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+        self.scan.domains = Some(false);
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+        self.scan.domains = Some(false);
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+        self.scan.domains = Some(false);
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<(), E> {
+        self.scan.domains = Some(false);
+        Ok(())
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<(), E> {
+        self.scan.nul |= value.contains('\0');
+        self.scan.domains = Some(false);
+        Ok(())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, items: A) -> Result<(), A::Error> {
+        Walk { scan: &mut *self.scan, urls: false, fetched: false }.visit_seq(items)?;
+        self.scan.domains = Some(false);
+        Ok(())
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<(), A::Error> {
+        let mut count = 0;
+        while let Some(key) = entries.next_key::<String>()? {
+            count += 1;
+            self.scan.nul |= key.contains('\0');
+            if key == crate::residents::DOMAIN {
+                let mut left = MAX_RESIDENT_NODES;
+                match entries.next_value_seed(Capture { left: &mut left }) {
+                    Ok(residents) => {
+                        self.scan.nul |= holds_nul(&residents);
+                        self.scan.url |= unsafe_url(&residents);
+                        self.scan.residents = Some(residents);
+                    }
+                    Err(error) => {
+                        self.scan.crowded = left == 0;
+                        return Err(error);
+                    }
+                }
+            } else {
+                entries.next_value_seed(Walk { scan: &mut *self.scan, urls: true, fetched: false })?;
+            }
+        }
+        self.scan.domains = Some(count <= MAX_DOMAINS);
+        Ok(())
+    }
+}
+
+/// Reads a value into memory, [`MAX_RESIDENT_NODES`] nodes at most (`left` counts down): past that, reading stops.
+struct Capture<'l> {
+    left: &'l mut usize,
+}
+
+impl Capture<'_> {
+    fn take<E: de::Error>(&mut self) -> Result<(), E> {
+        *self.left = self.left.checked_sub(1).ok_or_else(|| E::custom("too many residents"))?;
+        Ok(())
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for Capture<'_> {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Capture<'_> {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E: de::Error>(mut self, value: bool) -> Result<Value, E> {
+        self.take()?;
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E: de::Error>(mut self, value: i64) -> Result<Value, E> {
+        self.take()?;
+        Ok(Value::from(value))
+    }
+
+    fn visit_u64<E: de::Error>(mut self, value: u64) -> Result<Value, E> {
+        self.take()?;
+        Ok(Value::from(value))
+    }
+
+    fn visit_f64<E: de::Error>(mut self, value: f64) -> Result<Value, E> {
+        self.take()?;
+        Ok(Value::from(value))
+    }
+
+    fn visit_unit<E: de::Error>(mut self) -> Result<Value, E> {
+        self.take()?;
+        Ok(Value::Null)
+    }
+
+    fn visit_str<E: de::Error>(mut self, value: &str) -> Result<Value, E> {
+        self.take()?;
+        Ok(Value::from(value))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(mut self, mut items: A) -> Result<Value, A::Error> {
+        self.take()?;
+        let mut list = Vec::new();
+        while let Some(item) = items.next_element_seed(Capture { left: &mut *self.left })? {
+            list.push(item);
+        }
+        Ok(Value::Array(list))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(mut self, mut entries: A) -> Result<Value, A::Error> {
+        self.take()?;
+        let mut map = Map::new();
+        while let Some(key) = entries.next_key::<String>()? {
+            let value = entries.next_value_seed(Capture { left: &mut *self.left })?;
+            map.insert(key, value);
+        }
+        Ok(Value::Object(map))
+    }
+}
+
+/// Whether a string under a fetched key anywhere in `value` is not one of the platform's assets.
 fn unsafe_url(value: &Value) -> bool {
     match value {
         Value::Array(items) => items.iter().any(unsafe_url),
@@ -605,53 +1160,61 @@ fn holds_nul(value: &Value) -> bool {
     }
 }
 
-/// Why the save envelope may not be stored: the runtime's envelope rules, text the database cannot keep and the asset
-/// URL allowlist.
-fn world_problem(data: &Map<String, Value>) -> Option<&'static str> {
-    if data.get("version").and_then(Value::as_i64).is_none_or(|v| v < 1) {
-        return Some("version");
+/// Reads the envelope `data` (the text of a JSON object) as [`Scan`] says, without keeping more than its residents.
+/// Err when it is not an envelope at all (not an object, or residents past any island's).
+fn scan_world(data: &str) -> Result<Scan, Scan> {
+    let mut scan = Scan::default();
+    let mut deserializer = serde_json::Deserializer::from_str(data);
+    let read = Envelope { scan: &mut scan }.deserialize(&mut deserializer).and_then(|()| deserializer.end());
+    match read {
+        Ok(()) => Ok(scan),
+        Err(_) => Err(scan),
     }
-    if !data.get("savedAt").and_then(Value::as_f64).is_some_and(|v| v.is_finite() && v >= 0.0) {
-        return Some("savedAt");
-    }
-    let Some(domains) = data.get("domains").and_then(Value::as_object) else { return Some("domains") };
-    if domains.len() > MAX_DOMAINS {
-        return Some("domains");
-    }
-    if data.iter().any(|(key, value)| key.contains('\0') || holds_nul(value)) {
-        return Some("nul");
-    }
-    domains.values().any(unsafe_url).then_some("url")
 }
 
-/// A save request read and checked: its envelope as it is stored (and measured), and the domains for the resident check.
+/// The residents a save places, as far as its own text says: a domain that is none, or the catalog items it names (none
+/// without the domain).
+enum Residents {
+    Bad(&'static str),
+    Items(Vec<String>),
+}
+
+/// A save request read and checked: its envelope as it is stored (and measured), and its residents.
 struct Checked {
     world_id: String,
     base_revision: i64,
     data: String,
-    domains: Option<Map<String, Value>>,
+    residents: Residents,
 }
 
 /// The request body as `owner`'s save, its envelope measured and checked; for a blocking thread, since it is up to
-/// 2 MiB.
+/// 2 MiB. Nothing of it stays in memory but the envelope's text and its residents.
 fn check_save(bytes: &[u8], owner: Uuid) -> ApiResult<Checked> {
     let save: SaveWorld = serde_json::from_slice(bytes).map_err(|_| INVALID_WORLD)?;
     same_owner(save.expected_owner_id, owner)?;
     world_id(&save.world_id)?;
-    let data = serde_json::to_string(&save.data).map_err(internal)?;
+    let data = save.data.get();
     if data.len() > MAX_WORLD_BYTES {
         return Err(WORLD_TOO_LARGE);
     }
-    if let Some(problem) = world_problem(&save.data) {
+    let scan = match scan_world(data) {
+        Ok(scan) => scan,
+        Err(scan) if scan.crowded => {
+            tracing::warn!(problem = "residents_count", user = %owner, "Rejected world save");
+            return Err(INVALID_RESIDENTS);
+        }
+        Err(_) => return Err(INVALID_WORLD),
+    };
+    if let Some(problem) = scan.problem() {
         tracing::warn!(problem, user = %owner, "Rejected world save");
         return Err(INVALID_WORLD);
     }
-    let mut envelope = save.data;
-    let domains = match envelope.remove("domains") {
-        Some(Value::Object(domains)) => Some(domains),
-        _ => None,
+    let residents = match scan.residents.as_ref().map(crate::residents::shape) {
+        None => Residents::Items(Vec::new()),
+        Some(Ok(items)) => Residents::Items(items),
+        Some(Err(problem)) => Residents::Bad(problem),
     };
-    Ok(Checked { world_id: save.world_id, base_revision: save.base_revision, data, domains })
+    Ok(Checked { world_id: save.world_id, base_revision: save.base_revision, data: data.to_owned(), residents })
 }
 
 /// What a save answers with: the stored world's id, revision and time. The page has the envelope it sent, and an
@@ -661,7 +1224,8 @@ const SAVED_COLUMNS: &str = "world_id, revision, updated_at";
 /// Stores a save under a lock on the owner's home: a first save makes the world's row (None when it exists already),
 /// a later one needs the revision it was based on (None when another save came first). The owner then keeps at most
 /// [`MAX_WORLDS`] worlds and [`MAX_MEMBER_WORLD_BYTES`] in all: the least recently updated of the others make room,
-/// never the one saved here, so saves made at once cannot pass either cap.
+/// never the one saved here, so saves made at once cannot pass either cap. The island moves up the listing at most
+/// every [`LISTED_EVERY`].
 async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgRow>> {
     let bytes = save.data.len() as i32;
     let mut tx = db.begin().await?;
@@ -705,7 +1269,12 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
         .bind(MAX_MEMBER_WORLD_BYTES - i64::from(bytes))
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE homes SET updated_at = now() WHERE owner_id = $1").bind(owner).execute(&mut *tx).await?;
+        sqlx::query(&format!(
+            "UPDATE homes SET updated_at = now() WHERE owner_id = $1 AND updated_at < now() - interval '{LISTED_EVERY}'"
+        ))
+        .bind(owner)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(row)
@@ -726,27 +1295,33 @@ async fn limited_body(body: Body, max: usize, too_large: ApiError, cut_short: Ap
     Ok(bytes)
 }
 
-/// The save request's body, up to [`MAX_SAVE_BYTES`]: past that it is an island too large, and one that stops coming
-/// is [`WORLD_CUT_SHORT`].
-async fn save_body(body: Body) -> ApiResult<Vec<u8>> {
-    limited_body(body, MAX_SAVE_BYTES, WORLD_TOO_LARGE, WORLD_CUT_SHORT).await
-}
-
 /// `PUT /api/homes/me/world`: `{worldId, revision, updatedAt}` of the stored world. The body is read only once the
-/// sender is known and within its budget.
+/// sender is known and within its budget, with no other save of theirs under way, and once the save has one of the
+/// site's [`SAVE_SLOTS`]: however many saves come at once, a few bodies are held, and none is ever built into a tree.
 async fn save_world(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
     rate_limit(&state, format!("world:{}", user.id), WORLD_SAVES_PER_WINDOW)?;
-    let bytes = save_body(body).await?;
+    // A body that says it is past the limit is refused before anything waits for it.
+    let declared = headers.get(header::CONTENT_LENGTH).and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > MAX_SAVE_BYTES as u64) {
+        return Err(WORLD_TOO_LARGE);
+    }
+    let _saving = state.homes.begin(user.id)?;
+    let _slot = tokio::time::timeout(SAVE_WAIT, state.homes.saving.clone().acquire_owned())
+        .await
+        .map_err(|_| SAVES_BUSY)?
+        .map_err(internal)?;
+    let bytes = limited_body(body, MAX_SAVE_BYTES, WORLD_TOO_LARGE, WORLD_CUT_SHORT).await?;
     let owner = user.id;
     let save = tokio::task::spawn_blocking(move || check_save(&bytes, owner)).await.map_err(internal)??;
     create(&state.db, &user).await?;
-    if let Some(problem) = match &save.domains {
-        Some(domains) => crate::residents::problem(&state.db, domains).await?,
-        None => None,
-    } {
+    let problem = match &save.residents {
+        Residents::Bad(problem) => Some(*problem),
+        Residents::Items(items) => crate::residents::unknown(&state.db, items).await?.then_some("resident_npc"),
+    };
+    if let Some(problem) = problem {
         tracing::warn!(problem, user = %user.id, "Rejected world save");
-        return Err(bad("invalid_residents", "섬에 둘 수 없는 주민이 있습니다."));
+        return Err(INVALID_RESIDENTS);
     }
     let row = store(&state.db, user.id, &save)
         .await?
@@ -774,27 +1349,102 @@ mod tests {
         assert!(!safe_asset_url(&format!("/models/{}.glb", "A".repeat(64))));
     }
 
+    /// What reading `envelope` finds wrong with it, as a save would.
+    fn world_problem(envelope: Value) -> Option<&'static str> {
+        match scan_world(&envelope.to_string()) {
+            Ok(scan) => scan.problem(),
+            Err(scan) if scan.crowded => Some("residents_count"),
+            Err(_) => Some("not_an_envelope"),
+        }
+    }
+
     #[test]
     fn world_envelope_and_nested_urls_are_checked() {
         let ok = json!({"version": 1, "savedAt": 1, "domains": {"building": {"objects": [{"config": {"modelUrl": "gltf/props/bed.glb"}}]}}});
-        assert_eq!(world_problem(ok.as_object().unwrap()), None);
+        assert_eq!(world_problem(ok), None);
         let evil = json!({"version": 1, "savedAt": 1, "domains": {"building": {"meshes": [{"mapTextureUrl": "https://x.y/t.png"}]}}});
-        assert_eq!(world_problem(evil.as_object().unwrap()), Some("url"));
-        assert_eq!(
-            world_problem(json!({"version": 0, "savedAt": 1, "domains": {}}).as_object().unwrap()),
-            Some("version")
-        );
-        assert_eq!(
-            world_problem(json!({"version": 1, "savedAt": -1, "domains": {}}).as_object().unwrap()),
-            Some("savedAt")
-        );
+        assert_eq!(world_problem(evil), Some("url"));
+        let shouting = json!({"version": 1, "savedAt": 1, "domains": {"building": {"MODELURL": "https://x.y/m.glb"}}});
+        assert_eq!(world_problem(shouting), Some("url"));
+        assert_eq!(world_problem(json!({"version": 0, "savedAt": 1, "domains": {}})), Some("version"));
+        assert_eq!(world_problem(json!({"version": 1.5, "savedAt": 1, "domains": {}})), Some("version"));
+        assert_eq!(world_problem(json!({"version": 1, "savedAt": -1, "domains": {}})), Some("savedAt"));
+        assert_eq!(world_problem(json!({"version": 1, "savedAt": 2.5, "domains": {}})), None);
+        assert_eq!(world_problem(json!({"version": 1, "savedAt": 1})), Some("domains"));
+        assert_eq!(world_problem(json!({"version": 1, "savedAt": 1, "domains": [1]})), Some("domains"));
+        let crowded: Map<String, Value> = (0..=MAX_DOMAINS).map(|at| (format!("d{at}"), json!({}))).collect();
+        assert_eq!(world_problem(json!({"version": 1, "savedAt": 1, "domains": crowded})), Some("domains"));
+        assert_eq!(world_problem(json!([1, 2])), Some("not_an_envelope"));
         // PostgreSQL cannot keep a NUL in JSON: refused here, before the database would fail on it.
         let nul = json!({"version": 1, "savedAt": 1, "domains": {"building": {"note": "a\u{0}b"}}});
-        assert_eq!(world_problem(nul.as_object().unwrap()), Some("nul"));
+        assert_eq!(world_problem(nul), Some("nul"));
         let nul_key = json!({"version": 1, "savedAt": 1, "domains": {"building": {"a\u{0}": 1}}});
-        assert_eq!(world_problem(nul_key.as_object().unwrap()), Some("nul"));
+        assert_eq!(world_problem(nul_key), Some("nul"));
+        let nul_outside = json!({"version": 1, "savedAt": 1, "domains": {}, "note": ["a\u{0}"]});
+        assert_eq!(world_problem(nul_outside), Some("nul"));
         let lines = json!({"version": 1, "savedAt": 1, "domains": {"building": {"note": "a\nb\tc"}}});
-        assert_eq!(world_problem(lines.as_object().unwrap()), None);
+        assert_eq!(world_problem(lines), None);
+        // Only strings right under a fetched key are fetched; what sits outside the domains is the runtime's own.
+        let listed = json!({"version": 1, "savedAt": 1, "domains": {"building": {"modelUrl": ["https://x.y/m.glb"]}}});
+        assert_eq!(world_problem(listed), None);
+        let outside = json!({"version": 1, "savedAt": 1, "domains": {}, "meta": {"iconUrl": "https://x.y/i.png"}});
+        assert_eq!(world_problem(outside), None);
+    }
+
+    #[test]
+    fn a_huge_island_is_read_without_being_kept_and_only_its_residents_are() {
+        // About a million numbers: read as values it would take tens of megabytes; here nothing of it stays.
+        let numbers = format!("[{}0]", "0,".repeat(1_000_000));
+        let envelope = format!(r#"{{"version":1,"savedAt":1,"domains":{{"building":{{"x":{numbers}}}}}}}"#);
+        let scan = scan_world(&envelope).ok().unwrap();
+        assert_eq!((scan.problem(), scan.residents.is_none()), (None, true));
+        let resident =
+            json!({"id": "a", "npc": "npc-hero", "name": "모개", "greeting": "", "position": [0, 0, 0], "rotation": 0});
+        let residents = json!({"version": 1, "residents": [resident]});
+        let scan = scan_world(&json!({"version": 1, "savedAt": 1, "domains": {"residents": residents}}).to_string());
+        assert_eq!(scan.ok().unwrap().residents, Some(residents));
+        // Residents past any island's stop the reading there.
+        let crowd =
+            format!(r#"{{"version":1,"savedAt":1,"domains":{{"residents":{{"version":1,"residents":{numbers}}}}}}}"#);
+        assert!(scan_world(&crowd).err().is_some_and(|scan| scan.crowded));
+        let residents_url =
+            json!({"version": 1, "savedAt": 1, "domains": {"residents": {"modelUrl": "https://x.y/m.glb"}}});
+        assert_eq!(world_problem(residents_url), Some("url"));
+    }
+
+    #[test]
+    fn gzip_is_taken_as_the_request_says() {
+        let taking = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, value.parse().unwrap());
+            takes_gzip(&headers)
+        };
+        assert!(taking("gzip, deflate, br, zstd"));
+        assert!(taking("br;q=1.0, GZIP;q=0.5"));
+        assert!(taking("*"));
+        assert!(!taking("br"));
+        assert!(!taking("gzip;q=0"));
+        assert!(!taking("identity"));
+        assert!(!takes_gzip(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn the_world_cache_keeps_the_most_recently_used_within_its_bytes() {
+        let mut cache = WorldCache::default();
+        let (owner, at) = (Uuid::new_v4(), Utc::now());
+        let quarter = Bytes::from(vec![0u8; WORLD_CACHE_BYTES / 4]);
+        for world in ["a", "b", "c", "d"] {
+            cache.put(owner, world, 1, at, quarter.clone());
+        }
+        assert!(cache.get(owner, "a").is_some());
+        cache.put(owner, "e", 1, at, quarter.clone());
+        assert!(cache.get(owner, "b").is_none(), "the least recently used made room");
+        assert!(cache.get(owner, "a").is_some() && cache.get(owner, "e").is_some());
+        cache.put(owner, "a", 2, at, Bytes::from_static(b"x"));
+        assert_eq!(cache.get(owner, "a").map(|entry| entry.revision), Some(2));
+        assert!(cache.bytes <= WORLD_CACHE_BYTES);
+        cache.put(owner, "huge", 1, at, Bytes::from(vec![0u8; WORLD_CACHE_BYTES / 4 + 1]));
+        assert!(cache.get(owner, "huge").is_none());
     }
 
     #[test]

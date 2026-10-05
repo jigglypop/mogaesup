@@ -105,8 +105,10 @@ impl PartEdit {
 }
 
 /// `PUT /api/looks/me`: the wardrobe's body, the part worn in each slot, the hair colour and garment region colours.
+/// Fields this server does not know are ignored, so a newer page keeps saving to a server rolled back under it; what
+/// the known ones hold is checked as strictly as ever.
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct LookBody {
     body: BodyRef,
     #[serde(default)]
@@ -258,11 +260,36 @@ async fn baking_now(db: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
     .await
 }
 
-/// `PUT /api/looks/me`: saves the look and starts assembling it; 202 with the look, `baking` until it is worn.
+/// Wears the look the member last had assembled again, when `look` is that very look and its model is stored: nothing
+/// is fetched or baked for it. The look as it is then; None when `look` needs assembling (or one is being assembled).
+async fn wear_baked(state: &AppState, user: Uuid, look: &Value) -> ApiResult<Option<Value>> {
+    let worn = sqlx::query(
+        "UPDATE user_looks SET request = $2, revision = revision + 1, status = 'ready', error_code = NULL,
+           error_message = NULL, worn = true, wear_on_ready = true, updated_at = now()
+         WHERE user_id = $1 AND baked = $2 AND model_url IS NOT NULL
+           AND (status <> 'baking' OR updated_at < now() - make_interval(mins => $3))
+         RETURNING user_id",
+    )
+    .bind(user)
+    .bind(look)
+    .bind(STALE.num_minutes() as i32)
+    .fetch_optional(&state.db)
+    .await?;
+    match worn {
+        Some(_) => look_of(state, user).await,
+        None => Ok(None),
+    }
+}
+
+/// `PUT /api/looks/me`: saves the look and starts assembling it; 202 with the look, `baking` until it is worn. The
+/// look last assembled is worn again at once (200), without fetching or baking anything.
 async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LookBody>) -> ApiResult<Response> {
     let user = current_user(&state, &headers).await?;
     rate_limit(&state, format!("look:{}", user.id), SAVES_PER_WINDOW)?;
     let look = request(body)?;
+    if let Some(worn) = wear_baked(&state, user.id, &look).await? {
+        return Ok(Json(json!({"look": worn})).into_response());
+    }
     factory::configured(&state)?;
     let admission = state.looks.clone().try_acquire_owned().map_err(|_| BUSY)?;
     let body_job = text(&look["body"], "jobId").to_owned();
@@ -305,8 +332,8 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     Ok((StatusCode::ACCEPTED, Json(json!({"look": saved}))).into_response())
 }
 
+/// `PATCH /api/looks/me`. Fields this server does not know are ignored, as for a save.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Wear {
     worn: bool,
 }
@@ -688,10 +715,16 @@ mod tests {
         ] {
             assert_eq!(request(body(broken.clone())).unwrap_err().code, "invalid_look", "{broken}");
         }
+        // A field this server does not know (a newer page's) is ignored; inside the known ones nothing unknown passes.
+        let newer = body(json!({"body": {"jobId": "b1", "version": "v1"}, "modelUrl": "x", "accessories": {}}));
+        assert_eq!(request(newer).unwrap(), bare);
         assert!(
-            serde_json::from_value::<LookBody>(json!({"body": {"jobId": "b", "version": "v"}, "modelUrl": "x"}))
-                .is_err()
+            serde_json::from_value::<LookBody>(json!({"body": {"jobId": "b", "version": "v", "extra": 1}})).is_err()
         );
+        let edited = json!({"body": {"jobId": "b1", "version": "v1"},
+            "parts": {"hat": {"jobId": "p1", "version": "v2", "sha256": sha('a')}},
+            "partEdits": {"hat": {"scale": [1.0, 1.0, 1.0], "translation": [0.0, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0]}}});
+        assert!(serde_json::from_value::<LookBody>(edited).is_err());
     }
 
     #[test]

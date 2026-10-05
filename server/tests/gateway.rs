@@ -582,3 +582,46 @@ async fn work_the_character_server_does_on_its_own_machine_is_not_paid() {
     assert_eq!(seen.calls().len(), local.len());
     app.cleanup().await;
 }
+
+#[tokio::test]
+async fn 캐릭터_서버가_이_서버의_인증을_거절하면_앱_로그인과_다른_502로_알린다() {
+    // A character server whose token, API key or gateway key check refuses this server: 401 or 403 by path.
+    let upstream = Router::new().fallback(|request: Request| async move {
+        let path = request.uri().path().to_owned();
+        if path.ends_with("/locked") {
+            (StatusCode::UNAUTHORIZED, Json(json!({"detail": "JWT expired"}))).into_response()
+        } else if path.ends_with("/closed") {
+            (StatusCode::FORBIDDEN, Json(json!({"detail": "Studio operator access required"}))).into_response()
+        } else if path.ends_with("/missing") {
+            (StatusCode::NOT_FOUND, Json(json!({"detail": "no such part"}))).into_response()
+        } else {
+            Json(json!({"ok": true})).into_response()
+        }
+    });
+    let app = TestApp::new(Some(settings(serve(upstream).await, FactoryAccess::Write, 0))).await;
+    let member = app.register("member_auth", "회원").await;
+    let boss = admin(&app, "admin_auth").await;
+    let code = |reply: common::Reply| (reply.status, reply.body["code"].as_str().map(str::to_owned));
+    let refused = || (StatusCode::BAD_GATEWAY, Some("factory_auth".to_owned()));
+    for (path, cookie) in [
+        ("/api/avatar-factory/wardrobe/locked", &member),
+        ("/api/avatar-factory/wardrobe/closed", &member),
+        ("/api/factory/avatar-factory/closed", &boss),
+        ("/api/studio/locked", &boss),
+    ] {
+        assert_eq!(code(app.call("GET", path, None, Some(cookie)).await), refused(), "{path}");
+    }
+    // A change refused that way is recorded as the gateway's failure, which started nothing.
+    let write = app.call("PUT", "/api/avatar-factory/wardrobe/outfits/locked", Some(json!({})), Some(&boss)).await;
+    assert_eq!(code(write), refused());
+    assert_eq!(
+        requests(&app).await,
+        [("PUT".to_owned(), "avatar-factory/wardrobe/outfits/locked".to_owned(), false, Some(502))]
+    );
+    // The character server's other answers still pass as they came; the member stays signed in throughout.
+    let missing = app.call("GET", "/api/avatar-factory/wardrobe/missing", None, Some(&member)).await;
+    assert_eq!((missing.status, missing.body["detail"].as_str()), (StatusCode::NOT_FOUND, Some("no such part")));
+    let me = app.call("GET", "/api/auth/me", None, Some(&member)).await;
+    assert_eq!(me.body["user"]["username"], "member_auth");
+    app.cleanup().await;
+}
