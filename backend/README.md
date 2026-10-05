@@ -56,7 +56,7 @@ Swagger UI는 `/docs`, OpenAPI 문서는 `/openapi.json`에서 확인할 수 있
 - 캐릭터 공장 저장소: `ASSET_S3_BUCKET`, `ASSET_S3_REGION=ap-northeast-2`, `ASSET_S3_PREFIX=assets`, 선택 `ASSET_AWS_PROFILE`. 원본·파츠·생성 응답·작업 기록·GLB는 비공개 S3에 저장합니다. 다운로드는 인증 API가 소유권을 확인한 뒤 같은 origin에서 스트리밍합니다. 기존 `data/` 자료는 읽기 호환용으로 보존합니다.
 - 이미지 생성: `OPENAI_API_KEY`, `AVATAR_IMAGE_MODEL=gpt-image-2.5-sunburst`. TLS 1.3 연결이 끊기는 환경은 `AVATAR_IMAGE_TLS_MAX_VERSION=1.2`를 사용합니다.
 - 캐릭터 공장 3D 공급자: `AVATAR_3D_PROVIDER=meshy|tripo`(기본 meshy). Tripo는 `TRIPO_API_KEY`, 선택 `TRIPO_API_BASE_URL`, `TRIPO_MODEL_VERSION`(기본 `v3.1-20260211`). 키가 둘 다 있으면 파츠 화면에서 요청마다 고릅니다.
-- `BLENDER_CONCURRENCY`(기본 2): 동시에 실행하는 Blender 피팅 수. vCPU 2개당 1이 기준입니다.
+- `BLENDER_CONCURRENCY`(기본 2): 동시에 실행하는 Blender 피팅 수. vCPU 2개당 1이 기준이고, 메모리에서 1 GiB를 뺀 4 GiB마다 1개를 넘지 않습니다(Blender 하나가 최대 약 3.6 GB를 씀, 8 GB 인스턴스는 1개).
 - `ASSET_DETAIL_RENDERS=1`은 파츠별 상세 렌더를, `ASSET_SAVE_MASTER_BLEND=1`은 조립 `master.blend`를 추가로 저장합니다. 기본은 둘 다 끔입니다.
 - `CHARACTER_DATABASE_URL`: 작업·캐릭터·생성·설계도 기록과 요청 영수증(저장 이름공간의 `.json`)을 S3 대신 PostgreSQL에 둡니다. 아래 "기록 데이터베이스"를 보세요.
 - `ASSET_DATA_ROOT`는 기본 루트 `backend/data/`를, `CHARACTER_OWNER_ID`는 기존 manifest 소유자(기본 1)를, `BLENDER_EXECUTABLE`은 Blender 경로를 지정합니다. 미지정 시 PATH와 Windows 기본 설치 위치를 탐색합니다.

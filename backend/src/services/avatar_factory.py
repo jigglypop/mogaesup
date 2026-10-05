@@ -17,8 +17,23 @@ from src.services.object_storage import changed_since, child_names, sha256
 from src.services.run_lock import WorkerLocks, worker_alive
 
 LOGGER = logging.getLogger(__name__)
-# Concurrent Blender workers. Each one uses 1-2 CPU threads and about 1-2 GB of RAM.
-_QUEUE = Semaphore(max(1, int(os.getenv('BLENDER_CONCURRENCY', '2') or 2)))
+
+
+def blender_slots(requested=None, memory=None):
+    """Concurrent Blender workers: BLENDER_CONCURRENCY (default 2), but no more than one per 4 GiB of RAM after 1 GiB for
+    the API. A frozen-body render or an assembly peaks at about 3.6 GB; two at once on the studio's 8 GB instance were
+    killed for memory and paused their garments (2026-10-05). `memory` is in bytes; None reads this machine's."""
+    wanted = max(1, int((os.getenv('BLENDER_CONCURRENCY', '2') if requested is None else requested) or 2))
+    if memory is None:
+        try:
+            memory = os.sysconf('SC_PAGE_SIZE')*os.sysconf('SC_PHYS_PAGES')
+        except (AttributeError, ValueError, OSError):
+            return wanted
+    return max(1, min(wanted, int((memory/2**30-1)//4)))
+
+
+# Concurrent Blender workers. Each one uses 1-2 CPU threads and up to about 3.6 GB of RAM.
+_QUEUE = Semaphore(blender_slots())
 _LOCK = RLock()
 # The production worker of each job directory (AvatarImagePipeline.execute) while it runs in this process.
 _RUN_LOCKS = WorkerLocks()
