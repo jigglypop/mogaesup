@@ -1,5 +1,5 @@
-//! Where 임포스터's bots walk: the island's open spots joined into a graph (its cells are 4 m, so neighbours are up to
-//! a diagonal apart), and a bot's route along it at a steady pace. A route is a line of points and a departure time,
+//! Where 임포스터's bots walk: the ship's floor cells joined into a graph (its cells are 4 m, so neighbours are the cells
+//! beside one another, never across a corner a wall may stand on), and a bot's route along it at a steady pace. A route is a line of points and a departure time,
 //! which the views carry as they are, so pages move each bot themselves and a view changes only when a bot sets off.
 
 use serde_json::{Value, json};
@@ -7,8 +7,8 @@ use std::{cmp::Ordering, collections::BinaryHeap};
 
 use super::super::{Millis, distance_xz};
 
-/// Spots this near on the ground are neighbours: one cell across, or one diagonally (5.7 m).
-const LINK: f64 = 6.0;
+/// Spots this near on the ground are neighbours: one cell across (4 m), not diagonally (5.7 m).
+const LINK: f64 = 4.5;
 /// Points of a way closer than this are one.
 const SAME_POINT: f64 = 0.05;
 /// How fast bots walk, in meters a second.
@@ -194,8 +194,10 @@ mod tests {
         assert_eq!(way.last(), Some(&[16.0, 0.0, 0.0]));
         assert!(way.contains(&[8.0, 0.0, 16.0]), "{way:?}");
         assert!(way.windows(2).all(|pair| distance_xz(pair[0], pair[1]) <= LINK + 1e-9), "{way:?}");
+        // Never across a corner: a diagonal step goes round by a side cell.
+        assert_eq!(walk.way([0.0, 0.0, 0.0], [4.0, 0.0, 4.0]).len(), 3);
         // Near: straight. Cut off (an island of its own): straight too.
-        assert_eq!(walk.way([0.0, 0.0, 0.0], [4.0, 0.0, 4.0]), vec![[0.0, 0.0, 0.0], [4.0, 0.0, 4.0]]);
+        assert_eq!(walk.way([0.0, 0.0, 0.0], [4.0, 0.0, 0.0]), vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]]);
         let apart = Walk::new(vec![[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]]);
         assert_eq!(apart.way([0.0, 0.0, 0.0], [40.0, 0.0, 0.0]), vec![[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]]);
         assert_eq!(Walk::new(Vec::new()).way([0.0, 0.0, 0.0], [40.0, 0.0, 0.0]).len(), 2);

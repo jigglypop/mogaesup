@@ -77,6 +77,8 @@ export function useActiveGame(): ActiveGame | null {
       onEvent,
       serverNow: client.serverNow,
       teleport: client.teleport,
+      position: client.position,
+      body: client.body,
     };
     return { definition, props, result: session.result };
   }, [client, session, kind, onEvent]);

@@ -28,9 +28,12 @@
 //!   any time, to the dead only.
 //!
 //! Layout (from the host's page): `{"stations": [[x, y, z]; 6..=12], "table": [x, y, z], "vents": [[x, y, z]; 0..=8],
-//! "walk": [[x, y, z]; 0..=400], "bots": 0..=9, "role": "crew" | "impostor" | null}`: open spots of the island (the
-//! walk is where bots may go), the bots to add, and the role of someone playing alone. Stations nearer than 3.6 m to
-//! the table or an earlier station count as that place; six must remain. People and bots together are 4 to 15.
+//! "walk": [[x, y, z]; 0..=400], "panels": {"lights": i, "comms": i, "reactor": [i, j]} | null, "bots": 0..=9, "role":
+//! "crew" | "impostor" | null}`: the places of the map the page builds (the ship over the island, see
+//! frontend/src/games/impostor/ship.ts; the walk is every floor cell the bots may go to), which stations fix each
+//! sabotage (four different ones; without them the reactor gets the two farthest apart), the bots to add, and the role
+//! of someone playing alone. Stations nearer than 3.6 m to the table or an earlier station count as that place; six
+//! must remain (and the panels then go by the game's own choice). People and bots together are 4 to 15.
 //!
 //! Actions: `{"do": "task"}`, `{"do": "finish"}`, `{"do": "stop"}`, `{"do": "kill", "target": id}`, `{"do": "report",
 //! "body": n}`, `{"do": "meeting"}`, `{"do": "vote", "target": id | null}`, `{"do": "say", "text": "…"}`,
@@ -431,6 +434,31 @@ fn circle(center: [f64; 3], count: usize) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// The panels the host's map names: four different stations of `given` (as many as kept), or None when not named.
+fn named_panels(layout: &Value, given: usize, kept: usize) -> Result<Option<Panels>, GameError> {
+    let value = match layout.get("panels") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value,
+    };
+    let index =
+        |value: &Value| value.as_u64().and_then(|index| usize::try_from(index).ok()).filter(|index| *index < given);
+    let (Some(lights), Some(comms), Some([a, b])) = (
+        index(&value["lights"]),
+        index(&value["comms"]),
+        value["reactor"].as_array().filter(|pair| pair.len() == 2).map(|pair| [index(&pair[0]), index(&pair[1])]),
+    ) else {
+        return Err(BAD_LAYOUT);
+    };
+    let (Some(a), Some(b)) = (a, b) else { return Err(BAD_LAYOUT) };
+    let mut all = [lights, comms, a, b];
+    all.sort_unstable();
+    if all.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(BAD_LAYOUT);
+    }
+    // A station dropped as too near another moves the ones after it: then the names no longer fit.
+    Ok((kept == given).then_some(Panels { lights, comms, reactor: [a, b] }))
+}
+
 /// The two stations farthest apart for the reactor, and two more for the lights and the comms.
 fn panels(stations: &[[f64; 3]], rng: &mut StdRng) -> Panels {
     let mut reactor = [0, 1];
@@ -453,11 +481,14 @@ impl Impostor {
         // The host's page computed this: check the shape, the counts and the coordinates before using it.
         let table = point(&layout["table"])?;
         let mut places = vec![table];
-        places.extend(layout_points(layout, "stations", MIN_STATIONS, MAX_STATIONS)?);
+        let given = layout_points(layout, "stations", MIN_STATIONS, MAX_STATIONS)?;
+        let named = given.len();
+        places.extend(given);
         let stations: Vec<[f64; 3]> = distinct(places, SAME_PLACE).into_iter().skip(1).collect();
         if stations.len() < MIN_STATIONS {
             return Err(FEW_STATIONS);
         }
+        let named = named_panels(layout, named, stations.len())?;
         let vents = distinct(optional_points(layout, "vents", MAX_VENTS)?, SAME_VENT);
         let walk = optional_points(layout, "walk", MAX_WALK)?;
         let bots = match layout.get("bots") {
@@ -546,7 +577,10 @@ impl Impostor {
         let shuffled = pick_many(ctx.rng(), &kinds, kinds.len());
         kinds = shuffled;
         let chores = (0..stations.len()).map(|station| kinds[station % kinds.len()]).collect();
-        let panels = panels(&stations, ctx.rng());
+        let panels = match named {
+            Some(panels) => panels,
+            None => panels(&stations, ctx.rng()),
+        };
 
         // Everyone starts around the table; the bots stand there, the people's pages move them there.
         let seats = circle(table, players.len());

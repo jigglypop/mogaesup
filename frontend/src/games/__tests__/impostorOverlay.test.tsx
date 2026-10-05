@@ -74,9 +74,11 @@ describe('임포스터가 섬 위에 두는 것', () => {
     expect(dialog.getAttribute('aria-label')).toBe('숫자 누르기');
     expect(shown.button('작업')!.disabled).toBe(true);
     // One to ten in order; a wrong one starts over.
-    await shown.press('2');
-    expect(shown.button('1')!.getAttribute('aria-pressed')).toBe('false');
-    for (let value = 1; value <= 10; value++) await shown.press(String(value));
+    // By their exact number: '1' must not find '10'.
+    const number = (value: number) => shown.buttons().find((item) => item.textContent === String(value))!;
+    await act(() => number(2).click());
+    expect(number(1).getAttribute('aria-pressed')).toBe('false');
+    for (let value = 1; value <= 10; value++) await act(() => number(value).click());
     expect(dialog.querySelector('[role="status"]')!.textContent).toBe('완료');
     expect(shown.act).not.toHaveBeenCalledWith({ do: 'finish' });
     // The server's clock reaches the task's time: finish, once.

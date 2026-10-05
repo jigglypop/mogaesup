@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
+import type { RapierRigidBody } from '@react-three/rapier';
+
 import { authApi } from '../api/endpoints';
 import { readServerMessage, type ClientMessage, type GameEvent, type GameProblem, type GameSession, type Vec3 } from './protocol';
 
@@ -38,8 +40,17 @@ export type GameClient = {
   serverNow: () => number;
   /** Moves the viewer's character (see teleport.ts) once the island's world has said how; false until then. */
   teleport: (ground: Vec3) => boolean;
-  /** The island's world says how to teleport; returns the way to take it back. */
-  setTeleporter: (teleport: (ground: Vec3) => boolean) => () => void;
+  /** Where the viewer's character stands now, once the island's world has said how; null until then. */
+  position: () => Vec3 | null;
+  /** The viewer's own physics body, once the island's world has lent it; null until then. */
+  body: () => RapierRigidBody | null;
+  /** The island's world says how to teleport, where the character stands and which body is theirs; returns the way to
+   * take it back. */
+  setTeleporter: (
+    teleport: (ground: Vec3) => boolean,
+    locate?: () => Vec3 | null,
+    body?: () => RapierRigidBody | null,
+  ) => () => void;
   clearError: () => void;
   /** Opens a socket at `url` in place of any other; `closed` hears when it ends, and whether a session came first. */
   connect: (url: string, closed: (welcomed: boolean) => void) => void;
@@ -56,6 +67,8 @@ export function createGameClient(): GameClient {
   let socket: WebSocket | null = null;
   let offset = 0;
   let teleporter: ((ground: Vec3) => boolean) | null = null;
+  let locator: (() => Vec3 | null) | null = null;
+  let own: (() => RapierRigidBody | null) | null = null;
   const set = (changes: Partial<GameState>) => {
     const next = { ...state, ...changes };
     if (same(next, state)) return;
@@ -93,10 +106,18 @@ export function createGameClient(): GameClient {
     },
     serverNow: () => Date.now() + offset,
     teleport: (ground) => teleporter?.(ground) ?? false,
-    setTeleporter(teleport) {
+    position: () => locator?.() ?? null,
+    body: () => own?.() ?? null,
+    setTeleporter(teleport, locate, body) {
       teleporter = teleport;
+      locator = locate ?? null;
+      own = body ?? null;
       return () => {
-        if (teleporter === teleport) teleporter = null;
+        if (teleporter === teleport) {
+          teleporter = null;
+          locator = null;
+          own = null;
+        }
       };
     },
     clearError: () => set({ error: null }),
@@ -146,7 +167,7 @@ export type GameSessionOptions = {
 };
 
 export type GameSessionApi = GameState &
-  Pick<GameClient, 'open' | 'join' | 'leave' | 'start' | 'act' | 'close' | 'onEvent' | 'serverNow' | 'teleport'> & {
+  Pick<GameClient, 'open' | 'join' | 'leave' | 'start' | 'act' | 'close' | 'onEvent' | 'serverNow' | 'teleport' | 'position' | 'body'> & {
     client: GameClient;
   };
 
@@ -206,6 +227,8 @@ export function useGameSession({ username, viewerId, peer, enabled }: GameSessio
       onEvent: client.onEvent,
       serverNow: client.serverNow,
       teleport: client.teleport,
+      position: client.position,
+      body: client.body,
     }),
     [state, client],
   );

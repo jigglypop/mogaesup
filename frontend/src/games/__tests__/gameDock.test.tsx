@@ -47,6 +47,8 @@ function fakeClient(initial: Partial<GameState>) {
     onEvent: vi.fn(() => () => {}),
     serverNow: () => NOW,
     teleport: vi.fn(() => false),
+    position: () => null,
+    body: () => null,
     setTeleporter: vi.fn(() => () => {}),
     clearError: vi.fn(),
     connect: vi.fn(),

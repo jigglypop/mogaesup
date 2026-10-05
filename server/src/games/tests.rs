@@ -49,7 +49,49 @@ impl Game for Tally {
     }
 }
 
-const TALLY: &[Kind] = &[Kind::new("tally", 2, 3, tally), Kind::new("quick", 1, 2, tally).ticking(25)];
+/// A game whose code fails where its player says: `"act"` in the act itself, `"tick"` at its next tick, `"view"` in
+/// the views that act brings about.
+struct Fragile {
+    fail_tick: bool,
+    fail_view: bool,
+}
+
+fn fragile(_layout: &Value, _ctx: &mut Ctx) -> Result<Box<dyn Game>, GameError> {
+    Ok(Box::new(Fragile { fail_tick: false, fail_view: false }))
+}
+
+impl Game for Fragile {
+    fn view(&self, _viewer: Option<Uuid>, _now: Millis) -> Value {
+        assert!(!self.fail_view, "a view that fails");
+        json!({})
+    }
+
+    fn act(&mut self, _player: Uuid, action: &Value, _ctx: &mut Ctx) -> Result<(), GameError> {
+        match action.as_str() {
+            Some("act") => panic!("an act that fails"),
+            Some("tick") => self.fail_tick = true,
+            Some("view") => self.fail_view = true,
+            _ => return Err(BAD_ACTION),
+        }
+        Ok(())
+    }
+
+    fn tick(&mut self, _ctx: &mut Ctx) {
+        assert!(!self.fail_tick, "a tick that fails");
+    }
+
+    fn leave(&mut self, _player: Uuid, _ctx: &mut Ctx) {}
+
+    fn result(&self) -> Option<Value> {
+        None
+    }
+}
+
+const TALLY: &[Kind] = &[
+    Kind::new("tally", 2, 3, tally),
+    Kind::new("quick", 1, 2, tally).ticking(25),
+    Kind::new("fragile", 1, 2, fragile),
+];
 const ISLAND: &str = "mogae";
 const T0: Millis = 5_000_000;
 
@@ -62,10 +104,19 @@ struct Socket {
     rx: mpsc::Receiver<Message>,
 }
 
-fn connect(games: &Games, user: &User, peer: &str) -> Socket {
+/// `user` arriving on `island` as `standing` would, from an address of their own.
+fn arrival(user: &User, session: &str, peer: &str, standing: Standing) -> Arrival {
+    Arrival { user: user.clone(), session: session.into(), peer: peer.into(), standing, address: user.id.to_string() }
+}
+
+fn connect_as(games: &Games, user: &User, peer: &str, standing: Standing) -> Socket {
     let (tx, rx) = mpsc::channel(64);
-    let registration = games.register(ISLAND, user.clone(), "login".into(), peer.into(), tx, T0).unwrap();
+    let registration = games.register(ISLAND, arrival(user, "login", peer, standing), tx, T0).unwrap();
     Socket { registration, rx }
+}
+
+fn connect(games: &Games, user: &User, peer: &str) -> Socket {
+    connect_as(games, user, peer, Standing::Visitor)
 }
 
 impl Socket {
@@ -251,7 +302,8 @@ fn an_event_may_skip_some_players_and_someone_watching_acts_only_where_the_game_
     for socket in [&mut sa, &mut sb, &mut sw] {
         socket.frames();
     }
-    games.hub().islands[ISLAND].announce("tally", vec![(Audience::Except(vec![a.id]), json!({"type": "aside"}))]);
+    lock(&games.island(ISLAND).unwrap())
+        .announce("tally", vec![(Audience::Except(vec![a.id]), json!({"type": "aside"}))]);
     assert!(sa.frames().is_empty());
     let aside = json!({"type": "Event", "kind": "tally", "event": {"type": "aside"}});
     assert_eq!((sb.frames(), sw.frames()), (vec![aside.clone()], vec![aside]));
@@ -367,9 +419,10 @@ fn a_session_nobody_touches_for_ten_minutes_closes() {
 fn islands_are_apart_and_sockets_give_their_places_back() {
     let games = Games::new(TALLY, Some(1));
     let a = person("a");
-    let held: Vec<Socket> = (0..ACCOUNT_CAPACITY).map(|_| connect(&games, &a, "pa")).collect();
+    // The owner's own sockets take no one's seat, so all four of the account's open on one island.
+    let held: Vec<Socket> = (0..ACCOUNT_CAPACITY).map(|_| connect_as(&games, &a, "pa", Standing::Owner)).collect();
     let (tx, _rx) = mpsc::channel(4);
-    let refused = games.register("other", a.clone(), "login".into(), "pa".into(), tx, T0).err().unwrap();
+    let refused = games.register("other", arrival(&a, "login", "pa", Standing::Visitor), tx, T0).err().unwrap();
     assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(games.count(), ACCOUNT_CAPACITY);
     drop(held);
@@ -382,7 +435,7 @@ fn a_socket_that_stops_reading_is_closed_and_floods_or_garbage_close_it() {
     let Lobby { games, a, sa, room, .. } = lobby();
     // A queue of one: the first view fills it and the next one finds it full.
     let (tx, _rx) = mpsc::channel(1);
-    let slow = games.register(ISLAND, a.clone(), "login".into(), "pa".into(), tx, T0).unwrap();
+    let slow = games.register(ISLAND, arrival(&a, "login", "pa", Standing::Visitor), tx, T0).unwrap();
     assert_eq!(*slow.cancelled.borrow(), None);
     sa.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, T0);
     assert_eq!(*slow.cancelled.borrow(), Some((4408, "too slow")));
@@ -392,8 +445,13 @@ fn a_socket_that_stops_reading_is_closed_and_floods_or_garbage_close_it() {
     assert!(garbage[..INVALID_PER_SECOND].iter().all(|flow| matches!(flow, Flow::Continue)));
     let b = person("b2");
     let sb = connect(&games, &b, "pb2");
-    let flood: Vec<Flow> =
-        (0..=MESSAGES_PER_SECOND).map(|_| sb.send(&games, json!({"type": "Ping", "ts": 1}), &room, T0)).collect();
+    // A burst (a stalled link catching up) is taken; a flood over the window is not.
+    let burst: Vec<Flow> =
+        (0..MESSAGES_PER_WINDOW / 2).map(|_| sb.send(&games, json!({"type": "Ping", "ts": 1}), &room, T0)).collect();
+    assert!(burst.iter().all(|flow| matches!(flow, Flow::Continue)));
+    let flood: Vec<Flow> = (MESSAGES_PER_WINDOW / 2..=MESSAGES_PER_WINDOW)
+        .map(|_| sb.send(&games, json!({"type": "Ping", "ts": 1}), &room, T0))
+        .collect();
     assert!(matches!(flood.last(), Some(Flow::Close(4429, _))));
 }
 
@@ -401,7 +459,7 @@ fn a_socket_that_stops_reading_is_closed_and_floods_or_garbage_close_it() {
 fn ending_a_login_session_closes_its_sockets_only() {
     let Lobby { games, a, sa, sb, .. } = lobby();
     let (tx, _rx) = mpsc::channel(8);
-    let other = games.register(ISLAND, a, "another-login".into(), "pa".into(), tx, T0).unwrap();
+    let other = games.register(ISLAND, arrival(&a, "another-login", "pa", Standing::Visitor), tx, T0).unwrap();
     games.end_session("login");
     assert_eq!(*sa.registration.cancelled.borrow(), Some((4401, "session ended")));
     assert_eq!(*sb.registration.cancelled.borrow(), Some((4401, "session ended")));
@@ -461,4 +519,95 @@ fn every_registered_game_has_its_own_kind_and_limits_the_server_keeps() {
         assert!((1..=MAX_TICK_HZ).contains(&kind.tick_hz), "{}", kind.kind);
     }
     assert!(KINDS.iter().any(|kind| kind.kind == "impostor"));
+}
+
+#[test]
+fn a_game_whose_code_panics_ends_its_own_session_and_nothing_else() {
+    let games = Games::new(TALLY, Some(1));
+    let a = person("a");
+    let room = vec![peer("pa", &a, None)];
+    let mut sa = connect(&games, &a, "pa");
+    // Another island's game, playing all along.
+    let (tx, _other_rx) = mpsc::channel(256);
+    let elsewhere = games.register("other", arrival(&a, "login", "pa", Standing::Visitor), tx, T0).unwrap();
+    let send_elsewhere = |message: Value| games.receive("other", &elsewhere.id, &message.to_string(), &room, T0);
+    let other = opened(send_elsewhere(json!({"type": "Open", "kind": "quick"})));
+    send_elsewhere(json!({"type": "Start", "layout": {"goal": 9}}));
+    for failing in ["act", "tick", "view"] {
+        let id = opened(sa.send(&games, json!({"type": "Open", "kind": "fragile"}), &room, T0));
+        sa.send(&games, json!({"type": "Start", "layout": {}}), &room, T0);
+        assert_eq!(games.step(ISLAND, id, &room, T0 + 1), Some(Duration::from_millis(100)));
+        sa.frames();
+        sa.send(&games, json!({"type": "Act", "action": failing}), &room, T0 + 2);
+        if failing == "tick" {
+            assert_eq!(games.step(ISLAND, id, &room, T0 + 3), None, "{failing}");
+        }
+        let frames = sa.frames();
+        assert!(errors(&frames).contains(&"game_failed".to_owned()), "{failing}: {frames:?}");
+        let last = frames.iter().rfind(|frame| frame["type"] == "Session").unwrap();
+        assert_eq!(last["session"], Value::Null, "{failing}");
+        assert_eq!(games.step(ISLAND, id, &room, T0 + 4), None, "{failing}: nothing ticks it any more");
+        assert!(!games.island(ISLAND).unwrap().is_poisoned());
+        assert_eq!(games.step("other", other, &room, T0 + 5), Some(Duration::from_millis(40)), "{failing}");
+    }
+    // A ticker that stops before its session does ends it the same way.
+    let id = opened(sa.send(&games, json!({"type": "Open", "kind": "fragile"}), &room, T0));
+    sa.send(&games, json!({"type": "Start", "layout": {}}), &room, T0);
+    sa.frames();
+    games.end(ISLAND, id, T0 + 1);
+    let frames = sa.frames();
+    assert_eq!(errors(&frames), ["game_failed"]);
+    assert_eq!(games.step(ISLAND, id, &room, T0 + 2), None);
+    games.end(ISLAND, id, T0 + 3);
+    assert!(sa.frames().is_empty(), "a session already gone is left alone");
+}
+
+#[test]
+fn the_islands_owner_closes_a_session_someone_else_hosts() {
+    let games = Games::new(TALLY, Some(1));
+    let (owner, host, guest) = (person("o"), person("h"), person("g"));
+    let room = vec![peer("po", &owner, None), peer("ph", &host, None), peer("pg", &guest, None)];
+    let mut so = connect_as(&games, &owner, "po", Standing::Owner);
+    let sh = connect(&games, &host, "ph");
+    let mut sg = connect(&games, &guest, "pg");
+    for playing in [false, true] {
+        opened(sh.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0));
+        sg.send(&games, json!({"type": "Join"}), &room, T0);
+        if playing {
+            sh.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, T0);
+        }
+        sg.frames();
+        sg.send(&games, json!({"type": "Close"}), &room, T0);
+        assert_eq!(errors(&sg.frames()), ["not_host"], "only the host, or the owner");
+        so.frames();
+        so.send(&games, json!({"type": "Close"}), &room, T0);
+        assert_eq!(so.session(), Some(Value::Null), "playing: {playing}");
+    }
+}
+
+#[test]
+fn a_game_its_players_are_in_the_room_for_is_not_closed_for_want_of_actions() {
+    let Lobby { games, mut sa, room, id, .. } = lobby();
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, T0);
+    // Nobody acts for far longer than the idle limit, but both stay in the live room: it plays on.
+    for minute in 1..=15 {
+        assert_eq!(games.step(ISLAND, id, &room, T0 + minute * 60_000), Some(Duration::from_millis(100)), "{minute}");
+    }
+    assert_ne!(sa.session(), Some(Value::Null));
+    // A lobby is still closed when nobody does anything with it.
+    let Lobby { games, room, id, .. } = lobby();
+    assert_eq!(games.step(ISLAND, id, &room, T0 + IDLE_LIMIT), None);
+}
+
+#[test]
+fn one_account_holds_a_few_game_sockets_on_an_island_and_its_owner_more() {
+    let games = Games::new(TALLY, Some(1));
+    let (a, owner) = (person("a"), person("o"));
+    let _few: Vec<Socket> = (0..crate::rooms::ACCOUNT_ISLAND_CAPACITY).map(|_| connect(&games, &a, "pa")).collect();
+    let (tx, _rx) = mpsc::channel(4);
+    let more = games.register(ISLAND, arrival(&a, "login", "pa", Standing::Visitor), tx, T0).err().unwrap();
+    assert_eq!((more.status, more.code), (StatusCode::TOO_MANY_REQUESTS, "game"));
+    let _owner: Vec<Socket> =
+        (0..ACCOUNT_CAPACITY).map(|_| connect_as(&games, &owner, "po", Standing::Owner)).collect();
+    assert_eq!(games.count(), crate::rooms::ACCOUNT_ISLAND_CAPACITY + ACCOUNT_CAPACITY);
 }

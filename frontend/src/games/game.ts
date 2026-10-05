@@ -1,5 +1,7 @@
 import type { ComponentType } from 'react';
 
+import type { RapierRigidBody } from '@react-three/rapier';
+
 import type { BuildingSerializedState } from 'gaesup-world/building';
 
 import type { GameSession, SessionPlayer, Vec3 } from './protocol';
@@ -23,6 +25,10 @@ export type GameProps<View = unknown> = {
   serverNow: () => number;
   /** Moves the viewer's own character to stand at a ground point, ending any click-to-move walk; false before it exists. */
   teleport: (ground: Vec3) => boolean;
+  /** Where the viewer's character stands now; null before it exists. */
+  position: () => Vec3 | null;
+  /** The viewer's own physics body, for a game that moves it itself (a kart); null before it exists. */
+  body: () => RapierRigidBody | null;
 };
 
 export type GameResultProps<View = unknown, Result = unknown> = GameProps<View> & { result: Result };

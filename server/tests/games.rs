@@ -162,8 +162,14 @@ async fn 게임_소켓은_출처와_티켓과_로그아웃을_지키고_범람�
         noisy.send(Message::text(r#"{"type":"Nope"}"#)).await.unwrap();
     }
     assert_eq!(closed(&mut noisy).await, Some(4400));
+    // A burst is taken (a stalled link catching up); a flood is not.
     let mut flood = game(&app, &base, "gate_a", &host, &peer).await.unwrap();
     for _ in 0..60 {
+        send(&mut flood, json!({"type": "Ping", "ts": 1})).await;
+    }
+    send(&mut flood, json!({"type": "Ping", "ts": 2})).await;
+    assert!(next_where(&mut flood, "Pong", |pong| pong["ts"] == 2).await.is_some());
+    for _ in 0..150 {
         send(&mut flood, json!({"type": "Ping", "ts": 1})).await;
     }
     assert_eq!(closed(&mut flood).await, Some(4429));
@@ -216,4 +222,43 @@ async fn closed(stream: &mut Stream) -> Option<u16> {
     })
     .await
     .unwrap_or(None)
+}
+
+#[tokio::test]
+async fn 한_로그인의_방_소켓과_게임_소켓은_접근_확인_하나를_함께_쓴다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("watch_a", "에이").await;
+    let guest = app.register("watch_b", "비").await;
+    let base = serve(&app).await;
+    let (room_a, peer_a) = enter(&app, &base, "watch_a", &host, [0.0, 0.0, 0.0]).await;
+    let mut game_a = game(&app, &base, "watch_a", &host, &peer_a).await.unwrap();
+    next(&mut game_a, "Session").await.unwrap();
+    assert_eq!(app.state.rooms.access_checks(), 1, "the room's and the game's socket share one");
+    let (room_b, _) = enter(&app, &base, "watch_a", &guest, [1.0, 0.0, 1.0]).await;
+    let (room_c, _) = enter(&app, &base, "watch_b", &host, [1.0, 0.0, 1.0]).await;
+    assert_eq!(app.state.rooms.access_checks(), 3, "another login, another island");
+    drop((room_a, game_a, room_b, room_c));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while app.state.rooms.access_checks() > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(app.state.rooms.access_checks(), 0, "the last socket stops its check");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 섬_주인은_다른_사람이_연_게임도_닫는다() {
+    let app = TestApp::new(None).await;
+    let owner = app.register("own_a", "주인").await;
+    let guest = app.register("own_b", "손님").await;
+    let base = serve(&app).await;
+    let (_room_a, peer_a) = enter(&app, &base, "own_a", &owner, [0.0, 0.0, 0.0]).await;
+    let (_room_b, peer_b) = enter(&app, &base, "own_a", &guest, [2.0, 0.0, 2.0]).await;
+    let mut game_a = game(&app, &base, "own_a", &owner, &peer_a).await.unwrap();
+    let mut game_b = game(&app, &base, "own_a", &guest, &peer_b).await.unwrap();
+    send(&mut game_b, json!({"type": "Open", "kind": "impostor"})).await;
+    session_where(&mut game_a, |session| session["phase"] == "lobby").await;
+    send(&mut game_a, json!({"type": "Close"})).await;
+    assert_eq!(session_where(&mut game_b, Value::is_null).await, Value::Null);
+    app.cleanup().await;
 }

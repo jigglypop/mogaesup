@@ -4,12 +4,15 @@ import type { RapierRigidBody } from '@react-three/rapier';
 
 import { useActiveGame, useGameRoom } from './room';
 import type { GameClient } from './useGameSession';
-import { useTeleport } from './teleport';
+import { standing, useTeleport } from './teleport';
 
 /** Lends the game client the world's way of moving the viewer's character (it needs the world's input and routes). */
 function Teleporter({ client, playerRef }: { client: GameClient; playerRef: RefObject<RapierRigidBody> }) {
   const teleport = useTeleport(playerRef);
-  useEffect(() => client.setTeleporter(teleport), [client, teleport]);
+  useEffect(
+    () => client.setTeleporter(teleport, () => standing(playerRef.current), () => playerRef.current),
+    [client, teleport, playerRef],
+  );
   return null;
 }
 

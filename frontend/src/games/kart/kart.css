@@ -1,0 +1,131 @@
+/* 카트: its panel (the order and the result), the lobby settings and the race HUD over the page. Colours are the glass tokens only. */
+.mg-kart .mg-game-scores li { gap: 6px; }
+.mg-kart .mg-game-scores small { flex: none; }
+.mg-kart-closing { display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 800; }
+.mg-kart-closing .mg-game-timer { font-size: 22px; }
+.mg-kart-place { display: flex; align-items: baseline; gap: 10px; }
+.mg-kart-place b { font-size: 30px; font-weight: 900; letter-spacing: -0.03em; }
+.mg-kart-place span { font-size: 15px; font-weight: 800; color: var(--mg-muted); font-variant-numeric: tabular-nums; }
+
+/* The host's lobby settings. */
+.mg-kart-lobby { display: grid; gap: 8px; }
+.mg-kart-row { display: flex; align-items: center; gap: 8px; }
+.mg-kart-step { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
+.mg-kart-step > span:first-child { min-width: 3.5em; }
+.mg-kart-step .mg-icon-btn { width: 32px; height: 32px; font-size: 16px; font-weight: 800; }
+.mg-kart-step b { min-width: 1.5em; text-align: center; font-variant-numeric: tabular-nums; }
+.mg-kart-count { margin-left: auto; font-size: 12px; font-weight: 700; color: var(--mg-muted); font-variant-numeric: tabular-nums; }
+
+/* Over the page while it races. */
+.mg-kart-countdown {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  pointer-events: none;
+  font-size: clamp(72px, 16vw, 160px);
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  color: var(--mg-kart-shout);
+  text-shadow: 0 6px 28px var(--mg-scrim);
+  animation: mg-kart-beat 1s ease both;
+}
+.mg-kart-countdown[data-go] { color: var(--mg-good); }
+@keyframes mg-kart-beat {
+  0% { opacity: 0; transform: scale(1.4); }
+  25% { opacity: 1; transform: scale(1); }
+  80% { opacity: 1; }
+  100% { opacity: 0; transform: scale(0.92); }
+}
+
+/* Top left beside the rail, as KartRider has them: the lap and place, the item slot under them. */
+.mg-kart-hud {
+  position: fixed;
+  z-index: 31;
+  top: calc(var(--mg-edge) + 72px);
+  left: calc(var(--mg-edge) * 2 + var(--mg-rail));
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.mg-kart-hud b { font-size: 24px; font-weight: 900; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+
+.mg-kart-item {
+  position: fixed;
+  z-index: 31;
+  top: calc(var(--mg-edge) + 132px);
+  left: calc(var(--mg-edge) * 2 + var(--mg-rail));
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  min-width: 96px;
+  padding: 10px 14px;
+  border: 2px solid var(--mg-line);
+  font: inherit;
+  color: var(--mg-ink);
+  cursor: pointer;
+}
+.mg-kart-item b { font-size: 16px; font-weight: 850; }
+.mg-kart-item kbd { font: 700 11px var(--mg-mono); color: var(--mg-muted); }
+.mg-kart-item[data-item] { border-color: var(--mg-accent); box-shadow: 0 0 0 4px var(--mg-accent-soft), var(--mg-shadow-soft); }
+.mg-kart-item:disabled { cursor: default; }
+.mg-kart-item:focus-visible { outline: 3px solid var(--mg-primary); outline-offset: 2px; }
+
+.mg-kart-finish, .mg-kart-splash {
+  position: fixed;
+  z-index: 60;
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  pointer-events: none;
+  text-align: center;
+  text-shadow: 0 4px 22px var(--mg-scrim);
+}
+.mg-kart-finish { top: 14%; }
+.mg-kart-finish > b { font-size: clamp(48px, 10vw, 96px); font-weight: 900; letter-spacing: -0.04em; color: var(--mg-kart-shout); }
+.mg-kart-finish > span { font-size: 22px; font-weight: 850; color: var(--mg-kart-shout); font-variant-numeric: tabular-nums; }
+.mg-kart-board {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 8px;
+  display: grid;
+  gap: 2px;
+  min-width: 240px;
+  text-shadow: none;
+  color: var(--mg-ink);
+  font-size: 14px;
+  font-weight: 750;
+}
+.mg-kart-board li { display: flex; align-items: center; gap: 10px; padding: 4px 8px; border-radius: 10px; }
+.mg-kart-board li[aria-current='true'] { background: var(--mg-primary-soft); color: var(--mg-primary); }
+.mg-kart-board i { min-width: 1.4em; font-style: normal; font-weight: 900; text-align: right; }
+.mg-kart-board span { flex: 1; text-align: left; }
+.mg-kart-board b { font-variant-numeric: tabular-nums; }
+.mg-kart-splash { top: 38%; font-size: clamp(30px, 6vw, 52px); font-weight: 900; animation: mg-kart-beat 1.4s ease both; }
+.mg-kart-splash[data-tone='boost'] { color: var(--mg-accent); }
+.mg-kart-splash[data-tone='trap'] { color: var(--mg-kart-shout); }
+
+/* Names over the bots' karts. */
+.mg-kart-name {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--mg-glass-strong);
+  color: var(--mg-ink);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  box-shadow: var(--mg-shadow-soft);
+}
+
+@media (max-width: 720px) {
+  .mg-kart-hud { top: calc(var(--mg-edge) + 58px); left: var(--mg-edge); gap: 12px; padding: 6px 14px; }
+  .mg-kart-item { top: calc(var(--mg-edge) + 106px); left: var(--mg-edge); }
+  .mg-kart-hud b { font-size: 20px; }
+}

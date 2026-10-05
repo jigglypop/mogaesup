@@ -20,11 +20,17 @@ const meeting = (number: number, seat: Vec3 | null, voted = 0) => ({ number, sea
 
 type Given = { view: ImpostorView; players?: SessionPlayer[]; teleport: (ground: Vec3) => boolean };
 
-function Sync({ view: shown, players: present = players, teleport }: Given) {
+/** Where the viewer stands on the island before the game takes them to the ship. */
+const HOME: Vec3 = [5, 1, 5];
+
+function SyncHook({ view: shown, players: present = players, teleport }: Given) {
   const session = { kind: 'impostor', players: present, you: 'me' } as GameSession<ImpostorView>;
-  useImpostorSync({ view: shown, session, teleport });
+  useImpostorSync({ view: shown, session, teleport, position: here });
   return null;
 }
+
+const here = () => HOME;
+const Sync = SyncHook;
 
 const hidden = () => [...hiddenPeers.get()].sort();
 
@@ -52,23 +58,40 @@ describe('임포스터가 섬에서 하는 일', () => {
     expect(teleport).not.toHaveBeenCalled();
   });
 
-  it('시작하면 탁자 둘레의 제자리로 한 번 옮기고, 환풍구를 옮겨 갈 때마다 그 환풍구로 옮긴다', async () => {
+  it('시작하면 우주선의 탁자 둘레 제자리로 한 번 옮기고, 끝나면 섬의 원래 자리로 돌려보낸다', async () => {
+    const teleport = vi.fn((_ground: Vec3) => true);
+    const shown = await mount(<Sync view={view({ spawn: [1.6, 80, 0] })} teleport={teleport} />);
+    expect(teleport.mock.calls).toEqual([[[1.6, 80, 0]]]);
+    await shown.rerender(<Sync view={view({ spawn: [1.6, 80, 0], hidden: ['c'] })} teleport={teleport} />);
+    expect(teleport).toHaveBeenCalledTimes(1);
+    await shown.rerender(<Sync view={view({ phase: 'ended', spawn: [1.6, 80, 0] })} teleport={teleport} />);
+    expect(teleport.mock.calls.at(-1)).toEqual([HOME]);
+    await shown.unmount();
+    expect(teleport).toHaveBeenCalledTimes(2);
+    // Left before the end (the World goes): home too.
+    const again = vi.fn((_ground: Vec3) => true);
+    const left = await mount(<Sync view={view({ spawn: [1.6, 80, 0] })} teleport={again} />);
+    await left.unmount();
+    expect(again.mock.calls).toEqual([[[1.6, 80, 0]], [HOME]]);
+  });
+
+  it('환풍구를 옮겨 갈 때마다 그 환풍구로 옮긴다', async () => {
     const teleport = vi.fn((_ground: Vec3) => true);
     const vents: Vec3[] = [[0, 0, 20], [20, 0, 20]];
-    const shown = await mount(<Sync view={view({ spawn: [1.6, 0, 0], vents })} teleport={teleport} />);
-    expect(teleport.mock.calls).toEqual([[[1.6, 0, 0]]]);
-    await shown.rerender(<Sync view={view({ spawn: [1.6, 0, 0], vents, hidden: ['c'] })} teleport={teleport} />);
-    expect(teleport).toHaveBeenCalledTimes(1);
+    const shown = await mount(<SyncHook view={view({ vents })} teleport={teleport} />);
+    expect(teleport).not.toHaveBeenCalled();
+    await shown.rerender(<SyncHook view={view({ vents, hidden: ['c'] })} teleport={teleport} />);
+    expect(teleport).toHaveBeenCalledTimes(0);
     // Into a vent where they stand: taken to it; on to the next; out and in again.
-    await shown.rerender(<Sync view={view({ spawn: [1.6, 0, 0], vents, venting: 0 })} teleport={teleport} />);
+    await shown.rerender(<SyncHook view={view({ vents, venting: 0 })} teleport={teleport} />);
     expect(teleport.mock.calls.at(-1)).toEqual([[0, 0, 20]]);
-    await shown.rerender(<Sync view={view({ spawn: [1.6, 0, 0], vents, venting: 1 })} teleport={teleport} />);
+    await shown.rerender(<SyncHook view={view({ vents, venting: 1 })} teleport={teleport} />);
     expect(teleport.mock.calls.at(-1)).toEqual([[20, 0, 20]]);
-    await shown.rerender(<Sync view={view({ spawn: [1.6, 0, 0], vents, venting: 1 })} teleport={teleport} />);
+    await shown.rerender(<SyncHook view={view({ vents, venting: 1 })} teleport={teleport} />);
+    expect(teleport).toHaveBeenCalledTimes(2);
+    await shown.rerender(<SyncHook view={view({ vents, venting: null })} teleport={teleport} />);
+    await shown.rerender(<SyncHook view={view({ vents, venting: 1 })} teleport={teleport} />);
     expect(teleport).toHaveBeenCalledTimes(3);
-    await shown.rerender(<Sync view={view({ spawn: [1.6, 0, 0], vents, venting: null })} teleport={teleport} />);
-    await shown.rerender(<Sync view={view({ spawn: [1.6, 0, 0], vents, venting: 1 })} teleport={teleport} />);
-    expect(teleport).toHaveBeenCalledTimes(4);
     await shown.unmount();
   });
 

@@ -1,12 +1,12 @@
 # 섬 게임 플러그인
 
-섬마다 게임 세션 하나를 서버가 돌린다. 게임 하나는 **서버 파일 하나**(`server/src/games/<name>.rs`)와 **클라이언트 폴더 하나**(`frontend/src/games/<name>/`), 그리고 양쪽 등록부에 **한 줄씩**이다. 파일이 여럿인 게임은 서버에서 폴더(`server/src/games/<name>/mod.rs`)로 둔다. 지금 섬이 돌리는 게임은 임포스터(`server/src/games/impostor/`, `frontend/src/games/impostor/`) 하나이고, 아래 예제는 가상의 `relay`다. 프레임워크는 `server/src/games/mod.rs`와 `frontend/src/games/`의 나머지 파일이다.
+섬마다 게임 세션 하나를 서버가 돌린다. 게임 하나는 **서버 파일 하나**(`server/src/games/<name>.rs`)와 **클라이언트 폴더 하나**(`frontend/src/games/<name>/`), 그리고 양쪽 등록부에 **한 줄씩**이다. 파일이 여럿인 게임은 서버에서 폴더(`server/src/games/<name>/mod.rs`)로 둔다. 지금 섬이 돌리는 게임은 임포스터(`server/src/games/impostor/`, `frontend/src/games/impostor/`)와 카트(`server/src/games/kart/`, `frontend/src/games/kart/`)이고, 아래 예제는 가상의 `relay`다. 둘 다 섬 위 하늘에 자기 맵을 띄운다: `frontend/src/games/arenaMap.ts`(높이 `ARENA_Y`, 격자 맵·바닥·벽 상자, 게임의 index·layout이 import해도 되는 순수 모듈)와 `arena.tsx`(`ArenaColliders`, `ArenaBlocks`, 시작하면 맵으로 데려갔다가 끝나면 원래 자리로 돌려보내는 `useArenaTrip(entry, props)`; World·Overlay에서만 import한다). 프레임워크는 `server/src/games/mod.rs`와 `frontend/src/games/`의 나머지 파일이다.
 
 ## 동작
 
 - 섬의 실시간 방(`/api/rooms/{username}`)에 들어온 회원의 페이지가 게임 소켓 `GET /api/games/{username}?ticket=&peer=`를 따로 연다(티켓은 방과 같은 `POST /api/auth/realtime-ticket`, `peer`는 방이 준 이 페이지의 `client_id`). 방 소켓(gaesup-world 프로토콜)에는 아무것도 더하지 않는다.
 - 서버가 판정한다. 게임 상태·시간·점수는 서버의 `Game` 객체에 있고, 클라이언트는 보여 주고 `Act`만 보낸다. 플레이어 위치는 서버가 실시간 방에서 읽는다(클라이언트가 위치를 보내지 않는다).
-- `lobby` → `playing` → `ended`. 방장은 `players[0]`이고, 나가면 다음 사람이 방장이 된다. 방장만 시작·닫기를 한다. 마지막 사람이 나가거나 10분 동안 아무도 손대지 않으면 세션이 닫힌다. 실시간 방을 10초 넘게 떠난 사람은 게임에서 빠진다(`leave`).
+- `lobby` → `playing` → `ended`. 방장은 `players[0]`이고, 나가면 다음 사람이 방장이 된다. 방장만 시작하고, 닫기는 방장과 섬 주인이 한다. 마지막 사람이 나가거나 10분 동안 아무도 손대지 않으면 세션이 닫힌다(진행 중인 게임은 참가자가 실시간 방에 있는 동안 손댄 것으로 친다). 실시간 방을 10초 넘게 떠난 사람은 게임에서 빠진다(`leave`). 게임 코드가 패닉하면 그 세션만 끝나고 모두에게 `Error{code:"game_failed"}`가 간다.
 
 ## 서버
 
@@ -122,7 +122,7 @@ impl Game for Relay {
 | `leave(player, ctx)` | 직접 나갔거나 방을 10초 넘게 떠난 사람. 이어 가거나 끝낸다. |
 | `result()` | `Some`이 되는 순간 `ended`가 되고 모두에게 보인다. |
 
-모든 메서드는 서버의 잠금 안에서 불린다. 기다리는 일(DB, 파일, 네트워크, sleep)을 하지 않는다. 거절 메시지는 `GameError::new("code", "…해요.")`로 쓰고, 공용으로 `BAD_LAYOUT`·`BAD_ACTION`이 있다.
+모든 메서드는 그 섬의 잠금 안에서 불린다(섬마다 잠금이 따로다). 기다리는 일(DB, 파일, 네트워크, sleep)을 하지 않는다. 거절 메시지는 `GameError::new("code", "…해요.")`로 쓰고, 공용으로 `BAD_LAYOUT`·`BAD_ACTION`이 있다.
 
 ### `Ctx`와 도우미
 
@@ -134,9 +134,9 @@ impl Game for Relay {
 
 ### 프로토콜 요약
 
-- 클라이언트 → 서버: `Open{kind}`, `Join`, `Leave`, `Start{layout}`(방장), `Act{action}`, `Close`(방장), `Ping{ts}`.
+- 클라이언트 → 서버: `Open{kind}`, `Join`, `Leave`, `Start{layout}`(방장), `Act{action}`, `Close`(방장·섬 주인), `Ping{ts}`.
 - 서버 → 클라이언트: `Session{session}`(없으면 `null`. `kind`, `phase`, `host`, `players[{id,name,peer}]`, `you`, `game`=`view`, `result`, `seq`, `now`), `Event{kind,event}`, `Error{code,message}`, `Pong{ts}`.
-- 소켓: 섬당 30개, 계정당 4개, 초당 40개(넘으면 4429), 잘못된 프레임은 초당 10개까지(넘으면 4400), 큐가 차면 4408, 15초마다 세션(4401)·공개 범위(4403) 확인.
+- 소켓: 섬당 30개(일촌 몫 6개를 빼면 24개, 섬 주인은 따로), 한 섬에 계정당 3개·주소(IPv6는 /64)당 10개, 계정당 4개, 3초에 120개(넘으면 4429), 잘못된 프레임은 초당 10개까지(넘으면 4400), 큐가 차면 4408, 15초마다 세션(4401)·공개 범위(4403) 확인(같은 로그인의 방 소켓과 함께 한 번).
 
 ## 클라이언트
 
@@ -172,7 +172,7 @@ export const relay = defineGame<RelayView, RelayOutcome>({
 - `Lobby`(선택): 대기실에서 방장에게만 보이는 설정(`LobbyProps`: `session`, `options`, `setOptions`). 정한 값은 그 게임의 `layout`이 `options`로 받아 시작에 실어 보낸다(임포스터의 봇 수와 혼자일 때의 역할). 서버는 그 값도 layout처럼 검사한다.
 - `Overlay`(선택): 진행 중에 패널을 접어도 페이지 위(`document.body`)에 그려지는 것. 같은 `GameProps`를 받는다(임포스터의 행동 버튼, 작업 미니게임, 사보타주 경보, 정전의 어둠).
 - `attention(view)`(선택): 플레이어가 패널에서 답해야 하는 것(임포스터의 회의 투표)이 있으면 그 키를, 없으면 null을 돌려준다. 키가 새로 바뀔 때마다 접힌 패널이 한 번 다시 열린다.
-- `Panel`, `World`, `Result`가 받는 값(`GameProps<View>`): `session`, `view`(=`session.game`, 이 사람의 화면), `me`(참가자면 내 항목), `act(action)`, `onEvent(listener)`(이 게임의 이벤트만, 해제 함수를 돌려준다), `serverNow()`, `teleport(ground)`. `Result`는 `result`도 받는다. 함수들은 게임 동안 같은 것이라 effect 의존성에 넣어도 된다.
+- `Panel`, `World`, `Result`가 받는 값(`GameProps<View>`): `session`, `view`(=`session.game`, 이 사람의 화면), `me`(참가자면 내 항목), `act(action)`, `onEvent(listener)`(이 게임의 이벤트만, 해제 함수를 돌려준다), `serverNow()`, `teleport(ground)`, `position()`(보는 사람 캐릭터의 지금 위치), `body()`(보는 사람의 물리 몸체: 카트처럼 게임이 직접 움직일 때). `Result`는 `result`도 받는다. 함수들은 게임 동안 같은 것이라 effect 의존성에 넣어도 된다.
 - 시간: `useRemaining(view.endsAt, serverNow)`와 `clock(ms)`(`../time`).
 - 아바타 맞추기: `session.players[].peer`가 실시간 방의 `client_id`(gaesup-world `players` 지도의 키)다. 방 밖에 있으면 `null`.
 - 순간 이동: `teleport([x, y, z])`. 땅 위 점(예: `spots()`의 점)을 주면 몸을 그 1 m 위에 두고 속도를 없애며, 클릭 이동도 멈춘다. 서버는 사람을 옮길 수 없으므로, 서버가 각자의 화면에 목적지를 넣고 클라이언트가 그것을 보고 이동하며, 서버는 그 뒤의 위치로 확인한다.

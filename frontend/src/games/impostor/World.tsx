@@ -4,10 +4,12 @@ import { Html } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
 import type { Group, Mesh } from 'three';
 
+import { ArenaBlocks, ArenaColliders, cellPoint, cells, floorBoxes, wallBoxes, type Box } from '../arena';
 import type { GameProps } from '../game';
 import type { Vec3 } from '../protocol';
 import type { ImpostorBot, ImpostorView } from './index';
 import { routeAt } from './route';
+import { roomLabels, SHIP, walkable } from './ship';
 import { useImpostorSync } from './sync';
 
 /** Markers are left out of picking, so a click on one walks to the ground under it. */
@@ -163,7 +165,47 @@ function Crewmate({ bot, colors, serverNow }: { bot: ImpostorBot; colors: Colors
   );
 }
 
-/** The stations (the viewer's unfinished ones lit and marked), vents, the broken panel, the table, the bodies and the bots. */
+/** How thick the ship's floor tiles are, and the gap between two, in meters. */
+const TILE = 0.3;
+const SEAM = 0.08;
+
+/** The ship: its floor (rooms and halls in their own tones), walls, the colliders that hold everyone in, room names. */
+function Ship() {
+  const { floor, tiles, tones, walls, labels } = useMemo(() => {
+    const css = getComputedStyle(document.documentElement);
+    const tone = (name: string) => css.getPropertyValue(name).trim();
+    const [hall, room, cafeteria] = [tone('--mg-ship-hall'), tone('--mg-ship-room'), tone('--mg-ship-cafeteria')];
+    const open = cells(SHIP, walkable);
+    const size = SHIP.cell - SEAM;
+    const tiles: Box[] = open.map(({ col, row }) => {
+      const [x, y, z] = cellPoint(SHIP, col, row);
+      return { center: [x, y - TILE / 2, z], size: [size, TILE, size] };
+    });
+    const tones = open.map(({ mark }) => (mark === '.' ? hall : mark === 'C' ? cafeteria : room));
+    return {
+      floor: [...floorBoxes(SHIP, walkable), ...wallBoxes(SHIP, walkable)],
+      tiles,
+      tones,
+      walls: wallBoxes(SHIP, walkable),
+      labels: roomLabels(),
+    };
+  }, []);
+  const wall = useMemo(() => token('--mg-ship-wall'), []);
+  return (
+    <group>
+      <ArenaColliders boxes={floor} />
+      <ArenaBlocks boxes={tiles} colors={tones} roughness={0.9} />
+      <ArenaBlocks boxes={walls} color={wall} roughness={0.7} />
+      {labels.map((label) => (
+        <Html key={label.mark} position={[label.at[0], label.at[1] + 3.2, label.at[2]]} center zIndexRange={NAME_LAYERS} className="mg-impostor-room" pointerEvents="none">
+          {label.name}
+        </Html>
+      ))}
+    </group>
+  );
+}
+
+/** The ship, its stations (the viewer's unfinished ones lit and marked), vents, the broken panel, the table, the bodies and the bots. */
 export function ImpostorWorld(props: GameProps<ImpostorView>) {
   useImpostorSync(props);
   const { view, serverNow } = props;
@@ -192,6 +234,7 @@ export function ImpostorWorld(props: GameProps<ImpostorView>) {
   const ground = view.table[1];
   return (
     <group>
+      <Ship />
       {view.stations.map((at, index) => (
         <group key={index}>
           <Pad at={at} color={mine.has(index) ? colors.task : colors.pad} lit={mine.has(index)} />

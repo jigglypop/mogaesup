@@ -177,6 +177,18 @@
 
 .mg-fuel { display: grid; gap: 10px; }
 
+/* Room names over the ship, in the island's canvas. */
+.mg-impostor-room {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--mg-glass);
+  color: var(--mg-muted);
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* Names over the bots, in the island's canvas. */
 .mg-impostor-name {
   padding: 2px 8px;

@@ -1,88 +1,93 @@
 import { describe, expect, it } from 'vitest';
 
-import { at, createVillage } from '../../minihome/village';
+import { ARENA_Y, cells, floorBoxes, wallBoxes } from '../arenaMap';
 import { defaultOptions, flat, impostorLayout, optionsFor } from '../impostor/layout';
+import { SHIP, SHIP_ROOMS, roomLabels, shipPlaces, walkable } from '../impostor/ship';
 import type { GameSession, Vec3 } from '../protocol';
 import { gameOf } from '../registry';
-import { openSpots } from '../spots';
 
-/** No measured models: placed models count by their kind's size. */
-const village = openSpots(createVillage(), { bounds: () => undefined });
 const pairs = <T,>(items: readonly T[]) => items.flatMap((a, index) => items.slice(index + 1).map((b) => [a, b] as const));
 
-describe('임포스터 배치', () => {
-  it('모개숲에서는 방장 가까이 둘레가 트인 빈 자리에 탁자를, 서로 6m 넘게 떨어진 빈 자리 6~12곳에 작업대를 둔다', () => {
-    const host: Vec3 = [at(8), 1, at(5)];
-    const { stations, table } = impostorLayout({ spots: () => village, position: host });
-    expect(village).toContainEqual(table);
-    expect(flat(table, host)).toBeLessThanOrEqual(8);
-    // Open floor on all four sides of it, for the seats.
-    expect(village.filter((spot) => spot !== table && flat(spot, table) <= 4.5)).toHaveLength(4);
-    expect(stations.length).toBeGreaterThanOrEqual(6);
-    expect(stations.length).toBeLessThanOrEqual(12);
-    for (const station of stations) {
-      expect(village).toContainEqual(station);
-      expect(flat(station, table)).toBeGreaterThanOrEqual(6);
+/** The room whose cells hold `point`, by its mark ('.' for a hall). */
+function markAt(point: Vec3): string {
+  const open = cells(SHIP, walkable);
+  const near = open.find(({ col, row }) => {
+    const width = Math.max(...SHIP.rows.map((line) => line.length));
+    const x = (col - (width - 1) / 2) * SHIP.cell;
+    const z = (row - (SHIP.rows.length - 1) / 2) * SHIP.cell;
+    return Math.abs(point[0] - x) <= SHIP.cell / 2 && Math.abs(point[2] - z) <= SHIP.cell / 2;
+  });
+  return near?.mark ?? ' ';
+}
+
+describe('임포스터의 우주선', () => {
+  it('섬 위 하늘에 떠 있고, 방 열네 개와 복도가 모두 이어져 있다', () => {
+    expect(SHIP.origin[1]).toBe(ARENA_Y);
+    const open = cells(SHIP, walkable);
+    const key = (col: number, row: number) => `${col},${row}`;
+    const floor = new Set(open.map(({ col, row }) => key(col, row)));
+    const seen = new Set([key(10, 2)]);
+    const queue = [[10, 2]];
+    while (queue.length) {
+      const [col, row] = queue.shift()!;
+      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const next = key(col! + dc!, row! + dr!);
+        if (floor.has(next) && !seen.has(next)) {
+          seen.add(next);
+          queue.push([col! + dc!, row! + dr!]);
+        }
+      }
     }
-    for (const [a, b] of pairs(stations)) expect(flat(a, b)).toBeGreaterThanOrEqual(6);
-    // Spread over the island, not bunched in one corner.
-    expect(Math.max(...pairs(stations).map(([a, b]) => flat(a, b)))).toBeGreaterThan(30);
+    expect(seen.size).toBe(floor.size);
+    const marks = new Set(open.map(({ mark }) => mark));
+    for (const room of SHIP_ROOMS) expect(marks).toContain(room.mark);
+    expect(roomLabels()).toHaveLength(14);
+    // Every floor cell is closed in: walls run along its open edges, and the floor slabs cover every cell.
+    const walls = wallBoxes(SHIP, walkable);
+    expect(walls.length).toBeGreaterThan(20);
+    const slabs = floorBoxes(SHIP, walkable);
+    const covered = slabs.reduce((sum, slab) => sum + (slab.size[0] / SHIP.cell) * (slab.size[2] / SHIP.cell), 0);
+    expect(covered).toBe(open.length);
   });
 
-  it('방장이 아직 서 있지 않으면 섬 가운데 가까이에 탁자를 둔다', () => {
-    const xs = village.map((spot) => spot[0]);
-    const zs = village.map((spot) => spot[2]);
-    const middle: Vec3 = [(Math.min(...xs) + Math.max(...xs)) / 2, 0, (Math.min(...zs) + Math.max(...zs)) / 2];
-    const { table } = impostorLayout({ spots: () => village, position: null });
-    expect(flat(table, middle)).toBeLessThanOrEqual(8);
+  it('작업대 열두 곳은 방마다 서로 떨어져 있고, 원자로의 두 손은 원자로에, 정전·통신은 전기실·통신실에 있다', () => {
+    const { stations, table, vents, walk, panels } = shipPlaces();
+    expect(stations).toHaveLength(12);
+    for (const station of stations) {
+      expect(markAt(station)).not.toBe(' ');
+      expect(flat(station, table)).toBeGreaterThanOrEqual(3.6);
+    }
+    for (const [a, b] of pairs(stations)) expect(flat(a, b)).toBeGreaterThanOrEqual(3.6);
+    expect(markAt(table)).toBe('C');
+    expect(panels.reactor.map((index) => markAt(stations[index]!))).toEqual(['R', 'R']);
+    expect(markAt(stations[panels.lights]!)).toBe('L');
+    expect(markAt(stations[panels.comms]!)).toBe('K');
+    expect(vents.length).toBeGreaterThanOrEqual(2);
+    expect(vents.length).toBeLessThanOrEqual(8);
+    for (const vent of vents) {
+      expect(markAt(vent)).not.toBe(' ');
+      for (const station of stations) expect(flat(vent, station)).toBeGreaterThanOrEqual(2);
+    }
+    for (const [a, b] of pairs(vents)) expect(flat(a, b)).toBeGreaterThanOrEqual(2);
+    // Bots walk every floor cell, four meters apart.
+    expect(walk).toHaveLength(cells(SHIP, walkable).length);
+    expect(walk.length).toBeLessThanOrEqual(400);
   });
 
-  it('좁은 섬에서는 작업대를 더 가깝게 두고, 그래도 모자라면 시작하지 않는다', () => {
-    // Three by three cells, 4 m apart: the table in the middle, the corners only 5.7 m from it.
-    const small: Vec3[] = [];
-    for (let z = 0; z < 3; z++) for (let x = 0; x < 3; x++) small.push([x * 4, 0, z * 4]);
-    const { stations, table } = impostorLayout({ spots: () => small, position: [4, 0, 4] });
-    expect(table).toEqual([4, 0, 4]);
-    expect(stations).toHaveLength(8);
-    for (const [a, b] of pairs([table, ...stations])) expect(flat(a, b)).toBeGreaterThanOrEqual(4);
-    // In a row 3 m apart, only three places stand 4 m from the table and from one another.
-    const row: Vec3[] = Array.from({ length: 8 }, (_, index) => [index * 3, 0, 0]);
-    expect(() => impostorLayout({ spots: () => row, position: null })).toThrow('작업 자리가 부족해요.');
-    expect(() => impostorLayout({ spots: () => small.slice(0, 6), position: null })).toThrow('작업 자리가 부족해요.');
-  });
-
-  it('등록된 임포스터는 서버와 같은 kind와 인원이고, 섬에서 바로 배치를 만든다', () => {
+  it('등록된 임포스터는 서버와 같은 kind와 인원이고, 시작하면 우주선의 자리와 방장 설정을 보낸다', () => {
     const game = gameOf('impostor')!;
     expect([game.kind, game.label, game.minPlayers, game.maxPlayers]).toEqual(['impostor', '임포스터', 1, 15]);
-    const building = createVillage();
     const session = { kind: 'impostor', players: [{ id: 'me', name: '나', peer: 'p' }] } as GameSession;
-    const layout = game.layout({ building, spots: () => village, position: null, session, options: undefined }) as {
-      stations: Vec3[];
-      table: Vec3;
-      vents: Vec3[];
-      walk: Vec3[];
-      bots: number;
-      role: string | null;
-    };
-    expect(layout.stations.length).toBeGreaterThanOrEqual(6);
+    const layout = impostorLayout({ session, options: undefined });
     // Alone: five bots make a table of six, and the side is dealt.
     expect([layout.bots, layout.role]).toEqual([5, null]);
-    // Vents away from the table, the stations and one another; the walk is every open spot, up to four hundred.
-    expect(layout.vents.length).toBeGreaterThanOrEqual(2);
-    expect(layout.vents.length).toBeLessThanOrEqual(4);
-    for (const vent of layout.vents) {
-      expect(village).toContainEqual(vent);
-      for (const place of [layout.table, ...layout.stations]) expect(flat(vent, place)).toBeGreaterThanOrEqual(5);
-    }
-    for (const [a, b] of pairs(layout.vents)) expect(flat(a, b)).toBeGreaterThanOrEqual(5);
-    expect(layout.walk.length).toBeGreaterThan(layout.stations.length);
-    expect(layout.walk.length).toBeLessThanOrEqual(400);
-    // The whole layout fits the game socket's 16 KiB frames.
+    expect(layout).toMatchObject(shipPlaces());
+    // The whole layout fits the game socket's 16 KiB frames, within the server's bounds.
     expect(JSON.stringify({ type: 'Start', layout }).length).toBeLessThan(16 * 1024);
     for (const point of [layout.table, ...layout.stations, ...layout.vents, ...layout.walk]) {
       for (const value of point) expect(Math.abs(value)).toBeLessThanOrEqual(200);
     }
-    const chosen = game.layout({ building, spots: () => village, position: null, session, options: { bots: 3, role: 'impostor' } }) as typeof layout;
+    const chosen = impostorLayout({ session, options: { bots: 3, role: 'impostor' } });
     expect([chosen.bots, chosen.role]).toEqual([3, 'impostor']);
   });
 

@@ -50,6 +50,8 @@ export function props(shown: ImpostorView, you = me.id) {
     onEvent: (_listener: (event: unknown) => void) => () => {},
     serverNow: () => NOW,
     teleport: vi.fn(() => true),
+    position: () => null,
+    body: () => null,
   } satisfies GameProps<ImpostorView>;
 }
 

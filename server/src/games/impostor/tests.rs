@@ -432,6 +432,31 @@ fn every_station_has_a_kind_of_task_and_panels_for_the_sabotages() {
 }
 
 #[test]
+fn the_map_may_name_the_panels_of_each_sabotage() {
+    let mut named = layout(8);
+    named["panels"] = json!({"lights": 2, "comms": 5, "reactor": [1, 6]});
+    let play = Play::with(4, 3, named.clone());
+    assert_eq!(play.game.panels, Panels { lights: 2, comms: 5, reactor: [1, 6] });
+    for bad in [
+        json!({"lights": 2, "comms": 2, "reactor": [1, 6]}),
+        json!({"lights": 2, "comms": 5, "reactor": [1]}),
+        json!({"lights": 8, "comms": 5, "reactor": [1, 6]}),
+        json!({"lights": "2", "comms": 5, "reactor": [1, 6]}),
+        json!([2, 5, 1, 6]),
+    ] {
+        let mut odd = layout(8);
+        odd["panels"] = bad.clone();
+        assert_eq!(refused(odd, 4), Some(BAD_LAYOUT), "{bad}");
+    }
+    // A station dropped as too near another: the game picks the panels itself.
+    let mut crowded = named;
+    crowded["stations"][7] = json!([-40.0, 0.0, -27.0]);
+    let play = Play::with(4, 3, crowded);
+    assert_eq!(play.game.stations.len(), 7);
+    assert_eq!(play.game.panels.reactor, [0, 6]);
+}
+
+#[test]
 fn everyone_gets_four_different_stations_and_the_impostors_are_fake() {
     let mut play = Play::new(6, 3);
     for player in &play.game.players {
