@@ -10,13 +10,20 @@
       "file": "props/door.glb",
       "category": "furniture",
       "name": "현관문",
-      "prompt": "둥근 창이 달린 나무 현관문 한 짝과 문틀. 따뜻한 갈색 나무 판자, 황동색 둥근 손잡이. 문과 문틀이 한 덩어리로 서 있다."
+      "emoji": "🚪",
+      "shelf": "furniture",
+      "prompt": "둥근 창이 달린 나무 현관문 한 짝과 문틀. 따뜻한 갈색 나무 판자, 황동색 둥근 손잡이. 문과 문틀이 한 덩어리로 서 있다.",
+      "fit": {
+        "height": 2.1
+      }
     },
     {
       "id": "window-basic",
       "file": "props/window.glb",
       "category": "furniture",
       "name": "창문",
+      "emoji": "🪟",
+      "shelf": "furniture",
       "prompt": "흰 나무 창틀에 네 칸 유리가 끼워진 네모난 집 창문 한 개. 유리는 옅은 하늘색으로 불투명하게 칠한다."
     },
     {
@@ -24,6 +31,8 @@
       "file": "props/fence.glb",
       "category": "furniture",
       "name": "울타리",
+      "emoji": "🪵",
+      "shelf": "furniture",
       "prompt": "나무 울타리 한 칸. 굵은 기둥 두 개 사이에 가로대 두 줄과 끝이 둥근 세로 판자 다섯 개. 연한 갈색."
     },
     {
@@ -31,6 +40,8 @@
       "file": "props/lamp.glb",
       "category": "furniture",
       "name": "정원 조명",
+      "emoji": "💡",
+      "shelf": "furniture",
       "prompt": "길가에 두는 작은 정원 가로등. 짧고 굵은 짙은 초록 기둥 위에 따뜻한 노란 빛이 도는 둥근 유리 등갓."
     },
     {
@@ -38,6 +49,8 @@
       "file": "props/chair.glb",
       "category": "furniture",
       "name": "의자",
+      "emoji": "🪑",
+      "shelf": "furniture",
       "prompt": "나무 의자 한 개. 둥근 등받이, 두툼한 좌판 위의 작은 크림색 방석, 굵은 네 다리. 따뜻한 갈색 나무."
     },
     {
@@ -45,6 +58,8 @@
       "file": "props/table.glb",
       "category": "furniture",
       "name": "식탁",
+      "emoji": "🍽️",
+      "shelf": "furniture",
       "prompt": "여섯 명이 앉는 긴 나무 식탁 한 개. 모서리가 둥근 두꺼운 직사각형 상판과 굵은 네 다리. 따뜻한 갈색 나무."
     },
     {
@@ -52,20 +67,32 @@
       "file": "props/bed.glb",
       "category": "furniture",
       "name": "침대",
-      "prompt": "1인용 아늑한 침대. 둥근 나무 프레임과 머리판, 폭신한 하늘색 이불과 흰 베개 하나."
+      "emoji": "🛏️",
+      "shelf": "furniture",
+      "prompt": "1인용 아늑한 침대. 둥근 나무 프레임과 머리판, 폭신한 하늘색 이불과 흰 베개 하나.",
+      "fit": {
+        "width": 2.1
+      }
     },
     {
       "id": "storage-basic",
       "file": "props/storage.glb",
       "category": "furniture",
       "name": "수납장",
-      "prompt": "폭이 넓고 깊이가 얕은 키 큰 나무 수납장. 위는 책이 몇 권 꽂힌 열린 선반, 아래는 둥근 손잡이가 달린 문 두 짝. 진한 갈색."
+      "emoji": "🗄️",
+      "shelf": "furniture",
+      "prompt": "폭이 넓고 깊이가 얕은 키 큰 나무 수납장. 위는 책이 몇 권 꽂힌 열린 선반, 아래는 둥근 손잡이가 달린 문 두 짝. 진한 갈색.",
+      "fit": {
+        "height": 2.0
+      }
     },
     {
       "id": "mailbox-basic",
       "file": "props/mailbox.glb",
       "category": "furniture",
       "name": "우편함",
+      "emoji": "📮",
+      "shelf": "furniture",
       "prompt": "나무 기둥 위에 얹힌 빨간 우편함. 둥근 지붕 모양의 우편함 몸통과 옆에 세운 작은 노란 깃발.",
       "fit": {
         "height": 1.15
@@ -76,6 +103,8 @@
       "file": "props/crafting.glb",
       "category": "furniture",
       "name": "제작대",
+      "emoji": "🔨",
+      "shelf": "furniture",
       "prompt": "튼튼한 나무 제작대. 두꺼운 작업판 위에 망치와 톱이 놓여 있고 아래 선반에 나무판 몇 장이 쌓여 있다."
     },
     {
@@ -83,13 +112,20 @@
       "file": "props/shop-stall.glb",
       "category": "furniture",
       "name": "가판대",
-      "prompt": "작은 시장 가판대. 빨강·흰색 줄무늬 천막 지붕을 네 기둥이 받치고, 나무 판매대 위에 사과와 오렌지가 담긴 상자가 놓여 있다."
+      "emoji": "🏪",
+      "shelf": "furniture",
+      "prompt": "작은 시장 가판대. 빨강·흰색 줄무늬 천막 지붕을 네 기둥이 받치고, 나무 판매대 위에 사과와 오렌지가 담긴 상자가 놓여 있다.",
+      "fit": {
+        "height": 2.08
+      }
     },
     {
       "id": "nature-tree-round",
       "file": "nature/tree-round.glb",
       "category": "tree",
       "name": "둥근 나무",
+      "emoji": "🌳",
+      "shelf": "plants",
       "prompt": "둥글고 풍성한 수관을 가진 활엽수 한 그루. 굵은 갈색 줄기 위에 밝은 초록 잎 덩어리 서너 개."
     },
     {
@@ -97,6 +133,8 @@
       "file": "nature/tree-oak.glb",
       "category": "tree",
       "name": "열매 나무",
+      "emoji": "🍎",
+      "shelf": "plants",
       "prompt": "빨간 사과가 몇 개 달린 과일 나무 한 그루. 둥근 초록 수관 덩어리 두세 개와 굵은 갈색 줄기."
     },
     {
@@ -104,6 +142,8 @@
       "file": "nature/tree-pine.glb",
       "category": "tree",
       "name": "소나무",
+      "emoji": "🌲",
+      "shelf": "plants",
       "prompt": "층층이 쌓인 원뿔 모양의 짙은 초록 잎 덩어리를 가진 소나무 한 그루와 곧은 갈색 줄기."
     },
     {
@@ -111,6 +151,8 @@
       "file": "nature/tree-fat.glb",
       "category": "tree",
       "name": "통통한 나무",
+      "emoji": "🌳",
+      "shelf": "plants",
       "prompt": "크고 통통한 둥근 수관의 귀여운 나무 한 그루. 짧고 굵은 줄기, 연두색 잎 덩어리."
     },
     {
@@ -118,6 +160,8 @@
       "file": "nature/tree-thin.glb",
       "category": "tree",
       "name": "가는 나무",
+      "emoji": "🌳",
+      "shelf": "plants",
       "prompt": "가늘고 키 큰 나무 한 그루. 곧고 얇은 줄기 위에 길쭉한 초록 수관 덩어리."
     },
     {
@@ -125,6 +169,8 @@
       "file": "nature/rock-round.glb",
       "category": "prop",
       "name": "둥근 바위",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "둥근 회색 바위 한 개. 부드럽게 깎인 큰 면 몇 개."
     },
     {
@@ -132,6 +178,8 @@
       "file": "nature/rock-wide.glb",
       "category": "prop",
       "name": "넓은 바위",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "옆으로 넓적한 회색 바위 한 개. 윗면이 평평하다."
     },
     {
@@ -139,6 +187,8 @@
       "file": "nature/rock-tall.glb",
       "category": "prop",
       "name": "높은 바위",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "위로 솟은 키 큰 회색 바위 한 개. 몇 개의 큰 면으로 된 단순한 형태."
     },
     {
@@ -146,6 +196,8 @@
       "file": "nature/fern.glb",
       "category": "tree",
       "name": "고사리",
+      "emoji": "🌿",
+      "shelf": "plants",
       "prompt": "바닥에 둥글게 퍼진 고사리 한 포기. 큼직한 초록 잎 여섯 장."
     },
     {
@@ -153,6 +205,8 @@
       "file": "nature/kenney/bush.glb",
       "category": "tree",
       "name": "덤불",
+      "emoji": "🍃",
+      "shelf": "plants",
       "prompt": "둥근 초록 덤불 한 덩이. 큰 잎 덩어리 서너 개가 뭉쳐 있다."
     },
     {
@@ -160,6 +214,8 @@
       "file": "nature/kenney/flower-red.glb",
       "category": "tree",
       "name": "빨간 꽃",
+      "emoji": "🌺",
+      "shelf": "flowers",
       "prompt": "빨간 꽃 세 송이와 초록 잎이 모인 작은 꽃 무더기."
     },
     {
@@ -167,6 +223,8 @@
       "file": "nature/kenney/flower-yellow.glb",
       "category": "tree",
       "name": "노란 꽃",
+      "emoji": "🌼",
+      "shelf": "flowers",
       "prompt": "노란 꽃 네 송이와 초록 잎이 모인 작은 꽃 무더기."
     },
     {
@@ -174,6 +232,8 @@
       "file": "nature/kenney/flower-purple.glb",
       "category": "tree",
       "name": "보라 꽃",
+      "emoji": "🪻",
+      "shelf": "flowers",
       "prompt": "보라색 꽃 세 송이와 초록 잎이 모인 작은 꽃 무더기."
     },
     {
@@ -181,6 +241,8 @@
       "file": "nature/kenney/stump.glb",
       "category": "prop",
       "name": "그루터기",
+      "emoji": "🪵",
+      "shelf": "plants",
       "prompt": "윗면에 나이테가 보이는 나무 그루터기 한 개. 뿌리 몇 가닥이 바닥으로 조금 드러난다."
     },
     {
@@ -188,6 +250,8 @@
       "file": "nature/kenney/fallen-log.glb",
       "category": "prop",
       "name": "쓰러진 통나무",
+      "emoji": "🪵",
+      "shelf": "plants",
       "prompt": "바닥에 누운 통나무 한 개. 양 끝에 나이테, 갈색 나무껍질."
     },
     {
@@ -195,6 +259,8 @@
       "file": "nature/kenney/mushroom-cluster.glb",
       "category": "tree",
       "name": "버섯",
+      "emoji": "🍄",
+      "shelf": "plants",
       "prompt": "빨간 갓에 흰 점이 있는 버섯 세 개가 모인 무더기."
     },
     {
@@ -202,13 +268,20 @@
       "file": "nature/kenney/lily.glb",
       "category": "tree",
       "name": "연꽃",
-      "prompt": "둥근 초록 연잎 한 장 위에 핀 분홍 연꽃 한 송이."
+      "emoji": "🪷",
+      "shelf": "flowers",
+      "prompt": "둥근 초록 연잎 한 장 위에 핀 분홍 연꽃 한 송이.",
+      "fit": {
+        "width": 0.38
+      }
     },
     {
       "id": "nature-rock-small",
       "file": "nature/kenney/rock-small.glb",
       "category": "prop",
       "name": "작은 돌",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "낮고 둥근 회색 돌 서너 개가 모인 작은 무더기."
     },
     {
@@ -216,13 +289,20 @@
       "file": "nature/kenney/rock-flat.glb",
       "category": "prop",
       "name": "납작 돌",
-      "prompt": "디딤돌처럼 납작하고 넓은 회색 바위 한 개."
+      "emoji": "🪨",
+      "shelf": "rocks",
+      "prompt": "디딤돌처럼 납작하고 넓은 회색 바위 한 개.",
+      "fit": {
+        "width": 2.1
+      }
     },
     {
       "id": "nature-rock-moss",
       "file": "nature/kenney/rock-moss.glb",
       "category": "prop",
       "name": "이끼 바위",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "윗면을 초록 이끼가 덮은 넓고 낮은 회색 바위 한 개."
     },
     {
@@ -230,6 +310,8 @@
       "file": "nature/kenney/rock-large.glb",
       "category": "prop",
       "name": "큰 바위",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "넓고 낮은 큰 회색 바위 한 개. 몇 개의 큰 면으로 된 단순한 형태."
     },
     {
@@ -237,6 +319,8 @@
       "file": "decor/rock-pile-small.glb",
       "category": "prop",
       "name": "작은 돌무더기",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "크기가 다른 둥근 회색·베이지 돌 대여섯 개가 자연스럽게 쌓인 작은 돌무더기. 돌 틈에 짧은 풀 몇 가닥.",
       "fit": {
         "height": 0.5
@@ -247,6 +331,8 @@
       "file": "decor/rock-pile-large.glb",
       "category": "prop",
       "name": "큰 돌무더기",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "넓적한 바위 위에 둥근 돌들이 층층이 얹힌 큰 돌무더기. 군데군데 초록 이끼.",
       "fit": {
         "height": 1.2
@@ -257,6 +343,8 @@
       "file": "decor/rock-cairn.glb",
       "category": "prop",
       "name": "돌탑",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "납작하고 둥근 돌을 일곱 층으로 쌓아 올린 돌탑. 아래로 갈수록 넓다.",
       "fit": {
         "height": 1.1
@@ -266,7 +354,9 @@
       "id": "rock-boulder-moss",
       "file": "decor/rock-boulder-moss.glb",
       "category": "prop",
-      "name": "이끼 바위",
+      "name": "이끼 덮인 큰 바위",
+      "emoji": "🪨",
+      "shelf": "rocks",
       "prompt": "윗면에 두툼한 초록 이끼가 덮인 큰 둥근 바위. 옆에 작은 갈색 버섯 두 개.",
       "fit": {
         "height": 1.4
@@ -277,6 +367,8 @@
       "file": "decor/rock-ledge.glb",
       "category": "prop",
       "name": "층진 바위",
+      "emoji": "⛰️",
+      "shelf": "rocks",
       "prompt": "가로로 층이 진 사암색 바위 덩어리. 계단처럼 세 단으로 깎여 있다.",
       "fit": {
         "height": 1.6
@@ -287,6 +379,8 @@
       "file": "decor/flower-tulip-bed.glb",
       "category": "tree",
       "name": "튤립 화단",
+      "emoji": "🌷",
+      "shelf": "flowers",
       "prompt": "빨강·노랑·분홍 튤립이 세 줄로 핀 작은 정사각형 화단. 낮은 나무 테두리 안의 흙.",
       "fit": {
         "height": 0.6
@@ -297,6 +391,8 @@
       "file": "decor/flower-sunflower.glb",
       "category": "tree",
       "name": "해바라기",
+      "emoji": "🌻",
+      "shelf": "flowers",
       "prompt": "키가 다른 해바라기 세 그루. 큰 노란 꽃잎과 넓은 초록 잎.",
       "fit": {
         "height": 1.8
@@ -307,6 +403,8 @@
       "file": "decor/flower-rose-bush.glb",
       "category": "tree",
       "name": "장미 덤불",
+      "emoji": "🌹",
+      "shelf": "flowers",
       "prompt": "분홍 장미가 여러 송이 핀 둥근 장미 덤불.",
       "fit": {
         "height": 1.0
@@ -317,6 +415,8 @@
       "file": "decor/flower-hydrangea.glb",
       "category": "tree",
       "name": "수국",
+      "emoji": "💠",
+      "shelf": "flowers",
       "prompt": "파랑과 보라 꽃송이가 탐스러운 둥근 수국 덤불.",
       "fit": {
         "height": 0.9
@@ -327,6 +427,8 @@
       "file": "decor/flower-lavender.glb",
       "category": "tree",
       "name": "라벤더 화단",
+      "emoji": "🪻",
+      "shelf": "flowers",
       "prompt": "보라 라벤더가 길게 한 줄로 핀 좁은 화단.",
       "fit": {
         "height": 0.6
@@ -337,6 +439,8 @@
       "file": "decor/flower-daisy.glb",
       "category": "tree",
       "name": "들꽃 무더기",
+      "emoji": "🌼",
+      "shelf": "flowers",
       "prompt": "흰 데이지와 노란 민들레, 작은 파란 꽃이 섞인 낮은 들꽃 무더기.",
       "fit": {
         "height": 0.3
@@ -347,6 +451,8 @@
       "file": "decor/flower-pot.glb",
       "category": "furniture",
       "name": "화분",
+      "emoji": "🪴",
+      "shelf": "garden",
       "prompt": "테라코타 화분에 심은 분홍 제라늄 한 포기.",
       "fit": {
         "height": 0.6
@@ -357,6 +463,8 @@
       "file": "decor/deco-fountain.glb",
       "category": "furniture",
       "name": "분수",
+      "emoji": "⛲",
+      "shelf": "garden",
       "prompt": "둥근 돌 분수. 크기가 줄어드는 세 단의 물받이, 물은 옅은 하늘색 면으로 단순하게.",
       "fit": {
         "height": 1.8
@@ -367,6 +475,8 @@
       "file": "decor/deco-bird-bath.glb",
       "category": "furniture",
       "name": "새 물통",
+      "emoji": "🐦",
+      "shelf": "garden",
       "prompt": "돌기둥 위의 얕은 새 물통, 가장자리에 작은 새 조각 하나.",
       "fit": {
         "height": 1.0
@@ -377,6 +487,8 @@
       "file": "decor/deco-stone-lantern.glb",
       "category": "furniture",
       "name": "석등",
+      "emoji": "🏮",
+      "shelf": "garden",
       "prompt": "지붕이 넓은 돌 등롱. 가운데 창으로 따뜻한 노란 빛.",
       "fit": {
         "height": 1.3
@@ -387,6 +499,8 @@
       "file": "decor/deco-statue-fox.glb",
       "category": "furniture",
       "name": "여우 석상",
+      "emoji": "🦊",
+      "shelf": "garden",
       "prompt": "둥근 받침대 위에 꼬리를 감고 앉은 여우 모양 돌 조각상.",
       "fit": {
         "height": 1.4
@@ -397,6 +511,8 @@
       "file": "decor/deco-statue-bear.glb",
       "category": "furniture",
       "name": "곰 목각상",
+      "emoji": "🐻",
+      "shelf": "garden",
       "prompt": "두 손을 모은 곰 모양 나무 조각상, 네모난 받침대.",
       "fit": {
         "height": 1.4
@@ -407,6 +523,8 @@
       "file": "decor/deco-sundial.glb",
       "category": "furniture",
       "name": "해시계",
+      "emoji": "🕰️",
+      "shelf": "garden",
       "prompt": "둥근 돌 받침 위의 청동 해시계.",
       "fit": {
         "height": 1.0
@@ -417,6 +535,8 @@
       "file": "decor/deco-flower-arch.glb",
       "category": "furniture",
       "name": "꽃 아치",
+      "emoji": "💐",
+      "shelf": "garden",
       "prompt": "분홍·흰 꽃덩굴이 감긴 흰 나무 정원 아치.",
       "fit": {
         "height": 2.4
@@ -427,6 +547,8 @@
       "file": "decor/deco-bench.glb",
       "category": "furniture",
       "name": "정원 벤치",
+      "emoji": "🪑",
+      "shelf": "garden",
       "prompt": "나무 등받이와 둥근 짙은 초록 팔걸이가 있는 2인용 정원 벤치.",
       "fit": {
         "width": 1.8
@@ -437,6 +559,8 @@
       "file": "decor/deco-well.glb",
       "category": "furniture",
       "name": "우물",
+      "emoji": "🪣",
+      "shelf": "garden",
       "prompt": "작은 나무 지붕이 있는 둥근 돌 우물과 두레박.",
       "fit": {
         "height": 2.2
@@ -447,6 +571,8 @@
       "file": "decor/deco-signpost.glb",
       "category": "furniture",
       "name": "이정표",
+      "emoji": "🪧",
+      "shelf": "garden",
       "prompt": "화살표 모양 나무 표지판 세 개가 서로 다른 방향으로 달린 이정표 기둥.",
       "fit": {
         "height": 2.0
@@ -457,6 +583,8 @@
       "file": "decor/deco-picnic-table.glb",
       "category": "furniture",
       "name": "피크닉 테이블",
+      "emoji": "🧺",
+      "shelf": "garden",
       "prompt": "양쪽에 벤치가 붙은 나무 피크닉 테이블.",
       "fit": {
         "width": 2.0
@@ -467,6 +595,8 @@
       "file": "decor/deco-parasol-table.glb",
       "category": "furniture",
       "name": "파라솔 테이블",
+      "emoji": "⛱️",
+      "shelf": "garden",
       "prompt": "민트색 파라솔이 꽂힌 작은 원형 카페 테이블과 의자 두 개.",
       "fit": {
         "height": 2.2
@@ -477,6 +607,8 @@
       "file": "decor/deco-notice-board.glb",
       "category": "furniture",
       "name": "게시판",
+      "emoji": "📌",
+      "shelf": "garden",
       "prompt": "작은 지붕이 달린 나무 게시판, 색색의 쪽지 몇 장이 핀으로 꽂혀 있다.",
       "fit": {
         "height": 2.0
@@ -487,6 +619,8 @@
       "file": "decor/farm-scarecrow.glb",
       "category": "furniture",
       "name": "허수아비",
+      "emoji": "👒",
+      "shelf": "farm",
       "prompt": "밀짚모자와 체크무늬 셔츠를 입은 허수아비.",
       "fit": {
         "height": 2.0
@@ -497,6 +631,8 @@
       "file": "decor/farm-hay-bale.glb",
       "category": "furniture",
       "name": "건초 더미",
+      "emoji": "🌾",
+      "shelf": "farm",
       "prompt": "둥글게 말린 노란 건초 더미.",
       "fit": {
         "height": 1.0
@@ -507,6 +643,8 @@
       "file": "decor/farm-veg-crate.glb",
       "category": "furniture",
       "name": "채소 상자",
+      "emoji": "📦",
+      "shelf": "farm",
       "prompt": "당근과 양배추가 가득 담긴 나무 상자.",
       "fit": {
         "height": 0.6
@@ -517,6 +655,8 @@
       "file": "decor/farm-wheelbarrow.glb",
       "category": "furniture",
       "name": "손수레",
+      "emoji": "🛒",
+      "shelf": "farm",
       "prompt": "흙과 모종삽이 담긴 나무 손수레.",
       "fit": {
         "width": 1.4
@@ -527,6 +667,8 @@
       "file": "decor/farm-watering-can.glb",
       "category": "furniture",
       "name": "물뿌리개",
+      "emoji": "💧",
+      "shelf": "farm",
       "prompt": "연두색 금속 물뿌리개.",
       "fit": {
         "height": 0.4
@@ -537,6 +679,8 @@
       "file": "decor/farm-beehive.glb",
       "category": "furniture",
       "name": "벌통",
+      "emoji": "🐝",
+      "shelf": "farm",
       "prompt": "두 층짜리 흰 나무 벌통과 작은 지붕.",
       "fit": {
         "height": 0.9
@@ -547,6 +691,8 @@
       "file": "decor/farm-barrel.glb",
       "category": "furniture",
       "name": "오크통",
+      "emoji": "🛢️",
+      "shelf": "farm",
       "prompt": "쇠테를 두른 나무 물통(오크통).",
       "fit": {
         "height": 1.0
@@ -557,6 +703,8 @@
       "file": "decor/crop-pumpkin.glb",
       "category": "tree",
       "name": "호박밭",
+      "emoji": "🎃",
+      "shelf": "farm",
       "prompt": "넓은 잎과 덩굴 사이에 놓인 주황 호박 세 개.",
       "fit": {
         "height": 0.6
@@ -567,6 +715,8 @@
       "file": "decor/crop-cabbage.glb",
       "category": "tree",
       "name": "양배추 이랑",
+      "emoji": "🥬",
+      "shelf": "farm",
       "prompt": "양배추 여섯 포기가 한 줄로 자란 밭 이랑.",
       "fit": {
         "height": 0.4
@@ -577,6 +727,8 @@
       "file": "decor/crop-corn.glb",
       "category": "tree",
       "name": "옥수수",
+      "emoji": "🌽",
+      "shelf": "farm",
       "prompt": "잎이 무성한 옥수수 줄기 다섯 대, 노란 옥수수 이삭.",
       "fit": {
         "height": 2.0
@@ -587,6 +739,8 @@
       "file": "decor/crop-wheat.glb",
       "category": "tree",
       "name": "밀밭",
+      "emoji": "🌾",
+      "shelf": "farm",
       "prompt": "황금색 밀 이삭이 빽빽한 작은 밀밭 한 덩이.",
       "fit": {
         "height": 1.1
@@ -597,6 +751,8 @@
       "file": "decor/crop-carrot.glb",
       "category": "tree",
       "name": "당근 이랑",
+      "emoji": "🥕",
+      "shelf": "farm",
       "prompt": "당근 잎이 줄지어 올라온 밭 이랑, 주황 당근 끝이 흙 위로 살짝 보인다.",
       "fit": {
         "height": 0.35

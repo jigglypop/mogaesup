@@ -6,7 +6,6 @@ import type { Group } from 'three';
 import { gltfAssetCache } from 'gaesup-world';
 
 import { layoutApi } from '../../api/endpoints';
-import type { CatalogItem } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
 import { createWorldRenderer } from '../../rendering/worldRenderer';
@@ -64,8 +63,8 @@ export function LayoutPreview({ proposal }: { proposal: LayoutProposal }) {
   </div>;
 }
 
-type Props = { session: EditSession; residents: ResidentStore; studioItems: CatalogItem[]; ownerId: string };
-export function LayoutComposer({ session, residents, studioItems, ownerId }: Props) {
+type Props = { session: EditSession; residents: ResidentStore; ownerId: string };
+export function LayoutComposer({ session, residents, ownerId }: Props) {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [description, setDescription] = useState('12m × 12m 카페, 나무 바닥, 2인 좌석');
@@ -124,7 +123,7 @@ export function LayoutComposer({ session, residents, studioItems, ownerId }: Pro
       } else intent = interpretLayout(description);
       const snapshot = session.runtime.buildingStore.getState().serialize();
       const residentRevision = residents.revision();
-      const measured = await measureLayoutCatalog(studioItems, snapshot.objects.flatMap(object => object.config?.modelUrl ? [object.config.modelUrl] : []));
+      const measured = await measureLayoutCatalog(snapshot.objects.flatMap(object => object.config?.modelUrl ? [object.config.modelUrl] : []));
       if (controller.signal.aborted) return;
       const pivot = session.pivot();
       const points = residents.getState().map(resident => [resident.position[0], resident.position[2]] as const);

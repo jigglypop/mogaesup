@@ -454,7 +454,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
 
       <section className={`mg-drawer mg-glass${tool === 'select' && selected ? ' is-behind' : ''}`} aria-label="놓을 것">
         <div className="mg-drawer-head">
-          <LayoutComposer session={session} residents={residents} studioItems={studioItems} ownerId={ownerId} />
+          <LayoutComposer session={session} residents={residents} ownerId={ownerId} />
           <div className="mg-tabs is-fit" {...shelfTabs.list} aria-label="종류">
             {SHELVES.map((item) => (
               <button key={item.id} {...shelfTabs.tab(item.id)}>

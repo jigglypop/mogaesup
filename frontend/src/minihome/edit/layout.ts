@@ -4,7 +4,6 @@ import {
   type BuildingSerializedState, type PlacedObject, type TileConfig, type WallConfig,
 } from 'gaesup-world/building';
 
-import type { CatalogItem } from '../../api/types';
 import { loadModelBounds } from './bounds';
 import { pickBoxOf, type LocalBox } from './objects';
 import type { EditSession } from './session';
@@ -58,14 +57,15 @@ export function checkLayoutIntent(intent: LayoutIntent): void {
   }
 }
 
-/** Every extent comes from the GLB the current browser actually decodes, including overrides/quantization. */
-export async function measureLayoutCatalog(studioItems: CatalogItem[], extraUrls: readonly string[] = []): Promise<LayoutCatalogItem[]> {
+/**
+ * Every extent comes from the GLB the current browser actually decodes, including overrides/quantization: the pieces
+ * the planner places, and `extraUrls` (the island's placed models, its obstacles). Not the whole furniture catalog, whose
+ * dozens of studio models the planner never places and would all be downloaded and decoded for each proposal.
+ */
+export async function measureLayoutCatalog(extraUrls: readonly string[] = []): Promise<LayoutCatalogItem[]> {
   const wanted = new Set(['table-basic', 'chair-basic', 'shop-stall-basic', 'storage-basic', 'lamp-basic']);
-  const defaults = DEFAULT_BUILDING_OBJECT_CATALOG.filter(item => wanted.has(item.id) && !!item.modelUrl)
+  const items = DEFAULT_BUILDING_OBJECT_CATALOG.filter(item => wanted.has(item.id) && !!item.modelUrl)
     .map(item => ({ id: item.id, label: item.label, modelUrl: item.modelUrl!, scale: item.defaultScale, color: item.defaultColor }));
-  const extras = studioItems.filter(item => item.kind === 'furniture' && item.status === 'published')
-    .map(item => ({ id: item.id, label: item.label, modelUrl: item.modelUrl, scale: 1, color: '#ffffff' }));
-  const items = [...defaults, ...extras];
   await Promise.all([...new Set(extraUrls)].map(url => loadModelBounds(url)));
   return Promise.all(items.map(async item => ({ ...item, bounds: await loadModelBounds(item.modelUrl) })));
 }
