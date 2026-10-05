@@ -19,7 +19,7 @@ import {
 
 import { ApiRequestError, problemText } from '../api/client';
 import { homeApi, lookApi } from '../api/endpoints';
-import { followSessionOwner, sessionBelongsTo } from '../auth/sessionWork';
+import { followSessionOwner, sessionBelongsTo, trackUnsaved } from '../auth/sessionWork';
 import type { CatalogItem, HomeView, Look, ProfileChanges, User } from '../api/types';
 import { GameDock } from '../games/GameDock';
 import { GameWorld } from '../games/GameWorld';
@@ -77,29 +77,8 @@ const PANEL_TABS: { id: PanelTab; label: string }[] = [
   { id: 'about', label: '소개' },
 ];
 const PANEL_TAB_IDS = PANEL_TABS.map((item) => item.id);
-const KEYS = [
-  ['WASD', '이동'],
-  ['클릭', '가기'],
-  ['드래그', '시점'],
-] as const;
-/** The same, for a finger; CSS shows whichever list fits the device's pointer. */
-const TOUCH_KEYS = [
-  ['탭', '가기'],
-  ['드래그', '시점'],
-] as const;
-
-function KeyHints({ keys, touch = false }: { keys: typeof KEYS | typeof TOUCH_KEYS; touch?: boolean }) {
-  return (
-    <div className={`mg-keys${touch ? ' is-touch' : ''}`} aria-label="조작">
-      {keys.map(([key, label]) => (
-        <span key={key} className="mg-kbd">
-          <kbd>{key}</kbd>
-          {label}
-        </span>
-      ))}
-    </div>
-  );
-}
+/** How long a failed profile change stays on screen; the field it came from keeps its own error. */
+const PROFILE_ERROR_MS = 4000;
 
 /** The island's clock and the sky over it now. */
 function TimeChip() {
@@ -193,10 +172,12 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const session = isOwner ? createEditSession(runtime, history, labels) : null;
     let released = false;
     let stopSession = () => {};
+    // Until the island is let go (left with nothing unsaved, or dropped), signing out asks before losing its edits.
+    const untrack = isOwner ? trackUnsaved(() => !saver.disposed && hasUnsaved(saver.getState())) : () => {};
     const release = () => {
       if (released) return;
       released = true;
-      stopSession(); adapter.dispose();
+      untrack(); stopSession(); adapter.dispose();
       void runtime.dispose().catch((error: unknown) => console.error(error));
     };
     // Someone else signing in (or a sign-out) ends this owner's island; the owner signing in again after their session
@@ -265,8 +246,9 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const decorating = editing && isOwner;
   const characterUrl = playerModelUrl(viewerLook, viewerMinime, minimes);
   const urls = useMemo(() => ({ characterUrl }), [characterUrl]);
-  // A visitor starts beside the crossroads, not inside the owner standing on it.
-  const spawn = useMemo(() => spawnFor(isOwner ? null : (viewer?.username ?? null)), [isOwner, viewer?.username]);
+  // A visitor starts beside the crossroads, not inside the owner standing on it. Where is decided once: a session that
+  // lapses and signs in again (or a sign-in on the island) must not move the player.
+  const [spawn] = useState(() => spawnFor(isOwner ? null : (viewer?.username ?? null)));
   const playerRef = useRef<RapierRigidBody>(null!);
   const visualRotationRef = useRef<Group>(null!);
   // The same elements on every render, so the memoized scene skips the renders of this page (the panels, the live room).
@@ -281,8 +263,9 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     (next: Partial<SceneSettings>) => setSettings((current) => ({ ...current, ...next })),
     [setSettings],
   );
+  // `silent`: the change comes from a field that shows its own error (the autosaved title and status), so no toast.
   const updateProfile = useCallback(
-    (changes: ProfileChanges) => {
+    (changes: ProfileChanges, { silent = false }: { silent?: boolean } = {}) => {
       const write = profileWrites.current.catch(() => undefined).then(async () => {
         if (!sessionBelongsTo(profile.ownerId)) throw new ApiRequestError(409, 'owner_changed', '계정이 바뀌어 저장을 중단했어요.');
         const updated = await homeApi.update({ ...changes, expectedOwnerId: profile.ownerId });
@@ -295,7 +278,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
         setProfileError('');
       });
       profileWrites.current = write;
-      void write.catch((error: unknown) => { if (active.current) setProfileError(problemText(error)); });
+      void write.catch((error: unknown) => { if (active.current && !silent) setProfileError(problemText(error)); });
       return write;
     },
     [onView, onLook, profile.ownerId],
@@ -337,18 +320,27 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   );
   const saveNow = useCallback(() => void save(), [save]);
   // Leaving saves first; with nothing unsaved (or nothing that can be saved yet) it just leaves. When the save fails the
-  // owner may stay with the edits or leave without them.
+  // owner may stay with the edits or leave without them. One leaving at a time, and none once the island is gone (the
+  // save can answer after Back or a sign-out took the page elsewhere).
+  const leaving = useRef(false);
   const leave = useCallback(
     (to: string) => {
+      if (leaving.current) return;
       if (!hasUnsaved(saver.getState())) {
         navigate(to);
         return;
       }
-      void save().then((ok) => {
-        if (!ok && !window.confirm('저장하지 못한 변경이 있어요. 나가면 사라져요. 계속할까요?')) return;
-        discarding.current = !ok;
-        navigate(to);
-      });
+      leaving.current = true;
+      void save()
+        .then((ok) => {
+          if (!active.current) return;
+          if (!ok && !window.confirm('저장하지 못한 변경이 있어요. 나가면 사라져요. 계속할까요?')) return;
+          discarding.current = !ok;
+          navigate(to);
+        })
+        .finally(() => {
+          leaving.current = false;
+        });
     },
     [saver, save, navigate],
   );
@@ -379,6 +371,11 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const timer = setTimeout(() => setShared(null), 2200);
     return () => clearTimeout(timer);
   }, [shared]);
+  useEffect(() => {
+    if (!profileError) return undefined;
+    const timer = setTimeout(() => setProfileError(''), PROFILE_ERROR_MS);
+    return () => clearTimeout(timer);
+  }, [profileError]);
   // Finishing decorating saves what is left, rather than waiting for the autosave.
   useEffect(() => {
     if (!decorating) return undefined;
@@ -447,7 +444,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                   <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} ownerId={profile.ownerId} />
                 ) : (
                   <p className="mg-edit-wait mg-glass" role="status">
-                    {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요.' : '섬을 불러와야 꾸밀 수 있어요.'}
+                    {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요.' : '섬을 불러오지 못했어요.'}
                   </p>
                 )}
                 <EditHelp session={session} />
@@ -515,8 +512,6 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                   <ResidentGreeting greetings={greetings} />
                   <InteractButton />
                   <ChatBar signedIn={!!viewer} />
-                  <KeyHints keys={KEYS} />
-                  <KeyHints keys={TOUCH_KEYS} touch />
                 </div>
                 {performance && <StatusPanel onClose={() => setPerformance(false)} />}
               </>

@@ -26,10 +26,15 @@ export function AuthPage() {
   const [busy, setBusy] = useState(false);
   // The form is the panel of whichever tab is chosen. A sign-in error means nothing on the sign-up form, and the
   // other way round.
-  const tabs = useTabs(MODES, mode, (chosen) => {
-    setMode(chosen);
-    setError('');
-  });
+  const tabs = useTabs(
+    MODES,
+    mode,
+    (chosen) => {
+      setMode(chosen);
+      setError('');
+    },
+    { sharedPanel: true },
+  );
 
   if (status === 'loading') return <Loading />;
   if (user) return <Navigate to={next ?? `/@${user.username}`} replace />;
@@ -73,7 +78,7 @@ export function AuthPage() {
             </button>
           ))}
         </div>
-        <form className="mg-auth-form" onSubmit={submit} {...tabs.panel(mode)}>
+        <form className="mg-auth-form" onSubmit={submit} {...tabs.panel(mode, { focusable: false })}>
           <label className="mg-label">
             아이디
             <input

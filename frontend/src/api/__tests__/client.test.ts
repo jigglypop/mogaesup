@@ -71,6 +71,21 @@ describe('api client', () => {
       expect(lapses).not.toHaveBeenCalled();
     });
 
+    it('세션을 거절한 것이 아닌 401은 세션을 풀지 않는다', async () => {
+      // A character-server or realtime refusal passed on as-is must not sign the member out of the app.
+      fetchMock
+        .mockResolvedValueOnce(json(401, { code: 'ticket', message: '' }))
+        .mockResolvedValueOnce(json(401, { code: 'wrong_password', message: '' }))
+        .mockResolvedValueOnce(new Response('unauthorized', { status: 401 }))
+        .mockResolvedValueOnce(json(502, { code: 'factory_auth', message: '' }));
+      await expect(api('/rooms/ticket', { method: 'POST' })).rejects.toMatchObject({ status: 401, code: 'ticket' });
+      await expect(api('/auth/password', { method: 'POST' })).rejects.toMatchObject({ status: 401, code: 'wrong_password' });
+      await expect(api('/factory/characters')).rejects.toMatchObject({ status: 401, code: 'http_error' });
+      await expect(api('/factory/characters')).rejects.toMatchObject({ status: 502, code: 'factory_auth' });
+      expect(lapses).not.toHaveBeenCalled();
+      expect(sessionLapsed()).toBe(false);
+    });
+
     it('보낸 뒤에 세션이 바뀌었다면 늦게 온 401은 새 세션을 건드리지 않는다', async () => {
       let answer!: (response: Response) => void;
       fetchMock.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));

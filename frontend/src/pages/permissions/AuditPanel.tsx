@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { problemText } from '../../api/client';
 import { permissionsApi, type AuditEntry, type UserNames } from '../../api/permissions';
@@ -15,9 +15,13 @@ export function AuditPanel({ revision }: { revision: number }) {
   const [loading, setLoading] = useState(false);
   /** Counts asks to read the first page again after it failed. */
   const [tries, setTries] = useState(0);
+  /** Counts first-page reads: a later page asked for before one belongs to the list it replaced, and is dropped. */
+  const generation = useRef(0);
 
   useEffect(() => {
     let live = true;
+    generation.current++;
+    setLoading(false);
     permissionsApi.audit({ limit: PAGE }).then(
       (page) => {
         if (!live) return;
@@ -34,18 +38,20 @@ export function AuditPanel({ revision }: { revision: number }) {
   }, [revision, tries]);
 
   const more = async () => {
-    if (next === null) return;
+    if (next === null || loading) return;
+    const mine = generation.current;
     setLoading(true);
     setProblem('');
     try {
       const page = await permissionsApi.audit({ limit: PAGE, before: next });
+      if (mine !== generation.current) return;
       setEntries((previous) => [...(previous ?? []), ...page.entries]);
       setUsers((previous) => ({ ...previous, ...page.users }));
       setNext(page.nextBefore);
     } catch (reason) {
-      setProblem(problemText(reason));
+      if (mine === generation.current) setProblem(problemText(reason));
     } finally {
-      setLoading(false);
+      if (mine === generation.current) setLoading(false);
     }
   };
 

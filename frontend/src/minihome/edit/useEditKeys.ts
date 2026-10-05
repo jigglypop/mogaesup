@@ -24,11 +24,14 @@ const typing = (event: KeyboardEvent) => {
 const TAB_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End']);
 const tabbing = (event: KeyboardEvent) =>
   TAB_KEYS.has(event.key) && event.target instanceof Element && event.target.closest('[role=tablist]') !== null;
+/** A modal dialog over the island (매장 배치) has the keyboard to itself; its keys must not edit the island behind it. */
+const modalOpen = () => document.querySelector('[aria-modal="true"]') !== null;
 
 /**
  * The decorating shortcuts. They listen on the window's capture phase, ahead of the world's own key handling, and
  * cancel the keys they use: the engine skips a cancelled key, so arrows move the selection instead of turning the next
- * piece, and WASD moves the view while no player walks.
+ * piece, and WASD moves the view while no player walks. The shortcut help takes only its own keys, and another modal
+ * dialog none.
  */
 export function useEditKeys(session: EditSession, actions: { save: () => void }) {
   const { save } = actions;
@@ -46,6 +49,7 @@ export function useEditKeys(session: EditSession, actions: { save: () => void })
         }
         return;
       }
+      if (modalOpen()) return;
 
       if (event.ctrlKey || event.metaKey) {
         // By key or by position, so a Korean input mode (ㅋ for Z) still undoes.

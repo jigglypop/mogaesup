@@ -27,7 +27,7 @@ import { EditIcon, PieceIcon } from './edit/icons';
 import { EIGHTHS, SelectionInspector, Stepper, Turns } from './edit/Inspector';
 import { LayoutComposer } from './edit/LayoutComposer';
 import { degreesOf } from './edit/objects';
-import type { EditPart, EditSession, EditTool } from './edit/session';
+import type { EditSession, EditTool } from './edit/session';
 import type { ResidentStore } from './residents';
 import { ResidentsShelf } from './ResidentsShelf';
 import { WEATHER_CHOICES, weatherChoiceOf } from './weather';
@@ -40,11 +40,8 @@ const TOOLS: { id: EditTool; label: string; icon: ReactNode; key: string }[] = [
   { id: 'paint', label: '칠하기', icon: <Icon name="paint" />, key: '3' },
   { id: 'erase', label: '지우기', icon: <Icon name="erase" />, key: '4' },
 ];
-const HINTS: Record<Exclude<EditTool, 'select'>, Record<EditPart, string>> = {
-  place: { object: '땅을 눌러 놓아요 · R 돌리기', tile: '빈 칸을 눌러 바닥을 넓혀요 · Q/E 높이', wall: '칸 가장자리를 눌러 벽을 세워요 · R 돌리기' },
-  paint: { object: '물건은 칠할 수 없어요', tile: '바닥 칸을 눌러 고른 바닥으로 칠해요', wall: '벽을 눌러 고른 벽으로 바꿔요' },
-  erase: { object: '치울 물건을 눌러요', tile: '지울 바닥 칸을 눌러요', wall: '지울 벽을 눌러요' },
-};
+/** What the tool in use does to the part it is on, as the inspector's subtitle says it. */
+const TOOL_LABEL: Record<Exclude<EditTool, 'select'>, string> = { place: '놓기', paint: '칠하기', erase: '지우기' };
 const SHELF_IDS = SHELVES.map((item) => item.id);
 const QUARTERS = [0, 90, 180, 270];
 const QUARTER = Math.PI / 2;
@@ -342,13 +339,13 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
         </>
       );
     }
-    const title = part === 'object' ? (current?.label ?? '물건을 골라요') : part === 'tile' ? '바닥' : '벽';
+    const title = part === 'object' ? (current?.label ?? '물건') : part === 'tile' ? '바닥' : '벽';
     const turns = turnsFor;
     return (
       <>
         <header>
           <b>{title}</b>
-          <small>{tool === 'place' && part === 'object' && !turns ? '땅을 눌러 놓아요' : HINTS[tool][part]}</small>
+          <small>{part === 'object' && !current ? '고른 물건 없음' : TOOL_LABEL[tool]}</small>
         </header>
         {tool === 'place' && part === 'tile' && (
           <>

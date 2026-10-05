@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import {
   FRAME_PHASES,
@@ -28,9 +28,9 @@ type Grade = 'good' | 'warn' | 'bad';
 const grade = (value: number, good: number, warn: number, higher = false): Grade =>
   higher ? (value >= good ? 'good' : value >= warn ? 'warn' : 'bad') : value <= good ? 'good' : value <= warn ? 'warn' : 'bad';
 
-function Metric({ label, value, unit, tone, hint }: { label: string; value: ReactNode; unit?: string; tone?: Grade | undefined; hint?: string }) {
+function Metric({ label, value, unit, tone }: { label: string; value: ReactNode; unit?: string; tone?: Grade | undefined }) {
   return (
-    <div className="mh-metric" title={hint}>
+    <div className="mh-metric">
       <span className="mh-metric-label">{tone && <i className={`mh-dot is-${tone}`} />}{label}</span>
       <span className="mh-metric-value">{value}{unit && <small>{unit}</small>}</span>
     </div>
@@ -59,8 +59,21 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-/** Every number the engine reports about this world. */
+/**
+ * Every number the engine reports about this world. A dialog beside the world: it takes the keyboard when it opens,
+ * Escape closes it, and closing hands the keyboard back to where it came from (the settings button).
+ */
 export function StatusPanel({ onClose }: { onClose: () => void }) {
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = panel.current;
+    const before = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+    node?.focus();
+    return () => {
+      const at = document.activeElement;
+      if (before?.isConnected && (at === null || at === document.body || node?.contains(at))) before.focus();
+    };
+  }, []);
   const report = usePerformanceReport(500);
   const { frames, render, engine, phases, memory, shadow, resolution, gpuMs, cpuBound } = report;
   const [history, setHistory] = useState<number[]>([]);
@@ -78,7 +91,18 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
   const phaseMax = phases ? Math.max(0.5, ...FRAME_PHASES.map((phase) => phases[phase])) : 1;
 
   return (
-    <div className="mh-status mg-glass" role="dialog" aria-label="성능">
+    <div
+      ref={panel}
+      className="mh-status mg-glass"
+      role="dialog"
+      aria-label="성능"
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.stopPropagation();
+        onClose();
+      }}
+    >
       <header className="mh-status-head">
         <h3>성능</h3>
         <div className="mh-badges">
@@ -104,34 +128,31 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
 
       <Section title="프레임">
         <div className="mh-metrics">
-          <Metric label="캔버스 그리기" value={report.drawnFps === null ? '–' : number(report.drawnFps)} unit="/s" hint="캔버스가 실제로 그린 프레임 수. 절전 모드에서는 FPS보다 낮아요." />
-          <Metric label="고정 물리 틱" value={report.fixedTicksPerSecond === null ? '–' : number(report.fixedTicksPerSecond)} unit="/s" hint="시뮬레이션은 초당 60틱으로 돌아요." />
-          <Metric label="p95 프레임" value={number(frames.p95Ms, 1)} unit="ms" tone={grade(frames.p95Ms, 20, 34)} hint="느린 프레임 5%의 경계. 끊김 체감에 가장 가까운 값이에요." />
-          <Metric label="JS 힙" value={memory ? number(memory.usedMB) : '–'} unit={memory ? 'MB' : ''} tone={memory ? grade(memory.usedMB, 300, 600) : undefined} hint="Chromium에서만 보고돼요." />
+          <Metric label="캔버스 그리기" value={report.drawnFps === null ? '–' : number(report.drawnFps)} unit="/s" />
+          <Metric label="고정 물리 틱" value={report.fixedTicksPerSecond === null ? '–' : number(report.fixedTicksPerSecond)} unit="/s" />
+          <Metric label="p95 프레임" value={number(frames.p95Ms, 1)} unit="ms" tone={grade(frames.p95Ms, 20, 34)} />
+          <Metric label="JS 힙" value={memory ? number(memory.usedMB) : '–'} unit={memory ? 'MB' : ''} tone={memory ? grade(memory.usedMB, 300, 600) : undefined} />
         </div>
       </Section>
 
       <Section title="렌더링">
         <div className="mh-metrics">
-          <Metric label="Draw call" value={number(render.calls)} tone={grade(render.calls, 250, 600)} hint="한 프레임의 그리기 명령 수." />
+          <Metric label="Draw call" value={number(render.calls)} tone={grade(render.calls, 250, 600)} />
           <Metric
             label="GPU 시간"
             value={gpuMs === null ? '–' : number(gpuMs, 1)}
             unit={gpuMs === null ? '' : 'ms'}
             tone={gpuMs === null ? undefined : grade(gpuMs, 12, 16.7)}
-            hint="GPU가 한 프레임을 그린 시간(WebGPU 타임스탬프). 16.7ms를 넘으면 60fps를 못 지켜요."
           />
           <Metric
             label="해상도"
             value={resolution ? `${number(resolution.pixelRatio, 2)}×` : '–'}
             tone={resolution && resolution.pixelRatio < resolution.maxPixelRatio ? 'warn' : undefined}
-            hint={resolution?.adaptive ? `자동 품질: 프레임이 밀리면 픽셀 비율을 낮추고, 여유가 생기면 ${number(resolution.maxPixelRatio, 1)}×까지 되돌려요.` : '품질 설정이 정한 픽셀 비율이에요.'}
           />
           <Metric
             label="CPU 여유"
             value={cpuBound ? '부족' : '충분'}
             tone={cpuBound ? 'warn' : 'good'}
-            hint="GPU는 한가한데 프레임이 밀리면 CPU 병목이에요. 그동안 그림자를 덜 자주 다시 그려요."
           />
           <Metric label="삼각형" value={compact(render.triangles)} tone={grade(render.triangles, 1.5e6, 4e6)} />
           <Metric label="지오메트리" value={number(engine.geometries)} />
@@ -144,10 +165,10 @@ export function StatusPanel({ onClose }: { onClose: () => void }) {
       <Section title="그림자">
         {shadow ? (
           <div className="mh-metrics">
-            <Metric label="맵" value={`${shadow.maps}장 · ${number(shadow.mapSize)}px`} hint="WebGPU는 cascade 수, WebGL은 1장이에요." />
+            <Metric label="맵" value={`${shadow.maps}장 · ${number(shadow.mapSize)}px`} />
             <Metric label="가까운 맵 갱신" value={rate(shadow.nearHz)} />
-            <Metric label="먼 맵 갱신" value={shadow.maps > 1 ? rate(shadow.farHz) : '–'} hint="먼 cascade는 한 프레임에 하나씩 돌아가며 다시 그려요." />
-            <Metric label="근거리 전용 캐스터" value={number(shadow.nearOnlyCasters)} hint="작은 소품·잔디는 가장 가까운 cascade에만 그림자를 넣어요." />
+            <Metric label="먼 맵 갱신" value={shadow.maps > 1 ? rate(shadow.farHz) : '–'} />
+            <Metric label="근거리 전용 캐스터" value={number(shadow.nearOnlyCasters)} />
           </div>
         ) : (
           <p className="mh-muted">그림자를 만드는 해가 없어요.</p>

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError } from '../../api/client';
-import { appDestination, hasUnsaved, heldSavesSettled, leaveIsland } from '../edit/leave';
+import { appDestination, hasUnsaved, HeldSaveError, heldSavesSettled, leaveIsland } from '../edit/leave';
 import type { SaverState } from '../edit/save';
 import { IslandTooLargeError } from '../persistence';
 import { fakeWorld, ready } from './fakeWorld';
@@ -192,6 +192,63 @@ describe('나갈 때 저장하지 않은 변경', () => {
     finish();
     await vi.advanceTimersByTimeAsync(0);
     expect(settled).toHaveBeenCalled();
+  });
+
+  it('같은 섬을 다시 열 때 재시도를 기다리는 저장은 바로 다시 보내고, 저장된 뒤에 연다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    world.failing.with = offline();
+    world.edit();
+    saver.changed();
+    const release = vi.fn();
+    leaveIsland(saver, release, false, 'mogae');
+    await vi.advanceTimersByTimeAsync(0);
+    // Failed once; the next try is ten seconds away and nothing is saving now.
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+    expect(saver.getState().saving).toBe(false);
+
+    world.failing.with = null;
+    const settled = vi.fn();
+    void heldSavesSettled('mogae').then(settled);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(settled).toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('다시 보내도 저장되지 않으면 섬을 열지 않고 실패로 알린다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    world.failing.with = offline();
+    world.edit();
+    saver.changed();
+    const release = vi.fn();
+    leaveIsland(saver, release, false, 'mogae');
+    await vi.advanceTimersByTimeAsync(0);
+    const result = heldSavesSettled('mogae').then(() => 'opened', (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await result).toBeInstanceOf(HeldSaveError);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(release).not.toHaveBeenCalled();
+    // Still held, still retried in the background.
+    world.failing.with = null;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(release).toHaveBeenCalledTimes(1);
+    await expect(heldSavesSettled('mogae')).resolves.toBeUndefined();
+  });
+
+  it('다시 로그인을 기다리는 저장은 다시 보내지 않고 섬을 연다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    world.failing.with = new ApiRequestError(401, 'login_required', '');
+    world.edit();
+    saver.changed();
+    leaveIsland(saver, vi.fn(), false, 'mogae');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saver.getState().problem?.kind).toBe('session');
+    await expect(heldSavesSettled('mogae')).resolves.toBeUndefined();
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+    saver.dispose();
   });
 
   it('주인이 변경을 버리고 나가겠다고 하면 저장하지 않고 바로 놓아 준다', async () => {

@@ -131,6 +131,8 @@
 .mg-layout-dialog textarea { min-height: 84px; width: 100%; padding: 12px; resize: vertical; background: var(--mg-field); border: 1px solid var(--mg-hair-strong); border-radius: 14px; color: var(--mg-ink); font: inherit; }
 .mg-layout-ai { display: flex; align-items: center; gap: 8px; color: var(--mg-muted); }
 .mg-layout-canvas { height: clamp(240px, 43vh, 440px); overflow: hidden; border: 1px solid var(--mg-hair-strong); border-radius: 16px; }
+/* The proposal shown is not the one for what is entered now (being remade, or the description changed). */
+.mg-layout-canvas.is-stale { opacity: 0.55; }
 .mg-layout-result { color: var(--mg-ink); margin: 0; }
 @media (max-width: 720px) {
   .mg-layout-backdrop { padding: 8px; }

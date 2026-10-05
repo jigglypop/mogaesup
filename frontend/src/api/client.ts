@@ -29,6 +29,8 @@ type RequestOptions = {
 };
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+/** The code the server answers a request with when it no longer takes the session cookie (server/src/error.rs). */
+export const SESSION_REFUSED = 'login_required';
 
 /**
  * A signal that aborts when `outer` does or after `timeoutMs`; `timedOut` tells the clock from the caller.
@@ -59,8 +61,9 @@ export function deadline(timeoutMs: number, outer?: AbortSignal | null) {
 /**
  * JSON with the server's session cookie. The server takes writes only as same-origin JSON, so every non-GET request
  * carries a JSON body, `{}` when there is nothing to send. A request that gets no answer in time fails with
- * `ApiTimeoutError` rather than holding whoever waits on it for good. A 401 (other than a wrong password) means the
- * session ran out, and signs the member out (`expireSession`).
+ * `ApiTimeoutError` rather than holding whoever waits on it for good. The server's own refusal of the session cookie
+ * (`login_required`) means the session ran out, and signs the member out (`expireSession`); any other 401 (a wrong
+ * password, a refused realtime ticket) is that request's failure alone.
  */
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? 'GET';
@@ -83,7 +86,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     if (!response.ok) {
       const error = body as { code?: string; message?: string } | null;
       const code = error?.code ?? 'http_error';
-      if (response.status === 401 && code !== 'invalid_credentials') expireSession(sentAt);
+      if (response.status === 401 && code === SESSION_REFUSED) expireSession(sentAt);
       throw new ApiRequestError(response.status, code, error?.message ?? `요청이 실패했어요 (${response.status})`);
     }
     return body as T;

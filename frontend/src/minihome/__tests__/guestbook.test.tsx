@@ -6,11 +6,12 @@ import type { GuestbookEntry, GuestbookPage, User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
 import { Guestbook } from '../Guestbook';
 
-const { guestbook, write, remove } = vi.hoisted(() => ({
+const { guestbook, write, remove, removeByAuthor } = vi.hoisted(() => ({
   guestbook: vi.fn<(username: string, before?: string, signal?: AbortSignal) => Promise<GuestbookPage>>(),
   write: vi.fn<() => Promise<{ id: string }>>(), remove: vi.fn<() => Promise<void>>(),
+  removeByAuthor: vi.fn<(username: string, author: string) => Promise<{ deleted: number }>>(),
 }));
-vi.mock('../../api/endpoints', () => ({ socialApi: { guestbook, write, remove } }));
+vi.mock('../../api/endpoints', () => ({ socialApi: { guestbook, write, remove, removeByAuthor } }));
 vi.mock('../../shell/Shell', () => ({ initialOf: (name: string) => name[0], toneOf: () => '0' }));
 
 const viewer: User = { id: 'owner', username: 'me', displayName: '나', role: 'user' };
@@ -24,7 +25,25 @@ const button = (container: HTMLElement, label: string) => [...container.querySel
 
 describe('방명록 요청', () => {
   beforeEach(() => { guestbook.mockResolvedValue(page(['1'], 'cursor')); });
-  afterEach(() => { guestbook.mockReset(); write.mockReset(); remove.mockReset(); });
+  afterEach(() => { guestbook.mockReset(); write.mockReset(); remove.mockReset(); removeByAuthor.mockReset(); vi.restoreAllMocks(); });
+
+  it('섬 주인은 한 사람의 글을 묻고 나서 모두 지운다; 다른 섬에서는 그 버튼이 없다', async () => {
+    removeByAuthor.mockResolvedValueOnce({ deleted: 2 });
+    const ask = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const own = await mount(screen('me'));
+    const clear = own.container.querySelector<HTMLButtonElement>('[aria-label="글쓴이의 글 모두 삭제"]')!;
+    await act(async () => clear.click());
+    expect(removeByAuthor).not.toHaveBeenCalled();
+    guestbook.mockResolvedValueOnce({ entries: [], total: 0, nextBefore: null });
+    await act(async () => clear.click());
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(removeByAuthor).toHaveBeenCalledExactlyOnceWith('me', 'writer');
+    expect(own.container.querySelectorAll('.mg-entries li')).toHaveLength(0);
+    await own.unmount();
+    const other = await mount(screen('home'));
+    expect(other.container.querySelector('[aria-label="글쓴이의 글 모두 삭제"]')).toBeNull();
+    await other.unmount();
+  });
 
   it('로그인하지 않은 방문자의 로그인 링크는 로그인한 뒤 이 섬으로 돌아온다', async () => {
     const { container, unmount } = await mount(

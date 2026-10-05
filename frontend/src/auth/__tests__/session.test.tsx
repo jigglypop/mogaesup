@@ -330,6 +330,45 @@ describe('로그인 상태 제공자', () => {
       await unmount();
     });
 
+    it('로그인하는 동안 돌아온 탭이 물은 me의 답은 로그인 결과를 덮지 않는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      await act(async () => { expireSession(); });
+      // The sign-in is on its way when the tab comes back into view.
+      let signedIn!: (value: { user: User }) => void;
+      login.mockImplementationOnce(() => new Promise((resolve) => { signedIn = resolve; }));
+      const other = { ...mogae, id: 'u2', username: 'other' };
+      let answer!: (value: { user: User | null }) => void;
+      me.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+      let done!: Promise<User>;
+      await act(async () => { done = auth.login({ username: 'other', password: 'password' }); });
+      await act(async () => { window.dispatchEvent(new Event('focus')); await flush(); });
+      await act(async () => { signedIn({ user: other }); await done; });
+      answer?.({ user: null });
+      await act(flush);
+      expect(shown(container)).toBe('signedIn:other');
+      me.mockReset();
+      await unmount();
+    });
+
+    it('풀린 세션으로 새로고침한 뒤 다른 사람이 로그인해도 이전 계정의 초안을 지운다', async () => {
+      // After the reload the server knows nobody, and this page never knew who left the drafts.
+      localStorage.setItem(draftKey(mogae.id, 'title'), JSON.stringify({ text: '초안', base: '' }));
+      localStorage.setItem('mogaesup:layout-interpretations:u1', '[]');
+      localStorage.setItem(draftKey('u2', 'status'), JSON.stringify({ text: '내 초안', base: '' }));
+      me.mockResolvedValueOnce({ user: null });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      expect(shown(container)).toBe('anonymous:-');
+      expect(localStorage.getItem(draftKey(mogae.id, 'title'))).not.toBeNull();
+      login.mockResolvedValueOnce({ user: { ...mogae, id: 'u2', username: 'other' } });
+      await act(async () => { await auth.login({ username: 'other', password: 'password' }); });
+      expect(localStorage.getItem(draftKey(mogae.id, 'title'))).toBeNull();
+      expect(localStorage.getItem('mogaesup:layout-interpretations:u1')).toBeNull();
+      expect(localStorage.getItem(draftKey('u2', 'status'))).not.toBeNull();
+      localStorage.clear();
+      await unmount();
+    });
+
     it('아무도 로그인하지 않았거나 이미 풀린 세션에는 아무 일도 없다', () => {
       setSessionOwner(null);
       expireSession();

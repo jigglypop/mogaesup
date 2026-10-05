@@ -16,6 +16,19 @@ describe('로그인 뒤 돌아갈 곳', () => {
     }
   });
 
+  it('정규화하면 다른 사이트가 되는 경로도 받지 않는다', () => {
+    for (const next of ['/.//evil.example', '/%2e//evil.example', '/%2E//evil.example/a', '/x/..//evil.example/a', '/./\\evil.example', '/\t/evil.example', '/.%2f/evil.example']) {
+      const path = returnPath(next, origin);
+      if (path !== null) expect(new URL(path, origin).origin).toBe(origin);
+      expect(path === null || !path.startsWith('//')).toBe(true);
+    }
+    for (const next of ['/.//evil.example', '/%2e//evil.example', '/x/..//evil.example/a', '/./\\evil.example', '/\t/evil.example']) {
+      expect(returnPath(next, origin)).toBeNull();
+    }
+    // Dot segments that stay on this site are fine, and come back normalized.
+    expect(returnPath('/x/../@mogae', origin)).toBe('/@mogae');
+  });
+
   it('로그인 링크는 지금 있는 곳을 next로 싣고, 로그인 화면에서는 싣지 않는다', () => {
     expect(signInPath('/@mogae/edit')).toBe('/?next=%2F%40mogae%2Fedit');
     expect(signInPath('/character?tab=a')).toBe(`/?next=${encodeURIComponent('/character?tab=a')}`);

@@ -7,6 +7,9 @@ import { draftKey } from '../../auth/drafts';
 import { mount, type } from '../../__tests__/mount';
 import { About, openingText, wantsSave } from '../Profile';
 
+/** The autosaved fields say themselves what went wrong, so they ask the island for no toast. */
+const SILENT = { silent: true };
+
 const view = (changes: Partial<HomeView['profile']> = {}): HomeView => ({
   isOwner: true,
   visits: { today: 0, total: 0 },
@@ -53,7 +56,7 @@ describe('상태 메시지 저장', () => {
       const { container, unmount } = await open();
       await type(container.querySelector<HTMLTextAreaElement>('textarea[aria-label="상태 메시지"]')!, '');
       await wait(900);
-      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '' });
+      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '' }, SILENT);
       await unmount();
     });
 
@@ -69,7 +72,7 @@ describe('상태 메시지 저장', () => {
       const { container, unmount } = await open();
       await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '내일은 비');
       await unmount();
-      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '내일은 비' });
+      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '내일은 비' }, SILENT);
     });
 
     it('저장 실패를 표시하고 다시 열어도 실패한 입력을 남긴다', async () => {
@@ -77,6 +80,8 @@ describe('상태 메시지 저장', () => {
       const first = await open();
       await type(first.container.querySelector<HTMLTextAreaElement>('textarea')!, '내일은 비'); await wait(900);
       expect(first.container.querySelector('[role=alert]')?.textContent).toContain('잠시 후 다시 시도');
+      // The retry is not inside the field's label, which names the field alone.
+      expect(first.container.querySelector('label [role=alert], label button')).toBeNull();
       await first.unmount();
       const next = await open(); expect(next.container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('내일은 비');
       await next.unmount();
@@ -91,7 +96,7 @@ describe('상태 메시지 저장', () => {
       await rerender(<About view={view({ statusMessage: '내일은 비' })} minimes={[]} look={null} onUpdate={onUpdate} onWearLook={() => {}} />);
       finish(); await wait(0);
       expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('모레는 맑음');
-      expect(onUpdate).toHaveBeenLastCalledWith({ statusMessage: '모레는 맑음' });
+      expect(onUpdate).toHaveBeenLastCalledWith({ statusMessage: '모레는 맑음' }, SILENT);
       await unmount();
     });
 
@@ -103,7 +108,7 @@ describe('상태 메시지 저장', () => {
       await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '오늘도 맑음');
       expect(JSON.parse(localStorage.getItem(draftKey('owner', 'status'))!)).toEqual({ text: '오늘도 맑음', base: '오늘도 맑음' });
       await unmount(); finish(); await wait(0);
-      expect(onUpdate).toHaveBeenNthCalledWith(2, { statusMessage: '오늘도 맑음' });
+      expect(onUpdate).toHaveBeenNthCalledWith(2, { statusMessage: '오늘도 맑음' }, SILENT);
     });
 
     it('저장한 값이 돌아와도 이어 치던 끝의 빈칸을 지우지 않는다', async () => {
@@ -113,7 +118,7 @@ describe('상태 메시지 저장', () => {
       const field = () => container.querySelector<HTMLTextAreaElement>('textarea')!;
       await type(field(), '내일은 비');
       await wait(900);
-      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '내일은 비' });
+      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ statusMessage: '내일은 비' }, SILENT);
       // The next word is on its way: a space typed while the save answers.
       await type(field(), '내일은 비 ');
       finish();

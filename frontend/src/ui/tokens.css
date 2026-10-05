@@ -47,6 +47,16 @@
   --mg-sky-3: linear-gradient(180deg, #fff0c9, #c9e5b6);
   --mg-sky-4: linear-gradient(180deg, #d7f0ea, #b9dcb0);
   --mg-island-shade: rgba(90, 150, 70, 0.35);
+  /* The island page behind its canvas (the canvas's daylight sky), the same in either theme. */
+  --mg-island-sky: #8fd3ee;
+  /* A person's initial on their own colour (the chat bar's faces). */
+  --mg-peer-ink: #ffffff;
+  /* 매장 배치's preview canvas (hex: three.js reads them): its sky, and the way in kept clear. */
+  --mg-layout-sky: #cde4e8;
+  --mg-layout-path: #52bba4;
+  /* A switch's knob over its track. */
+  --mg-switch-knob: #ffffff;
+  --mg-switch-knob-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 
   --mg-hair: rgba(29, 24, 48, 0.08);
   --mg-hair-strong: rgba(29, 24, 48, 0.14);
@@ -81,6 +91,11 @@
   --mg-impostor-alarm: #ff4d4f;
   --mg-impostor-visor: #9fd8ef;
   --mg-impostor-dark: rgba(6, 8, 20, 0.94);
+  /* 임포스터's ship over the island (hex: three.js reads them): hall and room floors, the cafeteria, walls. */
+  --mg-ship-hall: #8e94a6;
+  --mg-ship-room: #c9cfdc;
+  --mg-ship-cafeteria: #d9d2c1;
+  --mg-ship-wall: #5d6578;
   /* The crew's colours: bots wear them, and the wires of a task (hex: three.js reads them). */
   --mg-crew-0: #d6302f;
   --mg-crew-1: #2f55d4;
@@ -94,6 +109,23 @@
   --mg-crew-9: #85572c;
   --mg-crew-10: #3fd6c8;
   --mg-crew-11: #7bd84a;
+  /* 카트 in the island's canvas (hex: three.js reads them): the road, its lines and the start's dark squares, the curbs,
+     the floor under the circuit, item boxes, boost pads, the karts' tyres and seats, a water bubble and a booster's
+     flame; the HUD's big words over the world. */
+  --mg-kart-road: #4c5160;
+  --mg-kart-line: #f5f2ea;
+  --mg-kart-checker: #1d1830;
+  --mg-kart-curb-a: #e5483f;
+  --mg-kart-curb-b: #f5f2ea;
+  --mg-kart-ground: #79c26a;
+  --mg-kart-box: #59b4ff;
+  --mg-kart-box-glow: #ffd84d;
+  --mg-kart-boost: #ff9a2e;
+  --mg-kart-tire: #23242c;
+  --mg-kart-seat: #2e303b;
+  --mg-kart-bubble: #8fd6ff;
+  --mg-kart-flame: #ffb03a;
+  --mg-kart-shout: #ffffff;
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(200, 186, 255, 0.5), transparent 62%),
@@ -158,6 +190,10 @@
   --mg-impostor-body: #f06a62;
   --mg-impostor-vent: #6b7180;
   --mg-impostor-alarm: #ff6b6b;
+  --mg-ship-hall: #5c6276;
+  --mg-ship-room: #8a91a6;
+  --mg-ship-cafeteria: #9d9583;
+  --mg-ship-wall: #3e4558;
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(110, 88, 190, 0.35), transparent 62%),

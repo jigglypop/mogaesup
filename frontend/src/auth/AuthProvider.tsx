@@ -50,7 +50,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setFailures(0);
     // A lapsed session reads as nobody signed in; that alone ends nothing the member left unsaved.
     if (!who && !signedOut && sessionLapsed()) return;
-    if (owner.current && owner.current.id !== who?.id) clearDrafts();
+    // Signing in leaves only this member's drafts in the browser, whoever was here before (a page reloaded after a lapse
+    // knows nobody); signing out, or another tab's sign-out, leaves none.
+    if (who) clearDrafts(who.id);
+    else if (signedOut || owner.current) clearDrafts();
     owner.current = who;
     setSessionOwner(who?.id ?? null);
     setUser(who);
@@ -71,6 +74,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     );
   };
   const askAgain = () => {
+    // A sign-in or sign-out on its way decides who is signed in; an answer to a question asked meanwhile would undo it.
+    if (changing.current) return;
     generation.current++;
     stopChecking.current?.();
     check();
@@ -125,6 +130,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     stopChecking.current?.();
     try {
       const result = await action();
+      // Whatever was asked while it ran answers for the session before it.
+      generation.current++;
+      stopChecking.current?.();
       if (mounted.current) accept(who(result), signedOut);
       return result;
     } catch (error) {

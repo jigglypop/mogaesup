@@ -217,8 +217,12 @@ function useBalloonStyle() {
 
 /** What the member just said, above their own character, drawn as the others' words are drawn above theirs. */
 function LocalSpeech({ text, playerRef }: { text: string; playerRef: RefObject<RapierRigidBody> }) {
-  // The balloon follows this vector every frame; the body is where the room places the member for the others too.
-  const position = useMemo(() => new Vector3(), []);
+  // The balloon follows this vector every frame; the body is where the room places the member for the others too. It
+  // starts where the body is, so the first frame does not draw it at the island's origin and fly it over.
+  const position = useMemo(() => {
+    const at = playerRef.current?.translation();
+    return at ? new Vector3(at.x, at.y, at.z) : new Vector3();
+  }, [playerRef]);
   useFrame(() => {
     const body = playerRef.current;
     if (!body) return;

@@ -1,3 +1,5 @@
+import { useRef } from 'react';
+
 import type { WorldQuality } from 'gaesup-world';
 
 import { usePopover } from '../shell/Shell';
@@ -33,9 +35,10 @@ type SettingsProps = {
 /** How the world draws on this device; kept per viewer. */
 export function SettingsMenu({ settings, onChange, bgm, onBgm, onPerformance }: SettingsProps) {
   const { open, setOpen, ref } = usePopover();
+  const trigger = useRef<HTMLButtonElement>(null);
   return (
     <div className="mg-anchor" ref={ref}>
-      <button className="mg-icon-btn" aria-label="화면 설정" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <button ref={trigger} className="mg-icon-btn" aria-label="화면 설정" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(!open)}>
         <Icon name="gear" />
       </button>
       {open && (
@@ -61,6 +64,8 @@ export function SettingsMenu({ settings, onChange, bgm, onBgm, onPerformance }: 
           <button
             className="mg-btn is-quiet is-small"
             onClick={() => {
+              // The report takes the keyboard from here, and gives it back to the settings button when it closes.
+              trigger.current?.focus();
               setOpen(false);
               onPerformance();
             }}

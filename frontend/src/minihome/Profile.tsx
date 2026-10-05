@@ -59,8 +59,9 @@ export function openingText(storageKey: string, value: string): string {
   return value;
 }
 
-/** A text field that saves a moment after typing stops. */
+/** A labelled text field that saves a moment after typing stops; a failed save is said under it, with a retry. */
 function Autosaved({
+  label,
   value,
   onSave,
   multiline = false,
@@ -68,6 +69,7 @@ function Autosaved({
   storageKey,
   ...props
 }: {
+  label: string;
   value: string;
   onSave: (value: string) => void | Promise<void>;
   storageKey: string;
@@ -75,7 +77,6 @@ function Autosaved({
   allowEmpty?: boolean;
   maxLength: number;
   placeholder?: string;
-  'aria-label': string;
 }) {
   const [draft, setDraft] = useState(() => openingText(storageKey, value));
   const [error, setError] = useState('');
@@ -136,6 +137,7 @@ function Autosaved({
   }, [savePending]);
   const common = {
     ...props,
+    'aria-label': label,
     className: 'mg-field',
     value: draft,
     onBlur: savePending,
@@ -146,10 +148,14 @@ function Autosaved({
     keepDraft(storageKey, { text: next, base: saved.current });
     setDraft(next);
   };
+  // The retry sits outside the label, which names the field alone.
   return <>
-    {multiline ? <textarea {...common} rows={2} onChange={(event) => edit(event.target.value)} />
-      : <input {...common} onChange={(event) => edit(event.target.value)} />}
-    {error && <span className="mg-error" role="alert">{error} <button className="mg-link" type="button" onClick={savePending}>다시 저장</button></span>}
+    <label className="mg-label">
+      {label}
+      {multiline ? <textarea {...common} rows={2} onChange={(event) => edit(event.target.value)} />
+        : <input {...common} onChange={(event) => edit(event.target.value)} />}
+    </label>
+    {error && <p className="mg-error" role="alert">{error} <button className="mg-link" type="button" onClick={savePending}>다시 저장</button></p>}
   </>;
 }
 
@@ -219,7 +225,8 @@ export function About({
   view: HomeView;
   minimes: CatalogItem[];
   look: Look | null;
-  onUpdate: (changes: ProfileChanges) => void | Promise<void>;
+  /** `silent`: the change comes from a field that says itself what went wrong. */
+  onUpdate: (changes: ProfileChanges, options?: { silent?: boolean }) => void | Promise<void>;
   onWearLook: () => void | Promise<void>;
   /** Saves the link preview's picture (a JPEG data URL), or null for the site's own. */
   onThumbnail?: (image: string | null) => Promise<void>;
@@ -228,22 +235,16 @@ export function About({
 }) {
   const { profile, isOwner } = view;
   const ownLook = wearsLook(look);
-  const saveTitle = useCallback((title: string) => onUpdate({ title }), [onUpdate]);
-  const saveStatus = useCallback((statusMessage: string) => onUpdate({ statusMessage }), [onUpdate]);
+  const saveTitle = useCallback((title: string) => onUpdate({ title }, { silent: true }), [onUpdate]);
+  const saveStatus = useCallback((statusMessage: string) => onUpdate({ statusMessage }, { silent: true }), [onUpdate]);
   const update = (changes: ProfileChanges) => { void Promise.resolve(onUpdate(changes)).catch(() => undefined); };
 
   return (
     <div className="mg-about">
       {isOwner ? (
         <section className="mg-form">
-          <label className="mg-label">
-            섬 이름
-            <Autosaved key={`${profile.ownerId}:title`} storageKey={draftKey(profile.ownerId, 'title')} value={profile.title} onSave={saveTitle} maxLength={30} placeholder="섬 이름" aria-label="섬 이름" />
-          </label>
-          <label className="mg-label">
-            상태 메시지
-            <Autosaved key={`${profile.ownerId}:status`} storageKey={draftKey(profile.ownerId, 'status')} value={profile.statusMessage} onSave={saveStatus} maxLength={60} aria-label="상태 메시지" multiline allowEmpty />
-          </label>
+          <Autosaved key={`${profile.ownerId}:title`} label="섬 이름" storageKey={draftKey(profile.ownerId, 'title')} value={profile.title} onSave={saveTitle} maxLength={30} placeholder="섬 이름" />
+          <Autosaved key={`${profile.ownerId}:status`} label="상태 메시지" storageKey={draftKey(profile.ownerId, 'status')} value={profile.statusMessage} onSave={saveStatus} maxLength={60} multiline allowEmpty />
           <div className="mg-label">
             오늘 기분
             <div className="mg-tabs" role="radiogroup" aria-label="오늘 기분">

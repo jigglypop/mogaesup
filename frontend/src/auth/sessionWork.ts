@@ -61,3 +61,17 @@ export function onSessionLapse(listener: () => void): () => void {
   lapseListeners.add(listener);
   return () => { lapseListeners.delete(listener); };
 }
+
+const unsavedChecks = new Set<() => boolean>();
+
+/**
+ * Registers a check for edits of the session's owner that are not saved yet (an island being decorated, or one left
+ * while its save kept failing); signing out asks before dropping them. Returns the stop for it.
+ */
+export function trackUnsaved(check: () => boolean): () => void {
+  unsavedChecks.add(check);
+  return () => { unsavedChecks.delete(check); };
+}
+
+/** Whether signing out now would drop edits nobody saved. */
+export const hasUnsavedWork = () => [...unsavedChecks].some((check) => check());

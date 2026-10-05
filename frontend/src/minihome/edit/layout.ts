@@ -106,6 +106,9 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
   const allTiles = snapshot.tileGroups.flatMap(group => group.tiles);
   const cells = new Map(allTiles.filter(validFloor).map(tile => [`${tile.position.x}:${tile.position.z}`, tile]));
   const allCells = new Map(allTiles.map(tile => [`${tile.position.x}:${tile.position.z}`, tile]));
+  // Tiles that can cover a 4 m cell other than their own: larger ones, and any off the grid. A one-cell tile on the grid
+  // covers only its own cell, which `allCells` already answers, so the per-cell scan below runs over these few alone.
+  const spanning = allTiles.filter(tile => (tile.size ?? 1) !== 1 || tile.position.x % 4 !== 0 || tile.position.z % 4 !== 0);
   const existing = snapshot.objects.map(object => {
     const bounds = object.config?.modelUrl ? knownBounds(object.config.modelUrl) : undefined;
     if (object.type === 'model' && !bounds) throw new Error('기존 기물의 크기를 확인하지 못했어요. 다시 배치해 주세요.');
@@ -136,7 +139,7 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
     for (let z = 0; z < intent.depthCells; z++) for (let x = 0; x < intent.widthCells; x++) {
       const tile = cells.get(`${x0 + x * 4}:${z0 + z * 4}`);
       if (tile) selected.push(tile);
-      else if (!allCells.has(`${x0 + x * 4}:${z0 + z * 4}`) && !allTiles.some(v => Math.abs(v.position.x - x0 - x * 4) < (v.size ?? 1) * 2 && Math.abs(v.position.z - z0 - z * 4) < (v.size ?? 1) * 2)) {
+      else if (!allCells.has(`${x0 + x * 4}:${z0 + z * 4}`) && !spanning.some(v => Math.abs(v.position.x - x0 - x * 4) < (v.size ?? 1) * 2 && Math.abs(v.position.z - z0 - z * 4) < (v.size ?? 1) * 2)) {
         const created: TileConfig = { id: createBuildingScopeId('tile'), tileGroupId: '', position: { x: x0 + x * 4, y: 0, z: z0 + z * 4 }, size: 1, shape: 'box', objectType: 'none' };
         selected.push(created); added.push(created);
       }
@@ -245,7 +248,7 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
     return { id: planId, baseline: sameSnapshot(snapshot), snapshot: next, intent, objects, walls, floor: { min, max, color: floorPreset.color },
       entrance, corridorX, corridor, measured: [...measured], notice: [...intent.warnings] };
   }
-  throw new Error(`${intent.widthCells * 4}m × ${intent.depthCells * 4}m의 빈 땅과 출입 경로가 없어요. 크기나 좌석을 줄이거나 기존 기물을 옮겨 주세요.`);
+  throw new Error(`${intent.widthCells * 4}m × ${intent.depthCells * 4}m의 빈 땅과 출입 경로가 없어요.`);
 }
 
 /** One synchronous prepared mutation; the live store and autosaver see no preview writes. */

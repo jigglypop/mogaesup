@@ -29,24 +29,46 @@ const askBeforeClosing = () => {
   else window.removeEventListener('beforeunload', closing);
 };
 
+/** Resolves when the saver has no save in flight (at once if it has none). */
+const idle = (saver: IslandSaver) =>
+  saver.getState().saving
+    ? new Promise<void>((done) => {
+        const stop = saver.subscribe(() => {
+          if (saver.getState().saving) return;
+          stop();
+          done();
+        });
+      })
+    : Promise.resolve();
+
+/** Edits a held saver could still store without its owner: not done, and not waiting for them to sign in again. */
+const stillSaving = (state: SaverState) => !finished(state) && state.problem?.kind !== 'session';
+
+/** A held island under the key opened again could not be saved yet; opening it now would read the copy before it. */
+export class HeldSaveError extends Error {
+  constructor() {
+    super('저장하지 못한 섬이 있어요.');
+    this.name = 'HeldSaveError';
+  }
+}
+
 /**
  * Resolves once no island left under `key` has a save on its way, so opening the same island again reads what that
- * save stored rather than the copy before it (signing in again resumes a held save just before the island reopens).
+ * save stored rather than the copy before it (signing in again resumes a held save just before the island reopens). A
+ * save in flight is waited for; one waiting out its retry delay is sent now. When that fails again it rejects with
+ * `HeldSaveError`, and the island waits (its start fails, with a retry) instead of opening over edits still on their way.
  */
-export function heldSavesSettled(key: string): Promise<void> {
-  const busy = [...holding].filter(([saver, of]) => of === key && saver.getState().saving).map(([saver]) => saver);
-  return Promise.all(
-    busy.map(
-      (saver) =>
-        new Promise<void>((done) => {
-          const stop = saver.subscribe(() => {
-            if (saver.getState().saving) return;
-            stop();
-            done();
-          });
-        }),
-    ),
-  ).then(() => undefined);
+export async function heldSavesSettled(key: string): Promise<void> {
+  const held = [...holding].filter(([, of]) => of === key).map(([saver]) => saver);
+  await Promise.all(
+    held.map(async (saver) => {
+      await idle(saver);
+      if (saver.disposed || !stillSaving(saver.getState())) return;
+      await saver.flush();
+      await idle(saver);
+      if (!saver.disposed && stillSaving(saver.getState())) throw new HeldSaveError();
+    }),
+  );
 }
 
 /**

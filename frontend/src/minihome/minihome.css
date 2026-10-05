@@ -7,7 +7,7 @@
   position: fixed;
   inset: 0;
   overflow: hidden;
-  background: #8fd3ee;
+  background: var(--mg-island-sky);
 }
 /* A long press on the world walks or turns; it should not select text or open the phone's callout. */
 .mg-world-canvas { position: absolute; inset: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
@@ -190,7 +190,7 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   margin-left: -8px;
   border-radius: 50%;
   border: 2px solid var(--mg-glass-strong);
-  color: #fff;
+  color: var(--mg-peer-ink);
   font-size: 12px;
   font-style: normal;
   font-weight: 850;
@@ -213,13 +213,6 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   color: var(--mg-primary-ink);
 }
 .mg-chatbar-send:disabled { opacity: 0.5; }
-.mg-keys { display: flex; flex-wrap: wrap; gap: 8px; }
-/* Keyboard and mouse hints, or on a touch screen the ones for a finger. */
-.mg-keys.is-touch { display: none; }
-@media (hover: none) and (pointer: coarse) {
-  .mg-keys { display: none; }
-  .mg-keys.is-touch { display: flex; }
-}
 .mg-interact {
   justify-self: center;
   display: flex;
@@ -475,7 +468,6 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   .mg-toast { border-radius: var(--mg-r-card); }
   .mg-world-bottom, .mg-world.has-panel .mg-world-bottom { left: var(--mg-edge); right: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); }
   .mg-world.has-panel .mg-world-bottom { display: none; }
-  .mg-keys { display: none; }
   .mg-toolbar { top: calc(var(--mg-edge) + 60px); }
   .mg-inspector { display: none; }
   .mg-drawer { left: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); }
@@ -525,7 +517,6 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   .mg-chatbar-people { display: none; }
   .mg-chatbar-said { max-width: 30%; }
   .mg-chatbar.is-hint { max-width: 100%; padding: 0 16px; }
-  .mg-keys.is-touch { display: none; }
   .mh-status, .mg-world.has-panel .mh-status { right: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); }
 }
 
@@ -537,7 +528,6 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   .mg-side-body { margin: 0 -14px -14px; padding: 2px 14px 14px; }
   .mg-profile .mg-avatar.is-large { width: 44px; height: 44px; border-radius: 14px; font-size: 20px; }
   .mg-profile-chips { display: none; }
-  .mg-keys, .mg-keys.is-touch { display: none; }
 }
 
 @media (pointer: coarse) {

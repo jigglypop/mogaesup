@@ -1,17 +1,19 @@
 import './shell.css';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 import { problemText } from '../api/client';
-import { socialApi } from '../api/endpoints';
+import { authApi, socialApi } from '../api/endpoints';
 import type { IlchonRequest } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { can } from '../auth/can';
+import { hasUnsavedWork } from '../auth/sessionWork';
 import { Icon, type IconName } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
+import { PasswordDialog } from './PasswordDialog';
 
 /** Where an arrow, Home or End key moves to in a menu of `count` items from `index` (-1: none focused yet). */
 export function nextMenuIndex(key: string, index: number, count: number): number | null {
@@ -154,19 +156,29 @@ function SearchBox() {
 /** 이웃 requests waiting for the viewer, with accept and decline in place. */
 function Notifications() {
   const { user } = useAuth();
+  const userId = user?.id ?? null;
   const { open, setOpen, ref } = usePopover();
+  const popoverId = useId();
   const [received, setReceived] = useState<IlchonRequest[]>([]);
   const [error, setError] = useState('');
-  const reload = useCallback(
-    () =>
-      socialApi.requests().then(
-        (result) => setReceived(result.received),
-        () => setReceived([]),
-      ),
-    [],
-  );
+  const viewing = useRef(userId);
+  viewing.current = userId;
+  // Each member's own list: another one signing in starts empty, and answers to the one before are dropped.
   useEffect(() => {
-    if (!user) return undefined;
+    setReceived([]);
+    setError('');
+    setOpen(false);
+    if (!userId) return undefined;
+    let live = true;
+    const reload = () =>
+      socialApi.requests().then(
+        (result) => {
+          if (live) setReceived(result.received);
+        },
+        () => {
+          if (live) setReceived([]);
+        },
+      );
     void reload();
     // A hidden tab skips the minute's check and makes it up as soon as it is shown again.
     let missed = false;
@@ -183,33 +195,44 @@ function Notifications() {
     window.addEventListener(REQUESTS_CHANGED, changed);
     document.addEventListener('visibilitychange', shown);
     return () => {
+      live = false;
       clearInterval(timer);
       window.removeEventListener(REQUESTS_CHANGED, changed);
       document.removeEventListener('visibilitychange', shown);
     };
-  }, [user, reload]);
+  }, [userId, setOpen]);
   if (!user) return null;
   const act = (action: () => Promise<unknown>) => {
+    const mine = userId;
     setError('');
     action()
       .then(() => window.dispatchEvent(new Event(REQUESTS_CHANGED)))
-      .catch((problem: unknown) => setError(problemText(problem)));
+      .catch((problem: unknown) => {
+        if (viewing.current === mine) setError(problemText(problem));
+      });
   };
   return (
     <div className="mg-anchor" ref={ref}>
       <button
         className="mg-icon-btn"
         aria-label={received.length ? `알림 ${received.length}개` : '알림'}
+        aria-haspopup="dialog"
         aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
         onClick={() => setOpen(!open)}
       >
         <Icon name="bell" />
         {received.length > 0 && <span className="mg-count">{received.length}</span>}
       </button>
       {open && (
-        <div className="mg-popover mg-menu is-right" role="dialog" aria-label="알림" tabIndex={-1}>
+        <div id={popoverId} className="mg-popover mg-menu is-right" role="dialog" aria-label="알림" tabIndex={-1}>
           <p className="mg-menu-title">이웃 신청</p>
           {received.length === 0 && <p className="mg-empty">새 알림이 없어요</p>}
+          {received.length > 1 && (
+            <button className="mg-btn is-quiet is-small" onClick={() => act(() => socialApi.dismissAll())}>
+              모두 거절
+            </button>
+          )}
           <ul className="mg-requests">
             {received.map((request) => (
               <li key={request.id}>
@@ -244,34 +267,67 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
   { value: 'system', label: '기기 설정' },
 ];
 
+/** Signing out drops what is held for the member here; it asks first when that loses edits nobody saved. */
+const UNSAVED_QUESTION = '저장하지 못한 변경이 있어요. 로그아웃하면 사라져요. 계속할까요?';
+
 function UserMenu() {
-  const { user, logout } = useAuth();
+  const { user, lapsed, logout } = useAuth();
   const navigate = useNavigate();
   const signIn = useSignInPath();
   const { open, setOpen, ref } = usePopover();
+  const trigger = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useTheme();
   const [leaving, setLeaving] = useState(false);
+  const [endingOthers, setEndingOthers] = useState(false);
   const [error, setError] = useState('');
+  const [status, setStatus] = useState('');
+  const [password, setPassword] = useState(false);
   const pending = useRef(false);
+  const userId = user?.id ?? null;
+  useEffect(() => {
+    setError('');
+    setStatus('');
+    setPassword(false);
+  }, [userId]);
   const signOut = async () => {
     if (pending.current) return;
+    if (hasUnsavedWork() && !window.confirm(UNSAVED_QUESTION)) return;
     pending.current = true;
-    setLeaving(true); setError('');
+    setLeaving(true); setError(''); setStatus('');
     try { await logout(); setOpen(false); navigate('/'); }
     catch (problem) { setError(problemText(problem)); }
     finally { pending.current = false; setLeaving(false); }
   };
+  const endOthers = async () => {
+    if (pending.current) return;
+    pending.current = true;
+    setEndingOthers(true); setError(''); setStatus('');
+    try {
+      const { ended } = await authApi.logoutOthers();
+      setStatus(`다른 기기 ${ended}곳에서 로그아웃했어요`);
+    } catch (problem) { setError(problemText(problem)); }
+    finally { pending.current = false; setEndingOthers(false); }
+  };
   if (!user) {
     return (
-      <Link className="mg-btn is-primary" to={signIn}>
-        로그인
-      </Link>
+      <>
+        <Link className="mg-btn is-primary" to={signIn}>
+          로그인
+        </Link>
+        {/* A session that ran out still holds its member's work here until someone signs in or out. */}
+        {lapsed && (
+          <button className="mg-btn is-quiet" disabled={leaving} onClick={() => void signOut()}>
+            {leaving ? '로그아웃 중…' : '로그아웃'}
+          </button>
+        )}
+        {lapsed && error && <p className="mg-error" role="alert">{error}</p>}
+      </>
     );
   }
   const home = `/@${user.username}`;
   return (
     <div className="mg-anchor" ref={ref}>
-      <button className="mg-me" aria-label="내 메뉴" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <button ref={trigger} className="mg-me" aria-label="내 메뉴" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span className="mg-avatar is-round" data-tone={toneOf(user.username)}>
           {initialOf(user.displayName)}
         </span>
@@ -303,14 +359,32 @@ function UserMenu() {
                 ))}
               </div>
             </div>
-            <button role="menuitem" disabled={leaving} onClick={() => void signOut()}>
+            <button
+              role="menuitem"
+              aria-haspopup="dialog"
+              onClick={() => {
+                // Closing the dialog hands the keyboard back to the menu's button.
+                trigger.current?.focus();
+                setOpen(false);
+                setStatus('');
+                setPassword(true);
+              }}
+            >
+              <Icon name="edit" /> 비밀번호 바꾸기
+            </button>
+            <button role="menuitem" aria-disabled={endingOthers || undefined} onClick={() => void endOthers()}>
+              <Icon name="logout" /> {endingOthers ? '로그아웃하는 중…' : '다른 기기에서 모두 로그아웃'}
+            </button>
+            <button role="menuitem" aria-disabled={leaving || undefined} onClick={() => void signOut()}>
               <Icon name="logout" /> {leaving ? '로그아웃 중…' : '로그아웃'}
             </button>
           </div>
-          {/* A menu holds only its items; what went wrong with one is said beside it. */}
+          {/* A menu holds only its items; what one did, or what went wrong with it, is said beside it. */}
+          {status && <p className="mg-menu-status" role="status">{status}</p>}
           {error && <p className="mg-error mg-menu-error" role="alert">{error}</p>}
         </div>
       )}
+      {password && <PasswordDialog onClose={() => setPassword(false)} />}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import type { SaveSystem } from 'gaesup-world';
 
-import { ApiRequestError, ApiTimeoutError } from '../../api/client';
+import { ApiRequestError, ApiTimeoutError, SESSION_REFUSED } from '../../api/client';
 import { IslandTooLargeError, MAX_ISLAND_BYTES } from '../persistence';
 
 /**
@@ -30,8 +30,8 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
   if (error instanceof ApiRequestError) {
     if (error.code === 'owner_changed') return { kind: 'auth', message: error.message };
     if (error.status === 409) return 'conflict';
-    if (error.status === 401) return { kind: 'session', message: '로그인이 풀려 저장하지 못했어요. 다시 로그인하면 이어서 저장해요.' };
-    if (error.status === 403) return { kind: 'auth', message: '이 섬을 저장할 권한이 없어요.' };
+    if (error.status === 401 && error.code === SESSION_REFUSED) return { kind: 'session', message: '로그인이 풀려 저장하지 못했어요. 다시 로그인하면 이어서 저장해요.' };
+    if (error.status === 401 || error.status === 403) return { kind: 'auth', message: '이 섬을 저장할 권한이 없어요.' };
     // A timeout, a rate limit or a server error may pass in a moment; any other refusal would come back the same.
     if (error.status === 408 || error.status === 429 || error.status >= 500) {
       return { kind: 'server', message: '서버가 잠시 대답하지 않아요. 조금 뒤에 다시 저장해 볼게요.' };
@@ -73,12 +73,18 @@ export function describeStatus(state: SaverState): SaveStatus {
     return { tone: 'bad', label: '불러오지 못함', detail: state.problem?.message ?? '섬을 불러오지 못했어요. 다시 불러와 주세요.' };
   }
   if (state.conflict) {
-    return { tone: 'bad', label: '다른 곳에서 저장됨', detail: '다른 탭이나 기기에서 이 섬을 먼저 저장했어요. 어느 쪽을 남길지 골라 주세요.' };
+    return { tone: 'bad', label: '다른 곳에서 저장됨', detail: '다른 탭이나 기기에서 이 섬을 먼저 저장했어요.' };
   }
   if (state.saving) return { tone: 'busy', label: '저장 중…', detail: '섬을 저장하고 있어요.' };
   if (state.problem) return { tone: 'bad', label: '저장 못 함', detail: state.problem.message };
   // Saving now (Ctrl+S) is on the 저장 button's title and in the shortcut help.
-  if (state.dirty) return { tone: 'warn', label: '저장 안 된 변경', detail: '곧 자동으로 저장돼요.' };
+  if (state.dirty) {
+    return {
+      tone: 'warn',
+      label: '저장 안 된 변경',
+      detail: state.lastSavedAt ? `${clock(state.lastSavedAt)}에 마지막으로 저장했어요.` : '불러온 뒤로 저장하지 않았어요.',
+    };
+  }
   return {
     tone: 'good',
     label: '저장됨',

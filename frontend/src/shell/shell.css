@@ -136,6 +136,12 @@
 .mg-menu-row > span { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
 .mg-menu-row .mg-tabs > button { height: 32px; font-size: 12px; }
 
+/* A modal dialog from the menus (비밀번호 바꾸기), over the page or the island. */
+.mg-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: var(--mg-edge); background: var(--mg-scrim); }
+.mg-modal { width: min(400px, 100%); display: grid; gap: 14px; padding: 22px; background: var(--mg-glass-strong); }
+.mg-modal-form { display: grid; gap: 12px; }
+.mg-menu-status { padding: 4px 10px 6px; font-size: 13px; color: var(--mg-muted); }
+
 .mg-requests { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .mg-requests li { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: center; padding: 8px; border-radius: 14px; }
 @media (hover: hover) {

@@ -138,10 +138,7 @@ export function SaveBanners({ saver, editing, onReloaded }: { saver: IslandSaver
   if (state.conflict) {
     return (
       <div className="mg-conflict mg-glass mg-save-conflict" role="alert">
-        <span>
-          다른 곳에서 이 섬을 먼저 저장했어요. 여기서 꾸민 모습은 아직 그대로 있어요.
-          <small>자동 저장은 고를 때까지 멈춰 있어요.</small>
-        </span>
+        <span>다른 곳에서 이 섬을 먼저 저장했어요.</span>
         <div className="mg-row">
           <button className="mg-btn is-primary is-small" disabled={state.saving} onClick={() => void saver.overwrite()}>
             내 편집으로 덮어쓰기

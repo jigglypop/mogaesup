@@ -66,7 +66,9 @@ describe('로그인 화면에서 돌아가는 곳', () => {
   });
 
   it('next가 없거나 다른 사이트를 가리키면 내 섬으로 간다', async () => {
-    for (const entry of ['/', `/?next=${encodeURIComponent('https://evil.example/')}`, `/?next=${encodeURIComponent('//evil.example')}`]) {
+    // Including paths that only become another site once normalized: before, these threw inside <Navigate>.
+    const away = ['https://evil.example/', '//evil.example', '/.//evil.example', '/%2e//evil.example', '/x/..//evil.example/a'];
+    for (const entry of ['/', ...away.map((next) => `/?next=${encodeURIComponent(next)}`)]) {
       me.mockResolvedValueOnce({ user: mogae });
       const { container, unmount } = await open(entry);
       expect(where(container)).toBe('/@mogae');

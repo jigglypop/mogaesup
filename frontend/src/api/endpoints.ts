@@ -26,6 +26,7 @@ import type {
   LayoutInterpretInput,
   LayoutInterpretation,
   LayoutCapabilities,
+  PasswordChange,
   ProfileChanges,
   RealtimeTicket,
   Registration,
@@ -53,6 +54,10 @@ export const authApi = {
   register: (body: Registration) => api<{ user: User }>('/auth/register', { method: 'POST', body }),
   login: (body: Credentials) => api<{ user: User }>('/auth/login', { method: 'POST', body }),
   logout: () => api<void>('/auth/logout', { method: 'POST' }),
+  /** 204 once the password is changed; `wrong_password` when the current one is not it. */
+  changePassword: (body: PasswordChange) => api<void>('/auth/password', { method: 'POST', body }),
+  /** Ends every other session of the member; `ended` counts them. */
+  logoutOthers: () => api<{ ended: number }>('/auth/logout-others', { method: 'POST' }),
   realtimeTicket: () => api<RealtimeTicket>('/auth/realtime-ticket', { method: 'POST' }),
 };
 
@@ -95,6 +100,9 @@ export const socialApi = {
   write: (username: string, body: { body: string; secret: boolean }) =>
     api<{ id: string }>(`/homes/${segment(username)}/guestbook`, { method: 'POST', body }),
   remove: (id: string) => api<void>(`/guestbook/${segment(id)}`, { method: 'DELETE' }),
+  /** Every note `author` left on `username`'s guestbook, removed by its owner (or a moderator). */
+  removeByAuthor: (username: string, author: string) =>
+    api<{ deleted: number }>(`/homes/${segment(username)}/guestbook?author=${segment(author)}`, { method: 'DELETE' }),
   ilchons: (username: string) => api<{ ilchons: Ilchon[] }>(`/homes/${segment(username)}/ilchons`),
   status: (username: string) => api<IlchonStatus>(`/ilchon/${segment(username)}`),
   request: (username: string, body: IlchonAsk) =>
@@ -113,6 +121,8 @@ export const socialApi = {
   accept: (id: string, body: { name?: string }) =>
     changesRequests(api<IlchonStatus>(`/ilchon-requests/${segment(id)}/accept`, { method: 'POST', body })),
   dismiss: (id: string) => changesRequests(api<void>(`/ilchon-requests/${segment(id)}`, { method: 'DELETE' })),
+  /** Dismisses every 이웃 request the viewer received. */
+  dismissAll: () => changesRequests(api<{ dismissed: number }>('/ilchon-requests', { method: 'DELETE' })),
 };
 
 /** The public lists change only when an admin publishes, so an island opened soon after another reuses them. */

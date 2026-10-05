@@ -163,28 +163,6 @@ h1, h2, h3, h4, p { margin: 0; }
 .mg-badge.is-published { background: var(--mg-good-soft); color: var(--mg-good); }
 .mg-badge.is-retired { background: var(--mg-tint); color: var(--mg-muted); }
 .mg-badge.is-admin { background: var(--mg-ink); color: var(--mg-surface); }
-.mg-kbd {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 30px;
-  padding: 0 10px 0 5px;
-  border-radius: 10px;
-  background: var(--mg-glass-strong);
-  border: 1px solid var(--mg-line);
-  font-size: 12px;
-  font-weight: 700;
-  box-shadow: var(--mg-shadow-soft);
-}
-.mg-kbd kbd {
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
-  border-radius: 7px;
-  background: var(--mg-tint);
-  font: 800 11px/22px var(--mg-font);
-  text-align: center;
-}
 
 /* Tabs and segmented controls */
 .mg-tabs {
@@ -271,8 +249,8 @@ textarea.mg-field { height: auto; min-height: 76px; padding: 11px 14px; resize: 
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  background: var(--mg-switch-knob);
+  box-shadow: var(--mg-switch-knob-shadow);
   transition: transform 0.15s;
 }
 .mg-switch input:checked { background: var(--mg-primary); }

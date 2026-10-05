@@ -78,6 +78,23 @@ describe('권한 화면의 불러오기', () => {
     await unmount();
   });
 
+  it('권한이 바뀌어 첫 페이지를 다시 읽으면, 그 전에 누른 더 보기의 늦은 답은 붙이지 않는다', async () => {
+    audit.mockResolvedValueOnce({ entries: [entry(9)], users: {}, nextBefore: 9 });
+    const { container, rerender, unmount } = await mount(<AuditPanel revision={0} />);
+    await flush();
+    let late!: (page: Page) => void;
+    audit.mockImplementationOnce(() => new Promise((resolve) => (late = resolve)));
+    await act(async () => button(container, '더 보기')!.click());
+    audit.mockResolvedValueOnce({ entries: [entry(10), entry(9)], users: {}, nextBefore: 9 });
+    await rerender(<AuditPanel revision={1} />);
+    await flush();
+    await act(async () => late({ entries: [entry(8)], users: {}, nextBefore: null }));
+    expect([...container.querySelectorAll('.mg-perm-audit li')]).toHaveLength(2);
+    // The new first page's cursor still asks for what follows it.
+    expect(button(container, '더 보기')?.disabled).toBe(false);
+    await unmount();
+  });
+
   it('기록을 처음부터 읽지 못하면 다시 불러올 수 있다', async () => {
     audit.mockRejectedValueOnce(new TypeError('Failed to fetch'));
     const { container, unmount } = await mount(<AuditPanel revision={0} />);

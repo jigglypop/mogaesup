@@ -55,7 +55,7 @@ function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
     setSending(true);
     const ok = await onSubmit(fields);
     setSending(false);
-    if (!ok) setProblem('가져오기를 시작하지 못했어요. 위 안내를 확인해 주세요.');
+    if (!ok) setProblem('가져오기를 시작하지 못했어요.');
   };
   return (
     <form className="mg-admin-form" onSubmit={(event) => void submit(event)}>

@@ -75,6 +75,17 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
     }));
   };
 
+  // The island's owner may clear everything one visitor left at once.
+  const owner = !!viewer && viewer.username === username;
+  const removeAuthor = (entry: GuestbookEntry) => {
+    if (!window.confirm(`${entry.author.displayName}의 글을 모두 지울까요?`)) return;
+    mutate(async (scope) => {
+      await socialApi.removeByAuthor(username, entry.author.username);
+      if (scope.controller.signal.aborted) return;
+      await load();
+    });
+  };
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const body = text.trim();
@@ -142,6 +153,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
                 {entry.canDelete && (
                   <button
                     className="mg-link"
+                    aria-label={`${entry.author.displayName}의 글 삭제`}
                     disabled={posting}
                     onClick={() =>
                       mutate(async (scope) => {
@@ -154,8 +166,18 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
                     삭제
                   </button>
                 )}
+                {owner && entry.author.username !== username && (
+                  <button
+                    className="mg-link"
+                    aria-label={`${entry.author.displayName}의 글 모두 삭제`}
+                    disabled={posting}
+                    onClick={() => removeAuthor(entry)}
+                  >
+                    이 사람 글 모두 삭제
+                  </button>
+                )}
               </p>
-              <p className="mg-entry-body">{entry.secret && !entry.body ? '주인과 글쓴이만 볼 수 있어요' : entry.body}</p>
+              <p className="mg-entry-body">{entry.secret && !entry.body ? '내용 비공개' : entry.body}</p>
             </div>
           </li>
         ))}
