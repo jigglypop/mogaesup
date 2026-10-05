@@ -69,7 +69,7 @@ class FakeProcess:
         self.completed = False
 
     def wait(self, timeout=None):
-        self.completed = True
+        self.completed, self.timeout = True, timeout
         return self.exit_code
 
     def poll(self):
@@ -136,6 +136,8 @@ def test_the_body_reference_worker_gets_no_credentials_and_is_stopped_without_it
     process = FakeProcess(exit_code=0)
     started = launches(monkeypatch, avatar_variants, process)
     avatar_variants.render_body_reference(output, tmp_path/'worker.py')
+    # Three views at up to three minutes each on the studio's two vCPUs.
+    assert process.timeout == avatar_variants.BODY_RENDER_TIMEOUT >= 3*180
     env = started[0]['env']
     assert env['ASSET_STORAGE_WORKER_LOCAL'] == '1'
     assert not {'OPENAI_API_KEY', 'MESHY_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'CHARACTER_DATABASE_URL', 'JWT_SECRET'} & set(env)

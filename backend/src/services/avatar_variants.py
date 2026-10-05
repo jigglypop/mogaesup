@@ -26,6 +26,9 @@ from src.services.studio_library import StudioLibrary
 from src.services.studio_prompts import StudioPrompts
 
 VARIANT_SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes', *EQUIPMENT)
+# Seconds a frozen-body reference render may take once it has its Blender slot. Each view took 1.5-3 minutes on the
+# studio's two vCPUs beside another Blender job (2026-10-05), so three views did not fit in the earlier 240 s.
+BODY_RENDER_TIMEOUT = 900
 
 
 def requested_hair_length(payload):
@@ -647,7 +650,7 @@ def render_body_reference(output, worker):
                  str(worker), '--', str(output/'input.json')],
                 output/'blender.log', output/'runner.json', write_json=_write_json) as process:
             try:
-                code = process.wait(timeout=240)
+                code = process.wait(timeout=BODY_RENDER_TIMEOUT)
             except subprocess.TimeoutExpired:
                 stop_process(process)
                 raise PipelineError('body_render_timeout', '기본 몸 참조 렌더 시간 초과', 409) from None
