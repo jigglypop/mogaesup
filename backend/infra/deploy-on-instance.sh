@@ -25,6 +25,7 @@ source "$config_file"
 : "${ASSET_S3_BUCKET:?ASSET_S3_BUCKET is required}"
 : "${AWS_REGION:?AWS_REGION is required}"
 : "${PROVIDER_SECRET_ARN:?PROVIDER_SECRET_ARN is required}"
+[[ "$AWS_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || { echo 'invalid AWS_REGION' >&2; exit 2; }
 PUBLIC_STUDIO="${PUBLIC_STUDIO:-false}"
 
 # deploy-aws.ps1 passes the end of its SSM execution timeout (epoch seconds). That timeout kills this script without its
@@ -44,24 +45,31 @@ install -d -m 700 /opt/asset-studio /opt/asset-studio/releases /opt/asset-studio
 # nginx's logs, on the host so infra/idle-stop.sh sees the last request even while no container runs.
 install -d -m 755 /var/log/asset-studio
 secret_tmp="$(mktemp /opt/asset-studio/provider.json.XXXXXX)"
-provider_backup=''
+# The configuration the running release started with, kept from just before the new one is installed until the new
+# release is committed. A deployment that was killed (the SSM timeout skips the EXIT trap) leaves it for the next one to
+# put back (recover_interrupted below).
+provider_previous=/opt/asset-studio/provider.previous.json
+provider_backup=false
 provider_installed=false
 provider_committed=false
 restore_provider() {
   if [[ "$provider_installed" == true && "$provider_committed" != true ]]; then
-    if [[ -n "$provider_backup" ]]; then
-      mv -f "$provider_backup" /opt/asset-studio/provider.json
-      provider_backup=''
+    if [[ "$provider_backup" == true && -f "$provider_previous" ]]; then
+      mv -f "$provider_previous" /opt/asset-studio/provider.json
+      provider_backup=false
     else
       rm -f /opt/asset-studio/provider.json
     fi
     provider_installed=false
   fi
 }
+gateway_header=''
 cleanup_files() {
   restore_provider
   [[ -z "$secret_tmp" ]] || rm -f "$secret_tmp"
-  [[ -z "$provider_backup" ]] || rm -f "$provider_backup"
+  [[ -z "$gateway_header" ]] || rm -f "$gateway_header"
+  # Only a copy this run made: one an interrupted run left is the next step's to recover.
+  [[ "$provider_backup" != true ]] || rm -f "$provider_previous"
 }
 trap cleanup_files EXIT
 chmod 600 "$secret_tmp"
@@ -99,7 +107,8 @@ candidate="gaesup-asset-studio-candidate-${release_sha:0:12}"
 if ! docker image inspect "$image" >/dev/null 2>&1; then
   docker build --pull -t "$image" -f "$source_root/infra/Dockerfile" "$source_root"
 fi
-if docker inspect -f '{{.State.Running}}' "$candidate" 2>/dev/null | grep -qx true; then
+if docker inspect -f '{{.State.Running}}' "$candidate" 2>/dev/null | grep -qx true || \
+   docker ps --filter 'name=^gaesup-asset-studio-candidate-' --format '{{.Names}}' 2>/dev/null | grep -q .; then
   echo 'a previous candidate is still running; inspect and recover that deployment before submitting another' >&2
   exit 5
 fi
@@ -107,13 +116,31 @@ docker rm "$candidate" >/dev/null 2>&1 || true
 
 service_running() { docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; }
 
-# Recover the stable name first if an earlier process ended between rename and rollback.
-if ! docker inspect "$service_name" >/dev/null 2>&1 && docker inspect "$rollback_name" >/dev/null 2>&1; then
-  docker rename "$rollback_name" "$service_name"
-  if ! service_running; then
-    docker start "$service_name" >/dev/null
+# An earlier deployment that was killed before its commit (the SSM timeout skips its EXIT trap) left one of:
+#  - the old runtime renamed for rollback and nothing under the stable name: it gets its name and its configuration back;
+#  - the old runtime still under the stable name with the new configuration on disk: its configuration comes back, so a
+#    restart of it does not start the old release with the new secrets.
+# With both containers present the new runtime had already taken the stable name, so its configuration stays.
+recover_interrupted() {
+  local has_service=false has_rollback=false
+  docker inspect "$service_name" >/dev/null 2>&1 && has_service=true
+  docker inspect "$rollback_name" >/dev/null 2>&1 && has_rollback=true
+  if [[ -f "$provider_previous" ]]; then
+    if [[ "$has_service" != true || "$has_rollback" != true ]]; then
+      mv -f "$provider_previous" /opt/asset-studio/provider.json
+      echo 'restored the configuration an interrupted deployment had replaced' >&2
+    else
+      rm -f "$provider_previous"
+    fi
   fi
-fi
+  if [[ "$has_service" != true && "$has_rollback" == true ]]; then
+    docker rename "$rollback_name" "$service_name"
+    if ! service_running; then
+      docker start "$service_name" >/dev/null
+    fi
+  fi
+}
+recover_interrupted
 
 health_snapshot() {
   # Missing counters cannot prove that a release is idle. Readiness also waits for the configured database check.
@@ -169,8 +196,9 @@ save_token() {
 # One request to the runtime's loopback control. Sets admission_status (000: nothing answered) and admission_body.
 admission_request() {
   local output
-  output="$(curl --silent --max-time 5 -X "$1" -H 'Content-Type: application/json' --data "$drain_payload" \
-    --write-out '\n%{http_code}' http://127.0.0.1:8000/internal/drain 2>/dev/null)" || true
+  # The token goes in on stdin, not on the command line other processes can read.
+  output="$(curl --silent --max-time 5 -X "$1" -H 'Content-Type: application/json' --data @- \
+    --write-out '\n%{http_code}' http://127.0.0.1:8000/internal/drain 2>/dev/null <<< "$drain_payload")" || true
   admission_status="${output##*$'\n'}"
   admission_body="${output%$'\n'*}"
   [[ "$admission_status" =~ ^[0-9]{3}$ ]] || admission_status=000
@@ -211,9 +239,44 @@ release_admission() {
     reopen_admission || true
   fi
 }
-cleanup() { cleanup_files; release_admission; }
+# Set once the running release is stopped for the candidate, until the candidate is committed: however this script ends
+# in between (a failed command, an explicit exit, INT or TERM), the EXIT trap puts the previous runtime back first.
+replacing=false
+cleanup() {
+  if [[ "$replacing" == true && "$provider_committed" != true ]]; then
+    restore_previous || true
+  fi
+  cleanup_files
+  release_admission
+}
 trap cleanup EXIT
 trap 'exit 1' INT TERM
+
+# Record database migrations, before anything is stopped: they only add (.github/scripts/check_migrations.py), so the
+# running release works on the migrated schema, and one that fails leaves everything as it is. The new release's image
+# applies them with the configuration it will run with; its output stays on the instance, as it may name the database.
+if python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("CHARACTER_DATABASE_URL") else 1)' "$secret_tmp"; then
+  if (( $(budget_left) < replace_seconds + 120 )); then
+    echo "only $(budget_left) s of the deployment time limit are left, too few to migrate, drain, replace and roll back; nothing was changed. The image is built: deploy again" >&2
+    exit 7
+  fi
+  migration_log=/var/log/asset-studio-migrate.log
+  migration="gaesup-asset-studio-migrate-${release_sha:0:12}"
+  docker rm -f "$migration" >/dev/null 2>&1 || true
+  if timeout --kill-after=10 300 docker run --rm --name "$migration" --network host \
+       -e ASSET_S3_BUCKET="$ASSET_S3_BUCKET" -e ASSET_S3_REGION="$AWS_REGION" -e AWS_REGION="$AWS_REGION" \
+       -v "$secret_tmp:/run/studio-secrets.json:ro" \
+       "$image" python -c 'import json, os, runpy, sys
+os.environ["CHARACTER_DATABASE_URL"] = json.load(open("/run/studio-secrets.json"))["CHARACTER_DATABASE_URL"]
+sys.argv = ["src.records", "migrate"]
+runpy.run_module("src.records", run_name="__main__")' > "$migration_log" 2>&1; then
+    grep -E '^(applied |record schema ready)' "$migration_log" || true
+  else
+    docker rm -f "$migration" >/dev/null 2>&1 || true
+    echo "record database migration failed; nothing was changed and the running release keeps serving. The log is in $migration_log on the instance" >&2
+    exit 8
+  fi
+fi
 
 if (( $(budget_left) < replace_seconds + 30 )); then
   echo "only $(budget_left) s of the deployment time limit are left, too few to drain, replace and roll back; nothing was stopped. The image is built: deploy again" >&2
@@ -268,8 +331,11 @@ done
 
 original_id="$(docker inspect -f '{{.Id}}' "$service_name" 2>/dev/null || true)"
 candidate_id=''
+restored=false
 restore_previous() {
   trap - ERR INT TERM
+  [[ "$restored" != true ]] || return 0
+  restored=true
   restore_provider
   if [[ -z "$candidate_id" ]]; then
     candidate_id="$(docker inspect -f '{{.Id}}' "$candidate" 2>/dev/null || true)"
@@ -297,12 +363,14 @@ restore_previous() {
   fi
   # The EXIT trap reopens admission once the restored runtime answers.
 }
-trap 'restore_previous; exit 1' ERR INT TERM
+replacing=true
+trap 'exit 1' ERR INT TERM
 
 # Keep the previous configuration with its container; a failed candidate must not change rollback credentials.
 if [[ -f /opt/asset-studio/provider.json ]]; then
-  provider_backup="$(mktemp /opt/asset-studio/provider.previous.XXXXXX)"
-  cp -p /opt/asset-studio/provider.json "$provider_backup"
+  cp -p /opt/asset-studio/provider.json "$provider_previous.new"
+  mv -f "$provider_previous.new" "$provider_previous"
+  provider_backup=true
 fi
 mv -f "$secret_tmp" /opt/asset-studio/provider.json
 secret_tmp=''
@@ -320,17 +388,29 @@ fi
 
 # The candidate starts with admission closed by this deployment's token, also when no runtime was running before: a
 # failure from here on leaves the drain to this run's EXIT trap or, when nothing answers, to the next deployment.
+# Docker does not restart it (a reboot, a daemon restart) before it is verified, so an unverified release never comes
+# back by itself.
 save_token
 drain_acquired=true
 start_id="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-docker run -d --restart unless-stopped --name "$candidate" --network host \
+# The token reaches the candidate as a file in a folder of its own (neither `ps` nor `docker inspect` shows it). The
+# file goes once the candidate has applied it; the folder stays while a container that mounts it exists.
+# Host networking stays: the instance's metadata service answers one network hop only (ec2.yaml HttpPutResponseHopLimit
+# 1), so a bridged container would get no role credentials for S3 and the secrets, and nginx serves CloudFront on port
+# 80. The container runs as root for nginx's port 80 and the rules entrypoint.py writes under /etc/nginx.
+start_dir="/opt/asset-studio/start-tokens/$start_id"
+install -d -m 700 /opt/asset-studio/start-tokens "$start_dir"
+(umask 077; printf '%s\n' "$drain_token" > "$start_dir/token")
+docker run -d --restart no --name "$candidate" --network host \
   --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
   --label gaesup.release.sha256="$release_sha" \
+  --label gaesup.start.id="$start_id" \
   -e ASSET_S3_BUCKET="$ASSET_S3_BUCKET" \
   -e ASSET_S3_REGION="$AWS_REGION" \
   -e AWS_REGION="$AWS_REGION" \
   -e STUDIO_RELEASE_SHA="$release_sha" \
-  -e ASSET_START_DRAIN_TOKEN="$drain_token" \
+  -e ASSET_START_DRAIN_TOKEN_FILE=/run/start-token/token \
+  --mount "type=bind,source=$start_dir,target=/run/start-token,readonly" \
   -e ASSET_START_DRAIN_ID="$start_id" \
   -e PUBLIC_STUDIO="$PUBLIC_STUDIO" \
   -v /opt/asset-studio/provider.json:/run/studio-secrets.json:ro \
@@ -359,12 +439,42 @@ if [[ "$healthy" != true ]]; then
   echo 'candidate health check failed; previous container restored' >&2
   exit 1
 fi
+# Applied: the candidate answered with admission closed by it.
+rm -f "$start_dir/token"
+# Port 80 (CloudFront's way in) must not let a request without the gateway key through: 403 with PUBLIC_STUDIO, 404
+# without it. With PUBLIC_STUDIO, the key (in a header file, not on the command line) must get through.
+public_status="$(curl --silent --max-time 3 --output /dev/null --write-out '%{http_code}' http://127.0.0.1/api/health 2>/dev/null || true)"
+public_status="${public_status##*$'\n'}"
+if [[ "$public_status" =~ ^[23][0-9][0-9]$ ]]; then
+  restore_previous
+  echo "port 80 answered HTTP $public_status to a request without the gateway key; previous container restored" >&2
+  exit 1
+fi
+if [[ "${PUBLIC_STUDIO,,}" == true ]]; then
+  gateway_header="$(mktemp /opt/asset-studio/gateway-header.XXXXXX)"
+  python3 -c 'import json, sys; print("x-gateway-key: " + str(json.load(open(sys.argv[1]))["STUDIO_GATEWAY_KEY"]).strip())' \
+    /opt/asset-studio/provider.json > "$gateway_header"
+  keyed_status="$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' -H "@$gateway_header" http://127.0.0.1/api/health 2>/dev/null || true)"
+  rm -f "$gateway_header"
+  gateway_header=''
+  keyed_status="${keyed_status##*$'\n'}"
+  if [[ "$keyed_status" != 200 ]]; then
+    restore_previous
+    echo "port 80 answered HTTP $keyed_status to a request with the gateway key; previous container restored" >&2
+    exit 1
+  fi
+fi
+release_dir="/opt/asset-studio/releases/$release_sha"
+if [[ -e "$release_dir" ]] && ! grep -qx "$release_sha" "$release_dir/.release-sha256"; then
+  restore_previous
+  echo 'existing release directory has a mismatched hash marker; previous container restored' >&2
+  exit 1
+fi
+docker update --restart unless-stopped "$candidate" >/dev/null
 
 docker rename "$candidate" "$service_name"
 
-release_dir="/opt/asset-studio/releases/$release_sha"
 if [[ -e "$release_dir" ]]; then
-  grep -qx "$release_sha" "$release_dir/.release-sha256" || { echo 'existing release directory has a mismatched hash marker' >&2; exit 1; }
   rm -rf "$source_root"
 else
   mv "$source_root" "$release_dir"
@@ -373,7 +483,14 @@ printf '{"release_key":"%s","sha256":"%s","deployed_at":"%s"}\n' \
   "$release_key" "$release_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /opt/asset-studio/current.json.new
 mv -f /opt/asset-studio/current.json.new /opt/asset-studio/current.json
 provider_committed=true
+rm -f "$provider_previous"
+provider_backup=false
+replacing=false
 trap - ERR INT TERM
+# The release a stack update passes as ReleaseKey (backend/infra/ec2.yaml); needs the role's ssm:PutParameter.
+aws ssm put-parameter --name /asset-studio/current-release --type String --overwrite --value "$release_key" \
+  --region "$AWS_REGION" >/dev/null 2>&1 \
+  || echo 'the release could not be recorded in the SSM parameter /asset-studio/current-release; current.json has it' >&2
 # No unverified mutation can run in a candidate before commit. After opening, a lost control response must
 # never force-stop this runtime: a newly accepted paid request may already exist.
 if ! reopen_admission; then
@@ -396,6 +513,14 @@ prune_releases() {
   ls -1t /opt/asset-studio/releases | tail -n +$((keep + 1)) | while read -r name; do
     if [[ "$name" =~ ^[0-9a-f]{64}$ && "$name" != "$release_sha" ]]; then
       rm -rf "/opt/asset-studio/releases/$name"
+    fi
+  done
+  # Startup token folders of containers that are gone; a container that still exists may restart and mounts its own.
+  local used
+  used="$(docker inspect -f '{{index .Config.Labels "gaesup.start.id"}}' "$service_name" "$rollback_name" 2>/dev/null || true)"
+  for name in /opt/asset-studio/start-tokens/*; do
+    if [[ -d "$name" ]] && ! grep -qxF "$(basename "$name")" <<< "$used"; then
+      rm -rf "$name"
     fi
   done
   # Sources that earlier, failed deployments left behind.

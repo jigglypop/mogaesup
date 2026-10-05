@@ -154,8 +154,9 @@ drain_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 drain_payload="{\"token\":\"$drain_token\"}"
 drain_acquired=true
 control_admission() {
+  # The token goes in on stdin, not on the command line other processes can read.
   curl --silent --show-error --fail --max-time 5 -X "$1" -H 'Content-Type: application/json' \
-    --data "$drain_payload" http://127.0.0.1:8000/internal/drain
+    --data @- http://127.0.0.1:8000/internal/drain <<< "$drain_payload"
 }
 release_admission() {
   if [[ "$drain_acquired" == true ]]; then

@@ -28,9 +28,12 @@ def load_bases():
 def parts_of(paths):
     """The release_parts.sh answer for each path."""
     script = f'source "{(HERE / "release_parts.sh").as_posix()}"\nwhile IFS= read -r p; do echo "$(parts_of "$p")"; done\n'
-    done = subprocess.run([BASH, "-c", script], input="\n".join(paths) + "\n", check=True, capture_output=True,
-                          text=True)
-    return dict(zip(paths, (set(line.split()) for line in done.stdout.splitlines())))
+    # Bytes in and out: text mode on Windows would hand bash CRLF line ends, which no pattern matches.
+    done = subprocess.run([BASH, "-c", script], input=("\n".join(paths) + "\n").encode("utf-8"), check=True,
+                          capture_output=True)
+    lines = done.stdout.decode("utf-8").splitlines()
+    assert len(lines) == len(paths), "one answer per path"
+    return dict(zip(paths, (set(line.split()) for line in lines)))
 
 
 class ReleaseRouting(unittest.TestCase):
@@ -271,6 +274,14 @@ class DeployBases(unittest.TestCase):
     def test_nothing_found_leaves_every_base_empty(self):
         found = self.bases([self.run_("c", conclusion="failure")], lambda run: [])
         self.assertEqual(found, dict.fromkeys(("check", *PARTS), ""))
+
+    def test_a_web_deployed_by_hand_is_deployed_again(self):
+        reconcile = load_bases().reconcile
+        found = {"check": "b", "server": "b", "web": "b", "studio": "b"}
+        self.assertEqual(reconcile(found, "c" * 40)["web"], "")
+        self.assertEqual(reconcile(found, "b"), found)
+        # A site that does not say what it runs (an older release) changes nothing.
+        self.assertEqual(reconcile(found, None), found)
 
 
 if __name__ == "__main__":

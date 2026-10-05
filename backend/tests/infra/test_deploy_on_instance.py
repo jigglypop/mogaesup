@@ -60,6 +60,7 @@ def run_candidate(bash, tmp_path, replies, **env):
     probe = text[start:text.index('\ndocker rename "$candidate" "$service_name"', start)]
     script = '\n'.join([
         'set -Eeuo pipefail', 'candidate=fixture-candidate', 'release_sha=' + 'a' * 64,
+        'start_dir=/nonexistent-start-token-dir', 'PUBLIC_STUDIO=false',
         'docker() { if [ "$1" = inspect ]; then echo true; fi; }',
         'sleep() { :; }', 'seq() { echo "1 2 3"; }',
         'restore_previous() { echo previous-restored; }',
@@ -68,6 +69,8 @@ def run_candidate(bash, tmp_path, replies, **env):
         '''curl() {
   if [[ "${*: -1}" == */version.json ]]; then
     printf \'{"release_sha":"%s"}\' "$release_sha"
+  elif [[ "${*: -1}" == http://127.0.0.1/api/health ]]; then
+    printf 403
   else
     "$PYTHON_EXE" -c \'
 import json, os
@@ -198,11 +201,16 @@ if family == 'docker':
             state['images'] = [line for line in state.get('images', []) if line.split('|')[1] != args[-1]]; save()
         sys.exit(0)
     if command == 'inspect':
-        item = container(args[-1])
-        if not item: sys.exit(1)
-        if '-f' not in args: print('{}')
-        elif 'Running' in args[2]: print(str(item['running']).lower())
-        else: print(item['id'])
+        # As docker does: an answer per container found, and a failure when any is missing.
+        form = args[args.index('-f') + 1] if '-f' in args else None
+        names = args[args.index('-f') + 2:] if form else args[1:]
+        found = [container(name) for name in names]
+        for item in filter(None, found):
+            if form is None: print('{}')
+            elif 'Running' in form: print(str(item['running']).lower())
+            elif 'Labels' in form: print(item.get('start_id', ''))
+            else: print(item['id'])
+        if not all(found): sys.exit(1)
     elif command == 'rename': container(args[1])['name'] = args[2]; save()
     elif command == 'stop':
         item = container(args[-1])
@@ -217,13 +225,23 @@ if family == 'docker':
     elif command == 'rm':
         item = container(args[-1])
         if item: state['containers'].remove(item); save()
+    elif command == 'run' and '--rm' in args:
+        # The record database migration in the new image, before anything is stopped.
+        event(['migrate', state['draining'], [item['name'] for item in state['containers'] if item['running']]])
+        print('applied 004_fixture.up.sql\nrecord schema ready')
+        sys.exit(int(os.environ.get('FAKE_MIGRATE_EXIT', '0')))
     elif command == 'run':
-        token = next(value.split('=', 1)[1] for value in args if value.startswith('ASSET_START_DRAIN_TOKEN='))
+        assert args[args.index('--restart') + 1] == 'no', 'an unverified candidate must not be restarted by Docker'
+        assert not any(value.startswith('ASSET_START_DRAIN_TOKEN=') for value in args), 'the token must not be in the env'
+        mount = next(value for value in args if value.startswith('type=bind,source='))
+        token = (Path(mount.split('source=', 1)[1].split(',')[0]) / 'token').read_text().strip()
+        start_id = next(value.split('=', 1)[1] for value in args if value.startswith('gaesup.start.id='))
         if state.get('drain_owner') not in (None, token):
             # The runtime refuses to start: another operation owns admission.
             state['containers'].append({'id': 'new-id', 'name': args[args.index('--name')+1], 'running': False})
             save(); print('new-id'); event(['candidate-refused', state['drain_owner']]); sys.exit(0)
-        state['containers'].append({'id': 'new-id', 'name': args[args.index('--name')+1], 'running': True})
+        state['containers'].append({'id': 'new-id', 'name': args[args.index('--name')+1], 'running': True,
+                                    'start_id': start_id})
         state.update(draining=True, drain_owner=token); save(); print('new-id')
         event(['candidate-admission', state['draining']])
     elif command == 'logs': print('fixture candidate unavailable')
@@ -242,7 +260,9 @@ elif family == 'curl':
         sys.exit(7)
     if args[-1].endswith('/internal/drain'):
         if os.environ.get('FAKE_CONTROL') == 'unsupported': answer(404, '{"detail":"Not Found"}')
-        token = json.loads(args[args.index('--data')+1])['token']
+        data = args[args.index('--data')+1]
+        assert data == '@-', 'the drain token must not be on the command line'
+        token = json.loads(sys.stdin.read())['token']
         if state.get('drain_owner') not in (None, token):
             answer(409, '{"detail":"Runtime admission state cannot be changed"}')
         if method == 'DELETE' and container('new-id'):
@@ -256,6 +276,13 @@ elif family == 'curl':
                                 'admission': {'version': 1, 'verified': True, 'draining': state['draining']}}))
     elif args[-1].endswith('/version.json'):
         print(json.dumps({'release_sha': 'a'*64}))
+    elif args[-1] == 'http://127.0.0.1/api/health':
+        # Port 80: with the gateway key (a header file) or without it.
+        header = args[args.index('-H') + 1] if '-H' in args else ''
+        if header.startswith('@'):
+            assert Path(header[1:]).read_text().startswith('x-gateway-key: ')
+            answer(int(os.environ.get('FAKE_KEYED_STATUS', '200')), '')
+        answer(200 if os.environ.get('FAKE_GATE_OPEN') == '1' else 403, '')
     else:
         candidate = container('new-id')
         if 'FAKE_HEALTH' in os.environ:
@@ -268,10 +295,15 @@ elif family == 'curl':
 elif family == 'systemctl':
     event(['systemctl', *args])
     sys.exit(int(os.environ.get('FAKE_POWEROFF_EXIT', '0')))
+elif family == 'aws':
+    if args[0] == 'secretsmanager':
+        sys.stdout.write(os.environ['FAKE_SECRET_PAYLOAD'])
+    else:
+        event(['aws', *args[:2], args[args.index('--value') + 1] if '--value' in args else None])
 '''
 
 
-def run_host_deploy(bash, tmp_path, *, root=None, **env):
+def run_host_deploy(bash, tmp_path, *, root=None, database=False, interrupted=False, **env):
     """Run the entire deploy script against a disposable host and command doubles, never Docker/AWS. Passing the `root`
     of an earlier run deploys again on that host, as the next deployment would."""
     again = root is not None
@@ -283,11 +315,17 @@ def run_host_deploy(bash, tmp_path, *, root=None, **env):
     (source / '.release-sha256').write_text('a' * 64 + '\n')
     if not again:
         (root / 'studio/provider.json').write_text(json.dumps({'revision': 'old'}))
-    (root / 'config.env').write_text('ASSET_S3_BUCKET=fixture\nAWS_REGION=fixture\nPROVIDER_SECRET_ARN=fixture\n'
+    if interrupted:
+        # A deployment killed after it installed its configuration: the copy of the running release's is left behind.
+        (root / 'studio/provider.previous.json').write_text(json.dumps({'revision': 'old'}))
+        (root / 'studio/provider.json').write_text(json.dumps({'revision': 'interrupted'}))
+    (root / 'config.env').write_text('ASSET_S3_BUCKET=fixture\nAWS_REGION=ap-northeast-2\nPROVIDER_SECRET_ARN=fixture\n'
                                    + 'PUBLIC_STUDIO=' + env.pop('FAKE_PUBLIC', 'false') + '\n')
     secret = {'OPENAI_API_KEY': 'offline', 'MESHY_API_KEY': 'offline', 'revision': 'new'}
     if 'FAKE_GATEWAY_KEY' in env:
         secret['STUDIO_GATEWAY_KEY'] = env.pop('FAKE_GATEWAY_KEY')
+    if database:
+        secret['CHARACTER_DATABASE_URL'] = 'postgresql://fixture'
     containers = {'running': [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}],
                   'stopped': [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': False}],
                   'none': []}[env.pop('FAKE_OLD', 'running')]
@@ -318,7 +356,7 @@ def run_host_deploy(bash, tmp_path, *, root=None, **env):
         'docker() { local code=0; "$PYTHON_EXE" "$FAKE_COMMANDS" docker "$@" || code=$?; '
         'if [[ "${FAKE_TERMINATE:-}" == 1 && "$1" == stop ]]; then kill -TERM $$; fi; return $code; }',
         'curl() { "$PYTHON_EXE" "$FAKE_COMMANDS" curl "$@"; }',
-        'aws() { printf "%s" "$FAKE_SECRET_PAYLOAD"; }',
+        'aws() { "$PYTHON_EXE" "$FAKE_COMMANDS" aws "$@"; }', 'timeout() { shift 2; "$@"; }',
         'python3() { "$PYTHON_EXE" "$@"; }', 'sleep() { :; }', 'seq() { echo "1 2 3"; }',
         # A stub file descriptor lock: no other fake host shares this directory.
         'flock() { :; }', 'chmod() { :; }',
@@ -388,7 +426,8 @@ def test_termination_after_stopping_old_container_restores_it_and_reopens_admiss
 def test_a_candidate_stays_closed_until_health_version_and_release_commit_pass(bash, tmp_path):
     done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1')
     assert done.code == 0 and 'deployment healthy' in done.out
-    assert state['containers'] == [{'id': 'new-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert [{key: item[key] for key in ('id', 'name', 'running')} for item in state['containers']] == [
+        {'id': 'new-id', 'name': 'gaesup-asset-studio', 'running': True}]
     assert not state['draining'] and ['candidate-admission', True] in events
     renamed = next(index for index, event in enumerate(events) if event[:3] == ['docker', 'rename',
         'gaesup-asset-studio-candidate-' + 'a'*12])
@@ -521,6 +560,103 @@ def test_a_successful_deployment_keeps_the_newest_three_releases(bash, tmp_path)
     assert [line.split(':')[-1] for line in state['images']] == [old[3], old[4], 'a' * 64]
     assert not (root / 'studio/incoming' / ('9' * 64)).exists()
     assert ['docker', 'image', 'prune', '-f'] in events
+
+
+def test_a_verified_candidate_is_restarted_by_docker_only_after_its_checks(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1')
+    assert done.code == 0 and 'deployment healthy' in done.out
+    update = events.index(['docker', 'update', '--restart', 'unless-stopped', 'gaesup-asset-studio-candidate-' + 'a'*12])
+    gate = events.index(['curl', 'GET', 'http://127.0.0.1/api/health'])
+    renamed = events.index(['docker', 'rename', 'gaesup-asset-studio-candidate-' + 'a'*12, 'gaesup-asset-studio'])
+    assert gate < update < renamed
+    # The release a later stack update has to pass, recorded once it is committed.
+    recorded = events.index(['aws', 'ssm', 'put-parameter', 'releases/studio/' + 'a'*64 + '.tar.gz'])
+    assert renamed < recorded
+
+
+def test_a_candidate_whose_public_port_answers_without_the_key_is_rolled_back(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1', FAKE_GATE_OPEN='1')
+    assert done.code == 1 and 'port 80 answered HTTP 200' in done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining'] and ['restart-config', 'old'] in events
+    assert not any(event[:2] == ['docker', 'update'] for event in events)
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+
+
+def test_the_startup_token_is_a_file_that_goes_once_applied(bash, tmp_path):
+    stale = tmp_path / 'host/studio/start-tokens' / ('9' * 32)
+    stale.mkdir(parents=True)
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1')
+    assert done.code == 0 and 'deployment healthy' in done.out
+    (service,) = state['containers']
+    folders = list((root / 'studio/start-tokens').iterdir())
+    # The running container's folder stays for its restarts, without the token; folders of gone containers go.
+    assert [folder.name for folder in folders] == [service['start_id']]
+    assert not (folders[0] / 'token').exists() and not stale.exists()
+
+
+def test_a_public_candidate_that_refuses_the_gateway_key_is_rolled_back(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_PUBLIC='true', FAKE_GATEWAY_KEY='a' * 32,
+                                                FAKE_READY='1', FAKE_KEYED_STATUS='403')
+    assert done.code == 1 and 'port 80 answered HTTP 403 to a request with the gateway key' in done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not list((root / 'studio').glob('gateway-header.*'))
+    assert 'a' * 32 not in done.out + done.err
+
+
+def test_a_release_folder_with_another_hash_rolls_back_instead_of_stopping_half_way(bash, tmp_path):
+    release = tmp_path / 'host/studio/releases' / ('a' * 64)
+    release.mkdir(parents=True)
+    (release / '.release-sha256').write_text('b' * 64 + '\n')
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1')
+    assert done.code == 1 and 'mismatched hash marker' in done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining'] and json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+    assert not (root / 'studio/current.json').exists() and not (root / 'studio/provider.previous.json').exists()
+
+
+def test_the_record_database_is_migrated_before_anything_is_stopped(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, database=True, FAKE_READY='1')
+    assert done.code == 0 and 'deployment healthy' in done.out and 'applied 004_fixture.up.sql' in done.out
+    migrated = next(index for index, event in enumerate(events) if event[0] == 'migrate')
+    # The running release still serves, with admission open, while the schema only grows.
+    assert events[migrated][1:] == [False, ['gaesup-asset-studio']]
+    drained = next(index for index, event in enumerate(events) if event[:2] == ['curl', 'POST'])
+    assert migrated < drained
+
+
+def test_a_failed_migration_leaves_the_running_release_alone(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, database=True, FAKE_READY='1', FAKE_MIGRATE_EXIT='1')
+    assert done.code == 8 and 'record database migration failed' in done.err
+    assert 'postgresql://' not in done.out + done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining']
+    assert not any(event[:2] in (['docker', 'stop'], ['curl', 'POST']) or event[:3] == ['docker', 'run', '-d']
+                   for event in events)
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+
+
+def test_without_a_record_database_nothing_is_migrated(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1')
+    assert done.code == 0 and not any(event[0] == 'migrate' for event in events)
+
+
+def test_an_interrupted_deployment_gets_its_runtime_and_configuration_back(bash, tmp_path):
+    # Killed after stopping the old runtime (no EXIT trap): only the rollback container and the copied configuration remain.
+    done, state, events, root = run_host_deploy(bash, tmp_path, interrupted=True, FAKE_OLD='none', FAKE_ROLLBACK_STOPPED='1')
+    assert 'restored the configuration an interrupted deployment had replaced' in done.err
+    # The old runtime restarts with its own configuration, then this deployment's failed candidate restores it again.
+    assert next(event for event in events if event[0] == 'restart-config') == ['restart-config', 'old']
+    assert done.code == 1 and state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+    assert not (root / 'studio/provider.previous.json').exists()
+
+
+def test_an_interrupted_deployment_that_left_the_old_runtime_running_restores_its_configuration(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, interrupted=True, FAKE_BUSY='1')
+    assert done.code == 4 and 'restored the configuration' in done.err
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+    assert not (root / 'studio/provider.previous.json').exists()
 
 
 IDLE_SCRIPT = SCRIPT.with_name('idle-stop.sh')

@@ -8,27 +8,42 @@ prefix (the local prop sandbox `mogaesup-props` stays in S3), imports again to c
 The import also leaves a marker object (`<prefix>/.records-in-database`) in S3: from then on a server of that prefix that
 starts without CHARACTER_DATABASE_URL refuses to start instead of reading the stale S3 records.
 Nothing secret reaches this machine: the URL is built on the instance from the server stack's CharacterDatabaseSecret.
-Usage: python backend/infra/records-to-postgres.py   (then deploy a release whose deploy-on-instance.sh reads the config)
+The database URL stays on the instance: in a root-only file the one-off containers mount, never on a command line or in
+a container's environment (`ps`, `docker inspect`).
+Usage: python backend/infra/records-to-postgres.py [--instance i-…]   (then deploy a release whose deploy-on-instance.sh
+reads the config; the instance defaults to the studio stack's)
 """
+import argparse
 import json
 import subprocess
 import time
 
 REGION = 'ap-northeast-2'
-INSTANCE = 'i-00381416eff810818'
 SERVER_STACK = 'mogaesup-server'
+STUDIO_STACK = 'gaesup-asset-studio'
+# The command's own limit (executionTimeout), and how long its invocation is waited for past it.
+COMMAND_SECONDS = 3600
+COMMAND_WAIT = COMMAND_SECONDS + 120
 
 SCRIPT = r'''
 set -euo pipefail
 . /etc/asset-studio.env
+umask 077
+URL_FILE=$(mktemp /var/tmp/records-url.XXXXXX)
+trap 'rm -f "$URL_FILE"' EXIT
 restart() { echo "failed; starting the studio again on S3 records"; docker start gaesup-asset-studio >/dev/null || true; }
 trap restart ERR
 URL=$(aws secretsmanager get-secret-value --secret-id '{secret}' --query SecretString --output text --region "$AWS_REGION" | python3 -c '
 import json, sys, urllib.parse
 db = json.load(sys.stdin)
 print("postgresql://%s:%s@%s:5432/%s?sslmode=require" % (urllib.parse.quote(db["username"], safe=""), urllib.parse.quote(db["password"], safe=""), sys.argv[1], db["dbname"]))' '{host}')
+printf '%s' "$URL" > "$URL_FILE"
+unset URL
 IMAGE=$(docker inspect -f '{{.Config.Image}}' gaesup-asset-studio)
-rec() { docker run --rm --network host -e ASSET_S3_BUCKET="$ASSET_S3_BUCKET" -e ASSET_S3_REGION="$AWS_REGION" -e AWS_REGION="$AWS_REGION" -e CHARACTER_DATABASE_URL="$URL" "$IMAGE" python -m src.records "$@"; }
+rec() { docker run --rm --network host -e ASSET_S3_BUCKET="$ASSET_S3_BUCKET" -e ASSET_S3_REGION="$AWS_REGION" -e AWS_REGION="$AWS_REGION" -v "$URL_FILE:/run/records-url:ro" "$IMAGE" python -c 'import os, runpy, sys
+os.environ["CHARACTER_DATABASE_URL"] = open("/run/records-url").read().strip()
+sys.argv = ["src.records", *sys.argv[1:]]
+runpy.run_module("src.records", run_name="__main__")' "$@"; }
 rec migrate
 rec import --prefix assets --dry-run | tail -8
 busy=$(curl -s --max-time 5 http://127.0.0.1:8080/api/health | python3 -c 'import json,sys; a=json.load(sys.stdin).get("activity") or {}; print(int(a.get("paid_requests",0))+int(a.get("running_tasks",0)))')
@@ -47,23 +62,36 @@ def aws(*args):
     return json.loads(subprocess.check_output(['aws', *args, '--region', REGION, '--output', 'json']))
 
 
+def stack_outputs(name):
+    return {item['OutputKey']: item['OutputValue']
+            for item in aws('cloudformation', 'describe-stacks', '--stack-name', name)['Stacks'][0]['Outputs']}
+
+
 def main():
-    outputs = {item['OutputKey']: item['OutputValue']
-               for item in aws('cloudformation', 'describe-stacks', '--stack-name', SERVER_STACK)['Stacks'][0]['Outputs']}
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--instance', help="the studio instance (default: the studio stack's InstanceId output)")
+    args = parser.parse_args()
+    instance = args.instance or stack_outputs(STUDIO_STACK)['InstanceId']
+    outputs = stack_outputs(SERVER_STACK)
     script = SCRIPT.replace('{secret}', outputs['CharacterDatabaseSecretArn']).replace('{host}', outputs['DatabaseEndpoint'])
     parameters = json.dumps({'commands': ["cat > /var/tmp/records-to-postgres.sh <<'MOVE'", *script.strip().splitlines(), 'MOVE',
                                           'bash /var/tmp/records-to-postgres.sh; status=$?; rm -f /var/tmp/records-to-postgres.sh; exit $status'],
-                             'executionTimeout': ['3600']})
-    command = aws('ssm', 'send-command', '--instance-ids', INSTANCE, '--document-name', 'AWS-RunShellScript',
+                             'executionTimeout': [str(COMMAND_SECONDS)]})
+    command = aws('ssm', 'send-command', '--instance-ids', instance, '--document-name', 'AWS-RunShellScript',
                   '--parameters', parameters, '--timeout-seconds', '600', '--comment', 'studio records to PostgreSQL')['Command']['CommandId']
+    # Bounded: a lookup that keeps failing, or a command that never ends, stops the wait instead of hanging here.
+    deadline = time.monotonic() + COMMAND_WAIT
+    result = None
     while True:
         time.sleep(10)
         try:
-            result = aws('ssm', 'get-command-invocation', '--command-id', command, '--instance-id', INSTANCE)
+            result = aws('ssm', 'get-command-invocation', '--command-id', command, '--instance-id', instance)
         except subprocess.CalledProcessError:
-            continue
-        if result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
+            result = None
+        if result and result['Status'] not in ('Pending', 'InProgress', 'Delayed'):
             break
+        if time.monotonic() > deadline:
+            raise SystemExit(f'SSM command {command} did not finish within {COMMAND_WAIT} s; inspect it before running again')
     print(result['StandardOutputContent'], result['StandardErrorContent'])
     if result['Status'] != 'Success':
         raise SystemExit(f"failed: {result['Status']}")

@@ -8,9 +8,11 @@ import subprocess
 import sys
 import time
 
+# JWT_SECRET (the app server's FACTORY_JWT_SECRET) lets the API verify the tokens the studio gateway signs, a member's
+# wardrobe reads among them (src/auth.py); without it a request that carries a token is refused with 503.
 allowed = {'OPENAI_API_KEY', 'MESHY_API_KEY', 'OPENAI_API_BASE', 'AVATAR_IMAGE_MODEL', 'TRIPO_API_KEY',
            'AVATAR_3D_PROVIDER', 'BLENDER_CONCURRENCY', 'CHARACTER_DATABASE_URL', 'STUDIO_GATEWAY_KEY',
-           'STUDIO_GATEWAY_KEY_PREVIOUS'}
+           'STUDIO_GATEWAY_KEY_PREVIOUS', 'JWT_SECRET', 'JWT_ISSUER', 'JWT_AUDIENCE'}
 # The gateway key is written into nginx's rules: no quote, space, `;`, `$` or anything else nginx would read.
 GATEWAY_KEY = re.compile(r'[A-Za-z0-9._~-]{16,}')
 GIT_COMMIT = re.compile(r'[0-9a-f]{40}')
@@ -36,8 +38,13 @@ def public_rules(public, gateway_key='', previous_key=''):
     if previous_key and (previous_key == gateway_key or not GATEWAY_KEY.fullmatch(previous_key)):
         raise SystemExit('STUDIO_GATEWAY_KEY_PREVIOUS must be another key of at least 16 characters of A-Z a-z 0-9 . _ ~ -')
     gate = _gate(gateway_key, previous_key)
-    # The API trusts the operator header only for a loopback Host: nginx names the API's own address.
-    proxy = ['  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id 1;', '  proxy_set_header Host 127.0.0.1;',
+    # The API trusts the operator header only for a loopback Host: nginx names the API's own address. A request that
+    # carries a token (the studio gateway signs one, MEMBER for a member's wardrobe reads) goes without the header, so
+    # the token alone decides who it is; the owner's own requests, which carry none, stay the operator. An empty
+    # proxy_set_header value sends no header, and the client's own X-User-Id is never passed on.
+    proxy = ['  set $studio_user 1;', '  if ($http_authorization != "") { set $studio_user ""; }',
+             '  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id $studio_user;',
+             '  proxy_set_header Host 127.0.0.1;',
              '  proxy_set_header Forwarded "";', '  proxy_set_header X-Forwarded-For "";', '  proxy_set_header X-Real-IP "";',
              '  proxy_read_timeout 65s;', '  proxy_buffering off;']
     return [
@@ -50,7 +57,8 @@ def public_rules(public, gateway_key='', previous_key=''):
 
 
 def write_public_rules(path, public, gateway_key, previous_key=''):
-    # nginx injects X-User-Id 1, so without the key whatever reaches port 80 acts as the studio owner.
+    # nginx injects X-User-Id 1 into a request without a token, so without the key whatever reaches port 80 acts as the
+    # studio owner.
     path.write_text('\n'.join(public_rules(public, gateway_key, previous_key)) + '\n', encoding='utf-8')
     path.chmod(0o600)
 

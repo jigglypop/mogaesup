@@ -46,11 +46,15 @@ def user_data(template):
 
 
 def config_variable(template):
-    return template[template.index('- CharacterDbConfig:'):template.index('\n  StudioAddress:')]
+    return template[template.index('- CharacterDbConfig:'):template.index('\n            # Empty unless IdleStop')]
+
+
+def idle_variable(template):
+    return template[template.index('IdleStopConfig: !If'):template.index('\n  StudioAddress:')]
 
 
 def storage_statements(template):
-    policy = template[template.index('        - PolicyName: StudioStorage'):template.index('\n  Profile:')]
+    policy = template[template.index('\n  StudioAccessPolicy:'):template.index('\n  Profile:')]
     return re.split(r'\n\s+- Effect: ', policy)[1:]
 
 
@@ -59,7 +63,7 @@ def parameter(template, name):
 
 
 def test_the_user_data_is_unchanged_without_a_records_database(template):
-    assert user_data(template).replace('${CharacterDbConfig}', '') == USER_DATA_BEFORE
+    assert user_data(template).replace('${CharacterDbConfig}', '').replace('${IdleStopConfig}', '') == USER_DATA_BEFORE
     # The variable sits at the end of the PUBLIC_STUDIO line and is empty unless both values are given.
     assert "PUBLIC_STUDIO='${PublicStudio}'${CharacterDbConfig}\nCONFIG\n" in user_data(template)
     variable = config_variable(template)
@@ -100,12 +104,41 @@ def test_the_records_secret_is_readable_only_when_given(template):
     assert '!If [HasCharacterDb, !Ref CharacterDbSecretArn, !Ref AWS::NoValue]' in reading[0]
 
 
-def test_the_image_still_follows_the_latest_al2023_and_says_how_to_pin_it(template):
+def test_the_image_is_pinned_and_never_resolved_by_an_update(template):
+    # An SSM-resolved image would pick a newer AL2023 on any update and replace the instance.
     block = parameter(template, 'ImageId')
     comment, declaration = block.split('    Type:', 1)
-    assert "'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'" in declaration
-    assert 'Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64' in declaration
-    assert 'pin' in comment and 'AWS::EC2::Image::Id' in comment
+    assert declaration.strip() == "'AWS::EC2::Image::Id'"
+    assert 'SSM::Parameter' not in template and 'Default' not in declaration
+    assert 'describe-instances' in comment and 'update-studio-role.py' in comment
+
+
+def test_the_role_permissions_are_a_resource_of_their_own(template):
+    # A permission change then modifies only that policy, never the role, its profile or the instance.
+    role = template[template.index('\n  InstanceRole:'):template.index('\n  StudioAccessPolicy:')]
+    assert 'Policies:' not in role
+    policy = template[template.index('\n  StudioAccessPolicy:'):template.index('\n  Profile:')]
+    assert 'Type: AWS::IAM::Policy' in policy and 'Roles: [!Ref InstanceRole]' in policy
+
+
+def test_the_release_parameter_is_the_only_one_the_instance_writes(template):
+    writing = [statement for statement in storage_statements(template) if 'ssm:PutParameter' in statement]
+    assert len(writing) == 1 and template.count("'ssm:") == 1
+    assert writing[0].rstrip().endswith(":parameter/asset-studio/current-release'")
+    script = (TEMPLATE.parent / 'deploy-on-instance.sh').read_text(encoding='utf-8')
+    assert '/asset-studio/current-release' in script
+
+
+def test_idle_stop_is_left_alone_unless_asked(template):
+    variable = idle_variable(template)
+    assert variable.startswith('IdleStopConfig: !If\n              - StaysOn\n') and variable.rstrip().endswith("- ''")
+    assert r'"\necho IDLE_STOP=off > /etc/asset-studio-idle.env"' in variable
+    assert "chmod 600 /etc/asset-studio.env${IdleStopConfig}\n" in user_data(template)
+
+
+def test_the_security_group_keeps_the_description_it_was_created_with(template):
+    # A new description replaces the group, and the instance whose network interface names it.
+    assert 'GroupDescription: SSM administration with optional public static HTTP\n' in template
 
 
 def test_the_gateway_key_is_part_of_the_cache_key(template):

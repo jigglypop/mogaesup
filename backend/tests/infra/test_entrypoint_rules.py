@@ -5,7 +5,10 @@ import pytest
 
 ENTRYPOINT = Path(__file__).resolve().parents[2] / 'infra' / 'entrypoint.py'
 KEY = 'Kq3VzX9mTt7RbN2wLp4HyC8sDf6JgA1uEoWi5xMhY0cB'
-PROXY = ['  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id 1;', '  proxy_set_header Host 127.0.0.1;',
+# The operator header goes only with a request that carries no token: the token alone decides who sent one.
+USER = ['  set $studio_user 1;', '  if ($http_authorization != "") { set $studio_user ""; }']
+PROXY = [*USER, '  proxy_pass http://127.0.0.1:8000;', '  proxy_set_header X-User-Id $studio_user;',
+         '  proxy_set_header Host 127.0.0.1;',
          '  proxy_set_header Forwarded "";', '  proxy_set_header X-Forwarded-For "";', '  proxy_set_header X-Real-IP "";',
          '  proxy_read_timeout 65s;', '  proxy_buffering off;']
 # What the container writes to /etc/nginx/studio-public.conf around the gateway check.
@@ -87,6 +90,11 @@ def test_the_key_is_an_allowed_secret(entrypoint):
     assert 'STUDIO_GATEWAY_KEY' in entrypoint.allowed
 
 
+def test_the_api_can_verify_the_gateway_tokens(entrypoint):
+    # Without JWT_SECRET the API refuses every request that carries a token (src/auth.py).
+    assert {'JWT_SECRET', 'JWT_ISSUER', 'JWT_AUDIENCE'} <= entrypoint.allowed
+
+
 def test_a_missing_gateway_key_writes_no_open_rules(entrypoint, tmp_path, capsys):
     target = tmp_path / 'studio-public.conf'
     with pytest.raises(SystemExit, match='STUDIO_GATEWAY_KEY'):
@@ -137,6 +145,21 @@ def test_a_previous_key_that_is_the_current_one_or_invalid_stops_the_start(entry
     assert previous not in str(stopped.value)
 
 
+@pytest.mark.parametrize('previous', ['', PREVIOUS])
+def test_a_request_with_a_token_reaches_the_api_without_the_operator_header(entrypoint, previous):
+    rules = entrypoint.public_rules(True, KEY, previous)
+    assert '  proxy_set_header X-User-Id 1;' not in rules
+    for opening in ('location /api/ {', 'location ~ ^/api/(avatar-factory/base-bodies/glb-assets|studio/glb-assets/upload)$ {'):
+        start = rules.index(opening)
+        end = rules.index('}', start)
+        block = rules[start:end]
+        # The gateway check refuses first; then the header is chosen, then the request is passed on with it.
+        gate = max(i for i, line in enumerate(block) if 'return 403;' in line)
+        chosen = block.index(USER[0])
+        assert gate < chosen < block.index(USER[1]) < block.index('  proxy_set_header X-User-Id $studio_user;')
+        assert sum('X-User-Id' in line for line in block) == 1
+
+
 def test_a_closed_studio_ignores_the_previous_key(entrypoint):
     assert entrypoint.public_rules(False, KEY, PREVIOUS) == CLOSED
 
@@ -171,3 +194,12 @@ def test_nginx_answers_only_requests_that_name_the_loopback_on_the_ssm_port():
     assert 'listen 127.0.0.1:8080;' in studio and 'server_name 127.0.0.1 localhost;' in studio
     assert studio.count('proxy_set_header Host 127.0.0.1;') == 2 and '$host' not in studio
     assert 'Origin' not in studio.replace('foreign Origin', '')
+
+
+def test_the_ssm_port_leaves_a_request_with_a_token_to_its_token():
+    # As the public port does: the operator header goes only with requests that carry no Authorization.
+    text = ENTRYPOINT.with_name('nginx.conf').read_text(encoding='utf-8')
+    studio = text.split('  server {')[2]
+    assert 'proxy_set_header X-User-Id 1;' not in studio
+    assert studio.count('proxy_set_header X-User-Id $studio_user;') == 2
+    assert studio.count('if ($http_authorization != "") { set $studio_user ""; }') == 2

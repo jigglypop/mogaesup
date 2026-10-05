@@ -131,12 +131,34 @@ Resources:
           QueryStringsConfig:
             QueryStringBehavior: none
 
+  # The engine's WebAssembly keeps its name across engine releases while the hashed script that loads it changes. The
+  # deploy uploads it with Cache-Control no-cache, right before index.html; with MinTTL 0 the edges honour that and ask
+  # S3 whether it changed (a 304 when it did not), so a new script never meets a day-old WebAssembly at the edge.
+  StaticRevalidateCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-static-revalidate'
+        Comment: Engine WebAssembly without a content hash; the origin's no-cache makes every edge request revalidate
+        DefaultTTL: 3600
+        MaxTTL: 86400
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
   StaticFileCachePolicy:
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
         Name: !Sub '${AWS::StackName}-static-day'
-        Comment: A day at the edge for models, WASM and fonts without a content hash; deploys invalidate them
+        Comment: A day at the edge for models and fonts without a content hash; deploys invalidate them
         DefaultTTL: 86400
         MaxTTL: 604800
         MinTTL: 86400
@@ -162,22 +184,27 @@ Resources:
           # until then browsers skip it (dark themes flash light) and Chrome's console names the hash it expected.
           # style-src 'unsafe-inline': the engine renders <style> elements (its toast keyframes), whose hashes would change
           # with each engine release. img-src data: and connect-src blob:: the engine's SVG textures and three.js reading
-          # GLB textures from blob: URLs. worker-src blob:: the GI worker. 'self' in connect-src also covers the live
-          # room's wss: on this host.
+          # GLB textures from blob: URLs. worker-src blob:: the GI worker. connect-src names the live room's wss: on this
+          # host as well: browsers that predate CSP Level 3 do not count it as 'self'.
+          # Not allowed: the engine's Draco decoder, which it loads from a fixed https://www.gstatic.com/draco/ address
+          # (no setting moves it here). No model the site serves is Draco-compressed (the build packs with Meshopt); one
+          # that is fails to load, so imports should refuse KHR_draco_mesh_compression.
           ContentSecurityPolicy:
-            ContentSecurityPolicy: >-
-              default-src 'self';
-              script-src 'self' 'sha256-D2PZNR0vxjZdeZxPL0VCEkMuwUEEIyIKks6viRiCnIQ=' 'wasm-unsafe-eval';
-              style-src 'self' 'unsafe-inline';
-              img-src 'self' data: blob:;
-              media-src 'self' data: blob:;
-              font-src 'self';
-              connect-src 'self' blob:;
-              worker-src 'self' blob:;
-              object-src 'none';
-              base-uri 'none';
-              form-action 'self';
-              frame-ancestors 'none'
+            ContentSecurityPolicy: !Sub
+              - >-
+                default-src 'self';
+                script-src 'self' 'sha256-D2PZNR0vxjZdeZxPL0VCEkMuwUEEIyIKks6viRiCnIQ=' 'wasm-unsafe-eval';
+                style-src 'self' 'unsafe-inline';
+                img-src 'self' data: blob:;
+                media-src 'self' data: blob:;
+                font-src 'self';
+                connect-src 'self' blob:${LiveRoom};
+                worker-src 'self' blob:;
+                object-src 'none';
+                base-uri 'none';
+                form-action 'self';
+                frame-ancestors 'none'
+              - LiveRoom: !If [HasDomain, !Sub ' wss://${DomainName}', '']
             Override: true
           ContentTypeOptions:
             Override: true
@@ -311,7 +338,7 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS]
             CachedMethods: [GET, HEAD, OPTIONS]
             Compress: true
-            CachePolicyId: !Ref StaticFileCachePolicy
+            CachePolicyId: !Ref StaticRevalidateCachePolicy
             ResponseHeadersPolicyId: !Ref SecurityHeaders
           - PathPattern: fonts/*
             TargetOriginId: private-s3-origin

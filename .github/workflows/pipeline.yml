@@ -1,8 +1,9 @@
 name: 점검과 배포
 
 # Pull requests and pushes to main run the checks of the parts they changed. A run on main that passes them deploys each
-# part that changed since that part was last deployed: server, then web, then studio. Infrastructure (CloudFormation) is
-# never applied here; the deploy role cannot do it.
+# part that changed since that part was last deployed: server, then studio, then web (the web calls the studio's
+# endpoints through the server, so it goes last). Infrastructure (CloudFormation) is never applied here; the deploy role
+# cannot do it.
 on:
   pull_request:
   push:
@@ -18,9 +19,12 @@ on:
 permissions:
   contents: read
 
-# Runs on main wait for each other and are never cancelled midway. One still waiting when a newer run arrives is replaced
-# by it; every run deploys what each part still lacks since its last deploy (.github/scripts/deploy_bases.py), so nothing
-# the replaced run would have deployed is lost. Pull requests and other branches only check, in a group of their own.
+# The deploy lock. Runs on main wait for each other in the `production` group and are never cancelled midway; one still
+# waiting when a newer run arrives is replaced by it, and every run deploys what each part still lacks since its last
+# deploy (.github/scripts/deploy_bases.py), so nothing the replaced run would have deployed is lost. A deploy by hand goes
+# through this workflow too (Run workflow, `target`), so it waits its turn in the same group; the scripts run from a PC
+# refuse while a run here is queued or in progress, and the instances' install locks keep two installs apart. Pull
+# requests and other branches only check, in a group of their own.
 concurrency:
   group: ${{ (github.event_name == 'pull_request' || github.ref != 'refs/heads/main') && format('check-{0}', github.ref) || 'production' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -28,15 +32,18 @@ concurrency:
 env:
   AWS_REGION: ap-northeast-2
   AWS_ROLE_ARN: arn:aws:iam::960243570517:role/mogaesup-github-deploy
-  # Checks and the release binary use this one compiler. A newer clippy (1.98 flags chunks_exact and Some(..).filter in
-  # server/src/look_bake.rs and looks.rs) must be fixed in the code before this is raised.
+  # Checks and the release binary use this one compiler (server/Cargo.toml asks for 1.95 or newer). The lints a newer
+  # clippy (1.98) raised in server/src/look_bake.rs and looks.rs were fixed, but `cargo clippy --all-targets -D warnings`
+  # has not been run with a newer toolchain yet: raise this, and RUST_IMAGE with it, once it passes there.
   RUST_VERSION: 1.95.0
+  # rust:1.95.0-alpine, by digest: a retagged image cannot change the release build.
+  RUST_IMAGE: rust:1.95.0-alpine@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2
   # The studio image installs this uv (backend/infra/Dockerfile); the checks resolve uv.lock with the same one.
   UV_VERSION: 0.11.9
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -55,6 +62,7 @@ jobs:
         with:
           fetch-depth: 0
           filter: blob:none
+          persist-credentials: false
       - name: 마지막으로 배포한 커밋
         id: previous
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -76,7 +84,7 @@ jobs:
   server-check:
     needs: changes
     if: needs.changes.outputs.server_check == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -96,6 +104,8 @@ jobs:
         working-directory: server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # factory_contract.rs runs the character server's auth.py through uv and skips itself without it.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -109,6 +119,9 @@ jobs:
         with:
           workspaces: server
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A failed release goes back to the previous binary on the migrated database, so migrations only add.
+      - name: 마이그레이션은 더하기만
+        run: python3 ../.github/scripts/check_migrations.py server/migrations
       - run: cargo fmt --check
       # Game modules are declared inside the `registry!` macro (src/games/mod.rs), where cargo fmt does not look.
       - run: rustfmt --edition 2024 --check $(find src/games -name '*.rs')
@@ -119,7 +132,7 @@ jobs:
   backend-check:
     needs: changes
     if: needs.changes.outputs.backend_check == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -142,10 +155,15 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+      # The studio applies them before it stops the running release (backend/infra/deploy-on-instance.sh).
+      - name: 마이그레이션은 더하기만
+        run: python3 .github/scripts/check_migrations.py backend/migrations
       - run: uv sync --locked --extra studio-mcp
       - run: uv run --no-sync python -m compileall -q backend/src
       # PostgreSQL runs beside this job, so the record database tests must not skip themselves here.
@@ -153,13 +171,51 @@ jobs:
         env:
           REQUIRE_TEST_DATABASE: '1'
 
+  # The studio image as the instance builds it (from the release archive prepare-aws.ps1 packs, never pushed anywhere),
+  # and its Blender running the helpers every worker imports. The tests above use a stand-in for Blender.
+  studio-image:
+    needs: changes
+    if: needs.changes.outputs.backend_check == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 릴리스 묶음
+        shell: pwsh
+        run: ./backend/infra/prepare-aws.ps1 -PackOnly
+      - name: 스튜디오 이미지
+        run: |
+          context="$RUNNER_TEMP/studio"
+          mkdir -p "$context"
+          tar -xzf backend/dist/aws/studio.tar.gz -C "$context"
+          docker build --pull -t studio-check -f "$context/infra/Dockerfile" "$context"
+      - name: Blender
+        run: >-
+          docker run --rm -v "$PWD/.github/scripts/blender_smoke.py:/smoke.py:ro" studio-check
+          blender --background --factory-startup --python-exit-code 1 --python /smoke.py
+      - name: 기록 DB 명령
+        run: docker run --rm studio-check python -c "import src.records, src.services.record_store"
+      # nginx.conf with the port-80 rules entrypoint.py writes for a public studio (a stand-in key, rotation included).
+      - name: nginx 설정
+        run: |
+          docker run --rm studio-check sh -c 'python -c "
+          import sys; sys.path.insert(0, \"/app\")
+          from pathlib import Path
+          import entrypoint
+          entrypoint.write_public_rules(Path(\"/etc/nginx/studio-public.conf\"), True, \"k\" * 32, \"p\" * 32)
+          " && nginx -t'
+
   frontend-check:
     needs: changes
     if: needs.changes.outputs.frontend_check == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -170,8 +226,11 @@ jobs:
       # `npm run build` would type-check again first.
       - name: 빌드
         run: npm exec --workspace frontend -- vite build
+      # The source page and the built one: the build may rewrite the inline script.
       - name: 인라인 스크립트의 CSP 해시
-        run: python3 .github/scripts/check_csp.py --html frontend/index.html --template frontend/infra/aws-static.yaml
+        run: |
+          python3 .github/scripts/check_csp.py --html frontend/index.html --template frontend/infra/aws-static.yaml
+          python3 .github/scripts/check_csp.py --html frontend/dist/index.html --template frontend/infra/aws-static.yaml
       # deploy-web ships this build, so what goes live is what was checked, and no build tool runs where the deploy role
       # can be assumed.
       - name: 배포할 빌드
@@ -188,15 +247,17 @@ jobs:
   infra-check:
     needs: changes
     if: needs.changes.outputs.infra_check == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-          cache-dependency-glob: .github/workflows/pipeline.yml
+          cache-dependency-glob: .github/requirements/cfn-lint.txt
       - name: 워크플로 문법과 변경 감지
         run: |
           curl --fail --silent --show-error --location https://github.com/rhysd/actionlint/releases/download/v1.7.11/actionlint_1.7.11_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
@@ -204,13 +265,17 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/pipeline.yml
           python3 .github/scripts/test_changes.py
+          python3 .github/scripts/test_check_migrations.py
+      # cfn-lint and every package it needs, pinned by hash.
       - name: CloudFormation 템플릿
-        run: >-
-          uvx --from cfn-lint==1.57.1 cfn-lint --ignore-checks W1030 --
-          frontend/infra/aws-static.yaml server/infra/aws-server.yaml backend/infra/ec2.yaml .github/aws/deploy-role.yaml
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/cfn-lint"
+          uv pip install --python "$RUNNER_TEMP/cfn-lint" --require-hashes -r .github/requirements/cfn-lint.txt
+          "$RUNNER_TEMP/cfn-lint/bin/cfn-lint" --ignore-checks W1030 -- \
+            frontend/infra/aws-static.yaml server/infra/aws-server.yaml backend/infra/ec2.yaml .github/aws/deploy-role.yaml
       - name: 스크립트 문법
         run: |
-          python3 -m compileall -q server/scripts scripts/props backend/infra
+          python3 -m compileall -q server/scripts scripts/props backend/infra .github/scripts
           for file in $(git ls-files '*.sh'); do bash -n "$file"; done
       - name: PowerShell 문법
         shell: pwsh
@@ -225,9 +290,9 @@ jobs:
           if ($failed) { exit 1 }
 
   gate:
-    needs: [changes, server-check, backend-check, frontend-check, infra-check]
+    needs: [changes, server-check, backend-check, studio-image, frontend-check, infra-check]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - if: ${{ needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
@@ -235,26 +300,19 @@ jobs:
           echo "::error::점검이 실패해 배포하지 않습니다"
           exit 1
 
-  # .github/scripts/deploy_bases.py reads the deploy jobs by these ids (deploy-server, deploy-web, deploy-studio).
-  deploy-server:
-    needs: [changes, gate]
-    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.deploy_server == 'true' }}
-    runs-on: ubuntu-latest
+  # The release binary, built where the deploy role cannot be assumed (no id-token): only the binary and its digest
+  # reach deploy-server. The source goes in read-only; the build writes only server/target (cached) and the crates.
+  build-server:
+    needs: changes
+    if: needs.changes.outputs.deploy_server == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
-    permissions:
-      contents: read
-      id-token: write
+    outputs:
+      sha256: ${{ steps.binary.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Re-running an older run would put its commit back in production while every later run stays green.
-      - name: main의 최신 커밋인지 확인
-        if: github.run_attempt != '1'
-        run: |
-          tip=$(git ls-remote origin refs/heads/main | cut -f1)
-          if [ "$tip" != "$GITHUB_SHA" ]; then
-            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 실행을 다시 돌리면 운영이 되돌아가므로 main에서 새로 실행하세요"
-            exit 1
-          fi
+        with:
+          persist-credentials: false
       # The crates and their release builds carry over between deploys; cargo rebuilds what changed.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -266,16 +324,63 @@ jobs:
       - name: 리눅스 릴리스 바이너리
         working-directory: server
         run: >-
+          mkdir -p target "$HOME/.cache/musl-cargo/registry" &&
           docker run --rm
-          -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/src/target
+          -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/target
           -v "$HOME/.cache/musl-cargo/registry":/usr/local/cargo/registry
-          -v "$PWD":/src -w /src "rust:${RUST_VERSION}-alpine"
+          -v "$PWD":/src:ro -v "$PWD/target":/target -w /src "$RUST_IMAGE"
           sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"
+      - name: 바이너리
+        id: binary
+        working-directory: server/target/x86_64-unknown-linux-musl/release
+        run: echo "sha256=$(sha256sum mogaesup-server | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: server-binary
+          path: server/target/x86_64-unknown-linux-musl/release/mogaesup-server
+          retention-days: 3
+          if-no-files-found: error
+
+  # .github/scripts/deploy_bases.py reads the deploy jobs by these ids (deploy-server, deploy-web, deploy-studio).
+  # Each one first checks that its commit is still main's newest: a run created out of order, or an older run run
+  # again, would put an older release back while every later run stays green. The jobs declare the GitHub environment
+  # the deploy role trusts (.github/aws/deploy-role.yaml) once the repository variable DEPLOY_ENVIRONMENT names it.
+  deploy-server:
+    needs: [changes, gate, build-server]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.build-server.result == 'success' && needs.changes.outputs.deploy_server == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ${{ vars.DEPLOY_ENVIRONMENT || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: main의 최신 커밋인지 확인
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 커밋을 배포하면 운영이 되돌아가므로 main의 최신 실행이 배포합니다"
+            exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: server-binary
+          path: server/target/x86_64-unknown-linux-musl/release
+      - name: 빌드한 바이너리인지 확인
+        env:
+          EXPECTED: ${{ needs.build-server.outputs.sha256 }}
+        run: echo "$EXPECTED  server/target/x86_64-unknown-linux-musl/release/mogaesup-server" | sha256sum -c -
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      # --skip-provision: the stack is not touched; the server keeps the FACTORY_* settings it has.
+      # --skip-provision: the stack is not touched; the server keeps the FACTORY_* settings it has. The script also checks
+      # that CloudFront (the web stack) sends /api/* to this stack's instance.
       - name: 서버 릴리스
         working-directory: server
         run: python3 scripts/deploy-rust-server.py --skip-provision
@@ -290,76 +395,35 @@ jobs:
             python3 -c "import json, sys; d = json.load(open(sys.argv[1])); print(d.get('Status')); print(d.get('StandardErrorContent', '')[-4000:])" "$file"
           done
 
-  deploy-web:
-    needs: [changes, gate, deploy-server]
-    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && needs.changes.outputs.deploy_web == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Re-running an older run would put its commit back in production while every later run stays green.
-      - name: main의 최신 커밋인지 확인
-        if: github.run_attempt != '1'
-        run: |
-          tip=$(git ls-remote origin refs/heads/main | cut -f1)
-          if [ "$tip" != "$GITHUB_SHA" ]; then
-            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 실행을 다시 돌리면 운영이 되돌아가므로 main에서 새로 실행하세요"
-            exit 1
-          fi
-      # The build frontend-check made and checked in this run.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: web-dist
-          path: frontend/dist
-      - name: 운영 CSP
-        run: python3 .github/scripts/check_csp.py --html frontend/dist/index.html --live https://mogaesup.com
-      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      # Uploads dist/, invalidates CloudFront, then checks the published index.html and /api/health.
-      - name: 웹 릴리스
-        shell: pwsh
-        run: ./frontend/scripts/deploy-aws.ps1 -SkipBuild -SkipProvision
-      # aws s3 cp guesses the type of the hashed assets from the runner's mime table; the browser needs JavaScript and CSS.
-      - name: 운영 파일 형식
-        run: |
-          check() {
-            type=$(curl --fail --silent --show-error --max-time 20 --head "https://mogaesup.com$1" | tr -d '\r' | awk -F': ' 'tolower($1) == "content-type" { print tolower($2) }')
-            case "$type" in *"$2"*) echo "$1 $type" ;; *) echo "::error::$1 의 content-type이 $type 입니다"; exit 1 ;; esac
-          }
-          check "$(grep -oE '/assets/[^"]+\.js' frontend/dist/index.html | head -1)" javascript
-          check "$(grep -oE '/assets/[^"]+\.css' frontend/dist/index.html | head -1)" text/css
-
   deploy-studio:
-    needs: [changes, gate, deploy-server, deploy-web]
-    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-web.result) && needs.changes.outputs.deploy_studio == 'true' }}
-    runs-on: ubuntu-latest
+    needs: [changes, gate, deploy-server]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && needs.changes.outputs.deploy_studio == 'true' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
+    environment: ${{ vars.DEPLOY_ENVIRONMENT || '' }}
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Re-running an older run would put its commit back in production while every later run stays green.
+        with:
+          persist-credentials: false
       - name: main의 최신 커밋인지 확인
-        if: github.run_attempt != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
           if [ "$tip" != "$GITHUB_SHA" ]; then
-            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 실행을 다시 돌리면 운영이 되돌아가므로 main에서 새로 실행하세요"
+            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 커밋을 배포하면 운영이 되돌아가므로 main의 최신 실행이 배포합니다"
             exit 1
           fi
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      # The instance powers itself off after two idle hours (backend/infra/idle-stop.sh), and this job does not start it.
-      # The studio then stays pending without holding back the server and web: once it is on, the next run on main (a
-      # push, or a manual run of any target) deploys it.
+      # The instance may power itself off after two idle hours (backend/infra/idle-stop.sh, unless IDLE_STOP=off), and
+      # this job does not start it. The studio then stays pending, and the web with it (it may call new studio
+      # endpoints): once the instance is on, the next run on main (a push, or a manual run of any target) deploys both.
       - name: 스튜디오 인스턴스
         id: instance
         run: |
@@ -374,7 +438,8 @@ jobs:
       - name: 릴리스 묶음
         shell: pwsh
         run: ./backend/infra/prepare-aws.ps1 -Upload
-      # deploy-on-instance.sh waits for running paid work to finish and stops with 4 or 5 when it cannot (backend/README.md).
+      # deploy-on-instance.sh applies the record database migrations, then waits for running paid work to finish and
+      # stops with 4 or 5 when it cannot (backend/README.md).
       - name: 인스턴스에 배포
         shell: pwsh
         env:
@@ -382,3 +447,52 @@ jobs:
         run: |
           $receipt = Get-Content backend/dist/aws/receipt.json -Raw | ConvertFrom-Json
           ./backend/infra/deploy-aws.ps1 -InstanceId $env:STUDIO_INSTANCE_ID -Bucket $receipt.bucket -ReleaseKey $receipt.release_key
+
+  deploy-web:
+    needs: [changes, gate, deploy-server, deploy-studio]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-studio.result) && needs.changes.outputs.deploy_web == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ vars.DEPLOY_ENVIRONMENT || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: main의 최신 커밋인지 확인
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::error::이 실행의 커밋 $GITHUB_SHA 는 main의 최신($tip)이 아닙니다. 옛 커밋을 배포하면 운영이 되돌아가므로 main의 최신 실행이 배포합니다"
+            exit 1
+          fi
+      # The build frontend-check made and checked in this run.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-dist
+          path: frontend/dist
+      # Warnings only: the stack is applied by hand (-ProvisionOnly), and until then the site keeps its old policy.
+      - name: 운영 CSP
+        run: python3 .github/scripts/check_csp.py --html frontend/dist/index.html --live https://mogaesup.com --template frontend/infra/aws-static.yaml
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      # Uploads dist/ (the engine's WebAssembly and index.html last), invalidates CloudFront, checks the published site,
+      # and puts the previous index.html and WebAssembly back when those checks fail.
+      - name: 웹 릴리스
+        shell: pwsh
+        run: ./frontend/scripts/deploy-aws.ps1 -SkipBuild -SkipProvision
+      # aws s3 cp guesses the type of the hashed assets from the runner's mime table; the browser needs JavaScript and CSS.
+      - name: 운영 파일 형식
+        run: |
+          check() {
+            type=$(curl --fail --silent --show-error --max-time 20 --head "https://mogaesup.com$1" | tr -d '\r' | awk -F': ' 'tolower($1) == "content-type" { print tolower($2) }')
+            case "$type" in *"$2"*) echo "$1 $type" ;; *) echo "::error::$1 의 content-type이 $type 입니다"; exit 1 ;; esac
+          }
+          check "$(grep -oE '/assets/[^"]+\.js' frontend/dist/index.html | head -1)" javascript
+          check "$(grep -oE '/assets/[^"]+\.css' frontend/dist/index.html | head -1)" text/css

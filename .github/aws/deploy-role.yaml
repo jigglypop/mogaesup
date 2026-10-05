@@ -16,10 +16,14 @@ Parameters:
     Default: '1393605828'
     AllowedPattern: '[0-9]+'
     Description: Immutable GitHub repository ID used in the OIDC subject
-  Branch:
+  Environment:
     Type: String
-    Default: main
-    Description: Only runs on this branch may assume the role
+    Default: production
+    AllowedPattern: '[A-Za-z0-9_-]+'
+    Description: >-
+      The GitHub environment the pipeline's deploy jobs declare (repository variable DEPLOY_ENVIRONMENT). Only a job
+      in it may assume the role, not every workflow that runs on main; the environment's deployment branch rule
+      allows main only.
   WebBucket:
     Type: String
     Default: mogaesup-web-960243570517-apne2
@@ -56,7 +60,7 @@ Resources:
               StringEquals:
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
                 'token.actions.githubusercontent.com:sub': !Sub
-                  - 'repo:${Owner}@${RepositoryOwnerId}/${Name}@${RepositoryId}:ref:refs/heads/${Branch}'
+                  - 'repo:${Owner}@${RepositoryOwnerId}/${Name}@${RepositoryId}:environment:${Environment}'
                   - Owner: !Select [0, !Split ['/', !Ref Repository]]
                     Name: !Select [1, !Split ['/', !Ref Repository]]
       Policies:
@@ -104,6 +108,9 @@ Resources:
                   - s3:GetBucketVersioning
                   - s3:GetBucketOwnershipControls
                 Resource: !Sub 'arn:aws:s3:::${StudioBucket}'
+              # The install scripts run as root on the two instances. A role that may upload the release could ship any
+              # binary there anyway; what such code may then reach is bounded by the instance roles (the server's reads no
+              # database master secret unless its stack sets DatabaseAdminAccess).
               - Sid: RunReleaseScripts
                 Effect: Allow
                 Action: ssm:SendCommand

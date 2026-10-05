@@ -11,8 +11,10 @@ import subprocess
 import urllib.parse
 from pathlib import Path
 
-# The studio gateway entries of server.env, in the order they are written.
-FACTORY_KEYS = ('FACTORY_URL', 'FACTORY_ACCESS', 'FACTORY_PAID_MONTHLY', 'FACTORY_GATEWAY_KEY', 'STUDIO_INSTANCE_ID')
+# The studio gateway entries of server.env, in the order they are written. The FACTORY_JWT_* and FACTORY_OWNER_ID ones
+# (the tokens the gateway signs for the studio, set by set-factory-jwt.py) are kept as the file has them.
+FACTORY_KEYS = ('FACTORY_URL', 'FACTORY_ACCESS', 'FACTORY_PAID_MONTHLY', 'FACTORY_GATEWAY_KEY', 'STUDIO_INSTANCE_ID',
+                'FACTORY_JWT_SECRET', 'FACTORY_JWT_ISSUER', 'FACTORY_JWT_AUDIENCE', 'FACTORY_OWNER_ID')
 
 
 def parse_args(argv=None):
@@ -29,6 +31,8 @@ def parse_args(argv=None):
     parser.add_argument('--studio-instance-id', default=None)
     parser.add_argument('--model-store', required=True)
     parser.add_argument('--region', default='ap-northeast-2')
+    # The install restarts the service itself, once, after it has swapped the binary (deploy-rust-server.py).
+    parser.add_argument('--no-restart', action='store_true')
     return parser.parse_args(argv)
 
 
@@ -86,7 +90,8 @@ def describe_factory(settings):
         return 'Studio gateway: off (server.env has no FACTORY_URL)'
     shown = ' '.join(f"{key}={settings.get(key) or '(none)'}"
                      for key in ('FACTORY_URL', 'FACTORY_ACCESS', 'FACTORY_PAID_MONTHLY', 'STUDIO_INSTANCE_ID'))
-    return f"Studio gateway: {shown} FACTORY_GATEWAY_KEY={'set' if settings.get('FACTORY_GATEWAY_KEY') else 'not set'}"
+    return (f"Studio gateway: {shown} FACTORY_GATEWAY_KEY={'set' if settings.get('FACTORY_GATEWAY_KEY') else 'not set'} "
+            f"FACTORY_JWT_SECRET={'set' if settings.get('FACTORY_JWT_SECRET') else 'not set'}")
 
 
 SERVICE = '''[Unit]
@@ -114,25 +119,33 @@ WantedBy=multi-user.target
 '''
 
 
-def main():
-    args = parse_args()
-    master = json.loads(secret_value(args.secret, args.region))
-    ticket_secret = secret_value(args.ticket_secret, args.region)
-    if len(ticket_secret.encode()) < 32:
-        raise RuntimeError('Realtime ticket secret is too short')
-    root = Path('/opt/mogaesup')
-    config = Path('/etc/mogaesup')
-    config.mkdir(mode=0o700, exist_ok=True)
-    password_file = config / 'app-password'
-    if not password_file.exists():
-        password_file.write_text(secrets.token_hex(32))
-        password_file.chmod(0o600)
-    password = password_file.read_text().strip()
+def database_env(root, password):
     env = os.environ.copy()
-    env['PGPASSWORD'] = master['password']
+    env['PGPASSWORD'] = password
     env['PGSSLMODE'] = 'verify-full'
     env['PGSSLROOTCERT'] = str(root / 'global-bundle.pem')
     env.setdefault('PGCONNECT_TIMEOUT', '10')
+    return env
+
+
+def app_role_works(endpoint, env, run=subprocess.run):
+    """Whether the app role logs in to its database with the password this instance keeps."""
+    done = run(['psql', '-h', endpoint, '-U', 'mogaesup_app', '-d', 'mogaesup', '-v', 'ON_ERROR_STOP=1', '-Atc', 'SELECT 1'],
+               text=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return done.returncode == 0
+
+
+def create_app_role(args, root, password):
+    """The database and its app role, made with the master account: on the first install, or when the app role no longer
+    logs in. Only then is the master secret read, so the instance role needs it only for that (the server stack's
+    DatabaseAdminAccess)."""
+    try:
+        master = json.loads(secret_value(args.secret, args.region))
+    except subprocess.CalledProcessError:
+        raise RuntimeError('The app database role does not log in, and the database master secret could not be read: '
+                           'deploy the server stack with DatabaseAdminAccess=true, run this install again, then set it '
+                           'back to false') from None
+    env = database_env(root, master['password'])
     # A shared instance (another stack's) has no mogaesup database until the first bootstrap makes one.
     subprocess.run(['psql', '-h', args.endpoint, '-U', master['username'], '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'],
                    input="SELECT 'CREATE DATABASE mogaesup' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mogaesup')\\gexec\n",
@@ -148,6 +161,24 @@ GRANT USAGE, CREATE ON SCHEMA public TO mogaesup_app;
 """ % (password, password)
     subprocess.run(['psql', '-h', args.endpoint, '-U', master['username'], '-d', 'mogaesup', '-v', 'ON_ERROR_STOP=1'],
                    input=sql, text=True, env=env, check=True, stdout=subprocess.DEVNULL)
+
+
+def main():
+    args = parse_args()
+    ticket_secret = secret_value(args.ticket_secret, args.region)
+    if len(ticket_secret.encode()) < 32:
+        raise RuntimeError('Realtime ticket secret is too short')
+    root = Path('/opt/mogaesup')
+    config = Path('/etc/mogaesup')
+    config.mkdir(mode=0o700, exist_ok=True)
+    password_file = config / 'app-password'
+    if not password_file.exists():
+        password_file.write_text(secrets.token_hex(32))
+        password_file.chmod(0o600)
+    password = password_file.read_text().strip()
+    # An ordinary release finds the role as the first install left it and never reads the master secret.
+    if not app_role_works(args.endpoint, database_env(root, password)):
+        create_app_role(args, root, password)
     url = (f"postgres://mogaesup_app:{urllib.parse.quote(password, safe='')}@{args.endpoint}:5432/mogaesup"
            f"?sslmode=verify-full&sslrootcert={root}/global-bundle.pem")
     # The studio gateway settings come from the arguments given and, for the rest, from the file this run replaces.
@@ -158,7 +189,8 @@ GRANT USAGE, CREATE ON SCHEMA public TO mogaesup_app;
     Path('/etc/systemd/system/mogaesup.service').write_text(SERVICE)
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     subprocess.run(['systemctl', 'enable', 'mogaesup'], check=True)
-    subprocess.run(['systemctl', 'restart', 'mogaesup'], check=True)
+    if not args.no_restart:
+        subprocess.run(['systemctl', 'restart', 'mogaesup'], check=True)
     print('Application role and service installed. Credentials stay in root-readable configuration.')
     print(describe_factory(settings))
 

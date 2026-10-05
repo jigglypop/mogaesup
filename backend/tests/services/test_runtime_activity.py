@@ -260,6 +260,23 @@ def test_a_token_a_later_deployment_reuses_closes_the_new_candidate_again(monkey
         assert not activity.state()['admission']['draining']
 
 
+def test_the_startup_token_can_come_from_a_file_that_is_gone_by_the_next_restart(monkeypatch, tmp_path):
+    # deploy-on-instance.sh mounts the token as a file (not in `ps` or `docker inspect`) and removes it once applied.
+    monkeypatch.setattr(activity, '_boot_id', lambda: 'boot-one')
+    token = tmp_path / 'start-token'
+    token.write_text(TOKEN + chr(10), encoding='utf-8')
+    monkeypatch.setenv('ASSET_START_DRAIN_TOKEN_FILE', str(token))
+    monkeypatch.setenv('ASSET_START_DRAIN_ID', 'a1' * 16)
+    with activity.server_lease():
+        assert activity.state()['admission']['draining']
+    token.unlink()
+    with activity.server_lease():
+        assert activity.state()['admission']['draining']
+        assert not activity.resume(TOKEN)['admission']['draining']
+    with activity.server_lease():
+        assert not activity.state()['admission']['draining']
+
+
 def test_a_drain_of_an_earlier_boot_never_blocks_the_startup_token(monkeypatch):
     monkeypatch.setattr(activity, '_boot_id', lambda: 'boot-one')
     with activity.server_lease():

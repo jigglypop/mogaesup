@@ -11,6 +11,8 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -136,6 +138,13 @@ class Host:
     def close_health(self):
         if self.connection is not None:
             self.connection.close()
+
+    def remove_leftover_gates(self):
+        """The REJECT rules of an earlier run that was killed (SIGKILL skips its cleanup): left in place, they keep
+        refusing nginx's and the next deployment's new connections to the API."""
+        for line in self.command('iptables', '-S', 'OUTPUT').stdout.splitlines():
+            if line.startswith('-A OUTPUT ') and re.search(r'--comment "?studio-legacy-[0-9a-f]{32}"?( |$)', line):
+                self.command('iptables', '-D', *shlex.split(line)[1:])
 
     def gate(self, action):
         self.command('iptables', action, 'OUTPUT', '-p', 'tcp', '-d', '127.0.0.1', '--dport', '8000',
@@ -282,7 +291,9 @@ def main():
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: (_ for _ in ()).throw(Unsafe('maintenance interrupted')))
-        print(json.dumps(bootstrap(Host(), timeout=args.timeout)))
+        host = Host()
+        host.remove_leftover_gates()
+        print(json.dumps(bootstrap(host, timeout=args.timeout)))
 
 
 if __name__ == '__main__':

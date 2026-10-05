@@ -38,7 +38,7 @@ Python 3.11과 [uv](https://docs.astral.sh/uv/)를 사용합니다. `backend/.en
 
 `npm run dev:character`가 이 서버(`127.0.0.1:8016`)를 Rust 서버·앱과 함께 띄우고 `backend/.env`의 API 키와 JWT 설정을 게이트웨이에 넘깁니다. 이 서버만 띄울 때는 루트에서 `uv run asset-api`(기본 `API_PORT=8000`)입니다. 로컬 서버는 loopback 전용이고 제어 서버는 단일 worker로 실행합니다. 상태 확인 경로는 `/health`와 `/api/health`입니다.
 
-API는 JWT(`Authorization: Bearer`, 발급자 `mogaesup`, 대상 `mogaesup-client`, `token_type=access`, `roles=[ADMIN]`)로 인증합니다. 실제 loopback socket이며 Forwarded·X-Forwarded-For·X-Real-IP가 없고, Host가 `127.0.0.1`·`localhost`·`[::1]`(포트 허용)이며 loopback이 아닌 Origin이 없는 로컬 요청만 양수 `X-User-Id`를 운영자로 받아들입니다(로컬 개발, `scripts/props/generate.py`). 127.0.0.1로 풀리게 만든 이름(DNS rebinding)이나 다른 사이트의 페이지는 자기 Host·Origin을 보내므로 운영자가 되지 못합니다. Uvicorn은 proxy header를 신뢰하지 않습니다. AWS 컨테이너 nginx는 gateway key를 먼저 검사하고 위 세 헤더를 제거한 뒤 Host를 `127.0.0.1`로 바꿔 `X-User-Id: 1`로 내부 API에 전달합니다(Origin은 그대로 전달). SSM 포트(8080)는 Host가 `127.0.0.1`·`localhost`인 요청에만 답하고 나머지는 연결을 끊습니다(444). `/internal/*`은 nginx에서 전달하지 않습니다.
+API는 JWT(`Authorization: Bearer`, 발급자 `mogaesup`, 대상 `mogaesup-client`, `token_type=access`, `roles=[ADMIN]`)로 인증합니다. 실제 loopback socket이며 Forwarded·X-Forwarded-For·X-Real-IP가 없고, Host가 `127.0.0.1`·`localhost`·`[::1]`(포트 허용)이며 loopback이 아닌 Origin이 없는 로컬 요청만 양수 `X-User-Id`를 운영자로 받아들입니다(로컬 개발, `scripts/props/generate.py`). 127.0.0.1로 풀리게 만든 이름(DNS rebinding)이나 다른 사이트의 페이지는 자기 Host·Origin을 보내므로 운영자가 되지 못합니다. Uvicorn은 proxy header를 신뢰하지 않습니다. AWS 컨테이너 nginx는 gateway key를 먼저 검사하고 위 세 헤더를 제거한 뒤 Host를 `127.0.0.1`로 바꿔 내부 API에 전달합니다(Origin은 그대로 전달). `Authorization`이 없는 요청(주인, SSM 접속)에만 `X-User-Id: 1`을 붙이고, 토큰이 있는 요청은 그 헤더 없이 보내 토큰이 누구인지 정합니다(게이트웨이가 서명한 회원 토큰은 `MEMBER`). 클라이언트가 보낸 `X-User-Id`는 어느 쪽이든 전달하지 않습니다. 토큰 검증 키는 provider secret의 `JWT_SECRET`(서버의 `FACTORY_JWT_SECRET`과 같은 값, 선택 `JWT_ISSUER`·`JWT_AUDIENCE`)이고, 없으면 토큰이 있는 요청은 503입니다. SSM 포트(8080)는 같은 규칙으로, Host가 `127.0.0.1`·`localhost`인 요청에만 답하고 나머지는 연결을 끊습니다(444). `/internal/*`은 nginx에서 전달하지 않습니다.
 
 ## API 범위
 
@@ -85,7 +85,7 @@ uv run python -m src.records status
 ```bash
 uv build --package asset-3d-api
 docker build -f backend/Dockerfile -t asset-3d-api .
-docker run --rm -p 8000:8000 --env-file backend/.env -e API_HOST=0.0.0.0 asset-3d-api
+docker run --rm -p 127.0.0.1:8000:8000 --env-file backend/.env -e API_HOST=0.0.0.0 asset-3d-api
 ```
 
 
@@ -129,7 +129,11 @@ git 체크아웃에서는 릴리스에 들어가는 파일(`backend/`, 루트의
 
 후보는 `ASSET_START_DRAIN_TOKEN`으로 새 작업 수락을 닫은 상태로 시작합니다. 컨테이너마다 새 `ASSET_START_DRAIN_ID`가 붙어, 남은 token을 다시 쓰는 배포의 후보도 닫힌 채 시작하고 같은 컨테이너의 재시작은 다시 닫지 않습니다. 이전 boot의 drain은 token을 비교하기 전에 해제합니다. `status=healthy`, 검증 가능한 닫힌 admission과 유효 activity를 만족해야 하며 DB가 설정되어 있으면 해당 prefix의 import 완료·record schema 조회까지 성공(`ok=true`)할 때까지 기다립니다. 확인 중(`ok=null`)과 degraded는 통과하지 않습니다. 건강·버전 확인 및 release commit이 모두 끝나야 수락을 열며, 열린 뒤 응답이 불확실해도 새 작업을 끊는 강제 rollback은 하지 않습니다. 실행 중인 leftover candidate/rollback은 지우지 않고 복구를 요구합니다. 프로세스/컨테이너 재시작은 진행 중 drain을 유지하고 실제 instance reboot만 이전 boot의 drain을 해제합니다. DB URL이 없을 때 S3 marker 조회가 실패/timeout이면 stale JSON 사용을 막기 위해 시작을 거절합니다. 산출물은 S3를 256KiB씩 읽어 인증된 같은-origin API로 보내고 Content-Type·Length·ETag, 단일 Range·HEAD를 지원하며 연결 종료/오류에도 S3 body를 닫습니다. 컨테이너 로그는 `json-file` 50 MB 3개로 돌립니다.
 
-스택(`ec2.yaml`)을 갱신할 때 `ReleaseKey`에는 인스턴스가 지금 돌리는 릴리스(`/opt/asset-studio/current.json` 또는 `dist/aws/deployment-receipt.json`의 키)를 넣습니다. SSM 배포는 스택 값을 바꾸지 않으므로 옛 키를 그대로 넘기면 교체된 인스턴스가 옛 릴리스로 뜹니다. 더 쓰지 않는 `PublicSiteOrigin` 파라미터와 0.0.0.0/0의 80 포트 규칙은 템플릿에서 뺐습니다. 갱신할 때 이 파라미터를 넘기지 않으며(없는 파라미터는 거부됩니다), user data의 `PUBLIC_SITE_ORIGIN` 줄도 빠져 다음 스택 갱신은 인스턴스를 멈췄다 켭니다. 갱신하기 전에 변경 세트에서 `Instance`가 교체(Replacement `True`)되지 않는지 봅니다. `ImageId`는 갱신할 때마다 최신 AL2023으로 다시 풀려, 새 이미지가 나왔으면 인스턴스가 교체됩니다(고정하는 방법은 템플릿의 `ImageId` 주석). 교체된 인스턴스는 `CharacterDbSecretArn`·`CharacterDbHost`가 비어 있으면 S3 기록으로 올라옵니다. 역할은 `assets/*`에서 읽기·쓰기·삭제를 합니다(버킷은 버전 관리).
+기록 DB(`CHARACTER_DATABASE_URL`)가 있으면 배포는 새 이미지로 `python -m src.records migrate`를 먼저 돌리고, 그 뒤에 실행 중인 런타임의 수락을 닫습니다. 마이그레이션은 더하기만 하므로(파이프라인의 `.github/scripts/check_migrations.py`가 DROP·RENAME·DELETE 등을 막습니다) 이전 릴리스도 바뀐 스키마로 돕니다. 실패하면 아무것도 바꾸지 않고 종료 코드 8로 멈추며, 출력은 DB 주소가 섞일 수 있어 인스턴스의 `/var/log/asset-studio-migrate.log`에만 남습니다. 후보 컨테이너는 재시작 정책 없이 뜨고, 건강·버전 확인과 80 포트가 키 없는 요청을 막는지(2xx·3xx면 실패) 확인한 뒤에야 `unless-stopped`가 됩니다. 그 전에 끝나면(실패, 명시적 종료, INT·TERM) EXIT 트랩이 이전 컨테이너와 provider 설정을 되돌립니다. SSM 시간 제한처럼 트랩 없이 끊기면 `/opt/asset-studio/provider.previous.json`이 남고, 다음 배포가 이전 컨테이너 이름과 함께 그 설정을 되돌린 뒤 진행합니다. 성공한 배포는 설치한 릴리스 키를 SSM 파라미터 `/asset-studio/current-release`에 남깁니다(역할의 `ssm:PutParameter`가 필요하며, 없으면 경고만 냅니다).
+
+스택(`ec2.yaml`)을 갱신할 때 `ReleaseKey`에는 인스턴스가 지금 돌리는 릴리스(`aws ssm get-parameter --name /asset-studio/current-release`, `/opt/asset-studio/current.json` 또는 `dist/aws/deployment-receipt.json`의 키)를 넣습니다. SSM 배포는 스택 값을 바꾸지 않으므로 옛 키를 그대로 넘기면 교체된 인스턴스가 옛 릴리스로 뜹니다. `ImageId`는 이제 기본값 없는 이미지 ID라 지금 인스턴스의 이미지(`aws ec2 describe-instances --instance-ids <InstanceId> --query 'Reservations[0].Instances[0].ImageId'`)를 넘겨야 하고, 갱신이 새 AL2023을 스스로 고르지 않습니다. 보안 그룹 설명은 만든 때의 문구 그대로 둡니다(바꾸면 그룹과 인스턴스가 교체됩니다). 더 쓰지 않는 `PublicSiteOrigin` 파라미터와 0.0.0.0/0의 80 포트 규칙은 템플릿에서 뺐고, user data의 `PUBLIC_SITE_ORIGIN` 줄도 빠져 이 템플릿 전체를 적용하는 갱신은 인스턴스를 멈췄다 켭니다. `IdleStop=off`는 교체된 인스턴스도 계속 켜 두게 합니다(바꾸면 user data가 바뀌어 한 번 멈췄다 켭니다). 교체된 인스턴스는 `CharacterDbSecretArn`·`CharacterDbHost`가 비어 있으면 S3 기록으로 올라옵니다. 역할의 권한은 별도 리소스(`StudioAccessPolicy`)이며 `assets/*`에서 읽기·쓰기·삭제를 합니다(버킷은 버전 관리).
+
+권한만 바꿀 때는 스택 전체를 적용하지 않고 `python backend/infra/update-studio-role.py`를 씁니다. 지금 인스턴스의 이미지와 스택의 나머지 파라미터 값으로 변경 세트를 만들어 보여 주고, 허용한 IAM 변경 말고 다른 것(인스턴스, 보안 그룹, CloudFront와 그 잠금 함수)이 하나라도 있으면 지우고 멈춥니다. 기본(`--from live`)은 운영 스택이 지금 쓰는 템플릿에 이미지 고정과 빠진 권한(`assets/*` 삭제, 릴리스 키 기록)을 담은 정책 하나만 더합니다. `--from repo`는 이 체크아웃의 `ec2.yaml`을 적용하며, 운영 스택이 이미 이 템플릿과 같을 때만 통과합니다. 실제 적용은 `--execute`를 줄 때만 합니다.
 
 ### 쉬면 끄기
 

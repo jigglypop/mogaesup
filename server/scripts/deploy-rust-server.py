@@ -4,12 +4,16 @@
 Uses the existing AWS CLI credentials only and never brings a secret to the developer machine.
 Build first: see README "배포". Usage: python scripts/deploy-rust-server.py [--skip-provision] [--yes] [--factory-url URL]
 [--factory-access read|write|paid] [--factory-paid-monthly N] [--studio-instance-id i-…]
-Infrastructure changes are listed and left unapplied until --yes. The studio gateway flags are optional: one left out keeps
-the value /etc/mogaesup/server.env already has, and the setting the server ended with is printed at the end.
+Infrastructure changes are listed and left unapplied until --yes, which runs that listed change set, never one that
+replaces the instance or the database. The studio gateway flags are optional: one left out keeps the value
+/etc/mogaesup/server.env already has, and the setting the server ended with is printed at the end. Run by hand, it refuses
+uncommitted server files, a binary older than the last server commit, and a pipeline run in progress on main; the commit
+goes with the release (/opt/mogaesup/current-release.json on the instance).
 """
 import argparse
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -28,6 +32,13 @@ SERVICE_GROUP = 'CloudFront-VPCOrigins-Service-SG'
 IMAGE = 'ami-03137ee2d0c5af1fe'
 CHANGE_SET = re.compile(r'arn:aws[a-z-]*:cloudformation:\S+:changeSet/\S+')
 UNAPPLIED = 'Infrastructure changes are listed above and not applied; run again with --yes to apply them'
+DATABASE = 'mogaesup-postgres'
+# Resources whose replacement --yes never applies.
+KEEP = ('ApiInstance', 'Database', 'RuntimeBucket', 'VpcOrigin', 'RealtimeTicketSecret', 'FactoryGatewaySecret',
+        'CharacterDatabaseSecret', 'ApiSecurityGroup')
+WEB_STACK = 'mogaesup-web'
+# The release paths the server deploy ships (.github/scripts/release_parts.sh); a manual deploy refuses changes there.
+RELEASE_PATHS = ('server',)
 # What the bootstrap rewrites on the instance; kept as <file>.prev before it runs, and put back with the binary.
 SERVER_ENV = '/etc/mogaesup/server.env'
 SERVICE_UNIT = '/etc/systemd/system/mogaesup.service'
@@ -125,6 +136,28 @@ def wait_for_command(command, instance, deadline_seconds=COMMAND_WAIT, interval=
         sleep(interval)
 
 
+def replacements(description):
+    """The resources a change set replaces or may replace whose loss takes the site down or its data away."""
+    return [change['ResourceChange']['LogicalResourceId'] for change in description.get('Changes', [])
+            if change.get('ResourceChange', {}).get('LogicalResourceId') in KEEP
+            and change['ResourceChange'].get('Replacement') in ('True', 'Conditional')]
+
+
+def template_engine_version(text=None):
+    text = text if text is not None else (ROOT / 'infra/aws-server.yaml').read_text(encoding='utf-8')
+    found = re.search(r"^\s+EngineVersion: '([0-9.]+)'", text, re.M)
+    return found.group(1) if found else None
+
+
+def check_engine_version(live, template):
+    """RDS refuses a stack change that names a version below the one the instance runs (a downgrade)."""
+    def parts(version):
+        return tuple(int(part) for part in version.split('.'))
+    if live and template and parts(live) > parts(template):
+        raise RuntimeError(f"The database runs PostgreSQL {live}, above the template's EngineVersion {template}: raise "
+                           'EngineVersion in server/infra/aws-server.yaml to it before changing the stack')
+
+
 def provision(studio_instance=None, yes=False):
     group = service_group()
     overrides = [f'VpcId={VPC}', f'SubnetA={SUBNETS[0]}', f'SubnetB={SUBNETS[1]}', f'ImageId={IMAGE}']
@@ -133,29 +166,44 @@ def provision(studio_instance=None, yes=False):
     # Left out, the stack keeps the instance it was given before.
     if studio_instance is not None:
         overrides.append(f'StudioInstanceId={studio_instance}')
+    try:
+        found = aws('rds', 'describe-db-instances', '--region', REGION, '--db-instance-identifier', DATABASE)
+        check_engine_version(found['DBInstances'][0]['EngineVersion'], template_engine_version())
+    except (RuntimeError, KeyError, IndexError) as error:
+        if 'EngineVersion' in str(error):
+            raise
+        print(f'Warning: the version of {DATABASE} could not be compared with the template ({error})', flush=True)
+    # No --tags: the stack keeps the tags it has. Tags that differ from the live stack's would list every resource as
+    # modified, and the instance as one that may be replaced, in every change set.
     deploy = ['aws', 'cloudformation', 'deploy', '--region', REGION, '--stack-name', STACK,
               '--template-file', str(ROOT / 'infra/aws-server.yaml'), '--parameter-overrides', *overrides,
-              '--capabilities', 'CAPABILITY_IAM', '--tags', 'application=mogaesup', '--no-fail-on-empty-changeset']
-    if yes:
-        subprocess.run(deploy, check=True)
-        return
-    # Without --yes the change set is made but not executed: what it would do is listed, and the run stops.
-    process = subprocess.run([*deploy, '--no-execute-changeset'], capture_output=True, text=True, encoding='utf-8',
-                             errors='replace')
+              '--capabilities', 'CAPABILITY_IAM', '--no-fail-on-empty-changeset', '--no-execute-changeset']
+    # The change set is made, listed, and with --yes run: that change set and no other.
+    process = subprocess.run(deploy, capture_output=True, text=True, encoding='utf-8', errors='replace')
     if process.returncode:
         raise RuntimeError(f'aws cloudformation deploy failed: {process.stderr.strip()}')
     arn = change_set_arn(process.stdout + process.stderr)
     if arn is None:
         if 'No changes to deploy' in process.stdout:
             return
-        raise RuntimeError('The change set could not be read from the aws output; run again with --yes to apply the '
-                           'infrastructure changes without listing them')
-    for line in change_lines(aws('cloudformation', 'describe-change-set', '--region', REGION, '--change-set-name', arn)):
+        raise RuntimeError('The change set could not be read from the aws output; inspect the stack in the console')
+    description = aws('cloudformation', 'describe-change-set', '--region', REGION, '--change-set-name', arn)
+    for line in change_lines(description):
         print(line, flush=True)
+    replaced = replacements(description)
+    if yes and not replaced:
+        aws('cloudformation', 'execute-change-set', '--region', REGION, '--change-set-name', arn)
+        subprocess.run(['aws', 'cloudformation', 'wait', 'stack-update-complete', '--region', REGION, '--stack-name', STACK],
+                       check=True)
+        return
     try:
         aws('cloudformation', 'delete-change-set', '--region', REGION, '--change-set-name', arn)
     except RuntimeError:
         pass
+    if replaced:
+        raise SystemExit(f"The change set replaces or may replace {', '.join(replaced)}; nothing was applied. A new "
+                         'instance has a new private DNS name (the web stack points at it) and a new database starts '
+                         'empty: change the stack by hand after reading the change set')
     raise SystemExit(UNAPPLIED)
 
 
@@ -175,10 +223,13 @@ def bootstrap_command(args, outputs, studio_instance):
 
 
 def install_commands(release, bucket, bootstrap):
-    """The SSM script lines that install a release. The binary being replaced is kept as mogaesup-server.prev, and the
-    server.env and systemd unit the bootstrap rewrites as <file>.prev; once the service is stopped, any failure up to a
-    healthy new release (the exit trap) puts those back and starts the previous release again: the last release that
-    answered its health check (mogaesup-server.good), or the binary it replaced when none has yet."""
+    """The SSM script lines that install a release. Everything that takes time happens while the running release keeps
+    serving: the download and its checksums, the RDS certificates, and the bootstrap (database role, server.env, the
+    systemd unit; it does not restart). Then the binary is swapped and the service restarted once, so the server is down
+    only for that restart. The binary being replaced is kept as mogaesup-server.prev, and the server.env and systemd unit
+    the bootstrap rewrites as <file>.prev. Any failure before a healthy new release (the exit trap) puts those back and,
+    once the binary was swapped, starts the previous release again: the last release that answered its health check
+    (mogaesup-server.good), or the binary it replaced when none has yet."""
     folder = f'/opt/mogaesup/releases/{release}'
     binary = '/opt/mogaesup/mogaesup-server'
     bundle = '/opt/mogaesup/global-bundle.pem'
@@ -197,17 +248,17 @@ def install_commands(release, bucket, bootstrap):
         f'curl --fail --silent --show-error --max-time 60 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o {bundle}.new',
         f'mv -f {bundle}.new {bundle}',
         'export PGCONNECT_TIMEOUT=10',
-        'stopped=0; swapped=0; configured=0; ok=0',
+        'restarted=0; swapped=0; configured=0; ok=0',
         'restore() {',
         '  status=$?; trap - EXIT',
-        '  if [ "$stopped" = 1 ] && [ "$ok" != 1 ]; then',
+        '  if [ "$ok" != 1 ] && { [ "$configured" = 1 ] || [ "$swapped" = 1 ]; }; then',
         '    [ "$status" != 0 ] || status=1',
-        "    echo 'the new release did not come up; starting the previous one again' >&2",
-        # The service's own log stays on the instance: the command's output reaches the pipeline's public log.
-        '    journalctl -u mogaesup -n 40 --no-pager > /var/log/mogaesup-failed-release.log 2>&1 || true',
-        "    echo 'the service log of the failed start is in /var/log/mogaesup-failed-release.log' >&2",
-        '    systemctl stop mogaesup.service 2>/dev/null || true',
         '    if [ "$swapped" = 1 ]; then',
+        "      echo 'the new release did not come up; starting the previous one again' >&2",
+        # The service's own log stays on the instance: the command's output reaches the pipeline's public log.
+        '      journalctl -u mogaesup -n 40 --no-pager > /var/log/mogaesup-failed-release.log 2>&1 || true',
+        "      echo 'the service log of the failed start is in /var/log/mogaesup-failed-release.log' >&2",
+        '      systemctl stop mogaesup.service 2>/dev/null || true',
         f'      if [ -f {binary}.good ]; then previous={binary}.good; else previous={binary}.prev; fi',
         '      if [ -f "$previous" ]; then install -m 755 -o root -g mogaesup "$previous" ' + binary + ' || true; '
         "else echo 'there is no previous binary to put back' >&2; fi",
@@ -216,29 +267,36 @@ def install_commands(release, bucket, bootstrap):
         f'      for file in {SERVER_ENV} {SERVICE_UNIT}; do if [ -f "$file.prev" ]; then cp -p "$file.prev" "$file" || true; fi; done',
         '      systemctl daemon-reload || true',
         '    fi',
-        '    systemctl restart mogaesup.service || true',
-        f'    for attempt in $(seq 1 30); do if {health} >/dev/null; then echo \'the previous release answers again\' >&2; break; fi; sleep 2; done',
+        # Before the swap the running release was never stopped and keeps the settings it started with.
+        '    if [ "$swapped" = 1 ] || [ "$restarted" = 1 ]; then',
+        '      systemctl restart mogaesup.service || true',
+        f'      for attempt in $(seq 1 30); do if {health} >/dev/null; then echo \'the previous release answers again\' >&2; break; fi; sleep 2; done',
+        '    fi',
         '  fi',
         '  exit "$status"',
         '}',
         'trap restore EXIT',
-        'stopped=1',
-        'systemctl stop mogaesup.service 2>/dev/null || true',
-        # Two commands, not `&&`: a failed copy must stop the script here, before the swap, and not be ignored by `set -e`.
+        # Two commands, not `&&`: a failed copy must stop the script here, before anything changes, and not be ignored
+        # by `set -e`.
         f'if [ -f {binary} ]; then cp -p {binary} {binary}.prev.new; mv -f {binary}.prev.new {binary}.prev; fi',
-        'swapped=1',
-        f'install -m 755 mogaesup-server {binary}',
-        'chown -R root:mogaesup /opt/mogaesup', 'chmod -R g+rX /opt/mogaesup/releases',
         'install -d -m 750 -o mogaesup -g mogaesup /var/lib/mogaesup',
-        # The settings the previous release ran with, kept (with their owner and mode) before the bootstrap rewrites them.
+        # The settings the previous release runs with, kept (with their owner and mode) before the bootstrap rewrites them.
         f'for file in {SERVER_ENV} {SERVICE_UNIT}; do if [ -f "$file" ]; then cp -p "$file" "$file.prev.new"; mv -f "$file.prev.new" "$file.prev"; fi; done',
         'configured=1',
-        ' '.join(shlex.quote(part) for part in bootstrap),
+        ' '.join(shlex.quote(part) for part in [*bootstrap, '--no-restart']),
+        # The new binary goes in under its final name by rename; the running process keeps the file it started from.
+        'swapped=1',
+        f'install -m 755 mogaesup-server {binary}.new',
+        f'mv -f {binary}.new {binary}',
+        'chown -R root:mogaesup /opt/mogaesup', 'chmod -R g+rX /opt/mogaesup/releases',
+        'restarted=1',
+        'systemctl restart mogaesup.service',
         f'for attempt in $(seq 1 30); do if {health}; then break; fi; sleep 2; done',
         'systemctl is-active mogaesup', health,
         'ok=1',
         # Housekeeping once the release answers; a failure here does not undo it.
         f'cp -p {binary} {binary}.good.new && mv -f {binary}.good.new {binary}.good || true',
+        'cp -p release.json /opt/mogaesup/current-release.json 2>/dev/null || true',
         "ls -1dt /opt/mogaesup/releases/release-* | tail -n +6 | xargs -r rm -rf -- || true",
     ]
 
@@ -260,19 +318,97 @@ def parse_args(argv=None):
                         help="The studio's EC2 instance the server may start when it has powered itself off "
                              "(STUDIO_INSTANCE_ID; the stack keeps the last one given, '' turns it off)")
     parser.add_argument('--skip-provision', action='store_true')
-    parser.add_argument('--yes', action='store_true', help='Apply infrastructure changes without listing them first')
+    parser.add_argument('--provision-only', action='store_true',
+                        help='Only list (with --yes, run) the stack change set; no binary is needed or installed')
+    parser.add_argument('--yes', action='store_true',
+                        help='Run the listed change set, unless it replaces the instance, the database or another kept resource')
     return parser.parse_args(argv)
+
+
+def git(*args):
+    return subprocess.run(['git', '-C', str(ROOT.parent), *args], capture_output=True, text=True, encoding='utf-8',
+                          errors='replace')
+
+
+def release_commit(binary, environ=None):
+    """The commit the release is built from. The pipeline names it; run by hand, the server's files must be committed
+    (what goes live is what was reviewed) and the binary built after the last commit that changed what it is built from."""
+    environ = os.environ if environ is None else environ
+    if environ.get('GITHUB_ACTIONS') == 'true':
+        commit = environ.get('GITHUB_SHA', '')
+    else:
+        status = git('status', '--porcelain', '--untracked-files=all', '--', *RELEASE_PATHS)
+        if status.returncode:
+            raise RuntimeError('git status of the server files failed')
+        changed = [line for line in status.stdout.splitlines() if line.strip()]
+        if changed:
+            raise RuntimeError('Uncommitted server files would go live unreviewed; commit them first: '
+                               + '; '.join(changed[:10]))
+        commit = git('rev-parse', 'HEAD').stdout.strip()
+        # A commit only this PC has would go live before anyone else can see it, and the pipeline would not know it.
+        if git('merge-base', '--is-ancestor', 'HEAD', 'origin/main').returncode:
+            raise RuntimeError('HEAD is not on origin/main; push it (git fetch first if origin/main is stale)')
+        built_from = git('log', '-1', '--format=%ct', '--', 'server/src', 'server/migrations', 'server/Cargo.toml',
+                         'server/Cargo.lock', 'server/build.rs').stdout.strip()
+        if built_from.isdigit() and binary.stat().st_mtime < int(built_from):
+            raise RuntimeError('The binary is older than the last commit that changed the server; build it again '
+                               '(README "배포" 1)')
+        pipeline_running()
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise RuntimeError('The commit of this release could not be read')
+    return commit
+
+
+def pipeline_running():
+    """Run by hand, refuse while a pipeline run on main may deploy too (its deploys take turns; this script is not one
+    of them). The instance's install lock still keeps two installs apart."""
+    try:
+        done = subprocess.run(['gh', 'run', 'list', '--workflow', 'pipeline.yml', '--branch', 'main', '--limit', '20',
+                               '--json', 'status', '--jq', '[.[] | select(.status != "completed")] | length'],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        print('Warning: gh is not available, so a pipeline run that deploys at the same time cannot be ruled out',
+              flush=True)
+        return
+    if done.returncode == 0 and done.stdout.strip().isdigit() and int(done.stdout.strip()) > 0:
+        raise RuntimeError('A pipeline run on main is queued or in progress and may deploy the server as well; wait '
+                           'for it, or use its Run workflow (target server) instead')
+
+
+def check_web_origin(outputs):
+    """CloudFront (the web stack) must send /api/* to this stack's instance: the health check through the site passes
+    for any healthy server it reaches."""
+    try:
+        web = aws('cloudformation', 'describe-stacks', '--region', REGION, '--stack-name', WEB_STACK)['Stacks'][0]
+    except RuntimeError as error:
+        print(f'Warning: the web stack could not be read, so where CloudFront sends /api/* is unchecked ({error})',
+              flush=True)
+        return
+    given = {item['ParameterKey']: item.get('ParameterValue', '') for item in web.get('Parameters', [])}
+    # The web stack's parameter and the server stack's output it is given from.
+    pairs = (('ApiVpcOriginId', 'VpcOriginId'), ('ApiPrivateDns', 'ApiPrivateDns'))
+    wrong = [f'{parameter}={given.get(parameter)!r} (this stack: {outputs[output]!r})'
+             for parameter, output in pairs if outputs.get(output) and given.get(parameter) != outputs[output]]
+    if wrong:
+        raise RuntimeError(f"CloudFront ({WEB_STACK}) sends /api/* to another origin: {'; '.join(wrong)}. Deploy the web "
+                           'stack (frontend/scripts/deploy-aws.ps1 -ProvisionOnly)')
 
 
 def main():
     args = parse_args()
     if args.studio_instance_id and not re.fullmatch(r'i-[0-9a-f]{8,17}', args.studio_instance_id):
         raise RuntimeError('--studio-instance-id must be an EC2 instance id (i-…)')
-    if aws('sts', 'get-caller-identity')['Account'] != ACCOUNT:
-        raise RuntimeError('Unexpected AWS account')
+    if args.provision_only:
+        if aws('sts', 'get-caller-identity')['Account'] != ACCOUNT:
+            raise RuntimeError('Unexpected AWS account')
+        provision(args.studio_instance_id, args.yes)
+        return
     binary = ROOT / args.binary
     if not binary.is_file() or binary.read_bytes()[:4] != b'\x7fELF':
         raise RuntimeError('Linux ELF release binary is required')
+    commit = release_commit(binary)
+    if aws('sts', 'get-caller-identity')['Account'] != ACCOUNT:
+        raise RuntimeError('Unexpected AWS account')
     if not args.skip_provision:
         provision(args.studio_instance_id, args.yes)
     deadline = time.monotonic() + 1800
@@ -295,7 +431,12 @@ def main():
     release = datetime.now(timezone.utc).strftime('release-%Y%m%dT%H%M%SZ')
     receipt_dir = ROOT / 'artifacts' / release
     receipt_dir.mkdir(parents=True)
-    files = {'mogaesup-server': binary, 'bootstrap.py': ROOT / 'scripts/bootstrap-rust-server.py'}
+    # Which commit the server runs; the install keeps it as /opt/mogaesup/current-release.json.
+    (receipt_dir / 'release.json').write_text(json.dumps({
+        'release': release, 'git_commit': commit,
+        'by': 'pipeline' if os.environ.get('GITHUB_ACTIONS') == 'true' else 'manual'}), encoding='utf-8')
+    files = {'mogaesup-server': binary, 'bootstrap.py': ROOT / 'scripts/bootstrap-rust-server.py',
+             'release.json': receipt_dir / 'release.json'}
     (receipt_dir / 'SHA256SUMS').write_text(''.join(f'{sha(path)}  {name}\n' for name, path in files.items()),
                                             encoding='ascii', newline='\n')
     files['SHA256SUMS'] = receipt_dir / 'SHA256SUMS'
@@ -323,8 +464,11 @@ def main():
         if line.startswith('Studio gateway:'):
             print(line, flush=True)
     receipt['status'] = 'server-deployed'
+    receipt['git_commit'] = commit
     (receipt_dir / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
-    print(json.dumps({'receipt': str(receipt_dir / 'receipt.json'), 'status': receipt['status']}), flush=True)
+    print(json.dumps({'receipt': str(receipt_dir / 'receipt.json'), 'status': receipt['status'], 'git_commit': commit}),
+          flush=True)
+    check_web_origin(outputs)
     # The first VPC origin creates CloudFront's service group; from then on only it may reach port 8080.
     if not args.skip_provision and service_group() and 'CloudFrontServiceGroup' not in {
             item['ParameterKey'] for item in stack.get('Parameters', []) if item.get('ParameterValue')}:

@@ -3,7 +3,9 @@ param(
   [string]$Profile = '',
   [string]$Region = 'ap-northeast-2',
   [string]$Bucket = 'gaesup-character-assets-960243570517-apne2',
-  [switch]$Upload
+  [switch]$Upload,
+  # Packs backend/dist/aws/studio.tar.gz only: no AWS call, no receipt (the pipeline builds the studio image from it).
+  [switch]$PackOnly
 )
 $ErrorActionPreference = 'Stop'
 # The release keeps the layout the instance scripts expect (backend/, infra/, the uv workspace files at its root);
@@ -12,7 +14,8 @@ $backend = Split-Path $PSScriptRoot -Parent
 $root = Split-Path $backend -Parent
 $artifactRoot = Join-Path $backend 'dist/aws'
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
-if (-not (Get-Command aws -ErrorAction SilentlyContinue)) { throw 'AWS CLI is required.' }
+if ($PackOnly -and $Upload) { throw '-PackOnly and -Upload exclude each other.' }
+if (-not $PackOnly -and -not (Get-Command aws -ErrorAction SilentlyContinue)) { throw 'AWS CLI is required.' }
 if (-not (Get-Command tar -ErrorAction SilentlyContinue)) { throw 'tar is required.' }
 # What the archive holds from the working tree, below the repository root (infra/ is packed from backend/infra).
 $releasePaths = @('backend/src', 'backend/assets', 'backend/migrations', 'backend/pyproject.toml', 'backend/main.py',
@@ -39,6 +42,12 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     $head = Invoke-Git @('rev-parse', 'HEAD')
     if ($head.ExitCode -ne 0 -or $head.Lines.Count -ne 1 -or $head.Lines[0] -notmatch '^[0-9a-f]{40}$') { throw 'The git commit could not be read.' }
     $gitCommit = $head.Lines[0]
+    # Run by hand, a release goes out only from a commit that is on origin/main: one only this PC has would go live
+    # before anyone could see it, and the pipeline would not know it. The pipeline checks out main itself.
+    if ($Upload -and $env:GITHUB_ACTIONS -ne 'true') {
+      $pushed = Invoke-Git @('merge-base', '--is-ancestor', 'HEAD', 'origin/main')
+      if ($pushed.ExitCode -ne 0) { throw 'HEAD is not on origin/main; push it first (git fetch if origin/main is stale).' }
+    }
   }
 }
 
@@ -49,6 +58,7 @@ function Invoke-Aws([string[]]$Arguments) {
   if ($LASTEXITCODE -ne 0) { throw 'AWS CLI request failed.' }
   return ($result | ConvertFrom-Json)
 }
+if (-not $PackOnly) {
 $identity = Invoke-Aws @('sts', 'get-caller-identity')
 $location = Invoke-Aws @('s3api', 'get-bucket-location', '--bucket', $Bucket)
 $bucketRegion = if ($location.LocationConstraint) { $location.LocationConstraint } else { 'us-east-1' }
@@ -63,6 +73,7 @@ if ($versioning.Status -ne 'Enabled') { throw 'S3 bucket versioning is required.
 $ownership = Invoke-Aws @('s3api', 'get-bucket-ownership-controls', '--bucket', $Bucket)
 if ($ownership.OwnershipControls.Rules.ObjectOwnership -notcontains 'BucketOwnerEnforced') { throw 'S3 BucketOwnerEnforced ownership is required.' }
 $validation = Invoke-Aws @('cloudformation', 'validate-template', '--template-body', ('file://' + (Join-Path $PSScriptRoot 'ec2.yaml')))
+}
 $utf8 = New-Object System.Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Join-Path $artifactRoot 'release.json'), ([ordered]@{ git_commit = $gitCommit } | ConvertTo-Json -Compress), $utf8)
 $archive = Join-Path $artifactRoot 'studio.tar.gz'
@@ -73,8 +84,8 @@ $fromRoot = @($releasePaths | Where-Object { $_ -ne 'backend/infra' })
 if ($LASTEXITCODE -ne 0) { throw 'Release archive failed.' }
 $entries = @(& tar -tzf $archiveTemp)
 if ($LASTEXITCODE -ne 0) { throw 'Release archive inspection failed.' }
-$forbidden = @($entries | Where-Object { $_ -match '(^|/)(\.env($|\.)|provider\.json$|credentials$|\.aws/)' })
-if ($forbidden.Count -gt 0) { throw 'Release archive contains a forbidden credential path.' }
+$forbidden = @($entries | Where-Object { $_ -match '(^|/)(\.env($|\.)|provider\.json$|credentials$|\.aws/|\.ssh/|id_[a-z0-9]+$|\.npmrc$|\.pypirc$|\.netrc$)|\.(pem|key|p12|pfx|log)$' })
+if ($forbidden.Count -gt 0) { throw "Release archive contains a forbidden credential path: $($forbidden -join ', ')" }
 $unsafe = @($entries | Where-Object { $_ -match '(^/)|(^|/)\.\.(/|$)' })
 if ($unsafe.Count -gt 0) { throw 'Release archive contains an unsafe path.' }
 # The exclusions above match a name at any depth; none of them may drop a tracked release file (a package named build/).
@@ -83,12 +94,24 @@ if ($gitCommit) {
   if ($tracked.ExitCode -ne 0) { throw 'git ls-files of the release files failed.' }
   $packed = New-Object 'System.Collections.Generic.HashSet[string]'
   foreach ($entry in $entries) { [void]$packed.Add(($entry -replace '^\./', '')) }
-  $dropped = @($tracked.Lines | ForEach-Object { $_ -replace '^backend/infra/', 'infra/' } | Where-Object { -not $packed.Contains($_) })
+  $trackedNames = @($tracked.Lines | ForEach-Object { $_ -replace '^backend/infra/', 'infra/' })
+  $dropped = @($trackedNames | Where-Object { -not $packed.Contains($_) })
   if ($dropped.Count -gt 0) { throw "Release archive is missing tracked files: $($dropped -join ', ')" }
+  # Nor may anything git does not track go in: a file .gitignore hides (a key, a log, local data) never shows in git
+  # status, so the uncommitted-files check above cannot see it.
+  $known = New-Object 'System.Collections.Generic.HashSet[string]'
+  foreach ($name in $trackedNames) { [void]$known.Add($name) }
+  [void]$known.Add('release.json')
+  $untracked = @($packed | Where-Object { $_ -and -not $_.EndsWith('/') -and -not $known.Contains($_) })
+  if ($untracked.Count -gt 0) { throw "Release archive holds files git does not track: $($untracked -join ', ')" }
 }
 Move-Item -LiteralPath $archiveTemp -Destination $archive -Force
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 $key = 'releases/studio/' + $hash + '.tar.gz'
+if ($PackOnly) {
+  [ordered]@{ archive = $archive; sha256 = $hash; git_commit = $gitCommit } | ConvertTo-Json
+  return
+}
 if ($Upload) {
   $uploadArgs = @('s3', 'cp', $archive, "s3://$Bucket/$key", '--region', $Region, '--metadata', "sha256=$hash", '--checksum-algorithm', 'SHA256', '--only-show-errors')
   if ($Profile) { $uploadArgs += @('--profile', $Profile) }

@@ -23,9 +23,27 @@ def sync(client, source, destination, request_id):
     current = client.describe_secret(SecretId=destination)['VersionIdsToStages']
     if 'AWSCURRENT' not in current.get(previous['VersionId'], []):
         raise RuntimeError('Studio provider configuration changed; inspect before repeating')
+    # A rotation: the app server keeps sending the old key until it restarts with the new one, so nginx accepts both
+    # until the next sync (deploy-on-instance.sh and entrypoint.py take STUDIO_GATEWAY_KEY_PREVIOUS).
+    replaced = str(settings.get('STUDIO_GATEWAY_KEY') or '').strip()
+    if replaced and replaced != gateway and re.fullmatch(r'[A-Za-z0-9._~-]{16,256}', replaced):
+        settings['STUDIO_GATEWAY_KEY_PREVIOUS'] = replaced
+    else:
+        settings.pop('STUDIO_GATEWAY_KEY_PREVIOUS', None)
     settings['STUDIO_GATEWAY_KEY'] = gateway
     result = client.put_secret_value(SecretId=destination, ClientRequestToken=request_id,
                                     SecretString=json.dumps(settings))
+    # Secrets Manager has no compare-and-swap: a write that landed between the read above and this one is now
+    # AWSPREVIOUS instead of the version read. It goes back to AWSCURRENT, so this run never silently drops it.
+    stages = client.describe_secret(SecretId=destination)['VersionIdsToStages']
+    if 'AWSPREVIOUS' not in stages.get(previous['VersionId'], []):
+        other = next((version for version, names in stages.items()
+                      if 'AWSPREVIOUS' in names and version != result['VersionId']), None)
+        if other:
+            client.update_secret_version_stage(SecretId=destination, VersionStage='AWSCURRENT', MoveToVersionId=other,
+                                               RemoveFromVersionId=result['VersionId'])
+        raise RuntimeError('Studio provider configuration changed during the update; the other change is current '
+                           'again. Inspect before repeating')
     # Both sides are read again: only the equality is returned, never either credential.
     installed = client.get_secret_value(SecretId=destination)
     existing = client.get_secret_value(SecretId=source)['SecretString'].strip()

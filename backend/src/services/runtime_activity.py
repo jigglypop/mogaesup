@@ -107,6 +107,20 @@ def _boot_id():
         return None
 
 
+def _startup_token():
+    """The deployment's admission token: ASSET_START_DRAIN_TOKEN, or the file ASSET_START_DRAIN_TOKEN_FILE names (what
+    deploy-on-instance.sh mounts, so the token is in neither `ps` nor `docker inspect`). The deployment removes the file
+    once the candidate has applied it; a later restart then finds none and keeps the drain it has."""
+    token = os.getenv('ASSET_START_DRAIN_TOKEN', '')
+    path = os.getenv('ASSET_START_DRAIN_TOKEN_FILE', '')
+    if not token and path:
+        try:
+            token = Path(path).read_text(encoding='utf-8').strip()
+        except FileNotFoundError:
+            token = ''
+    return token
+
+
 @contextmanager
 def server_lease():
     """Only one API worker per data root; the kernel releases the lease even after a crash."""
@@ -123,7 +137,7 @@ def server_lease():
                 # Checked first: a drain of an earlier boot never blocks the startup token below.
                 (_root() / 'drain.json').unlink(missing_ok=True)
                 previous = None
-            startup_token = os.getenv('ASSET_START_DRAIN_TOKEN', '')
+            startup_token = _startup_token()
             if startup_token and not re.fullmatch(r'[a-f0-9]{32}', startup_token):
                 raise RuntimeUncertain('Invalid startup admission token')
             # The deployment that started this container closes admission with its token once, on the container's first
@@ -205,8 +219,16 @@ def snapshot():
     return state()['activity']
 
 
-@contextmanager
-def _counted(kind, *, inherit=False):
+def draining():
+    """Whether new work is refused now; a drain receipt that cannot be read counts as a drain."""
+    try:
+        return _drain() is not None
+    except RuntimeUncertain:
+        return True
+
+
+def _admit(kind, inherit=False):
+    """Blocking half of an admission: check the drain under admission.guard and hold a new kernel work lease."""
     path = _root() / 'work' / (uuid.uuid4().hex + '.json')
     with _guard():
         grant = _inherited_grant() if inherit else _admitted.get()
@@ -222,16 +244,26 @@ def _counted(kind, *, inherit=False):
             stream.close()
             path.unlink(missing_ok=True)
             raise
+    return path, stream
+
+
+def _release(path, stream):
+    stream.close()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass  # A subsequent snapshot reclaims a lease that no process holds.
+
+
+@contextmanager
+def _counted(kind, *, inherit=False):
+    path, stream = _admit(kind, inherit)
     token = _admitted.set(path)
     try:
         yield
     finally:
         _admitted.reset(token)
-        stream.close()
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass  # A subsequent snapshot reclaims a lease that no process holds.
+        _release(path, stream)
 
 
 def paid_request():
@@ -281,26 +313,52 @@ def worker_task():
     return _counted('running_tasks', inherit=True)
 
 
+ADMISSION_THREADS = 4
+DRAINING_BODY = {'detail': '작업 수락이 중지되어 있습니다. 잠시 후 다시 시도하세요.', 'code': 'draining'}
+
+
 class ActivityMiddleware:
-    """Admit before dispatch; keep the grant until FastAPI background work finishes."""
+    """Admit before dispatch; keep the grant until FastAPI background work finishes.
+
+    Admission waits on admission.guard (held by health, the drain control and local CLIs) and writes a lease file, so
+    it runs in a few threads of its own: neither a slow disk nor a held guard stops the event loop, and long jobs that
+    hold the default threads cannot keep a request from being admitted. The grant is set on the loop, in the request's
+    context, which the route, its background tasks and their worker threads copy.
+    """
     def __init__(self, app):
+        # Imported here: Blender's isolated Python loads this module without the server's dependencies.
+        from anyio.lowlevel import RunVar
         self.app = app
+        self._threads = RunVar('runtime_admission_threads')
+
+    def _limiter(self):
+        """ADMISSION_THREADS for the running event loop (a limiter belongs to one loop)."""
+        import anyio
+        try:
+            return self._threads.get()
+        except LookupError:
+            limiter = anyio.CapacityLimiter(ADMISSION_THREADS)
+            self._threads.set(limiter)
+            return limiter
 
     async def __call__(self, scope, receive, send):
         if (scope['type'] != 'http' or scope.get('method') in ('GET', 'HEAD', 'OPTIONS')
                 or scope.get('path', '').startswith('/internal/')):
             await self.app(scope, receive, send)
             return
-        work = running_task()
+        import anyio
+        limiter = self._limiter()
         try:
-            work.__enter__()
+            path, stream = await anyio.to_thread.run_sync(_admit, 'running_tasks', limiter=limiter)
         except (RuntimeDraining, RuntimeUncertain, OSError):
             from starlette.responses import JSONResponse
-            response = JSONResponse({'detail': '작업 수락이 중지되어 있습니다. 잠시 후 다시 시도하세요.'},
-                                    status_code=503, headers={'Retry-After': '5'})
+            response = JSONResponse(DRAINING_BODY, status_code=503, headers={'Retry-After': '5'})
             await response(scope, receive, send)
             return
+        token = _admitted.set(path)
         try:
             await self.app(scope, receive, send)
         finally:
-            work.__exit__(None, None, None)
+            _admitted.reset(token)
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(_release, path, stream, limiter=limiter)

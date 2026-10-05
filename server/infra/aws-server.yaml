@@ -51,10 +51,37 @@ Parameters:
     Type: String
     Default: ''
     Description: The studio instance's role, allowed to read the character records database secret.
+  DatabaseAdminAccess:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: true lets the instance role read the database master secrets and the character records secret. The bootstrap needs them only to create the app role (a first install, or an app role that no longer logs in); move-database.py and character-database.py always do. Set it for that work, then back to false.
+  KeepOwnDatabase:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: With SharedDatabaseEndpoint the server no longer uses this stack's own RDS (mogaesup-postgres), which still costs. false deletes it, after a final snapshot (its DeletionProtection has to be turned off first, by hand). Kept unless set.
+  AlarmEmail:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[^@\s]+@[^@\s]+$'
+    Description: Where the server and database alarms are mailed (the address confirms the subscription once). Empty sends none; a failed instance is recovered either way.
+Rules:
+  OwnDatabaseWithoutShared:
+    RuleCondition: !Equals [!Ref SharedDatabaseEndpoint, '']
+    Assertions:
+      - Assert: !Equals [!Ref KeepOwnDatabase, 'true']
+        AssertDescription: Without SharedDatabaseEndpoint the server uses this stack's own database, so it is kept
 Conditions:
   HasCloudFrontGroup: !Not [!Equals [!Ref CloudFrontServiceGroup, '']]
   HasStudioInstance: !Not [!Equals [!Ref StudioInstanceId, '']]
   UseSharedDatabase: !Not [!Equals [!Ref SharedDatabaseEndpoint, '']]
+  HasOwnDatabase: !Or [!Not [!Condition UseSharedDatabase], !Equals [!Ref KeepOwnDatabase, 'true']]
+  HasDatabaseAdmin: !Equals [!Ref DatabaseAdminAccess, 'true']
+  AdminReadsOwnDatabase: !And [!Condition HasDatabaseAdmin, !Condition HasOwnDatabase]
+  AdminReadsSharedDatabase: !And [!Condition HasDatabaseAdmin, !Condition UseSharedDatabase]
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
+  AlarmsOwnDatabase: !And [!Condition HasAlarmEmail, !Condition HasOwnDatabase]
   StudioUsesSharedDatabase: !And [!Condition UseSharedDatabase, !Not [!Equals [!Ref StudioSecurityGroup, '']]]
   StudioReadsCharacterDatabase: !And [!Condition StudioUsesSharedDatabase, !Not [!Equals [!Ref StudioRoleArn, '']]]
 Resources:
@@ -113,6 +140,7 @@ Resources:
       Tags: [{Key: application, Value: mogaesup}]
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: HasOwnDatabase
     Properties:
       GroupDescription: PostgreSQL reachable only from the Mogaesup server security group
       VpcId: !Ref VpcId
@@ -173,11 +201,15 @@ Resources:
             Resource: '*'
   DatabaseSubnets:
     Type: AWS::RDS::DBSubnetGroup
+    Condition: HasOwnDatabase
     Properties:
       DBSubnetGroupDescription: Mogaesup RDS subnets
       SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+  # This stack's own PostgreSQL. With SharedDatabaseEndpoint the server uses the shared instance instead and this one
+  # only costs; KeepOwnDatabase=false removes it (a final snapshot is kept).
   Database:
     Type: AWS::RDS::DBInstance
+    Condition: HasOwnDatabase
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
     Properties:
@@ -229,14 +261,24 @@ Resources:
               - Effect: Allow
                 Action: [s3:GetObject, s3:PutObject]
                 Resource: !Sub 'arn:${AWS::Partition}:s3:::${ModelBucketName}/models/*'
+              # What every install reads (bootstrap-rust-server.py writes them into server.env).
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource:
-                  - !GetAtt Database.MasterUserSecret.SecretArn
                   - !Ref RealtimeTicketSecret
                   - !Ref FactoryGatewaySecret
-                  - !If [UseSharedDatabase, !Ref SharedDatabaseSecretArn, !Ref AWS::NoValue]
-                  - !If [StudioReadsCharacterDatabase, !Ref CharacterDatabaseSecret, !Ref AWS::NoValue]
+              # The database master secrets and the character records secret only while DatabaseAdminAccess is true:
+              # creating the app role, moving the database, making the records database. An ordinary install logs in as
+              # the app role and reads none of them.
+              - !If
+                - HasDatabaseAdmin
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource:
+                    - !If [AdminReadsOwnDatabase, !GetAtt Database.MasterUserSecret.SecretArn, !Ref AWS::NoValue]
+                    - !If [AdminReadsSharedDatabase, !Ref SharedDatabaseSecretArn, !Ref AWS::NoValue]
+                    - !If [StudioReadsCharacterDatabase, !Ref CharacterDatabaseSecret, !Ref AWS::NoValue]
+                - !Ref AWS::NoValue
         # Wakes the idle-stopped studio (STUDIO_INSTANCE_ID). DescribeInstances has no resource-level permissions.
         - !If
           - HasStudioInstance
@@ -282,6 +324,57 @@ Resources:
           install -d -m 750 -o mogaesup -g mogaesup /var/lib/mogaesup /var/lib/mogaesup/blobs
           systemctl enable --now amazon-ssm-agent
       Tags: [{Key: application, Value: mogaesup}, {Key: Name, Value: mogaesup-server}]
+  # A failed host (system status check) brings the instance back on other hardware: same id, private address and disk,
+  # so the VPC origin and the web stack keep pointing at it.
+  ApiRecoveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Recover the mogaesup server instance when its host fails
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions: [{Name: InstanceId, Value: !Ref ApiInstance}]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: [!Sub 'arn:${AWS::Partition}:automate:${AWS::Region}:ec2:recover']
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      Subscription: [{Protocol: email, Endpoint: !Ref AlarmEmail}]
+      Tags: [{Key: application, Value: mogaesup}]
+  ApiStatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlarmEmail
+    Properties:
+      AlarmDescription: The mogaesup server instance fails its status checks
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions: [{Name: InstanceId, Value: !Ref ApiInstance}]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+  DatabaseStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AlarmsOwnDatabase
+    Properties:
+      AlarmDescription: The mogaesup RDS has less than 2 GB free (storage grows by itself up to MaxAllocatedStorage)
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions: [{Name: DBInstanceIdentifier, Value: !Ref Database}]
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 2000000000
+      ComparisonOperator: LessThanThreshold
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
   VpcOrigin:
     Type: AWS::CloudFront::VpcOrigin
     Properties:

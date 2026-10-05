@@ -21,7 +21,7 @@ from pathlib import Path
 REGION = 'ap-northeast-2'
 ACCOUNT = '960243570517'
 SERVER_STACK = 'mogaesup-server'
-DISTRIBUTION = 'EVYDOGNZWWWC9'
+STUDIO_STACK = 'gaesup-asset-studio'
 FUNCTION = 'gaesup-studio-gate'
 
 
@@ -72,9 +72,15 @@ def publish(code):
         'FunctionMetadata']['FunctionARN']
 
 
-def associate(arn):
+def studio_distribution():
+    """The studio stack's CloudFront distribution (a new one when the stack replaced it)."""
+    return aws('cloudformation', 'describe-stack-resource', '--region', REGION, '--stack-name', STUDIO_STACK,
+               '--logical-resource-id', 'StudioDistribution')['StackResourceDetail']['PhysicalResourceId']
+
+
+def associate(distribution, arn):
     """Puts the gate on every behavior of the studio distribution, or takes it off when `arn` is None."""
-    current = aws('cloudfront', 'get-distribution-config', '--id', DISTRIBUTION)
+    current = aws('cloudfront', 'get-distribution-config', '--id', distribution)
     config, etag = current['DistributionConfig'], current['ETag']
     items = [{'FunctionARN': arn, 'EventType': 'viewer-request'}] if arn else []
     behaviors = [config['DefaultCacheBehavior'], *config.get('CacheBehaviors', {}).get('Items', [])]
@@ -85,7 +91,7 @@ def associate(arn):
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / 'distribution.json'
         path.write_text(json.dumps(config), encoding='utf-8')
-        aws('cloudfront', 'update-distribution', '--id', DISTRIBUTION, '--if-match', etag,
+        aws('cloudfront', 'update-distribution', '--id', distribution, '--if-match', etag,
             '--distribution-config', f'file://{path.as_posix()}')
 
 
@@ -93,12 +99,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--allow-ip', action='append', default=[], help='A viewer address let in without the key')
     parser.add_argument('--unlock', action='store_true', help='Take the gate off the studio again')
+    parser.add_argument('--distribution', help=f"The studio's CloudFront distribution (default: {STUDIO_STACK}'s)")
     args = parser.parse_args()
     if aws('sts', 'get-caller-identity')['Account'] != ACCOUNT:
         raise RuntimeError('Unexpected AWS account')
+    distribution = args.distribution or studio_distribution()
     if args.unlock:
-        associate(None)
-        print(json.dumps({'distribution': DISTRIBUTION, 'gate': 'removed'}))
+        associate(distribution, None)
+        print(json.dumps({'distribution': distribution, 'gate': 'removed'}))
         return
     ips = [str(ipaddress.ip_address(value)) for value in args.allow_ip]
     outputs = {item['OutputKey']: item['OutputValue'] for item in
@@ -106,8 +114,8 @@ def main():
     key = aws('secretsmanager', 'get-secret-value', '--region', REGION,
               '--secret-id', outputs['FactoryGatewaySecretArn'])['SecretString']
     arn = publish(gate_code(key, ips))
-    associate(arn)
-    print(json.dumps({'distribution': DISTRIBUTION, 'gate': FUNCTION, 'allowIps': ips}))
+    associate(distribution, arn)
+    print(json.dumps({'distribution': distribution, 'gate': FUNCTION, 'allowIps': ips}))
 
 
 if __name__ == '__main__':

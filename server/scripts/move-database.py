@@ -6,7 +6,8 @@ this machine or into the command output. It creates the `mogaesup` database and 
 password the server already uses) on the target, refuses a target that already has tables, stops the service, copies
 everything with pg_dump/pg_restore as the app role, compares every table's row count, and leaves the service stopped
 on success so `deploy-rust-server.py --skip-provision` can start it against the new outputs. On failure it starts the
-service again on the old database. Provision the stack with the Shared* parameters first (security group rule, IAM).
+service again on the old database. Provision the stack with the Shared* parameters first (security group rule, IAM)
+and DatabaseAdminAccess=true (the instance role reads the master secrets only then); set it back to false after.
 """
 import argparse
 import json

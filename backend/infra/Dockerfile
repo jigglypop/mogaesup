@@ -1,4 +1,8 @@
-FROM python:3.12-slim-bookworm
+# python:3.12-slim-bookworm by digest: the instance and the pipeline build the same base. Raise it on purpose
+# (docker buildx imagetools inspect python:3.12-slim-bookworm), with the Blender line below as it needs.
+# Production runs Python 3.12; .python-version keeps 3.11 for the local machines and backend/Dockerfile. The pipeline's
+# backend-check runs the tests on both, and studio-image builds this image, so a change that works on one only fails there.
+FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3
 ARG BLENDER_VERSION=4.5.3
 # blender-<version>.sha256 next to the download on download.blender.org; change both together.
 ARG BLENDER_SHA256=975c58fcb244273838534bba771e64ad87739216b0f9b39a888531a49a72d845

@@ -170,3 +170,20 @@ def test_term_command_has_no_force_kill_timeout():
     host.command = lambda *args: calls.append(args)
     host.term({'container_id': 'old'})
     assert calls == [('docker', 'update', '--restart=no', 'old'), ('docker', 'kill', '--signal=TERM', 'old')]
+
+
+def test_rules_a_killed_run_left_are_removed_and_no_others(monkeypatch):
+    host = bootstrap.Host()
+    calls = []
+    listed = ('-P OUTPUT ACCEPT\n'
+              '-A OUTPUT -d 127.0.0.1/32 -p tcp -m tcp --dport 8000 -m conntrack --ctstate NEW -m comment --comment '
+              'studio-legacy-' + 'a' * 32 + ' -j REJECT --reject-with tcp-reset\n'
+              '-A OUTPUT -d 10.0.0.0/8 -m comment --comment "someone else" -j ACCEPT\n')
+
+    def command(*args, check=True):
+        calls.append(args)
+        return SimpleNamespace(stdout=listed if args[1] == '-S' else '', returncode=0)
+    monkeypatch.setattr(host, 'command', command)
+    host.remove_leftover_gates()
+    assert calls[1][:3] == ('iptables', '-D', 'OUTPUT') and '-j' in calls[1] and len(calls) == 2
+    assert 'studio-legacy-' + 'a' * 32 in calls[1]

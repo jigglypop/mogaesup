@@ -107,7 +107,7 @@ def test_the_gateway_secret_is_not_read_for_a_server_without_a_character_server(
 
 def test_other_factory_entries_stay_after_the_ones_the_deploy_manages(server_env):
     found, lines = server_env(EXISTING + 'FACTORY_API_KEY=abc\nFACTORY_OWNER_ID=7\nSOMETHING_ELSE=1\n')
-    assert list(found)[-2:] == ['FACTORY_API_KEY', 'FACTORY_OWNER_ID']
+    assert list(found)[-2:] == ['FACTORY_OWNER_ID', 'FACTORY_API_KEY']
     assert 'FACTORY_API_KEY=abc' in lines and 'SOMETHING_ELSE=1' not in lines
 
 
@@ -125,7 +125,7 @@ def test_the_log_line_names_the_settings_and_never_a_secret(bootstrap):
         bootstrap.parse_args(BASE), lambda: '')
     line = bootstrap.describe_factory(found)
     assert line == ('Studio gateway: FACTORY_URL=https://studio.example FACTORY_ACCESS=paid FACTORY_PAID_MONTHLY=5 '
-                    f'STUDIO_INSTANCE_ID={INSTANCE} FACTORY_GATEWAY_KEY=set')
+                    f'STUDIO_INSTANCE_ID={INSTANCE} FACTORY_GATEWAY_KEY=set FACTORY_JWT_SECRET=not set')
     assert GATEWAY_KEY not in line and 'api-key-value' not in line
     assert bootstrap.describe_factory({}) == 'Studio gateway: off (server.env has no FACTORY_URL)'
     assert 'STUDIO_INSTANCE_ID=(none)' in bootstrap.describe_factory({'FACTORY_URL': 'https://x.example'})
@@ -171,14 +171,19 @@ def test_the_install_script_is_valid_bash(deploy, bash):
     assert done.returncode == 0, done.stderr.decode(errors='replace')
 
 
-def test_the_previous_binary_is_kept_before_the_swap_and_restored_after_a_failure(deploy):
+def test_the_running_release_serves_until_one_restart_after_the_bootstrap(deploy):
     lines = install_script(deploy)
-    trap, stopped, swapped, ok = (lines.index(text) for text in ('trap restore EXIT', 'stopped=1', 'swapped=1', 'ok=1'))
-    stop = lines.index('systemctl stop mogaesup.service 2>/dev/null || true', stopped)
+    trap, configured, swapped, restarted, ok = (lines.index(text) for text in (
+        'trap restore EXIT', 'configured=1', 'swapped=1', 'restarted=1', 'ok=1'))
     keep = next(index for index, line in enumerate(lines) if '.prev.new' in line and line.startswith('if'))
-    swap = next(index for index, line in enumerate(lines) if line.startswith('install -m 755 mogaesup-server'))
     bootstrap = next(index for index, line in enumerate(lines) if line.startswith('python3 bootstrap.py'))
-    assert trap < stopped < stop < keep < swapped < swap < bootstrap < lines.index('systemctl is-active mogaesup') < ok
+    swap = next(index for index, line in enumerate(lines) if line.startswith('install -m 755 mogaesup-server'))
+    restart = lines.index('systemctl restart mogaesup.service')
+    assert trap < keep < configured < bootstrap < swapped < swap < restarted < restart
+    assert restart < lines.index('systemctl is-active mogaesup') < ok
+    # The bootstrap only writes the settings; nothing before the swap stops the service.
+    assert lines[bootstrap].endswith(' --no-restart')
+    assert not [line for line in lines[:swap] if line.startswith('systemctl stop') or line.startswith('systemctl restart')]
     # A failed copy of the previous binary must end the script, which `set -e` does not do inside an `&&` list.
     assert '&&' not in lines[keep]
     # What follows the healthy release is housekeeping that cannot fail the install.
@@ -199,7 +204,7 @@ def test_the_certificate_bundle_is_replaced_whole(deploy):
     assert lines[download].endswith('global-bundle.pem.new')
     assert lines[download + 1] == 'mv -f /opt/mogaesup/global-bundle.pem.new /opt/mogaesup/global-bundle.pem'
     # Before anything is stopped: a failed download leaves the running release alone.
-    assert download < lines.index('stopped=1')
+    assert download < lines.index('swapped=1')
 
 
 # The commands the script runs on the instance, as bash functions (a function beats the command of the same name).
@@ -221,7 +226,13 @@ curl() {
   if [ -f "$SB/state/running" ] && grep -q GOOD "$SB/state/running"; then echo '{"status":"healthy"}'; return 0; fi
   return 22
 }
-python3() { echo bootstrap >> "$SB/calls.log"; [ -z "${BOOTSTRAP_FAILS:-}" ] || return 1; systemctl restart mogaesup; }
+python3() {
+  echo "bootstrap $*" >> "$SB/calls.log"
+  # It rewrites the settings (a failing one may have done so already) and leaves the restart to the install.
+  echo rewritten > "$SB/etc/mogaesup/server.env"
+  [ -z "${BOOTSTRAP_FAILS:-}" ] || return 1
+  case " $* " in *' --no-restart '*) ;; *) systemctl restart mogaesup ;; esac
+}
 install() {
   if [ "$1" = -d ]; then shift; while [ $# -gt 0 ]; do case "$1" in -m|-o|-g) shift 2;; *) mkdir -p "$1"; shift;; esac; done; return 0; fi
   args=(); while [ $# -gt 0 ]; do case "$1" in -m|-o|-g) shift 2;; *) args+=("$1"); shift;; esac; done
@@ -243,8 +254,9 @@ def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', good=None, *
     sandbox = tmp_path.as_posix()
     if ' ' in sandbox:
         pytest.skip('the rendered script does not quote paths')
-    for folder in ('state', 'var/log', 'var/lock', f'opt/mogaesup/releases/{RELEASE}'):
+    for folder in ('state', 'var/log', 'var/lock', f'opt/mogaesup/releases/{RELEASE}', 'etc/mogaesup', 'etc/systemd/system'):
         (tmp_path / folder).mkdir(parents=True)
+    (tmp_path / 'etc/mogaesup/server.env').write_text('ORIGINAL')
     (tmp_path / f'opt/mogaesup/releases/{RELEASE}/mogaesup-server').write_text(new)
     if old is not None:
         (tmp_path / 'opt/mogaesup/mogaesup-server').write_text(old)
@@ -252,7 +264,8 @@ def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', good=None, *
     if good is not None:
         (tmp_path / 'opt/mogaesup/mogaesup-server.good').write_text(good)
     script = replace_host_paths('\n'.join(install_script(deploy)), {
-        '/opt/mogaesup': f'{sandbox}/opt/mogaesup', '/var/': f'{sandbox}/var/'})
+        '/opt/mogaesup': f'{sandbox}/opt/mogaesup', '/var/': f'{sandbox}/var/', '/etc/mogaesup': f'{sandbox}/etc/mogaesup',
+        '/etc/systemd/system': f'{sandbox}/etc/systemd/system'})
     # Two tries of each health wait instead of thirty: starting a command costs far more here than the wait it stands for.
     script = script.replace('$(seq 1 30)', '$(seq 1 2)')
     done = subprocess.run([bash], input=(STUBS + script + '\n').encode(), capture_output=True, timeout=120, cwd=tmp_path,
@@ -263,6 +276,7 @@ def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', good=None, *
     return SimpleNamespace(code=done.returncode, err=done.stderr.decode(errors='replace'), binary=read('opt/mogaesup/mogaesup-server'),
                            prev=read('opt/mogaesup/mogaesup-server.prev'), good=read('opt/mogaesup/mogaesup-server.good'),
                            running=read('state/running'), stops=read('calls.log').count('systemctl stop'),
+                           restarts=read('calls.log').count('systemctl restart'), env=read('etc/mogaesup/server.env'),
                            bootstrapped='bootstrap' in read('calls.log'), journal=read('var/log/mogaesup-failed-release.log'),
                            releases=sorted(path.name for path in (tmp_path / 'opt/mogaesup/releases').iterdir()))
 
@@ -270,7 +284,9 @@ def install(deploy, bash, tmp_path, old='OLD-GOOD', new='NEW-GOOD', good=None, *
 def test_a_release_that_comes_up_replaces_the_binary_and_keeps_the_old_one(deploy, bash, tmp_path):
     done = install(deploy, bash, tmp_path)
     assert done.code == 0 and (done.binary, done.prev, done.running) == ('NEW-GOOD', 'OLD-GOOD', 'NEW-GOOD')
-    assert done.good == 'NEW-GOOD'
+    assert done.good == 'NEW-GOOD' and done.env.strip() == 'rewritten'
+    # One restart, after the bootstrap: the server is down only while it restarts.
+    assert (done.stops, done.restarts) == (0, 1)
 
 
 def test_a_failure_goes_back_to_the_last_release_that_answered(deploy, bash, tmp_path):
@@ -301,11 +317,14 @@ def test_a_release_that_never_gets_healthy_is_replaced_by_the_previous_binary(de
     done = install(deploy, bash, tmp_path, new='NEW-BAD')
     assert done.code != 0 and (done.binary, done.running) == ('OLD-GOOD', 'OLD-GOOD')
     assert 'starting the previous one again' in done.err and 'the previous release answers again' in done.err
+    assert done.env == 'ORIGINAL'
 
 
-def test_a_failing_bootstrap_puts_the_previous_binary_back_too(deploy, bash, tmp_path):
+def test_a_failing_bootstrap_leaves_the_running_release_untouched(deploy, bash, tmp_path):
     done = install(deploy, bash, tmp_path, bootstrap_fails=True)
     assert done.code != 0 and done.bootstrapped and (done.binary, done.running) == ('OLD-GOOD', 'OLD-GOOD')
+    # Never stopped or restarted, and the settings it runs with are back on disk for its next start.
+    assert (done.stops, done.restarts) == (0, 0) and done.env == 'ORIGINAL'
 
 
 def test_a_failed_copy_of_the_previous_binary_stops_before_the_swap(deploy, bash, tmp_path):
@@ -369,31 +388,114 @@ def cloudformation(deploy, monkeypatch):
     return seen
 
 
+def cloudformation_calls(seen):
+    return [call[1] for call in seen.aws if call[0] == 'cloudformation']
+
+
 def test_without_yes_the_changes_are_listed_and_left_unapplied(deploy, cloudformation, capsys):
-    cloudformation.changes = [{'ResourceChange': {'Action': 'Modify', 'LogicalResourceId': 'ApiInstance',
-                                                  'ResourceType': 'AWS::EC2::Instance', 'Replacement': 'True'}}]
+    cloudformation.changes = [{'ResourceChange': {'Action': 'Modify', 'LogicalResourceId': 'InstanceRole',
+                                                  'ResourceType': 'AWS::IAM::Role', 'Replacement': 'False'}}]
     with pytest.raises(SystemExit) as stopped:
         deploy.provision(INSTANCE)
     assert str(stopped.value) == deploy.UNAPPLIED
     assert len(cloudformation.run) == 1 and '--no-execute-changeset' in cloudformation.run[0]
     assert f'StudioInstanceId={INSTANCE}' in cloudformation.run[0]
-    assert 'ApiInstance (AWS::EC2::Instance)  REPLACES the resource' in capsys.readouterr().out
-    assert [call[1] for call in cloudformation.aws] == ['describe-change-set', 'delete-change-set']
+    assert 'InstanceRole (AWS::IAM::Role)' in capsys.readouterr().out
+    assert cloudformation_calls(cloudformation) == ['describe-change-set', 'delete-change-set']
+
+
+def test_the_stack_keeps_its_own_tags(deploy, cloudformation):
+    # Tags the live stack does not have list every resource as modified, the instance as one that may be replaced.
+    cloudformation.output = 'No changes to deploy. Stack mogaesup-server is up to date\n'
+    deploy.provision()
+    assert '--tags' not in cloudformation.run[0]
 
 
 def test_without_yes_an_empty_change_set_goes_on(deploy, cloudformation):
     cloudformation.output = 'No changes to deploy. Stack mogaesup-server is up to date\n'
     deploy.provision()
-    assert len(cloudformation.run) == 1 and cloudformation.aws == []
+    assert len(cloudformation.run) == 1 and cloudformation_calls(cloudformation) == []
 
 
-def test_without_yes_an_unreadable_answer_is_not_applied(deploy, cloudformation):
+def test_an_unreadable_answer_is_not_applied(deploy, cloudformation):
     cloudformation.output = 'something else\n'
-    with pytest.raises(RuntimeError, match='--yes'):
-        deploy.provision()
+    with pytest.raises(RuntimeError, match='change set could not be read'):
+        deploy.provision(yes=True)
+    assert len(cloudformation.run) == 1
 
 
-def test_with_yes_the_stack_is_deployed_as_before(deploy, cloudformation):
+def test_with_yes_the_listed_change_set_and_no_other_is_run(deploy, cloudformation, capsys):
+    cloudformation.changes = [{'ResourceChange': {'Action': 'Modify', 'LogicalResourceId': 'InstanceRole',
+                                                  'ResourceType': 'AWS::IAM::Role', 'Replacement': 'False'}}]
     deploy.provision(yes=True)
-    assert len(cloudformation.run) == 1 and '--no-execute-changeset' not in cloudformation.run[0]
-    assert cloudformation.run[0][:4] == ['aws', 'cloudformation', 'deploy', '--region'] and cloudformation.aws == []
+    assert '--no-execute-changeset' in cloudformation.run[0]
+    assert 'InstanceRole (AWS::IAM::Role)' in capsys.readouterr().out
+    executed = [call for call in cloudformation.aws if call[:2] == ('cloudformation', 'execute-change-set')]
+    assert len(executed) == 1 and executed[0][-1] == ARN
+    assert cloudformation.run[1][:4] == ['aws', 'cloudformation', 'wait', 'stack-update-complete']
+
+
+@pytest.mark.parametrize('name, replacement', [('ApiInstance', 'True'), ('ApiInstance', 'Conditional'), ('Database', 'True')])
+def test_yes_never_replaces_the_instance_or_the_database(deploy, cloudformation, name, replacement):
+    cloudformation.changes = [{'ResourceChange': {'Action': 'Modify', 'LogicalResourceId': name,
+                                                  'ResourceType': 'AWS::EC2::Instance', 'Replacement': replacement}}]
+    with pytest.raises(SystemExit) as stopped:
+        deploy.provision(yes=True)
+    assert name in str(stopped.value) and 'nothing was applied' in str(stopped.value)
+    assert cloudformation_calls(cloudformation) == ['describe-change-set', 'delete-change-set']
+
+
+def test_a_database_newer_than_the_template_stops_the_change(deploy):
+    assert deploy.template_engine_version() == '17.9'
+    deploy.check_engine_version('17.9', '17.9')
+    deploy.check_engine_version('17.6', '17.9')
+    with pytest.raises(RuntimeError, match='raise EngineVersion'):
+        deploy.check_engine_version('17.10', '17.9')
+
+
+def test_a_manual_release_must_be_committed_and_built_after_the_last_server_commit(deploy, monkeypatch, tmp_path):
+    binary = tmp_path / 'mogaesup-server'
+    binary.write_bytes(b'\x7fELF')
+    answers = {'status': ' M server/src/main.rs\n', 'rev-parse': 'a' * 40 + '\n', 'log': '4000000000\n'}
+
+    pushed = {'code': 1}
+
+    def git(*args):
+        if args[0] == 'merge-base':
+            return subprocess.CompletedProcess(args, pushed['code'], stdout='', stderr='')
+        return subprocess.CompletedProcess(args, 0, stdout=answers[args[0]], stderr='')
+    monkeypatch.setattr(deploy, 'git', git)
+    monkeypatch.setattr(deploy, 'pipeline_running', lambda: None)
+    with pytest.raises(RuntimeError, match='Uncommitted server files'):
+        deploy.release_commit(binary, environ={})
+    answers['status'] = ''
+    with pytest.raises(RuntimeError, match='not on origin/main'):
+        deploy.release_commit(binary, environ={})
+    pushed['code'] = 0
+    with pytest.raises(RuntimeError, match='older than the last commit'):
+        deploy.release_commit(binary, environ={})
+    answers['log'] = '1000000000\n'
+    assert deploy.release_commit(binary, environ={}) == 'a' * 40
+    # The pipeline names the commit it checked out.
+    assert deploy.release_commit(binary, environ={'GITHUB_ACTIONS': 'true', 'GITHUB_SHA': 'b' * 40}) == 'b' * 40
+
+
+def test_cloudfront_must_send_the_api_to_this_stack(deploy, monkeypatch):
+    outputs = {'VpcOriginId': 'vo_1', 'ApiPrivateDns': 'ip-10-0-0-1.ec2.internal'}
+
+    def web(given):
+        return lambda *args: {'Stacks': [{'Parameters': [{'ParameterKey': key, 'ParameterValue': value}
+                                                         for key, value in given.items()]}]}
+    monkeypatch.setattr(deploy, 'aws', web({'ApiVpcOriginId': 'vo_1', 'ApiPrivateDns': 'ip-10-0-0-1.ec2.internal'}))
+    deploy.check_web_origin(outputs)
+    monkeypatch.setattr(deploy, 'aws', web({'ApiVpcOriginId': 'vo_1', 'ApiPrivateDns': 'ip-10-0-0-9.ec2.internal'}))
+    with pytest.raises(RuntimeError, match='ApiPrivateDns'):
+        deploy.check_web_origin(outputs)
+
+
+def test_the_gateway_token_settings_survive_a_deploy_and_stay_unprinted(server_env, bootstrap):
+    found, lines = server_env(EXISTING + 'FACTORY_JWT_SECRET=jwt-secret-value-0123456789\nFACTORY_OWNER_ID=1\n')
+    assert found['FACTORY_JWT_SECRET'] == 'jwt-secret-value-0123456789' and 'FACTORY_OWNER_ID=1' in lines
+    assert list(found)[-2:] == ['FACTORY_JWT_SECRET', 'FACTORY_OWNER_ID']
+    line = bootstrap.describe_factory(found)
+    assert 'FACTORY_JWT_SECRET=set' in line and 'jwt-secret-value' not in line

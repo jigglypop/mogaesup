@@ -1,7 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Gaesup character studio API on one instance with S3 durability and SSM administration, optionally reachable over HTTPS through CloudFront
-# A stack update deploys UserData with ReleaseKey: pass the release the instance runs now (ReleaseKey in
-# /opt/asset-studio/current.json or backend/dist/aws/deployment-receipt.json), or a replaced instance boots an older one.
+# A stack update deploys UserData with ReleaseKey: pass the release the instance runs now (the SSM parameter
+# /asset-studio/current-release that deploy-on-instance.sh writes, /opt/asset-studio/current.json, or
+# backend/dist/aws/deployment-receipt.json), or a replaced instance boots an older one. A change to the instance role's
+# permissions alone goes through backend/infra/update-studio-role.py, which refuses a change set that touches the instance.
 Parameters:
   VpcId: {Type: 'AWS::EC2::VPC::Id'}
   SubnetId: {Type: 'AWS::EC2::Subnet::Id'}
@@ -36,11 +38,17 @@ Parameters:
     AllowedPattern: '^$|^pl-[0-9a-f]+$'
   InstanceType: {Type: String, Default: t3.large, AllowedValues: [t3.large, t3.xlarge, c7i.large, c7i.xlarge]}
   ImageId:
-    # Resolved again on every stack update, so a newer AL2023 image replaces the instance. The image the instance runs now
-    # is not recorded here; to pin it, take its id from `aws ec2 describe-instances` and make this a plain
-    # AWS::EC2::Image::Id parameter with that default, as server/infra/aws-server.yaml does.
-    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    # Pinned, with no default: another image replaces the instance, and the deploy role (SendCommand), the server
+    # (StartInstances, STUDIO_INSTANCE_ID) and the studio gate all name the instance it replaces. Pass the image it runs:
+    #   aws ec2 describe-instances --instance-ids <InstanceId output> --query 'Reservations[0].Instances[0].ImageId' --output text
+    # (update-studio-role.py looks it up). A new stack takes the current AL2023 image:
+    #   aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 --query Parameter.Value --output text
+    Type: 'AWS::EC2::Image::Id'
+  IdleStop:
+    Type: String
+    Default: ''
+    AllowedValues: ['', 'off']
+    Description: off writes IDLE_STOP=off to /etc/asset-studio-idle.env on the first boot, so a new instance stays on (infra/idle-stop.sh). Empty leaves the user data as it was; a change of this value stops and starts the instance once.
 Rules:
   PublicStudioOrigin:
     RuleCondition: !Equals [!Ref PublicStudio, 'true']
@@ -60,6 +68,7 @@ Rules:
 Conditions:
   HasCharacterDb: !And [!Not [!Equals [!Ref CharacterDbSecretArn, '']], !Not [!Equals [!Ref CharacterDbHost, '']]]
   HasPublicStudio: !Equals [!Ref PublicStudio, 'true']
+  StaysOn: !Equals [!Ref IdleStop, 'off']
   IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
 Resources:
   InstanceRole:
@@ -69,35 +78,46 @@ Resources:
         Version: '2012-10-17'
         Statement: [{Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: 'sts:AssumeRole'}]
       ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore']
-      Policies:
-        - PolicyName: StudioStorage
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: ['s3:ListBucket']
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}'
-                Condition: {StringLike: {'s3:prefix': ['assets/*', 'releases/*']}}
-              # The studio deletes objects it replaces or archives (StoredPath.unlink); the bucket is versioned.
-              - Effect: Allow
-                Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject']
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/assets/*'
-              - Effect: Allow
-                Action: ['s3:GetObject']
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/releases/studio/*'
-              # deploy-on-instance.sh reads the provider secret and, when given, the records database secret.
-              - Effect: Allow
-                Action: ['secretsmanager:GetSecretValue']
-                Resource:
-                  - !Ref ProviderSecretArn
-                  - !If [HasCharacterDb, !Ref CharacterDbSecretArn, !Ref AWS::NoValue]
+  # The role's own permissions, apart from the role and the instance: a change here is an IAM-only update
+  # (update-studio-role.py checks the change set for that before it runs it).
+  StudioAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: StudioAccess
+      Roles: [!Ref InstanceRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: ['s3:ListBucket']
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}'
+            Condition: {StringLike: {'s3:prefix': ['assets/*', 'releases/*']}}
+          # The studio deletes objects it replaces or archives (StoredPath.unlink); the bucket is versioned.
+          - Effect: Allow
+            Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject']
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/assets/*'
+          - Effect: Allow
+            Action: ['s3:GetObject']
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${AssetBucket}/releases/studio/*'
+          # deploy-on-instance.sh reads the provider secret and, when given, the records database secret.
+          - Effect: Allow
+            Action: ['secretsmanager:GetSecretValue']
+            Resource:
+              - !Ref ProviderSecretArn
+              - !If [HasCharacterDb, !Ref CharacterDbSecretArn, !Ref AWS::NoValue]
+          # deploy-on-instance.sh records the release it installed, the ReleaseKey a later stack update passes.
+          - Effect: Allow
+            Action: ['ssm:PutParameter']
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/asset-studio/current-release'
   Profile:
     Type: AWS::IAM::InstanceProfile
     Properties: {Roles: [!Ref InstanceRole]}
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: SSM administration with optional CloudFront HTTP
+      # The text the group was created with: a new description replaces the group, and with it the instance (its network
+      # interface names the group). Port 80 is CloudFront's only (CloudFrontHttpIngress).
+      GroupDescription: SSM administration with optional public static HTTP
       VpcId: !Ref VpcId
       SecurityGroupEgress: [{IpProtocol: '-1', CidrIp: 0.0.0.0/0}]
   CloudFrontHttpIngress:
@@ -143,7 +163,7 @@ Resources:
             PROVIDER_SECRET_ARN='${ProviderSecretArn}'
             PUBLIC_STUDIO='${PublicStudio}'${CharacterDbConfig}
             CONFIG
-            chmod 600 /etc/asset-studio.env
+            chmod 600 /etc/asset-studio.env${IdleStopConfig}
             release_sha="$(basename '${ReleaseKey}' .tar.gz)"
             exec 8>/var/lock/asset-studio-prepare.lock
             flock -n 8 || { echo 'another release preparation is active' >&2; exit 3; }
@@ -163,6 +183,11 @@ Resources:
                   - "'\nCHARACTER_DB_HOST='"
                   - !Ref CharacterDbHost
                   - "'"
+              - ''
+            # Empty unless IdleStop is off, so the user data stays as it was.
+            IdleStopConfig: !If
+              - StaysOn
+              - "\necho IDLE_STOP=off > /etc/asset-studio-idle.env"
               - ''
   StudioAddress:
     # Fixed address so the CloudFront origin name survives instance stop and start.
@@ -206,6 +231,9 @@ Resources:
               - IsUsEast1
               - !Sub ['ec2-${Address}.compute-1.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
               - !Sub ['ec2-${Address}.${AWS::Region}.compute.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
+            # Plain HTTP between CloudFront and the instance, x-gateway-key included: no certificate can name an EC2 public
+            # DNS name. Closing it takes a CloudFront VPC origin (as server/infra/aws-server.yaml has), which needs the
+            # instance in a private subnet, that is, a new instance.
             CustomOriginConfig:
               OriginProtocolPolicy: http-only
               HTTPPort: 80

@@ -12,18 +12,29 @@ if ($InstanceId -notmatch '^i-[0-9a-f]{8,17}$') { throw 'Invalid EC2 instance ID
 if ($Bucket -notmatch '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$') { throw 'Invalid S3 bucket name.' }
 if ($ReleaseKey -notmatch '^releases/studio/([0-9a-f]{64})\.tar\.gz$') { throw 'Invalid release key.' }
 $releaseSha = $Matches[1]
+# The region goes into the script the instance runs.
+if ($Region -notmatch '^[a-z]{2}(-[a-z]+)+-[0-9]+$') { throw 'Invalid AWS region.' }
 if (-not (Get-Command aws -ErrorAction SilentlyContinue)) { throw 'AWS CLI is required.' }
 
 function Invoke-Aws([string[]]$Arguments, [switch]$AllowFailure) {
   $common = @('--region', $Region, '--cli-connect-timeout', '5', '--cli-read-timeout', '20', '--output', 'json')
   if ($Profile) { $common += @('--profile', $Profile) }
-  # Windows PowerShell 5.1 turns any redirected stderr line into a terminating error under Stop;
-  # the exit code decides failure instead.
+  # stdout alone is parsed as JSON; stderr goes to a file, so a CLI warning cannot break the parse. Windows PowerShell
+  # 5.1 turns a redirected stderr line into a terminating error under Stop, so the exit code decides failure instead.
+  $errorFile = [IO.Path]::GetTempFileName()
   $previous = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-  try { $text = & aws @Arguments @common 2>&1 } finally { $ErrorActionPreference = $previous }
+  try {
+    $text = & aws @Arguments @common 2>$errorFile
+    $code = $LASTEXITCODE
+    $errorText = (Get-Content -LiteralPath $errorFile -Raw -ErrorAction SilentlyContinue)
+  } finally {
+    $ErrorActionPreference = $previous
+    Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
+  }
   $text = $text | ForEach-Object { "$_" }
-  if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) { throw "AWS CLI request failed: $($Arguments[0..1] -join ' ')" }
-  return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = ($text -join "`n") }
+  $errorText = if ($errorText) { $errorText.Trim() } else { '' }
+  if ($code -ne 0 -and -not $AllowFailure) { throw "AWS CLI request failed: $($Arguments[0..1] -join ' '): $errorText" }
+  return [pscustomobject]@{ ExitCode = $code; Text = ($text -join "`n"); Error = $errorText }
 }
 
 $headResult = Invoke-Aws @('s3api', 'head-object', '--bucket', $Bucket, '--key', $ReleaseKey)
@@ -71,7 +82,7 @@ do {
   Start-Sleep -Seconds 5
   $get = Invoke-Aws @('ssm', 'get-command-invocation', '--command-id', $commandId, '--instance-id', $InstanceId) -AllowFailure
   if ($get.ExitCode -ne 0) {
-    $lookupFailure = ($get.Text -split "`n" | Select-Object -Last 1)
+    $lookupFailure = ($get.Error -split "`n" | Select-Object -Last 1)
     continue
   }
   $lookupFailure = $null
