@@ -586,7 +586,12 @@ async fn finished(app: &TestApp, admin: &str, id: &str) -> Value {
 async fn import(app: &TestApp, admin: &str, body: Value) -> Value {
     let queued = app.call("POST", IMPORT, Some(body), Some(admin)).await;
     assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
-    assert!(matches!(queued.body["status"].as_str(), Some("queued" | "running")), "{:?}", queued.body);
+    // The import runs on a task of its own, which may already be done (or have failed) when the reply reads it back.
+    assert!(
+        matches!(queued.body["status"].as_str(), Some("queued" | "running" | "done" | "failed")),
+        "{:?}",
+        queued.body
+    );
     finished(app, admin, queued.body["id"].as_str().unwrap()).await
 }
 

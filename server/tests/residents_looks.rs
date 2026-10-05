@@ -514,7 +514,8 @@ async fn 옷장에서_꾸민_모습을_저장하면_한_모델로_조립되어_�
 
     let queued = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
     assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
-    assert_eq!(queued.body["look"]["status"], "baking");
+    // The bake starts as the request is saved; on a quick machine it is done before the reply reads the look back.
+    assert!(matches!(queued.body["look"]["status"].as_str(), Some("baking" | "ready")), "{:?}", queued.body);
     let ready = settled(&app, &member).await;
     assert_eq!((ready["status"].as_str(), ready["worn"].as_bool()), (Some("ready"), Some(true)), "{ready}");
     let model = ready["modelUrl"].as_str().unwrap().to_owned();
