@@ -7,6 +7,11 @@ const FIT_REASONS = new Map([
   ['fit_exception', '피팅 중 오류'],
 ]);
 
+/** The parts on offer: a part that failed its fit check is worn only by operators, who look into it; members never
+ * see it, so their character never wears a part known to clip through the body. */
+export const wearableParts = (parts: WardrobePart[], operator: boolean): WardrobePart[] =>
+  operator ? parts : parts.filter(part => part.fit_check?.status !== 'fail');
+
 /** The parts that could not be fitted, for operators only. */
 export const unfittedParts = (parts: WardrobeUnavailable[] | undefined, operator: boolean): WardrobeUnavailable[] => (operator ? (parts ?? []) : []);
 

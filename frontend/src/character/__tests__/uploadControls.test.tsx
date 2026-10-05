@@ -25,6 +25,9 @@ const paste = (target: Element, files: File[]) => {
   target.dispatchEvent(event);
 };
 
+/** Lets a picked photo be read (the browser reads its header from the file first) and prepared. */
+const photoRead = () => act(async () => { for (let round = 0; round < 3; round++) await new Promise(resolve => setTimeout(resolve, 0)); });
+
 describe('파일을 고르는 곳', () => {
   it('GLB 등록은 파일 입력 하나만 키보드로 닿고, 그곳에 붙여넣어도 고른다', async () => {
     const { container, unmount } = await mount(<GlbUpload onUpload={async () => {}} />);
@@ -77,7 +80,7 @@ describe('파일을 고르는 곳', () => {
       const draw = vi.fn();
       vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: draw } as unknown as CanvasRenderingContext2D);
       vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => callback(new Blob(['encoded pixels'], { type: 'image/jpeg' })));
-      const create = vi.spyOn(api, 'create').mockResolvedValue({ id: 'new-photo' } as never);
+      const create = vi.spyOn(api, 'create').mockResolvedValue({ id: 'new-photo', artifacts: [] } as never);
       const upload = vi.spyOn(api, 'upload').mockResolvedValue({} as never);
       const { container, unmount } = await mount(<CharacterFactory jobs={[]} jobsLoading={false} jobsError="" catalogError="" bodyProfileError="" onJob={() => {}} refreshJobs={async () => {}} />);
       const label = container.querySelector('label.character-upload')!, input = label.querySelector('input')!;
@@ -92,6 +95,7 @@ describe('파일을 고르는 곳', () => {
           input.dispatchEvent(new Event('change', { bubbles: true }));
         }
       });
+      await photoRead();
       expect(container.querySelector('img[alt="업로드할 사진"]')).not.toBeNull();
       expect(container.textContent).toContain('2048 × 1365');
       expect(create).not.toHaveBeenCalled(); expect(upload).not.toHaveBeenCalled();
@@ -103,6 +107,33 @@ describe('파일을 고르는 곳', () => {
       expect(prepared).toBeInstanceOf(File); expect(prepared).not.toBe(source); expect(prepared.size).toBe(14);
       expect(container.querySelector('[aria-label="사진 자르기"]')).toBeNull();
       expect(bitmap.close).toHaveBeenCalledOnce();
+      await unmount();
+    });
+    it('업로드만 실패하면 다시 눌러도 캐릭터를 새로 만들지 않고 만든 캐릭터에 올린다', async () => {
+      const source = new File(['original'], 'photo.png', { type: 'image/png' });
+      vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 400, height: 300, close: vi.fn() })));
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:photo-preview');
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D);
+      vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => callback(new Blob(['encoded'], { type: 'image/png' })));
+      const made = { id: 'made', revision: 'r1', artifacts: [] };
+      const create = vi.spyOn(api, 'create').mockResolvedValue(made as never);
+      const list = vi.spyOn(api, 'list').mockResolvedValue({ characters: [{ ...made, revision: 'r2' }] } as never);
+      const upload = vi.spyOn(api, 'upload').mockRejectedValueOnce(new Error('업로드 실패')).mockResolvedValue({} as never);
+      const { container, unmount } = await mount(<CharacterFactory jobs={[]} jobsLoading={false} jobsError="" catalogError="" bodyProfileError="" onJob={() => {}} refreshJobs={async () => {}} />);
+      const input = container.querySelector<HTMLInputElement>('label.character-upload input')!;
+      Object.defineProperty(input, 'files', { configurable: true, value: [source] });
+      await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })); });
+      await photoRead();
+      const use = () => [...container.querySelectorAll('button')].find(button => button.textContent === '이 사진 사용')!;
+      await act(async () => use().click());
+      expect(container.querySelector('[role=alert]')?.textContent).toBe('업로드 실패');
+      await act(async () => use().click());
+      expect(create).toHaveBeenCalledOnce();
+      expect(list).toHaveBeenCalledOnce();
+      expect(upload).toHaveBeenCalledTimes(2);
+      expect(upload.mock.calls[1]![0]).toMatchObject({ id: 'made', revision: 'r2' });
+      expect(container.querySelector('[aria-label="사진 자르기"]')).toBeNull();
       await unmount();
     });
   });

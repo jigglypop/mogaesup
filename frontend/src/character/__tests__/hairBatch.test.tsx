@@ -47,7 +47,7 @@ describe('헤어 일괄 생성의 저장된 요청', () => {
     localStorage.setItem(PENDING, JSON.stringify({ key: 'lost-key', input: input('단발') }));
     const { container, unmount } = await open();
     expect(container.querySelector('.generation-recovery')?.textContent).toContain('응답을 확인하지 못한 배치 · 단발');
-    expect(button(container, '같은 요청 키로 접수 복구')).toBeDefined();
+    expect(button(container, '접수 복구')).toBeDefined();
     await act(async () => button(container, '저장된 요청 지우기')!.click());
     expect(localStorage.getItem(PENDING)).toBeNull();
     expect(container.querySelector('.generation-recovery')).toBeNull();
@@ -67,7 +67,7 @@ describe('헤어 일괄 생성의 저장된 요청', () => {
     expect(container.querySelector('.generation-recovery')?.textContent).toContain('단발');
 
     fetchMock.mockResolvedValueOnce(json(200, { id: 'batch-1', status: 'accepted', completed: 0, created_at: '2026-10-02T00:00:00Z', input: input('단발'), items: [] }));
-    await act(async () => button(container, '같은 요청 키로 접수 복구')!.click());
+    await act(async () => button(container, '접수 복구')!.click());
     await settle();
     expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Idempotency-Key')).toBe('other-tab-key');
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).items[0].name).toBe('단발');

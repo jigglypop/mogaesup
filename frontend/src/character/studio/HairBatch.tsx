@@ -195,7 +195,7 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       <label className="hair-batch-check"><input type="checkbox" checked={worn} onChange={e=>setWorn(e.target.checked)}/>기본 몸 머리에 씌워 생성</label>
     </fieldset>
     {uploadProgress && <p role="status">3뷰 이미지 처리 중 · {uploadProgress}</p>}
-    <button disabled={busy || !!recoveryError || (!pending && (disabled || !baseId || !version || !selected.length || selected.some(index=>!items[index]?.name.trim())))} onClick={()=>void generate()}>{pending?'같은 요청 키로 접수 복구':`${selected.length}종 생성 · 유료 이미지 ${selected.length*(worn?3:4)}장 + 3D ${selected.length}회`}</button>
+    <button disabled={busy || !!recoveryError || (!pending && (disabled || !baseId || !version || !selected.length || selected.some(index=>!items[index]?.name.trim())))} onClick={()=>void generate()}>{pending?'접수 복구':`${selected.length}종 생성 · 유료 이미지 ${selected.length*(worn?3:4)}장 + 3D ${selected.length}회`}</button>
     {pending && <p className="generation-recovery">응답을 확인하지 못한 배치 · {pending.input.items.map(item=>item.name).join(', ')} <button type="button" disabled={busy} onClick={()=>discard(pending.key)}>저장된 요청 지우기</button></p>}
     </div>
     {(error || recoveryError || batches.error) && <p role="alert">{error || recoveryError || batches.error}</p>}

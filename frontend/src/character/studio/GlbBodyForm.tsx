@@ -75,7 +75,7 @@ export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
       <small>Meshy 유료 리깅 1회{motions ? ' · 기본 동작 5종' : ''} · 기존 골격·동작 교체</small>
     </>}
     <button className="base-body-create" onClick={() => void submit()} disabled={busy || checking || !!recovery.error || (!pending && (!draft.name.trim() || !draft.asset))}>{busy ? '접수 중' : pending ? '같은 GLB 요청 복구' : mode === 'rig' ? '새 리깅 시작 후 등록' : '바로 등록'}</button>
-    {pending && <p className="base-body-recovery">저장된 GLB와 같은 요청 키로 접수 결과를 확인합니다.</p>}
+    {pending && <p className="base-body-recovery">응답 확인 안 됨</p>}
     {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}
     {notice && <p role="status">{notice}</p>}
   </div>;

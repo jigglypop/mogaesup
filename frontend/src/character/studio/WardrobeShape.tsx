@@ -11,6 +11,8 @@ const initialShape = (part: WardrobePart): GarmentShape => ({
   ...(part.slot === 'top' ? { sleeve: part.shape?.sleeve ?? .5 } : {}), hem: part.shape?.hem ?? .5, fit: part.shape?.fit ?? 'normal' });
 const POLL_MS = 2000;
 
+type SavedRefit = Pending<{ source_version: string; slot: string }>;
+
 /** Sleeve, hem and fit of a worn body-shell top or bottom. Rebuilding refits the part in its own job;
  * `replace` receives the new version once the wardrobe lists it. Closing the panel stops the waiting. */
 export function WardrobeShape({ part, label, reload, replace }: {
@@ -19,37 +21,60 @@ export function WardrobeShape({ part, label, reload, replace }: {
 }) {
   const [draft, setDraft] = useState<GarmentShape>(() => initialShape(part));
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [elapsed, setElapsed] = useState(0);
-  // A saved refit of this job that is not this rebuild (an answer lost for another shape or screen): it is resumed or
-  // cleared here, never sent in this one's place.
-  const [saved, setSaved] = useState<Pending<unknown> | null>(null);
+  // A saved refit of this job the server never answered for: it is resumed or cleared here, never sent in another
+  // rebuild's place.
+  const [saved, setSaved] = useState<SavedRefit | null>(null);
   const closed = useRef<AbortController | null>(null);
+  const shown = useRef(part);
+  shown.current = part;
   useEffect(() => {
     const controller = new AbortController();
     closed.current = controller;
     return () => controller.abort();
   }, []);
   useEffect(() => { setDraft(initialShape(part)); }, [part.job_id, part.version]);
+  // A rebuild of this part whose answer was lost (the panel closed, the page reloaded): one the server has is followed
+  // here to its end and forgotten; one it does not have waits to be sent again or cleared.
+  useEffect(() => {
+    let lost: SavedRefit | null;
+    try { lost = factoryApi.pendingRefit(part.job_id); }
+    catch (reason) { setError((reason as Error).message); return; }
+    const signal = closed.current?.signal;
+    if (!lost || lost.input.slot !== part.slot || !signal) return;
+    const pending = lost;
+    factoryApi.nativeParts(part.job_id, signal).then(state => {
+      if (signal.aborted) return;
+      if (state.refit_request_key !== pending.key) { setSaved(pending); return; }
+      factoryApi.acknowledgeRefit(part.job_id, pending.key);
+      void rebuild(undefined, pending.input.source_version);
+    }, () => { if (!signal.aborted) setSaved(pending); })
+      .catch((reason: unknown) => { if (!signal.aborted) setError((reason as Error).message); });
+  }, [part.job_id, part.slot]);
 
-  async function rebuild(send: () => Promise<unknown>) {
+  /** Sends a refit (none when following one the server already has) and waits until the server holds a finished
+   * version other than `from`, the version it was made from, and the wardrobe lists it. */
+  async function rebuild(send: (() => Promise<unknown>) | undefined, from: string) {
     const signal = closed.current?.signal;
     if (!signal || signal.aborted) return;
     setBusy(true); setError(''); setSaved(null); setElapsed(0);
     const started = performance.now();
     const tick = setInterval(() => setElapsed(Math.round((performance.now() - started)/1000)), 1000);
     try {
-      await send();
+      await send?.();
       const rebuilt = await pollUntil(
         stop => factoryApi.nativeParts(part.job_id, stop),
         state => {
           if (['failed', 'recovery_required', 'qc_failed'].includes(state.status)) throw new Error(state.error || '다시 만들지 못했어요.');
-          return state.status === 'review_required' && state.version && state.version !== part.version ? state.version : undefined;
-        }, { attempts: 151, delayMs: POLL_MS, signal });
+          return state.status === 'review_required' && state.version && state.version !== from ? state.version : undefined;
+        }, { attempts: 151, delayMs: POLL_MS, signal, immediate: !send });
       if (signal.aborted) return;
       if (!rebuilt) throw new Error('다시 만들기가 끝나지 않았어요.');
+      // Already worn: the wardrobe's own reading of the list found it first.
+      if (shown.current.job_id === part.job_id && shown.current.version === rebuilt) return;
       // The job listing behind the wardrobe refreshes every few seconds.
       const next = await pollUntil(
         stop => reload(stop),
-        parts => parts.find(item => item.job_id === part.job_id && item.slot === part.slot && item.version !== part.version),
+        parts => parts.find(item => item.job_id === part.job_id && item.slot === part.slot && item.version === rebuilt),
         { attempts: 15, delayMs: POLL_MS, immediate: true, signal });
       if (signal.aborted) return;
       if (!next) throw new Error('새 버전이 옷장에 아직 보이지 않아요.');
@@ -57,7 +82,7 @@ export function WardrobeShape({ part, label, reload, replace }: {
     } catch (reason) {
       if (signal.aborted) return;
       setError((reason as Error).message);
-      if (reason instanceof PendingRequestConflict) setSaved(reason.pending);
+      if (reason instanceof PendingRequestConflict) setSaved(reason.pending as SavedRefit);
     } finally { clearInterval(tick); if (!signal.aborted) setBusy(false); }
   }
   function clearSaved(key: string) {
@@ -81,13 +106,16 @@ export function WardrobeShape({ part, label, reload, replace }: {
           onClick={() => setDraft(current => ({ ...current, fit: fit.value }))}>{fit.label}</button>)}</div>
     </div>
     <div className="wardrobe-shape-actions">
-      <button type="button" disabled={busy} onClick={() => void rebuild(() => factoryApi.refitPart(part.job_id, part.version, part.slot, undefined, 'body_shell', draft))}>{busy ? `다시 만드는 중 ${elapsed}초` : '다시 만들기'}</button>
-      {part.shape && <button type="button" disabled={busy} onClick={() => void rebuild(() => factoryApi.refitPart(part.job_id, part.version, part.slot, undefined, 'body_shell', {}))}>그림대로</button>}
+      <button type="button" disabled={busy || !!saved} onClick={() => void rebuild(() => factoryApi.refitPart(part.job_id, part.version, part.slot, undefined, 'body_shell', draft), part.version)}>{busy ? `다시 만드는 중 ${elapsed}초` : '다시 만들기'}</button>
+      {part.shape && <button type="button" disabled={busy || !!saved} onClick={() => void rebuild(() => factoryApi.refitPart(part.job_id, part.version, part.slot, undefined, 'body_shell', {}), part.version)}>그림대로</button>}
     </div>
     {error && <p role="alert">{error}</p>}
-    {saved && <div className="wardrobe-shape-actions">
-      <button type="button" disabled={busy} onClick={() => void rebuild(() => factoryApi.resumeRefit(part.job_id))}>저장된 요청 이어서 보내기</button>
-      <button type="button" disabled={busy} onClick={() => clearSaved(saved.key)}>저장된 요청 지우기</button>
-    </div>}
+    {saved && <>
+      {!error && <p role="status">응답 확인 안 됨</p>}
+      <div className="wardrobe-shape-actions">
+        <button type="button" disabled={busy} onClick={() => void rebuild(() => factoryApi.resumeRefit(part.job_id), saved.input.source_version)}>저장된 요청 이어서 보내기</button>
+        <button type="button" disabled={busy} onClick={() => clearSaved(saved.key)}>저장된 요청 지우기</button>
+      </div>
+    </>}
   </li>;
 }

@@ -9,6 +9,8 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
   const [refitting, setRefitting] = useState(''), [refitError, setRefitError] = useState('');
   const [retrying, setRetrying] = useState(false), [retryError, setRetryError] = useState('');
   const refitLock = useRef(false), retryLock = useRef(false);
+  // The saved refit is read from storage on every render; a refit that settles it draws the screen again.
+  const [, settled] = useState(0);
   async function retry(slot: string, view: string, failureId: string) {
     if (retryLock.current) return;
     retryLock.current = true; setRetrying(true); setRetryError('');
@@ -18,13 +20,14 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
   }
   let pending: ReturnType<typeof factoryApi.pendingRefit> = null, recoveryError = '';
   try { pending = factoryApi.pendingRefit(job.id); } catch (error) { recoveryError = (error as Error).message; }
-  async function refit(slot: string, method?: 'isolated' | 'body_shell') {
-    const version = pending?.input.source_version || job.assembly_version;
-    if (refitLock.current || !version) return;
+  /** A new refit of `slot`, or (`resume`) the saved one sent again as it was saved, under its own key. */
+  async function refit(slot: string, method?: 'isolated' | 'body_shell', resume = false) {
+    const version = job.assembly_version;
+    if (refitLock.current || (!resume && !version)) return;
     refitLock.current = true; setRefitting(slot); setRefitError('');
-    try { await factoryApi.refitPart(job.id, version, slot, undefined, method); }
+    try { await (resume ? factoryApi.resumeRefit(job.id) : factoryApi.refitPart(job.id, version!, slot, undefined, method)); }
     catch (error) { setRefitError((error as Error).message); }
-    finally { refitLock.current = false; setRefitting(''); }
+    finally { refitLock.current = false; setRefitting(''); settled(value => value + 1); }
   }
   const parts = job.parts || [];
   const imageStates = parts.flatMap(p => Object.values(p.views || {}).length ? Object.values(p.views!) : [{status: p.image_status}]);
@@ -54,6 +57,7 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
             return <div className="part-view" key={view}>
               <span>{viewLabels[view] || view} · {image.status === 'rejected' && image.failure?.message ? image.failure.message : imageNames[image.status] || image.status}</span>
               {action?.failure_id && <button className="part-retry" disabled={busy || retrying} onClick={() => void retry(part.slot, view, action.failure_id!)}>{busy || retrying ? '접수 중' : '다시 요청 · 유료 1장'}</button>}
+              {action?.failure_id && action.warning && <small className="part-retry-warning" role="note">{action.warning}</small>}
             </div>;
           })}
           <span>3D · {part.part_method === 'body_shell' ? '몸에 맞춰 만듦' : modelNames[part.model_status] || part.model_status}{part.model_status === 'IN_PROGRESS' && ` ${part.progress || 0}%`}</span>
@@ -63,7 +67,8 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
           {job.artifacts.filter(artifact => artifact.name.startsWith(`meshy-${part.slot}-`)).map(artifact => <a key={artifact.name} href={artifact.url} download>{artifact.name.slice(`meshy-${part.slot}-`.length)}</a>)}
           {job.meshy_options?.[part.slot] && <details><summary>접수한 Meshy 7.1 설정</summary><pre className="meshy-saved-options">{JSON.stringify(job.meshy_options[part.slot], null, 2)}</pre></details>}
           {job.assembly_version && variantSlots.some(slot => slot === part.slot) && part.model_status === 'ready' && !busy && !job.character_flow?.busy && <a href={studioHref({ tab: 'character', mode: 'parts', base: job.id, part: part.slot })}>3뷰로 다시 생성</a>}
-          {part.slot !== 'body' && part.model_status === 'ready' && part.part_method !== 'body_shell' && (job.assembly_version || pending?.input.slot === part.slot) && <button type="button" disabled={busy || !!refitting || !!recoveryError || (!!pending && pending.input.slot !== part.slot) || (!pending && job.character_flow?.busy)} onClick={() => void refit(part.slot, pending?.input.slot === part.slot ? pending.input.part_method : undefined)}>{refitting === part.slot ? '접수 중' : pending?.input.slot === part.slot ? '같은 피팅 요청 복구' : '기존 모델 위치·크기 맞추기'}</button>}
+          {pending?.input.slot === part.slot && <button type="button" disabled={busy || !!refitting} onClick={() => void refit(part.slot, undefined, true)}>{refitting === part.slot ? '접수 중' : '같은 피팅 요청 복구'}</button>}
+          {part.slot !== 'body' && part.model_status === 'ready' && part.part_method !== 'body_shell' && job.assembly_version && pending?.input.slot !== part.slot && <button type="button" disabled={busy || !!refitting || !!recoveryError || !!pending || job.character_flow?.busy} onClick={() => void refit(part.slot)}>{refitting === part.slot ? '접수 중' : '기존 모델 위치·크기 맞추기'}</button>}
           {(part.slot === 'top' || part.slot === 'bottom') && part.model_status === 'ready' && job.assembly_version && !pending && <button type="button" disabled={busy || !!refitting || !!recoveryError || job.character_flow?.busy} onClick={() => void refit(part.slot, 'body_shell')}>{refitting === part.slot ? '접수 중' : '몸에 맞춰 다시 만들기'}</button>}
         </div>
       </li>;

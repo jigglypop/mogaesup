@@ -73,6 +73,9 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
   const [baseId, setBaseId] = useState(new URLSearchParams(location.search).get('photoBase') || '');
   const [useCommonBody, setUseCommonBody] = useState(!new URLSearchParams(location.search).has('photoBase') && new URLSearchParams(location.search).get('photoBody') !== 'new');
   const locked = useRef(false), alive = useRef(true), dragDepth = useRef(0);
+  // The character made for the photo being prepared, kept while its upload has not gone through: trying again uploads
+  // to it rather than making another character.
+  const madeFor = useRef<{ draft: File; id: string } | null>(null);
   const partJobs = jobs.filter(j => j.production_mode === 'character_parts').sort((a, b) => b.created_at.localeCompare(a.created_at));
   const photoJobs = partJobs.filter(isPhotoJob);
   const suggested = photoJobs.find(j => j.id === jobId) || photoJobs[0];
@@ -123,8 +126,8 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
   const creditsShort = capabilities?.meshy_balance != null && capabilities.meshy_balance < creditNeed;
   const blockedReason = !capabilities || pending || running ? '' : !compatible ? '서버 버전 불일치'
     : !canGenerate ? produceAction?.reason || ''
-    : creditsShort ? `Meshy 크레딧 부족 · 필요 약 ${creditNeed} · 잔여 ${capabilities.meshy_balance} · 충전 후 생성하세요`
-    : !reference ? '' : !baseListed ? '선택한 기본 몸을 사용할 수 없습니다 · 다른 기본 몸을 선택하세요'
+    : creditsShort ? `Meshy 크레딧 부족 · 필요 약 ${creditNeed} · 잔여 ${capabilities.meshy_balance}`
+    : !reference ? '' : !baseListed ? '선택한 기본 몸 사용 불가'
     : !baseReady ? baseState.error || '기본 몸 확인 중' : '';
 
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -146,8 +149,15 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
     if (!isSupportedImage(file)) { setError('PNG 또는 JPEG 사진을 선택해 주세요.'); return; }
     locked.current = true; setBusy(true); setError('');
     try {
-      const character = await api.create(file.name.replace(/\.[^.]+$/, ''), null);
-      await api.upload(character, file, 'image');
+      const draft = photoDraft || file, kept = madeFor.current?.draft === draft ? madeFor.current.id : '';
+      // Read again for its current revision, and whether the photo reached it although the answer did not.
+      let character = kept ? (await api.list()).characters.find(item => item.id === kept) : undefined;
+      if (!character) {
+        character = await api.create(file.name.replace(/\.[^.]+$/, ''), null);
+        madeFor.current = { draft, id: character.id };
+      }
+      if (!character.artifacts.some(item => item.id === 'reference')) await api.upload(character, file, 'image');
+      madeFor.current = null;
       if (!alive.current) return;
       setPhotoDraft(null); remember(character.id); await live.refresh();
     } catch (e) { if (alive.current) setError((e as Error).message); }
@@ -265,7 +275,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
         <h1>사진으로 전체 생성</h1>
         {/* The file input is the one control here: Tab reaches it, Space or Enter opens the picker, and a paste or drop
             anywhere on the label opens the photo preparation too. */}
-        <label className={`character-upload${draggingPhoto ? ' is-dragging' : ''}${busy ? ' is-disabled' : ''}`} onPaste={pasteUpload} onDragEnter={enterPhotoDrop} onDragLeave={leavePhotoDrop} onDragOver={overPhotoDrop} onDrop={dropPhoto}>{reference ? <img src={reference.url} alt="캐릭터 원본 사진" /> : <span>{live.loading && (characterId || suggested) ? '사진 불러오는 중' : '캐릭터 사진을 클릭하거나 놓거나 Ctrl+V로 붙여넣으세요'}</span>}<b>{reference ? '사진 바꾸기 · 끌어놓기 가능' : '사진 선택 · 끌어놓기 가능'}</b><input aria-label="캐릭터 사진" type="file" accept="image/png,image/jpeg" disabled={busy} onChange={e => { selectPhoto(e.target.files?.[0]); e.target.value = ''; }} /></label>
+        <label className={`character-upload${draggingPhoto ? ' is-dragging' : ''}${busy ? ' is-disabled' : ''}`} onPaste={pasteUpload} onDragEnter={enterPhotoDrop} onDragLeave={leavePhotoDrop} onDragOver={overPhotoDrop} onDrop={dropPhoto}>{reference ? <img src={reference.url} alt="캐릭터 원본 사진" /> : <span>{live.loading && (characterId || suggested) ? '사진 불러오는 중' : '캐릭터 사진'}</span>}<b>{reference ? '사진 바꾸기' : '사진 선택'}</b><input aria-label="캐릭터 사진" type="file" accept="image/png,image/jpeg" disabled={busy} onChange={e => { selectPhoto(e.target.files?.[0]); e.target.value = ''; }} /></label>
         {photoDraft && <PhotoPreparation key={`${photoDraft.name}:${photoDraft.lastModified}:${photoDraft.size}`} file={photoDraft} busy={busy} onUpload={upload} onCancel={() => setPhotoDraft(null)} />}
         {live.characters.length > 0 && <details className="character-history"><summary>작업 선택</summary><select aria-label="작업 선택" disabled={busy} value={source?.id || ''} onChange={e => remember(e.target.value)}><option value="" disabled>선택</option>{live.characters.filter(c => c.artifacts.some(a => a.id === 'reference') || photoJobs.some(j => j.character_id === c.id)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></details>}
         <label className="character-history">기본 몸<select aria-label="기본 몸" value={selectedBaseId} disabled={busy || running || !!pending} onChange={event => { setBaseId(event.target.value); setUseCommonBody(false); }}>
@@ -284,7 +294,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
         <small className="character-generation">유료 이미지 {totalImageCount}장 · 3D {providerModelCount}개 · {selectedBaseId ? '기존 몸·리깅·동작 재사용' : '리깅 1회 · 기본 동작'}{capabilities?.meshy_balance != null && ` · Meshy 잔여 크레딧 ${capabilities.meshy_balance.toLocaleString()}`}</small>
         {blockedReason && <p className="character-status" role="status">{blockedReason}</p>}
         {(error || recovery.error || connectionError || catalogError || bodyProfileError) && <p role="alert">{error || recovery.error || connectionError || catalogError || bodyProfileError}</p>}
-        {jobId && !job && !jobsLoading && !connectionError && <p role="alert">선택한 작업을 찾을 수 없습니다. 제작 버전을 다시 선택해 주세요.</p>}
+        {jobId && !job && !jobsLoading && !connectionError && <p role="alert">선택한 작업 없음</p>}
         {versions.length > 1 && <label className="character-history">제작 버전<select aria-label="제작 버전" value={job?.id || ''} onChange={e => remember(source!.id, e.target.value)}><option value="" disabled>버전 선택</option>{versions.map(v => <option key={v.id} value={v.id}>{new Date(v.created_at).toLocaleString()}</option>)}</select></label>}
         {retryBatch && <button disabled={busy || running} onClick={() => void retryImages(retryBatch)}>실패한 이미지 재요청 · 유료 {retryBatch.length}장</button>}
         {job && <PartProgress job={job} busy={busy} retryImage={(slot, view, failure_id) => retryImages([{slot, view, failure_id}])} />}

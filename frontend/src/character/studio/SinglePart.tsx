@@ -166,8 +166,8 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
     {pending && !bases.some(item => item.id === pending.input.base_job_id) && <option value={pending.input.base_job_id}>{pending.input.base_job_id}</option>}
     {baseOptions.map(item => <option key={item.id} value={item.id}>{name(item)} · {worn(item).join('·') || '기본 몸'}</option>)}
   </select></label>;
-  const baseStatus = pending ? '' : !bases.length ? '완성된 기본 몸 없음 · 기본 몸에서 먼저 생성하세요'
-    : !base ? '기준 캐릭터를 선택하세요' : native && native.status !== 'review_required' ? '기준 캐릭터 조립 확인 중' : '';
+  const baseStatus = pending ? '' : !bases.length ? '완성된 기본 몸 없음'
+    : !base ? '기준 캐릭터 미선택' : native && native.status !== 'review_required' ? '기준 캐릭터 조립 확인 중' : '';
   const outputSettings = <><MeshyOptionsEditor key={slot} scope={slot} value={pending?.input.meshy_options || meshy.options} disabled={inputLocked} onChange={meshy.setOptions} onUploading={setMeshyUploading} />{meshy.storageError && <p role="alert">{meshy.storageError}</p>}</>;
 
   return <main className={batchMode ? 'single-part-batch-layout' : undefined}>
@@ -175,7 +175,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
       <h1>{partLabels[slot]}</h1>
       <div className="character-workflow-switch" role="group" aria-label="파츠 입력 방식">{slot === 'hair' && <button aria-pressed={batchMode} disabled={inputLocked} onClick={() => setInputMode('batch')}>시트·여러 헤어</button>}<button aria-pressed={inputMode === 'generate' || !!pending} disabled={inputLocked} onClick={() => setInputMode('generate')}>하나 생성</button><button aria-pressed={inputMode === 'glb' && !pending} disabled={inputLocked} onClick={() => setInputMode('glb')}>GLB 등록</button></div>
       {inputMode === 'glb' && !pending ? <GlbAssetLibrary key={slot} slot={slot} bases={bases} defaultBaseId={base?.id} onJob={result => { onBaseChange(result.base_job_id || result.id); onJob(result); void refreshJobs(); }} /> : <>
-      {differentPending && <p className="generation-recovery">{partLabels[pending!.input.slot]} 요청 확인이 필요합니다. <button type="button" onClick={() => onSlotChange(pending!.input.slot as (typeof variantSlots)[number])}>해당 파츠 열기</button></p>}
+      {differentPending && <p className="generation-recovery">{partLabels[pending!.input.slot]} · 응답 확인 안 됨 <button type="button" onClick={() => onSlotChange(pending!.input.slot as (typeof variantSlots)[number])}>해당 파츠 열기</button></p>}
       {!batchMode && baseSelector}
       {!batchMode && native?.artifacts.find(artifact => artifact.name === 'body-front.png') && <img className="base-portrait" src={native.artifacts.find(artifact => artifact.name === 'body-front.png')!.url} alt="선택한 캐릭터" />}
       {slot === 'hair' && !batchMode && <label>헤어 길이<select value={hairLength} disabled={inputLocked} onChange={event => setHairLength(event.target.value as typeof hairLength)}><option value="source">저장된 기준</option><option value="short">숏컷</option><option value="long">롱컷</option></select></label>}

@@ -53,7 +53,6 @@ export function NativeAssembly({ jobId, simple = false, flow }: { jobId: string;
     {!available && <>
       <div className="meshy-motion">
       <h2>{simple ? flow?.busy ? '캐릭터 제작 중' : state?.status === 'qc_failed' ? '조립 재개' : state?.status === 'failed' ? '조립 중단' : '캐릭터' : '파츠 조립'}</h2>
-      {!simple && <p>리깅·동작과 파츠 수신 대기</p>}
       {!simple && paid && <button disabled={busy || !state || !!state.expression_pending || ['accepted', 'running'].includes(state.status)} onClick={() => void assemble()}>파츠 조립 · 로컬 처리</button>}
       {state && ['accepted', 'running'].includes(state.status) && <p role="status">파츠를 공통 골격에 연결하고 있습니다…</p>}
       {state?.expression_pending && <p role="status">새 조립에 저장된 표정을 적용하고 있습니다…</p>}
@@ -184,7 +183,6 @@ function NativeCharacter({ jobId, state, paid }: { jobId: string; state: NativeP
       return artifact && <a key={view} href={artifact.url} target="_blank" rel="noreferrer"><img src={artifact.url} alt={`${reviewGroups.find(([group]) => group === reviewGroup)?.[1]} ${title}`} loading="lazy" />{title}</a>;
     })}</div>
     </details>
-    {mode === 'world' && <p>W·A·S·D 이동 · Shift 달리기</p>}
     {mode === 'studio' && <div className="meshy-clips"><button disabled={!ready} aria-pressed={motion === -1} onClick={() => { viewer.current?.play(-1); setMotion(-1); }}>기본 자세</button>{clips.map(c => <button disabled={!ready} key={c.index} aria-pressed={motion === c.index} onClick={() => { viewer.current?.play(c.index); setMotion(c.index); }}>{c.name}</button>)}</div>}
     {body && <Expressions key={`${jobId}:${version}:${mode}`} job={jobId} version={version} bodySha={body.sha256} viewer={readyViewer} paid={paid} />}
     <fieldset className="assembly-parts" disabled={!ready || !restored || busy || pending}><legend>착용 파츠</legend>
@@ -200,7 +198,7 @@ function NativeCharacter({ jobId, state, paid }: { jobId: string; state: NativeP
     {wearError && <p role="alert">{wearError} 이전에 적용된 조합을 유지했습니다.</p>}
     {selectionNotice && <p role="status">겹치는 머리 파츠를 벗겼습니다: {selectionNotice}</p>}
     {saveError && <p role="alert">{saveError}</p>}
-    {pending && <p role="status">저장 응답이 확인되지 않았습니다. 같은 요청으로 결과를 복구할 수 있습니다.</p>}
+    {pending && <p role="status">저장 응답 확인 안 됨</p>}
     <div className="meshy-buttons"><button disabled={busy || !appliedSelection || !!wearError || (!pending && equal(selected, saved) && hairColor === savedHairColor && revision !== '0')} onClick={() => void save()}>{pending ? '조합 저장 결과 복구' : '현재 조합 저장'}</button><button disabled={busy || pending} onClick={() => void restore()}>저장한 조합 다시 불러오기</button></div>
     {restored && !pending && revision !== '0' && equal(selected, saved) && hairColor === savedHairColor && <p role="status">저장된 조합입니다.</p>}
     <div className="meshy-buttons">{state.artifacts.filter(a => ['model.glb', 'model.runtime.glb', 'master.blend'].includes(a.name)).map(a => <a className="meshy-download" key={a.name} href={a.url} download>{a.name === 'model.glb' ? '전체 파츠 조립 GLB' : a.name === 'model.runtime.glb' ? '런타임 조립 GLB' : '조립 Blender 원본'}</a>)}</div>

@@ -17,6 +17,8 @@ vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: auth.user, s
 
 // The WebGPU viewer is not what is tested: it only has to take parts on and off and say what it was told.
 const viewers = vi.hoisted(() => [] as { wear: ReturnType<typeof vi.fn>; setPartColors: ReturnType<typeof vi.fn>; setHiddenBodyTriangles: ReturnType<typeof vi.fn>; setTucked: ReturnType<typeof vi.fn>; setPartEdit: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }[]);
+/** Worn slots whose file the viewer cannot resize. */
+const fixedFiles = vi.hoisted(() => new Set<string>());
 /** How many of the next body loads fail. */
 const bodyLoads = vi.hoisted(() => ({ failing: 0 }));
 vi.mock('../viewer', () => ({
@@ -32,6 +34,7 @@ vi.mock('../viewer', () => ({
     setTucked = vi.fn();
     setPartColors = vi.fn();
     setPartEdit = vi.fn();
+    canEdit = vi.fn((slot: string) => !fixedFiles.has(slot));
     dispose = vi.fn();
     constructor() {
       viewers.push(this);
@@ -128,6 +131,7 @@ describe('옷장', () => {
     loadMask.mockImplementation(async () => maskTexture());
     auth.user = user();
     bodyLoads.failing = 0;
+    fixedFiles.clear();
     thumbnails.drawable = false;
     thumbnails.draw.mockReset();
   });
@@ -229,6 +233,28 @@ describe('옷장', () => {
     expect(fieldsets.map(item => item.disabled)).toEqual(fieldsets.map(() => false));
     expect([...fieldsets[4]!.querySelectorAll('input')].map(input => input.getAttribute('aria-label')))
       .toEqual(['하의 상하 크기', '하의 상하 위치', '하의 가로 크기', '하의 깊이 크기', '하의 앞뒤 위치', '하의 좌우 위치']);
+    await unmount();
+  });
+
+  it('브라우저가 크기를 바꿀 수 없는 파츠는 조절을 미리 끄고, 저장된 조절도 적용·저장하지 않는다', async () => {
+    const hat = part('hat-job', 'hat', '모자'), top = part('top-job', 'top', '후드'); parts = [hat, top];
+    fixedFiles.add('hat');
+    const edit = { scale: [.8, .8, .8] as [number, number, number], translation: [0, .05, 0] as [number, number, number] };
+    const saved: Look = { ...wearing(parts), request: { ...wearing(parts).request, partEdits: { hat: edit } } };
+    vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+    const save = vi.spyOn(lookApi, 'save').mockImplementation(async request => ({ look: { ...saved, request } }));
+    const { container, unmount } = await open(); await settle();
+    const viewer = viewers[0]!;
+    const hatControls = slider(container, '모자·머리 장식 가로 크기').closest('fieldset')!;
+    expect(hatControls.disabled).toBe(true);
+    expect(hatControls.querySelector('[role=status]')?.textContent).toBe('크기·위치 고정');
+    expect(outputs(container, '모자·머리 장식')[2]).toBe('100%');
+    expect(slider(container, '상의 가로 크기').closest('fieldset')!.disabled).toBe(false);
+    expect(viewer.setPartEdit.mock.calls.some(([slot]) => slot === 'hat')).toBe(false);
+    expect(container.querySelector('.wardrobe-part-edits [role=alert]')).toBeNull();
+    expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(false);
+    await click(button(container, '내 캐릭터로 입기')); await settle();
+    expect(save).toHaveBeenLastCalledWith(wearing(parts).request);
     await unmount();
   });
 
@@ -370,11 +396,11 @@ describe('옷장', () => {
   });
 
   describe('누가 무엇을 보는가', () => {
-    it('운영자가 아니어도 핏 검사에서 떨어진 파츠를 목록에서 본다', async () => {
+    it('운영자가 아니면 핏 검사에서 떨어진 파츠는 목록에 없어 입을 수 없다', async () => {
       const { container, unmount } = await open();
       await settle();
-      expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
-      expect(tab(container, '상의')?.textContent).toContain('2');
+      expect(cardNames(container)).toEqual(['후드']);
+      expect(tab(container, '상의')?.textContent).toContain('1');
       expect(container.textContent).not.toContain('소매가 몸을 뚫습니다.');
       await unmount();
     });
@@ -614,7 +640,7 @@ describe('옷장', () => {
       await settle();
       expect(factoryApi.wardrobeBodies).toHaveBeenCalledTimes(2);
       expect(container.textContent).not.toContain('몸 목록을 읽지 못했습니다.');
-      expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
+      expect(cardNames(container)).toEqual(['후드']);
       await unmount();
     });
 
@@ -625,11 +651,11 @@ describe('옷장', () => {
       await settle();
       await click(card(container, '후드'));
       await settle();
-      expect(container.textContent).toContain('상의 가림 영역: 가림 정보를 읽지 못했습니다.');
+      expect(container.querySelector('[role=alert]')?.textContent).toContain('맞춤 정보 불러오기 실패 · 상의 · 가림 정보를 읽지 못했습니다.');
       expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(false);
       await type(container.querySelector<HTMLInputElement>('.wardrobe-save input')!, '새 조합');
       expect(button(container, '조합 저장')?.disabled).toBe(false);
-      await click(button(container, '가림 영역 다시 불러오기'));
+      await click(button(container, '다시 불러오기'));
       await settle();
       expect(factoryApi.wardrobeCoverage).toHaveBeenCalledTimes(2);
       expect(container.textContent).not.toContain('가림 정보를 읽지 못했습니다.');

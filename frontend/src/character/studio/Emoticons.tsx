@@ -98,7 +98,7 @@ export default function Emoticons() {
           </button>
         </div>
         {listing.value && !listing.value.capabilities.ready && <p>{listing.value.capabilities.reason}</p>}
-        {pending && <p className="generation-recovery">접수한 이름·프롬프트·기준 원화로 요청을 복구합니다.</p>}
+        {pending && <p className="generation-recovery">응답 확인 안 됨</p>}
       </form>
     </section>
     {(error || listing.error || selection.error || recovery.error) && <p className="workspace-error" role="alert">{error || recovery.error || listing.error || selection.error}

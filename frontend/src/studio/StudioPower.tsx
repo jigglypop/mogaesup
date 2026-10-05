@@ -54,8 +54,8 @@ export function StudioWaking({ sleep, member }: { sleep: StudioSleep; member: bo
   const text = !member
     ? sleep.message
     : sleep.code === 'studio_stopping'
-      ? '옷장이 잠시 쉬는 중이에요. 곧 다시 열어요.'
-      : '옷장을 여는 중이에요. 1~2분 걸려요.';
+      ? '옷장이 쉬는 중'
+      : '옷장을 여는 중';
   return <WakeBanner sleep={sleep} text={text} />;
 }
 

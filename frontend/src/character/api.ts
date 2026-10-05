@@ -1,5 +1,6 @@
 import { deadline } from '../api/client';
 import { reportStudio } from '../api/studioSleep';
+import { expireSession, sessionEpoch } from '../auth/sessionWork';
 
 type Part = { node_index: number; role: string; name?: string };
 type Operation = { id: string; action_id: string; status: string; error: { code: string; message: string } | null };
@@ -43,6 +44,7 @@ export const isRevisionConflict = (error: unknown) => error instanceof ApiError 
 export async function request<T>(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const { timeoutMs = 15000, signal, ...init } = options;
   const wait = deadline(timeoutMs, signal);
+  const sentAt = sessionEpoch();
   try {
   let response: Response;
   try { response = await fetch(url, { ...init, signal: wait.signal }); }
@@ -54,6 +56,9 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
   // The app server's own refusals ({code, message}): its permission checks, and the studio sleeping (see studioSleep).
   const gateway = !response.ok && typeof body?.code === 'string' && typeof body?.message === 'string' ? body as { code: string; message: string } : null;
   reportStudio(gateway?.code, gateway?.message);
+  // The app server refused the session cookie: the session ran out, as anywhere else in the app (the header offers a
+  // new sign-in). A 401 the studio itself sends stays this request's own failure.
+  if (response.status === 401 && gateway?.code === 'login_required') expireSession(sentAt);
   if (!response.ok) {
     const validation = Array.isArray(body.detail) ? body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join('.') || '입력'}: ${item.msg || '값 확인 필요'}`).join(' / ') : typeof body.detail === 'string' && body.detail !== 'Not Found' ? body.detail : '';
     // Only when the server sent no message of its own: what happened, in words for whoever is on the screen.

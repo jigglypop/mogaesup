@@ -43,11 +43,31 @@ export function partThumbnail(url: string, sha256: string, signal: AbortSignal):
   });
 }
 
+/**
+ * Resolves once the page is shown. A hidden tab draws no frames, so a picture started there would wait with the viewer
+ * held; the queue waits instead, and lets the viewer go after `IDLE_MS` as an empty queue does.
+ */
+function shown() {
+  if (typeof document === 'undefined' || !document.hidden) return Promise.resolve();
+  clearTimeout(idle); idle = setTimeout(close, IDLE_MS);
+  return new Promise<void>(resolve => {
+    const back = () => {
+      if (document.hidden) return;
+      document.removeEventListener('visibilitychange', back);
+      clearTimeout(idle); resolve();
+    };
+    document.addEventListener('visibilitychange', back);
+  });
+}
+
 async function drain() {
   if (drawing) return;
   drawing = true; clearTimeout(idle);
   try {
-    for (let job = queue.shift(); job; job = queue.shift()) {
+    while (queue.length) {
+      await shown();
+      const job = queue.shift();
+      if (!job) break;
       const key = identity(job.url, job.sha256);
       try {
         const picture = drawn.get(key) ?? await draw(job);

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { reportStudio } from '../../api/studioSleep';
+import { sessionLapsed, setSessionOwner } from '../../auth/sessionWork';
 import { request } from '../api';
 
 const answer = (status: number, body?: unknown) =>
@@ -27,6 +28,18 @@ describe('스튜디오 요청이 실패했을 때 화면에 닿는 문장', () =
     const text = await messageOf(request('/api/avatar-factory/wardrobe/bodies'));
     expect(text).toBe(message);
     expect(text).not.toMatch(/API|백엔드|프론트|로컬|주소/);
+  });
+
+  it('앱 서버가 세션을 거절하면 앱 전체의 세션 만료로 알리고, 스튜디오 자체의 401은 그 요청의 실패로만 둔다', async () => {
+    setSessionOwner('u1');
+    try {
+      fetchMock.mockResolvedValueOnce(answer(401, { detail: '토큰이 맞지 않습니다.' }));
+      expect(await messageOf(request('/api/avatar-factory/wardrobe/bodies'))).toBe('토큰이 맞지 않습니다.');
+      expect(sessionLapsed()).toBe(false);
+      fetchMock.mockResolvedValueOnce(answer(401, { code: 'login_required', message: '로그인이 필요해요' }));
+      expect(await messageOf(request('/api/avatar-factory/wardrobe/bodies'))).toBe('로그인이 필요해요');
+      expect(sessionLapsed()).toBe(true);
+    } finally { setSessionOwner(null); }
   });
 
   it('서버가 준 이유는 그대로 보인다', async () => {

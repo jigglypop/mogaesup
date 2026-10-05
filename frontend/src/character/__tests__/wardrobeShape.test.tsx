@@ -133,4 +133,58 @@ describe('옷 모양 다시 만들기', () => {
     expect(reload).toHaveBeenCalledTimes(asked);
     expect(replace).not.toHaveBeenCalled();
   });
+
+  describe('응답을 잃은 다시 만들기', () => {
+    const lost = { key: 'lost-key', input: { source_version: 'v1', slot: 'top', part_method: 'body_shell', shape: { hem: 0.2 } } };
+    beforeEach(() => localStorage.setItem('gaesup.part-refit:top-job', JSON.stringify(lost)));
+    afterEach(() => localStorage.clear());
+
+    it('서버가 받은 것이면 저장 기록을 지우고 끝까지 따라가 새 버전으로 바꾼다', async () => {
+      nativeParts
+        .mockResolvedValueOnce(native({ status: 'running', version: 'v2', refit_request_key: 'lost-key' }))
+        .mockResolvedValueOnce(native({ status: 'running', version: 'v2', refit_request_key: 'lost-key' }))
+        .mockResolvedValue(native({ status: 'review_required', version: 'v2', refit_request_key: 'lost-key' }));
+      const next = { ...part, version: 'v2' };
+      reload.mockResolvedValue([next]);
+      const { container, unmount } = await open();
+      await wait(0);
+      expect(localStorage.getItem('gaesup.part-refit:top-job')).toBeNull();
+      expect(container.querySelector('.wardrobe-shape-actions button')?.textContent).toContain('다시 만드는 중');
+      await wait(4000);
+      expect(replace).toHaveBeenCalledExactlyOnceWith(next);
+      expect(factoryApi.refitPart).not.toHaveBeenCalled();
+      await unmount();
+    });
+
+    it('옷장이 이미 새 버전을 입혔으면 기다리지 않고 끝낸다', async () => {
+      nativeParts.mockResolvedValue(native({ status: 'review_required', version: 'v2', refit_request_key: 'lost-key' }));
+      const { container, unmount } = await mount(<WardrobeShape part={{ ...part, version: 'v2' }} label="상의" reload={reload} replace={replace} />);
+      await wait(0);
+      await wait(0);
+      expect(container.querySelector('.wardrobe-shape-actions button')?.textContent).toBe('다시 만들기');
+      expect(container.querySelector('[role=alert]')).toBeNull();
+      expect(reload).not.toHaveBeenCalled();
+      expect(replace).not.toHaveBeenCalled();
+      await unmount();
+    });
+
+    it('서버에 없는 것이면 응답 확인 안 됨으로 두고, 이어서 보내면 저장된 버전에서 만든 새 버전을 기다린다', async () => {
+      nativeParts.mockResolvedValueOnce(native({ status: 'review_required', version: 'v2', refit_request_key: null }));
+      const resume = vi.spyOn(factoryApi, 'resumeRefit').mockResolvedValue(native({}));
+      const { container, unmount } = await mount(<WardrobeShape part={{ ...part, version: 'v2' }} label="상의" reload={reload} replace={replace} />);
+      await wait(0);
+      expect(container.querySelector('[role=status]')?.textContent).toBe('응답 확인 안 됨');
+      expect([...container.querySelectorAll('button')].find((item) => item.textContent === '다시 만들기')?.disabled).toBe(true);
+      expect(localStorage.getItem('gaesup.part-refit:top-job')).not.toBeNull();
+
+      nativeParts.mockResolvedValue(native({ status: 'review_required', version: 'v3', refit_request_key: 'lost-key' }));
+      const next = { ...part, version: 'v3' };
+      reload.mockResolvedValue([next]);
+      await act(async () => [...container.querySelectorAll('button')].find((item) => item.textContent === '저장된 요청 이어서 보내기')!.click());
+      await wait(2000);
+      expect(resume).toHaveBeenCalledWith('top-job');
+      expect(replace).toHaveBeenCalledExactlyOnceWith(next);
+      await unmount();
+    });
+  });
 });

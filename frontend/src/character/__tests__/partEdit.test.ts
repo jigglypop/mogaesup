@@ -7,7 +7,7 @@ describe('공통 rest 좌표의 파츠 편집', () => {
     const geometry = new BufferGeometry();
     geometry.setAttribute('position', new Float32BufferAttribute([0, 0, 0, 2, 0, 0], 3));
     geometry.setAttribute('normal', new Float32BufferAttribute([1, 1, 0, 1, 1, 0], 3));
-    const rest = restGeometry(geometry), mesh = new Matrix4().makeTranslation(10, 1, 0);
+    const rest = restGeometry(geometry)!, mesh = new Matrix4().makeTranslation(10, 1, 0);
     const common = partEditMatrix(new Vector3(11, 1, 0), { scale: [1.2, .8, 1], translation: [.05, 0, 0] });
     const local = mesh.clone().invert().multiply(common).multiply(mesh);
     editGeometry(geometry, rest, rest.position, local);

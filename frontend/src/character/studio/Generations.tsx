@@ -109,7 +109,7 @@ export default function Generations() {
           listing.setValue(previous => ({ ...(previous || { capabilities: capability || { ready: true }, defaults: listing.value?.defaults || {} }), items: upsert(previous?.items, result) }));
         })}>{busy ? '요청 확인 중' : pending ? '같은 요청 복구' : '유료 생성 · 이미지 1장 + Meshy 1회'}</button></div>
         {capability && !capability.ready && <small className="generation-capability">{capability.reason || '현재 생성 기능을 사용할 수 없습니다.'}</small>}
-        {pending && <small className="generation-recovery">응답이 확인되지 않은 요청입니다. 같은 요청 키로 결과를 복구합니다.</small>}
+        {pending && <small className="generation-recovery">응답 확인 안 됨</small>}
       </div>
     </section>
     {(error || recovery.error || listing.error) && <p role="alert">{error || recovery.error || listing.error}</p>}

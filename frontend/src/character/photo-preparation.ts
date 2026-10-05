@@ -18,9 +18,50 @@ export function photoCropPixels(width: number, height: number, crop: PhotoCrop) 
     outputWidth: Math.max(1, Math.round(croppedWidth * ratio)), outputHeight: Math.max(1, Math.round(croppedHeight * ratio)) };
 }
 
+/** The most pixels a photo may have; a decoder would hold them all in memory at once. */
+export const PHOTO_MAX_PIXELS = 32_000_000;
+const tooLarge = () => new Error('사진은 3200만 픽셀 이하로 준비해 주세요.');
+
+/** JPEG start-of-frame markers (C0-CF but DHT C4, JPG C8 and DAC CC) carry the frame's height and width. */
+const isStartOfFrame = (marker: number) => marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+
+/**
+ * The width and height a PNG (IHDR) or JPEG (start of frame) header states, read from the file's bytes before anything
+ * decodes it; null when the header cannot be read, and the decoder is left to judge the file.
+ */
+export async function photoHeaderSize(file: Blob): Promise<{ width: number; height: number } | null> {
+  const bytes = new Uint8Array(typeof file.arrayBuffer === 'function' ? await file.arrayBuffer() : await new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  }));
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length >= 24 && view.getUint32(0) === 0x89504e47 && view.getUint32(4) === 0x0d0a1a0a && view.getUint32(12) === 0x49484452) {
+    return { width: view.getUint32(16), height: view.getUint32(20) };
+  }
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  for (let at = 2; at + 4 <= bytes.length;) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1]!;
+    // Fill bytes, and markers that stand alone without a length.
+    if (marker === 0xff) { at++; continue; }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { at += 2; continue; }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    const length = view.getUint16(at + 2);
+    if (length < 2) return null;
+    if (isStartOfFrame(marker)) return at + 9 <= bytes.length ? { width: view.getUint16(at + 7), height: view.getUint16(at + 5) } : null;
+    at += 2 + length;
+  }
+  return null;
+}
+
 export async function decodePhoto(file: File): Promise<DecodedPhoto> {
   if (!['image/png', 'image/jpeg'].includes(file.type)) throw new Error('PNG 또는 JPEG 사진을 선택해 주세요.');
   if (file.size > 25 * 1024 * 1024) throw new Error('사진은 25MB 이하로 준비해 주세요.');
+  // A small file can still hold a huge picture; it is refused before decoding would hold every pixel.
+  const stated = await photoHeaderSize(file).catch(() => null);
+  if (stated && stated.width * stated.height > PHOTO_MAX_PIXELS) throw tooLarge();
   let photo: DecodedPhoto;
   if (typeof createImageBitmap === 'function') {
     // The decoder applies EXIF orientation once. Canvas re-encoding drops the source metadata.
@@ -33,8 +74,8 @@ export async function decodePhoto(file: File): Promise<DecodedPhoto> {
       photo = { source: element, width: element.naturalWidth, height: element.naturalHeight, close: () => URL.revokeObjectURL(url) };
     } catch (error) { URL.revokeObjectURL(url); throw error; }
   }
-  if (!photo.width || !photo.height || photo.width * photo.height > 32_000_000) {
-    photo.close(); throw new Error('사진은 3200만 픽셀 이하로 준비해 주세요.');
+  if (!photo.width || !photo.height || photo.width * photo.height > PHOTO_MAX_PIXELS) {
+    photo.close(); throw tooLarge();
   }
   return photo;
 }

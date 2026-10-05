@@ -102,6 +102,31 @@ describe('파츠 모델 그림', () => {
     await expect(next).resolves.toMatchObject({ src: 'data:image/webp;base64,/b.glb' });
   });
 
+  it('숨은 탭에서는 다음 그림을 시작하지 않고 뷰어를 놓았다가, 다시 보이면 이어서 그린다', async () => {
+    let hidden = false;
+    const visibility = vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    const show = (value: boolean) => { hidden = !value; document.dispatchEvent(new Event('visibilitychange')); };
+    try {
+      const first = thumbnails.partThumbnail('/a.glb', 'a', wanted().signal);
+      const second = thumbnails.partThumbnail('/b.glb', 'b', wanted().signal);
+      await flush();
+      show(false);
+      viewers[0]!.loads[0]!.finish();
+      await first;
+      await flush();
+      // The second picture waits for the page, and the viewer is let go meanwhile.
+      expect(viewers[0]!.loads).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(viewers[0]!.dispose).toHaveBeenCalledOnce();
+      show(true);
+      await flush();
+      expect(viewers).toHaveLength(2);
+      expect(viewers[1]!.loads.map(load => load.url)).toEqual(['/b.glb']);
+      viewers[1]!.loads[0]!.finish();
+      await expect(second).resolves.toMatchObject({ src: 'data:image/webp;base64,/b.glb' });
+    } finally { visibility.mockRestore(); }
+  });
+
   it('GPU가 없는 곳에서는 그릴 수 없다고 알린다', () => {
     expect(thumbnails.canDrawThumbnails()).toBe(false);
   });

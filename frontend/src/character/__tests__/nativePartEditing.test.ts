@@ -1,4 +1,4 @@
-import { Bone, BufferGeometry, Float32BufferAttribute, Group, Matrix4, MeshStandardMaterial, Skeleton, SkinnedMesh, Vector3 } from 'three';
+import { Bone, BufferGeometry, Float32BufferAttribute, Group, Int16BufferAttribute, InterleavedBuffer, InterleavedBufferAttribute, Matrix4, MeshStandardMaterial, Skeleton, SkinnedMesh, Vector3 } from 'three';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NativeWardrobe } from '../native-wardrobe';
@@ -8,9 +8,12 @@ vi.mock('../assets/download', () => ({ downloadBytes: async () => new ArrayBuffe
 beforeEach(() => vi.stubGlobal('crypto', { subtle: { digest: async () => new Uint8Array(32).buffer } }));
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-function fixture(kind: 'plain' | 'morph' | 'shared' = 'plain', slot = 'hat') {
+function fixture(kind: 'plain' | 'morph' | 'shared' | 'quantized' | 'interleaved' = 'plain', slot = 'hat') {
   const geometry = new BufferGeometry();
-  geometry.setAttribute('position', new Float32BufferAttribute([0, 0, 0, 2, 0, 0], 3));
+  // KHR_mesh_quantization positions, and positions sharing one buffer with another attribute.
+  geometry.setAttribute('position', kind === 'quantized' ? new Int16BufferAttribute([0, 0, 0, 2, 0, 0], 3)
+    : kind === 'interleaved' ? new InterleavedBufferAttribute(new InterleavedBuffer(new Float32Array([0, 0, 0, 9, 2, 0, 0, 9]), 4), 3, 0)
+      : new Float32BufferAttribute([0, 0, 0, 2, 0, 0], 3));
   geometry.setAttribute('normal', new Float32BufferAttribute([2, 2, 0, 2, 2, 0], 3));
   geometry.setAttribute('skinWeight', new Float32BufferAttribute([1, 0, 0, 0, 1, 0, 0, 0], 4));
   const originalDispose = vi.spyOn(geometry, 'dispose');
@@ -96,12 +99,26 @@ describe('실제 옷장 파츠 변형', () => {
     } finally { value.dispose(); }
   });
 
-  it.each([['morph', 'hat'], ['shared', 'hat'], ['morph', 'bottom'], ['morph', 'shoes']] as const)('%s %s 파츠는 원래 착용을 허용하고 nonidentity 편집을 거절한다', async (kind, slot) => {
+  it.each([['morph', 'hat'], ['shared', 'hat'], ['morph', 'bottom'], ['morph', 'shoes'], ['quantized', 'hat'], ['interleaved', 'top']] as const)('%s %s 파츠는 원래 착용을 허용하고 편집할 수 없다고 미리 알리며 nonidentity 편집을 거절한다', async (kind, slot) => {
     const value = fixture(kind, slot);
     try {
       await expect(value.equip()).resolves.toBe(true);
-      expect(() => value.wardrobe.setPartEdit(slot, { scale: [1.1, 1, 1], translation: [0, 0, 0] })).toThrow(kind === 'morph' ? '표정 변형' : '공유하는');
+      expect(value.wardrobe.canEdit(slot)).toBe(false);
+      expect(() => value.wardrobe.setPartEdit(slot, { scale: [1.1, 1, 1], translation: [0, 0, 0] })).toThrow('크기와 위치를 바꿀 수 없어요');
       expect(() => value.wardrobe.setPartEdit(slot, null)).not.toThrow();
+      // Worn as it came: the file's own positions, untouched.
+      const position = value.mesh.geometry.getAttribute('position');
+      expect([position.getX(1), position.getY(1), position.getZ(1)]).toEqual([2, 0, 0]);
+    } finally { value.dispose(); }
+  });
+
+  it('편집할 수 있는 파츠는 입은 뒤에 그렇다고 알린다', async () => {
+    const value = fixture('plain', 'top');
+    try {
+      expect(value.wardrobe.canEdit('top')).toBe(false);
+      await value.equip();
+      expect(value.wardrobe.canEdit('top')).toBe(true);
+      expect(value.wardrobe.canEdit('hat')).toBe(false);
     } finally { value.dispose(); }
   });
 

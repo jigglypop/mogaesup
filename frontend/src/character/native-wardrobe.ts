@@ -17,6 +17,8 @@ export type Tuck = { anchors: Record<string, Int32Array>; moves: Record<string, 
 const OUTER_LAYERS: Record<string, number> = { top: -2, hat: -2, shoes: -1 };
 type Entry = { spec: Wearable; group: Group; source: GLTF; skeletons: Set<Skeleton>; touched: number; keys: Map<SkinnedMesh, string>; pivot: Vector3; rest: Map<SkinnedMesh, RestGeometry>; originalGeometries: Set<BufferGeometry>; editProblem?: string };
 type RestBone = { bone: Bone; matrix: Matrix4; parent: string | null };
+/** Why a worn part keeps its own size and place (`canEdit` is false): its file cannot be resized in the browser. */
+export const PART_FIXED = '이 파츠는 크기와 위치를 바꿀 수 없어요.';
 
 function standardSlot(object: Object3D): unknown {
   // A glTF node with several material primitives loads as a Group. Its extras
@@ -160,10 +162,15 @@ export class NativeWardrobe {
     if (!(EDITABLE_PARTS as readonly string[]).includes(slot) || (edit && !validPartEdit(edit))) throw new Error('파츠 크기와 위치 범위를 확인해 주세요.');
     const entry = this.active.get(slot);
     if (entry?.editProblem && edit && !isDefaultPartEdit(edit)) throw new Error(entry.editProblem);
-    if (entry && edit && !isDefaultPartEdit(edit) && [...entry.rest.keys()].some(mesh => Object.values(mesh.geometry.morphAttributes).some(attributes => attributes.length))) throw new Error('이 파츠의 표정 변형을 유지하려면 원래 크기와 위치로 되돌려 주세요.');
     if (edit) this.edits.set(slot, { scale: [...edit.scale], translation: [...edit.translation] }); else this.edits.delete(slot);
     if (entry) this.applyEdit(entry);
     this.updateBodyVisibility();
+  }
+
+  /** Whether the part worn in `slot` may be resized and moved: an editable slot, and a file the browser can reshape. */
+  canEdit(slot: string) {
+    const entry = this.active.get(slot);
+    return !!entry && (EDITABLE_PARTS as readonly string[]).includes(slot) && !entry.editProblem;
   }
 
   private updateBodyVisibility() {
@@ -263,7 +270,7 @@ export class NativeWardrobe {
             const parent = (bone.parent as Bone)?.isBone ? bone.parent!.name : null;
             if (!rest || names.has(bone.name) || rest.parent !== parent ||
                 rest.matrix.elements.some((v, i) => Math.abs(v - (bone.matrixWorld.elements[i] ?? 0)) > 1e-4)) {
-              throw new Error('의상의 본 위치·구조가 고정 몸과 맞지 않아요. 다시 피팅해야 해요.');
+              throw new Error('의상의 본 위치·구조가 고정 몸과 맞지 않아요.');
             }
             names.add(bone.name); return rest.bone;
           });
@@ -282,6 +289,10 @@ export class NativeWardrobe {
           if ((EDITABLE_PARTS as readonly string[]).includes(spec.slot)) {
             // Each loaded primitive needs its own buffers: glTF instances can share one geometry.
             entry.originalGeometries.add(mesh.geometry); mesh.geometry = mesh.geometry.clone(); const rest = restGeometry(mesh.geometry);
+            // Quantized or interleaved positions are worn as they are; reshaping them would break the part.
+            if (!rest) { entry.editProblem = PART_FIXED; continue; }
+            // Resizing would leave its expression shapes (morph targets) behind.
+            if (Object.values(mesh.geometry.morphAttributes).some(attributes => attributes.length)) entry.editProblem = PART_FIXED;
             entry.rest.set(mesh, rest); this.partPositions.set(mesh, rest.position);
           }
         }
@@ -289,11 +300,12 @@ export class NativeWardrobe {
         const matrices = new Map<number, Matrix4>();
         for (const mesh of entry.rest.keys()) {
           const matrix = mesh.matrix, values = matrix.elements;
-          if (values.some(value => !Number.isFinite(value)) || Math.abs(matrix.determinant()) < 1e-12 || [values[3]!, values[7]!, values[11]!, values[15]! - 1].some(value => Math.abs(value) > 1e-8)) entry.editProblem = '파츠의 변환을 읽지 못해 크기를 조정할 수 없어요.';
+          if (values.some(value => !Number.isFinite(value)) || Math.abs(matrix.determinant()) < 1e-12 || [values[3]!, values[7]!, values[11]!, values[15]! - 1].some(value => Math.abs(value) > 1e-8)) entry.editProblem = PART_FIXED;
           const association = source.parser.associations.get(mesh) as { meshes?: number } | undefined;
           if (association?.meshes === undefined) continue;
           const previous = matrices.get(association.meshes);
-          if (previous && !previous.equals(matrix)) entry.editProblem = '서로 다른 위치에서 공유하는 파츠 메시의 크기를 조정할 수 없어요.';
+          // One mesh placed in several spots cannot be resized about each spot's own centre.
+          if (previous && !previous.equals(matrix)) entry.editProblem = PART_FIXED;
           matrices.set(association.meshes, matrix);
         }
         for (const [mesh, rest] of entry.rest) for (let index = 0; index < rest.position.length; index += 3) bounds.expandByPoint(point.fromArray(rest.position, index).applyMatrix4(mesh.matrix));

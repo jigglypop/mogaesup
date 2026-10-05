@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError } from '../../api/client';
+import { reportStudio } from '../../api/studioSleep';
 import { catalogApi } from '../../api/endpoints';
 import type { PermissionName, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
@@ -71,6 +72,21 @@ describe('캐릭터 공장 화면', () => {
     auth.user = user('operator');
     const { container, unmount } = await open('/admin/studio/prompts');
     expect(where(container)).toBe('/admin/studio/prompts');
+    await unmount();
+  });
+
+  it('스튜디오가 깨어나 작업 화면을 다시 열어도 그동안 고른 것을 주소에 그대로 둔다', async () => {
+    auth.user = user('operator');
+    const { container, unmount } = await open('/admin/studio/library?item=a');
+    expect(location.search).toBe('?item=a&tab=admin');
+    // What a screen does when something is chosen (rememberStudioQuery): the router never hears of it.
+    history.replaceState(history.state, '', '/admin/studio/library?item=b');
+    await act(async () => reportStudio('studio_waking', '켜는 중'));
+    expect(container.textContent).not.toContain('작업 화면');
+    await act(async () => reportStudio());
+    await flush();
+    expect(container.textContent).toContain('작업 화면');
+    expect(location.search).toBe('?item=b&tab=admin');
     await unmount();
   });
 

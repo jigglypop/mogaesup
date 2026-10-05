@@ -55,7 +55,8 @@ export function PartPreview({ part, refreshed }: { part: WardrobePart; refreshed
     else setView(answer === 'missing' ? 'model' : 'label');
   }
 
-  if (view === 'drawing') return <img src={attempt ? `${url}&attempt=${attempt}` : url} alt={part.name} loading="lazy" onError={() => void failed()} />;
-  if (view === 'model' && picture) return <img src={picture.src} alt={part.name} data-renderer={picture.renderer} />;
+  // The card that holds the picture already names the part; the picture itself is not read out a second time.
+  if (view === 'drawing') return <img src={attempt ? `${url}&attempt=${attempt}` : url} alt="" loading="lazy" onError={() => void failed()} />;
+  if (view === 'model' && picture) return <img src={picture.src} alt="" data-renderer={picture.renderer} />;
   return <span ref={holder} className="wardrobe-card-empty">{labels[part.slot] || part.slot}</span>;
 }

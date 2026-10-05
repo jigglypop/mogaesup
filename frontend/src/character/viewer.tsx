@@ -494,6 +494,8 @@ export class ModelViewer {
   }
   setHairColor(color: string | null) { this.wardrobe?.setHairColor(color); this.render(); }
   setPartEdit(slot: string, edit: PartEdit | null) { this.wardrobe?.setPartEdit(slot, edit); this.render(); }
+  /** Whether the part worn in `slot` may be resized and moved (see NativeWardrobe.canEdit). */
+  canEdit(slot: string) { return this.wardrobe?.canEdit(slot) ?? false; }
   setHiddenBodyTriangles(hidden: Record<string, Uint8Array> | null) { this.wardrobe?.hideTriangles(hidden); this.render(); }
   setTucked(slot: string, tuck: Tuck | null, outer: Record<string, Uint8Array> | null) { this.wardrobe?.tuckUnder(slot, tuck, outer); this.render(); }
   setPartColors(slot: string, material: number, mask: THREE.Texture, lights: number[], colors: (string | null)[]) { this.wardrobe?.setRegionColors(slot, material, mask, lights, colors); this.render(); }

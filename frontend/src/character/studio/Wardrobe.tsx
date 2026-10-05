@@ -17,7 +17,7 @@ import { ModelViewer } from '../viewer';
 import type { Tuck } from '../native-wardrobe';
 import { createHeldLoads } from './held-loads';
 import { PartPreview } from './PartPreview';
-import { fitReason, reshapable, unfittedParts } from './wardrobe-view';
+import { fitReason, reshapable, unfittedParts, wearableParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
 import { EDITABLE_PARTS, isDefaultPartEdit, type PartEdit } from '../part-edit';
 import { PartEditControls } from './PartEditControls';
@@ -104,7 +104,7 @@ export default function Wardrobe() {
     library.setValue(value);
     return value.parts;
   }, [body?.job_id, body?.version, body?.body_sha256, library.setValue]);
-  const parts = libraryMatchesBody ? library.value!.parts : [];
+  const parts = libraryMatchesBody ? wearableParts(library.value!.parts, admin) : [];
   const unfitted = libraryMatchesBody ? unfittedParts(library.value!.unavailable, admin) : [];
   const slots = slotOrder.filter(slot => parts.some(part => part.slot === slot));
   const [slot, setSlot] = useState('hair');
@@ -117,6 +117,8 @@ export default function Wardrobe() {
   const [attempt, setAttempt] = useState(0), [modelError, setModelError] = useState('');
   const [worn, setWorn] = useState<Worn>({}), applied = useRef<Worn>({});
   const [appliedKey, setAppliedKey] = useState('');
+  // Worn parts whose file the viewer cannot resize: their size and place controls stay off, and no edit is kept for them.
+  const [fixedSlots, setFixedSlots] = useState<readonly string[]>([]);
   const [coverages, setCoverages] = useState<Record<string, WardrobeCoverage>>({});
   // A part whose covered skin could not be read: shown with a retry, and it holds back no action (the server works out
   // the same skin when it assembles the look).
@@ -188,7 +190,7 @@ export default function Wardrobe() {
   }, [baking, lookBusy, user?.id]);
 
   useEffect(() => {
-    setViewer(null); setModelError(''); setClips([]); applied.current = {}; setWorn({}); setAppliedKey(''); setNotice(''); setPartEdits({}); setEditError('');
+    setViewer(null); setModelError(''); setClips([]); applied.current = {}; setWorn({}); setAppliedKey(''); setFixedSlots([]); setNotice(''); setPartEdits({}); setEditError('');
     if (!body || !mount.current) return;
     let active = true;
     const instance = new ModelViewer(mount.current, 'studio');
@@ -204,7 +206,11 @@ export default function Wardrobe() {
     if (!viewer) return;
     let active = true; setWearing(true);
     const wearables = Object.values(worn).map(part => ({ id: keyOf(part, part.slot), slot: part.slot, url: wardrobeUrls.part(part), sha256: wardrobePartSha(part) }));
-    void viewer.wear(wearables).then(done => { if (done && active) { applied.current = { ...worn }; setAppliedKey(wornKey); } })
+    void viewer.wear(wearables).then(done => {
+      if (!done || !active) return;
+      applied.current = { ...worn }; setAppliedKey(wornKey);
+      setFixedSlots(EDITABLE_PARTS.filter(slotName => worn[slotName] && !viewer.canEdit(slotName)));
+    })
       .catch(reason => { if (active) { setWearError((reason as Error).message); setWorn({ ...applied.current }); } })
       .finally(() => { if (active) setWearing(false); });
     return () => { active = false; };
@@ -239,7 +245,7 @@ export default function Wardrobe() {
           setCoverages(current => ({ ...current, [key]: value }));
           setCoverageErrors(current => Object.fromEntries(Object.entries(current).filter(([item]) => item !== key)));
         })
-        .catch(reason => { if (!controller.signal.aborted) setCoverageErrors(current => ({ ...current, [key]: `${labels[part.slot] || part.slot} 가림 영역: ${(reason as Error).message}` })); });
+        .catch(reason => { if (!controller.signal.aborted) setCoverageErrors(current => ({ ...current, [key]: (reason as Error).message })); });
     }
     return () => controller.abort();
   }, [appliedKey, body?.job_id, body?.version, body?.geometry_sha256, coverageAttempt]);
@@ -340,7 +346,7 @@ export default function Wardrobe() {
     shownEdits.current = null;
     try {
       for (const [slotName, part] of Object.entries(applied.current)) {
-        if (!(EDITABLE_PARTS as readonly string[]).includes(slotName)) continue;
+        if (!(EDITABLE_PARTS as readonly string[]).includes(slotName) || !viewer.canEdit(slotName)) continue;
         const edit = edits[slotName] = partEdits[keyOf(part, slotName)];
         if (!before || before[slotName] !== edit) viewer.setPartEdit(slotName, edit || null);
       }
@@ -423,7 +429,7 @@ export default function Wardrobe() {
     const worn = Object.entries(applied.current);
     const edits = Object.fromEntries(worn.flatMap(([slotName, part]) => {
       const edit = partEdits[keyOf(part, slotName)];
-      return edit && !isDefaultPartEdit(edit) ? [[slotName, edit]] : [];
+      return edit && !isDefaultPartEdit(edit) && !fixedSlots.includes(slotName) ? [[slotName, edit]] : [];
     }));
     return {
       body: { jobId: body.job_id, version: body.version },
@@ -471,7 +477,11 @@ export default function Wardrobe() {
   const settled = !!viewer && libraryMatchesBody && !wearing && wornKey === appliedKey;
   const savedOutfits = Object.entries(outfits.value?.outfits || {}).sort(([, a], [, b]) => (b.saved_at || '').localeCompare(a.saved_at || ''));
   const shapes = reshapable(worn, paidOperator);
-  const coverageProblems = Object.values(applied.current).map(part => coverageErrors[coverageKey(part)]).filter((value): value is string => !!value);
+  // Worn parts whose covered skin could not be read: their names, and for operators why.
+  const coverageProblems = Object.values(applied.current).flatMap(part => {
+    const problem = coverageErrors[coverageKey(part)];
+    return problem ? [admin ? `${labels[part.slot] || part.slot} · ${problem}` : labels[part.slot] || part.slot] : [];
+  });
   if (bodies.value && registered.length === 0) {
     // Bodies are registered on the base body screen, which only paid operators open.
     return <div className="wardrobe workspace-content"><div className="workspace-heading"><h1>옷장</h1></div>
@@ -494,7 +504,7 @@ export default function Wardrobe() {
         {bodies.error && <p role="alert">{bodies.error} <button type="button" onClick={() => void bodies.refresh()}>몸 목록 다시 불러오기</button></p>}
         {modelError && <p role="alert">{modelError} <button type="button" onClick={() => setAttempt(value => value + 1)}>다시 불러오기</button></p>}
         {wearError && <p role="alert">{wearError}</p>}
-        {coverageProblems.length > 0 && <p role="alert">{coverageProblems.join(' · ')} <button type="button" onClick={() => { setCoverageErrors({}); setCoverageAttempt(value => value + 1); }}>가림 영역 다시 불러오기</button></p>}
+        {coverageProblems.length > 0 && <p role="alert">맞춤 정보 불러오기 실패 · {coverageProblems.join(' · ')} <button type="button" onClick={() => { setCoverageErrors({}); setCoverageAttempt(value => value + 1); }}>다시 불러오기</button></p>}
         {notice && <p role="status">{notice}</p>}
       </section>
       <section className="wardrobe-closet">
@@ -544,7 +554,8 @@ export default function Wardrobe() {
         </div>}
         {Object.keys(worn).some(slotName => (EDITABLE_PARTS as readonly string[]).includes(slotName)) && <div className="wardrobe-part-edits"><h2>크기와 위치</h2>
           {EDITABLE_PARTS.filter(slotName => worn[slotName]).map(slotName => <PartEditControls key={keyOf(worn[slotName]!, slotName)} label={labels[slotName] || slotName}
-            value={partEdits[keyOf(worn[slotName]!, slotName)]} disabled={!settled || !lookReady || lookBusy || baking}
+            value={fixedSlots.includes(slotName) ? undefined : partEdits[keyOf(worn[slotName]!, slotName)]} fixed={settled && fixedSlots.includes(slotName)}
+            disabled={!settled || !lookReady || lookBusy || baking || fixedSlots.includes(slotName)}
             onChange={edit => setPartEdits(current => { const next = { ...current }, key = keyOf(worn[slotName]!, slotName); if (edit) next[key] = edit; else delete next[key]; return next; })} />)}
           {editError && <p role="alert">{editError}</p>}
         </div>}

@@ -19,14 +19,16 @@ import { FactoryUsageContext, useFactoryUsage } from './usage';
 const Workspace = lazy(() => import('../character/studio/Workspace').then((module) => ({ default: module.Workspace })));
 
 /**
- * The pathname selects the screen. Legacy query state is supplied once before the workspace mounts.
+ * The pathname selects the screen. Legacy query state is supplied once before the workspace mounts. The screens keep
+ * their selections in the address with `rememberStudioQuery`, which the router does not hear of, so the query is read
+ * from the address itself: mounted again (the studio woke up), the workspace keeps what was chosen since.
  */
 function WorkspaceFrame({ screen }: { screen: Screen }) {
   const { pathname, search } = useLocation();
   const entry = `${pathname}${search}`;
   const [ready, setReady] = useState<string | null>(null);
   useLayoutEffect(() => {
-    const query = new URLSearchParams(search);
+    const query = new URLSearchParams(location.pathname === pathname ? location.search : search);
     query.set('tab', screen.tab);
     if (screen.mode) query.set('mode', screen.mode);
     else query.delete('mode');
@@ -70,7 +72,6 @@ function Connection({ usage, failed, refresh }: ReturnType<typeof useFactoryUsag
           이번 달 유료 작업 {known.paidThisMonth} / {known.paidMonthly}
         </small>
       )}
-      {known?.connected && known.access !== 'paid' && <small>비용이 드는 작업은 이 서버에서 막혀 있어요</small>}
       {usage?.connected && <StudioPowerLine canStart />}
     </section>
   );

@@ -1,4 +1,4 @@
-import { Matrix3, Matrix4, Vector3, type BufferAttribute, type BufferGeometry } from 'three';
+import { Matrix3, Matrix4, Vector3, type BufferAttribute, type BufferGeometry, type InterleavedBufferAttribute } from 'three';
 
 export type PartEdit = { scale: [number, number, number]; translation: [number, number, number] };
 /** Worn parts a member may resize and move, in the wardrobe's slot order: the server's `EDITABLE_SLOTS`. */
@@ -25,13 +25,20 @@ export function partEditMatrix(pivot: Vector3, edit: PartEdit): Matrix4 {
 }
 
 export type RestGeometry = { position: Float32Array; normal?: Float32Array; tangent?: Float32Array };
-export function restGeometry(geometry: BufferGeometry): RestGeometry {
-  const read = (name: string) => geometry.getAttribute(name) as BufferAttribute | undefined;
-  const positions = read('position');
-  if (!positions || !(positions.array instanceof Float32Array)) throw new Error('파츠 위치 데이터를 읽지 못했어요.');
-  return { position: positions.array.slice(),
-    ...(read('normal')?.array instanceof Float32Array ? { normal: (read('normal')!.array as Float32Array).slice() } : {}),
-    ...(read('tangent')?.array instanceof Float32Array ? { tangent: (read('tangent')!.array as Float32Array).slice() } : {}) };
+/** An attribute's own float values, `size` per vertex; none for quantized (integer or normalized) or interleaved data. */
+function plainFloats(geometry: BufferGeometry, name: string, size: number) {
+  const attribute = geometry.getAttribute(name) as BufferAttribute | InterleavedBufferAttribute | undefined;
+  if (!attribute || (attribute as InterleavedBufferAttribute).isInterleavedBufferAttribute || attribute.normalized || attribute.itemSize !== size) return undefined;
+  const array = (attribute as BufferAttribute).array;
+  return array instanceof Float32Array && array.length === size * attribute.count ? array : undefined;
+}
+/** The rest buffers every edit starts from, or null when the positions are not plain float x, y, z: such a part (a
+ * quantized or interleaved file) is worn as it is and never resized. */
+export function restGeometry(geometry: BufferGeometry): RestGeometry | null {
+  const position = plainFloats(geometry, 'position', 3);
+  if (!position) return null;
+  const normal = plainFloats(geometry, 'normal', 3), tangent = plainFloats(geometry, 'tangent', 4);
+  return { position: position.slice(), ...(normal ? { normal: normal.slice() } : {}), ...(tangent ? { tangent: tangent.slice() } : {}) };
 }
 
 /** Rebuild from the saved rest/tucked buffers on every update; bone objects and bind matrices are never changed. */

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ApiError, isRevisionConflict } from '../api';
 import type { WardrobePart, WardrobeUnavailable } from '../factory/api';
-import { fitReason, reshapable, unfittedParts } from '../studio/wardrobe-view';
+import { fitReason, reshapable, unfittedParts, wearableParts } from '../studio/wardrobe-view';
 
 const part = (slot: string, changes: Partial<WardrobePart> = {}): WardrobePart => ({
   job_id: 'job',
@@ -11,6 +11,17 @@ const part = (slot: string, changes: Partial<WardrobePart> = {}): WardrobePart =
   name: slot,
   sha256: 'sha',
   ...changes,
+});
+
+describe('입을 수 있는 파츠', () => {
+  const failed = part('top', { name: '뚫는 옷', fit_check: { status: 'fail', failures: ['소매가 몸을 뚫습니다.'] } });
+  const passed = part('top', { name: '맞는 옷', fit_check: { status: 'pass', failures: [] } });
+  const unchecked = part('bottom');
+
+  it('핏 검사에서 떨어진 파츠는 운영자만 입어 본다', () => {
+    expect(wearableParts([failed, passed, unchecked], true)).toEqual([failed, passed, unchecked]);
+    expect(wearableParts([failed, passed, unchecked], false)).toEqual([passed, unchecked]);
+  });
 });
 
 describe('피팅하지 못한 파츠', () => {

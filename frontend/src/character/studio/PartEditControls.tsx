@@ -10,12 +10,14 @@ const SLIDERS: readonly { name: string; kind: keyof PartEdit; axis: 0 | 1 | 2 }[
   { name: '좌우 위치', kind: 'translation', axis: 0 },
 ];
 
-export function PartEditControls({ label, value, disabled, onChange }: { label: string; value?: PartEdit; disabled: boolean; onChange(value: PartEdit | null): void }) {
+/** `fixed`: the worn part's file cannot be resized, so the controls stay off and say so. */
+export function PartEditControls({ label, value, disabled, fixed = false, onChange }: { label: string; value?: PartEdit; disabled: boolean; fixed?: boolean; onChange(value: PartEdit | null): void }) {
   const edit = value || defaultPartEdit();
   const set = (kind: keyof PartEdit, axis: 0 | 1 | 2, number: number) => {
     const next: PartEdit = { scale: [...edit.scale], translation: [...edit.translation] }; next[kind][axis] = number; onChange(next);
   };
   return <fieldset className="wardrobe-part-edit" disabled={disabled}><legend>{label}</legend>
+    {fixed && <small role="status">크기·위치 고정</small>}
     {SLIDERS.map(({ name, kind, axis }) => {
       const size = kind === 'scale', number = edit[kind][axis]!;
       return <label key={name}><span>{name}</span>

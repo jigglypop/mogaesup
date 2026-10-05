@@ -169,7 +169,7 @@ export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: 
         }}><option value="">새 리깅 생성</option>{rigValue && !rigOptions.some(item => `${item.jobId}:${item.version}` === rigValue) && <option value={rigValue}>{rigValue}</option>}{rigOptions.map(item => <option key={`${item.jobId}:${item.version}`} value={`${item.jobId}:${item.version}`}>{item.label}</option>)}</select></label>
         <button className="base-body-create" disabled={busy || !!uploading || !!recovery.error || (!pending && (!draft.name.trim() || !complete))} onClick={() => void create()}>{busy ? '접수 확인 중' : pending ? '같은 요청 복구' : '기본 몸 3D 생성'}</button>
         <small>유료 Meshy 3D 1회{shownRig ? ' · 저장된 리깅 재사용' : ' · 리깅 1회 · 기본 동작'}</small>
-        {pending && <p className="base-body-recovery">응답이 확인되지 않은 {bodyLabels[bodyType]} 요청입니다. 저장된 이미지와 요청 키로 복구합니다.</p>}
+        {pending && <p className="base-body-recovery">{bodyLabels[bodyType]} · 응답 확인 안 됨</p>}
         {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}{notice && <p role="status">{notice}</p>}
         </>}
       </section>

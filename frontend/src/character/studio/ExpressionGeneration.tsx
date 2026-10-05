@@ -108,8 +108,8 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
         })}>{busy ? '요청 확인 중' : batchPending ? '기본 5종 같은 요청 복구' : '기본 5종 생성 · 이미지 5회'}</button>
       </div>
       {capability && !capability.ready && <small>{capability.reason || '현재 표정 텍스처를 생성할 수 없습니다.'}</small>}
-      {pending && <small>응답을 확인하지 못한 요청입니다. 같은 요청 키로 결과를 복구합니다.</small>}
-      {batchPending && <small>응답을 확인하지 못한 기본 5종 요청입니다. 같은 요청 키로 결과를 복구합니다.</small>}
+      {pending && <small>응답 확인 안 됨</small>}
+      {batchPending && <small>기본 5종 · 응답 확인 안 됨</small>}
     </fieldset>
     {(error || recovery.error || batchRecovery.error || listing.error) && <p role="alert">{error || recovery.error || batchRecovery.error || listing.error} <button type="button" onClick={() => void listing.refresh()}>다시 불러오기</button></p>}
     {!!listing.value?.batches?.length && <div className="expression-batches">{listing.value.batches.map(batch => <article key={batch.id}>

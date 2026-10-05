@@ -21,6 +21,35 @@ type View = 'model' | 'image';
 
 const modelIdentity = (model: AssetPreviewModel) => `${model.url}:${model.sha256 ?? ''}`;
 
+/** Off-screen cards that keep their viewer, and for how long; and the viewers all cards may hold, shown ones first. */
+const KEEP_HIDDEN = 4, HIDDEN_MS = 60_000, MAX_LIVE = 12;
+type Hidden = { release(): void; timer: ReturnType<typeof setTimeout> };
+const hiddenViewers: Hidden[] = [];
+/** Cards on screen now; each holds a viewer. */
+let showing = 0;
+/** Lets go of the longest-hidden viewers beyond what may stay. */
+const trimHidden = () => {
+  while (hiddenViewers.length > Math.min(KEEP_HIDDEN, Math.max(0, MAX_LIVE - showing))) forget(hiddenViewers[0]!, true);
+};
+function forget(entry: Hidden, release: boolean) {
+  const index = hiddenViewers.indexOf(entry);
+  if (index < 0) return;
+  hiddenViewers.splice(index, 1); clearTimeout(entry.timer);
+  if (release) entry.release();
+}
+/**
+ * A card that scrolls away keeps its viewer for a while, so coming back does not download and parse the model again;
+ * but every viewer holds a renderer of its own and a browser keeps only about 16 WebGL contexts, so only the
+ * `KEEP_HIDDEN` most recently hidden keep theirs (fewer while many cards are on screen), each for `HIDDEN_MS`. `release` lets go of the viewer; the returned
+ * function says the card is back (or gone) before that.
+ */
+function keepHidden(release: () => void) {
+  const entry: Hidden = { release, timer: setTimeout(() => forget(entry, true), HIDDEN_MS) };
+  hiddenViewers.push(entry);
+  trimHidden();
+  return () => forget(entry, false);
+}
+
 export function AssetModelPreview({ model, models, image, name, emptyLabel, detail = false, autoLoad = detail, animate = false, clip }: AssetModelPreviewProps) {
   const viewerMount = useRef<HTMLDivElement>(null);
   const viewer = useRef<import('../viewer').ModelViewer | null>(null);
@@ -31,9 +60,9 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
   const [selectedModel, setSelectedModel] = useState(() => choices[0] ? modelIdentity(choices[0]) : '');
   const activeModel = choices.find(item => modelIdentity(item) === selectedModel) || choices[0];
   const [visible, setVisible] = useState(false);
-  // Once shown, the viewer stays when the card scrolls away (it stops drawing off screen) instead of being built,
-  // downloaded and parsed again when the card comes back.
-  const [seen, setSeen] = useState(false);
+  // Whether the card holds a viewer: from when it is first shown until it has been off screen too long or too many
+  // other cards went off screen after it (see keepHidden). Off screen it stops drawing.
+  const [live, setLive] = useState(false);
   // A gallery card plays its clip only while pointed at or focused; moving cards would each draw every frame.
   const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false);
   const clipIndex = useRef(-1);
@@ -57,14 +86,18 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
   useEffect(() => {
     const element = viewerMount.current;
     if (!element) return;
-    const observer = new IntersectionObserver(entries => {
-      const nextVisible = entries.some(entry => entry.isIntersecting);
-      setVisible(nextVisible);
-      if (nextVisible) setSeen(true);
-    }, { threshold: 0.01 });
+    const observer = new IntersectionObserver(entries => setVisible(entries.some(entry => entry.isIntersecting)), { threshold: 0.01 });
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (visible) {
+      setLive(true); showing++; trimHidden();
+      return () => { showing--; };
+    }
+    if (live) return keepHidden(() => setLive(false));
+  }, [visible, live]);
 
   useEffect(() => {
     setView(hasModel && autoLoad ? 'model' : 'image');
@@ -79,7 +112,7 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
 
   useEffect(() => {
     const element = viewerMount.current;
-    if (!element || !modelUrl || view !== 'model' || !seen) return;
+    if (!element || !modelUrl || view !== 'model' || !live) return;
     let active = true;
     let instance: import('../viewer').ModelViewer | undefined;
     setLoading(true);
@@ -90,7 +123,7 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       instance = new ModelViewer(element, 'card');
       viewer.current = instance;
       const canvas = element.querySelector('canvas');
-      canvas?.setAttribute('aria-label', `${nameRef.current} 3D 모델. 드래그하여 회전하고 휠로 확대 또는 축소합니다.`);
+      canvas?.setAttribute('aria-label', `${nameRef.current} 3D 모델`);
       // The viewer gives up when the server stops answering or the file stops arriving, never for a large file.
       return instance.load(modelUrl, { sha256: modelSha256 });
     }).then(clips => {
@@ -111,8 +144,9 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
       active = false;
       instance?.dispose();
       if (viewer.current === instance) viewer.current = null;
+      setReady(false); setLoading(false);
     };
-  }, [animate, attempt, clip, modelKey, modelSha256, modelUrl, view, seen]);
+  }, [animate, attempt, clip, modelKey, modelSha256, modelUrl, view, live]);
 
   const engaged = hovered || focused;
   useEffect(() => {
@@ -122,7 +156,7 @@ export function AssetModelPreview({ model, models, image, name, emptyLabel, deta
   useEffect(() => { if (ready) viewer.current?.setWireframe(wireframe); }, [wireframe, ready]);
 
   useEffect(() => {
-    viewerMount.current?.querySelector('canvas')?.setAttribute('aria-label', `${name} 3D 모델. 드래그하여 회전하고 휠로 확대 또는 축소합니다.`);
+    viewerMount.current?.querySelector('canvas')?.setAttribute('aria-label', `${name} 3D 모델`);
   }, [name, ready]);
 
   const showImage = Boolean(image) && (view === 'image' || !ready);
