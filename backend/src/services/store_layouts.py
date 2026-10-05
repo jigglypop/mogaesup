@@ -1,7 +1,9 @@
 """Bounded store intent interpretation; geometry and placement are measured in the editor.
 
 Paid requests are recorded before POST and are never automatically resubmitted after an
-uncertain result. The shared asset namespace and process lock cover HTTP/CLI callers.
+uncertain result. A request the provider refused outright (key, permission, schema, model,
+quota) produced nothing billable, so its request ID may be tried again. The shared asset
+namespace and process lock cover HTTP/CLI callers.
 """
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import json
 import math
 import os
 import re
+from contextlib import ExitStack
 from typing import Literal
 
 import httpx
@@ -62,6 +65,26 @@ def interpret_rules(description: str) -> dict:
 
 _KEY = re.compile(r'[A-Za-z0-9_-]{8,80}')
 DEFAULT_MODEL = 'gpt-4.1-mini'
+# Provider statuses that refuse the request before any work. They are answered with 503, which the studio gateway does
+# not count against the paid budget; only timeouts, 5xx and unusable bodies stay uncertain (504, counted).
+_REFUSED = {401: 'layout_ai_unavailable', 403: 'layout_ai_unavailable', 429: 'layout_ai_limited',
+            400: 'layout_ai_rejected', 404: 'layout_ai_rejected', 422: 'layout_ai_rejected'}
+_REFUSAL_MESSAGES = {
+    'layout_ai_unavailable': 'AI 해석 설정을 확인해 주세요.',
+    'layout_ai_limited': 'AI 해석 사용 한도에 걸렸습니다. 잠시 후 다시 시도해 주세요.',
+    'layout_ai_rejected': 'AI 해석 요청이 거절되었습니다. 설정을 확인해 주세요.',
+}
+
+
+def _refusal(error: Exception) -> str | None:
+    if isinstance(error, httpx.HTTPStatusError):
+        return _REFUSED.get(error.response.status_code)
+    return None
+
+
+def _unreadable() -> PipelineError:
+    # Never rewritten: the record may stand for a request that was paid for.
+    return PipelineError('layout_record_unreadable', '배치 요청 기록을 읽지 못했습니다. 같은 요청은 다시 결제하지 않습니다.', 500)
 
 
 def capabilities() -> dict:
@@ -96,47 +119,74 @@ class StoreLayouts:
         directory = StoredPath(data_root() / 'avatar-factory' / 'layout-interpretations' / str(self.user_id) / request_id)
         digest = hashlib.sha256(description.encode()).hexdigest()
         # The same lock is used by CLI and API processes; no provider call is retried under it.
-        try:
-            with run_lock(directory, 0, blender=False):
-                directory.mkdir(parents=True, exist_ok=True)
-                path = directory / 'record.json'
+        with ExitStack() as held:
+            try:
+                held.enter_context(run_lock(directory, 0, blender=False))
+            except ValueError:
+                raise PipelineError('layout_busy', '같은 배치 요청을 처리 중입니다. 잠시 후 다시 확인해 주세요.') from None
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / 'record.json'
+            try:
                 previous = read_json(path)
-                if previous:
-                    if previous.get('descriptionSha256') != digest:
-                        raise PipelineError('idempotency_conflict', '같은 요청 식별자의 설명이 달라졌습니다.')
-                    if previous.get('status') == 'completed':
-                        return LayoutIntent.model_validate(previous['result']).model_dump()
-                    raise PipelineError('layout_interpretation_uncertain', '이 요청은 이미 전송되었습니다. 확인되지 않은 요청을 다시 결제하지 않습니다.')
-                model = os.getenv('LAYOUT_TEXT_MODEL', '').strip() or DEFAULT_MODEL
-                key = os.getenv('OPENAI_API_KEY', '').strip()
-                if not key:
-                    raise PipelineError('layout_ai_unavailable', 'AI 해석 설정을 확인해 주세요.', 503)
-                record = {'version': 1, 'userId': self.user_id, 'requestId': request_id,
-                          'descriptionSha256': digest, 'model': model, 'status': 'submitting', 'createdAt': now()}
-                with paid_request():
-                    _write_json(path, record)
+            except ValueError:
+                raise _unreadable() from None
+            if not isinstance(previous, dict):
+                raise _unreadable()
+            if previous:
+                if previous.get('descriptionSha256') != digest:
+                    raise PipelineError('idempotency_conflict', '같은 요청 식별자의 설명이 달라졌습니다.')
+                if previous.get('status') == 'completed':
                     try:
-                        result, provider_id = self._generate(description, model, key, request_id)
-                    except Exception:
-                        # Persist uncertainty, including valid HTTP with a truncated/invalid result.
-                        # If this save fails, the already committed submitting receipt still prevents another POST.
-                        record.update(status='uncertain', updatedAt=now())
+                        return LayoutIntent.model_validate(previous['result']).model_dump()
+                    except (KeyError, TypeError, ValueError):
+                        raise _unreadable() from None
+                if previous.get('status') != 'failed':
+                    raise PipelineError('layout_interpretation_uncertain', '이 요청은 이미 전송되었습니다. 확인되지 않은 요청을 다시 결제하지 않습니다.')
+            model = os.getenv('LAYOUT_TEXT_MODEL', '').strip() or DEFAULT_MODEL
+            key = os.getenv('OPENAI_API_KEY', '').strip()
+            if not key:
+                raise PipelineError('layout_ai_unavailable', 'AI 해석 설정을 확인해 주세요.', 503)
+            attempt = 1
+            if previous:
+                prior = previous.get('attempt', 1)
+                if type(prior) is not int or prior < 1:
+                    raise _unreadable()
+                attempt = prior + 1
+            record = {'version': 1, 'userId': self.user_id, 'requestId': request_id, 'descriptionSha256': digest,
+                      'model': model, 'attempt': attempt, 'status': 'submitting', 'createdAt': now()}
+            with paid_request():
+                _write_json(path, record)
+                try:
+                    result, provider_id = self._generate(description, model, key, request_id, attempt)
+                except Exception as error:
+                    refused = _refusal(error)
+                    if refused:
+                        # Refused before any work: nothing was billed, so this request ID may be sent again.
+                        record.update(status='failed', failure=refused, providerStatus=error.response.status_code,
+                                      updatedAt=now())
                         try:
                             _write_json(path, record)
                         except Exception:
-                            pass  # The original submitting receipt still durably blocks a second paid POST.
-                        # The studio gateway retains its paid budget reservation for uncertain 504s.
-                        raise PipelineError('layout_interpretation_uncertain', 'AI 해석 결과를 확인하지 못했습니다. 같은 요청은 다시 결제하지 않습니다.', 504) from None
-                    record.update(status='completed', result=result, providerResponseId=provider_id, updatedAt=now())
+                            pass  # The submitting receipt stays: this request ID is then refused, never sent again.
+                        raise PipelineError(refused, _REFUSAL_MESSAGES[refused], 503) from None
+                    # Persist uncertainty, including valid HTTP with a truncated/invalid result.
+                    # If this save fails, the already committed submitting receipt still prevents another POST.
+                    record.update(status='uncertain', updatedAt=now())
                     try:
                         _write_json(path, record)
                     except Exception:
-                        raise PipelineError('layout_interpretation_uncertain', 'AI 해석 결과를 저장하지 못했습니다. 같은 요청은 다시 결제하지 않습니다.', 504) from None
-                    return result
-        except ValueError:
-            raise PipelineError('layout_busy', '같은 배치 요청을 처리 중입니다. 잠시 후 다시 확인해 주세요.') from None
+                        pass  # The original submitting receipt still durably blocks a second paid POST.
+                    # The studio gateway retains its paid budget reservation for uncertain 504s.
+                    raise PipelineError('layout_interpretation_uncertain', 'AI 해석 결과를 확인하지 못했습니다. 같은 요청은 다시 결제하지 않습니다.', 504) from None
+                record.update(status='completed', result=result, providerResponseId=provider_id, updatedAt=now())
+                try:
+                    _write_json(path, record)
+                except Exception:
+                    raise PipelineError('layout_interpretation_uncertain', 'AI 해석 결과를 저장하지 못했습니다. 같은 요청은 다시 결제하지 않습니다.', 504) from None
+                return result
 
-    def _generate(self, description: str, model: str, key: str, request_id: str) -> tuple[dict, str | None]:
+    def _generate(self, description: str, model: str, key: str, request_id: str,
+                  attempt: int = 1) -> tuple[dict, str | None]:
         schema = LayoutIntent.model_json_schema()
         # OpenAI strict schemas accept bounded types; runtime validation also rejects unsafe/invalid output.
         for definition in schema['properties'].values():
@@ -145,7 +195,9 @@ class StoreLayouts:
                    'input': [{'role': 'system', 'content': _SYSTEM}, {'role': 'user', 'content': description}],
                    'text': {'format': {'type': 'json_schema', 'name': 'store_layout_intent', 'strict': True, 'schema': schema}}}
         base = (os.getenv('OPENAI_API_BASE') or 'https://api.openai.com/v1').rstrip('/')
-        provider_key = hashlib.sha256(f'layout:{self.user_id}:{request_id}'.encode()).hexdigest()
+        # A later attempt follows a refusal; its own key keeps a provider from answering it with the cached refusal.
+        scope = f'layout:{self.user_id}:{request_id}' + (f':{attempt}' if attempt > 1 else '')
+        provider_key = hashlib.sha256(scope.encode()).hexdigest()
         with httpx.Client(timeout=45, follow_redirects=False) as client:
             response = client.post(base + '/responses', json=payload,
                                    headers={'Authorization': 'Bearer ' + key, 'Idempotency-Key': provider_key})

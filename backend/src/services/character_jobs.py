@@ -48,16 +48,21 @@ def archive_attempt(directory: Path, reason: str) -> int:
     if value.get("status") not in RETRYABLE:
         raise ValueError("Only failed or unaccepted Meshy attempts can be replaced")
     attempts = directory / "attempts"
-    index = len(list(attempts.glob("*/archive.json"))) + 1
-    target = attempts / str(index)
-    for name in ATTEMPT_FILES:
-        source = directory / name
-        if source.is_file():
-            copy_file(source, target / name)
-    _write_json(target / "archive.json", {
-        "reason": reason, "status": value.get("status"), "http_status": value.get("http_status"),
-        "task_id": value.get("task_id"), "stage": value.get("stage"),
-        "archived_at": datetime.now(timezone.utc).isoformat()})
+    index = value.get("archived_as")
+    if not (type(index) is int and index > 0 and (attempts / str(index) / "archive.json").is_file()):
+        index = len(list(attempts.glob("*/archive.json"))) + 1
+        target = attempts / str(index)
+        for name in ATTEMPT_FILES:
+            source = directory / name
+            if source.is_file():
+                copy_file(source, target / name)
+        _write_json(target / "archive.json", {
+            "reason": reason, "status": value.get("status"), "http_status": value.get("http_status"),
+            "task_id": value.get("task_id"), "stage": value.get("stage"),
+            "archived_at": datetime.now(timezone.utc).isoformat()})
+        # The receipt names its archive before anything is removed: when a delete below is refused, the next try only
+        # removes the files again instead of copying the whole attempt into another archive.
+        _write_json(directory / "character.json", {**value, "archived_as": index})
     # Artifacts first and character.json last: a refused delete (an S3 role without s3:DeleteObject) then leaves the
     # attempt as it was, retryable once the delete is allowed, never a run without its receipt whose leftover input
     # refuses every new submission as an "Existing run".

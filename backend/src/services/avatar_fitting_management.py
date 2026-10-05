@@ -214,71 +214,91 @@ class FittingManagement:
                 'items': sorted(items, key=lambda row: row.get('created_at') or '', reverse=True)}
 
     def select(self, job, version, expected_version, key):
-        from src.services.avatar_native_parts import AvatarNativeParts
-        from src.services.avatar_stage_resume import ensure_stage_idle
+        from src.services.avatar_native_parts import AvatarNativeParts, admission
         require_request_key(key)
         if not re.fullmatch(r'[a-f0-9]{24}', version):
             raise PipelineError('not_found', '조립 버전을 찾을 수 없습니다.', 404)
         self.library.require_storage()
         native = AvatarNativeParts(self.factory)
-        with _LOCK:
-            root = native.root(self.owner, job)
-            intent = {'version': version, 'expected_version': expected_version}
-            receipt = root/'selections'/f'{hashlib.sha256(key.encode()).hexdigest()}.json'
-            previous = read_json(receipt)
-            if previous:
-                if previous['input'] != intent:
-                    raise PipelineError('idempotency_conflict', '같은 요청의 선택 버전이 바뀌었습니다.', 409)
-                if previous.get('status') == 'complete':
-                    return native.get(self.owner, job)
-            ensure_stage_idle(self.factory, self.owner, job)
-            pointer = read_json(root/'current.json')
-            from src.services.avatar_native_parts import assembly_running
-            from src.services.avatar_expression_reuse import expression_reuse_state
-            assembling = assembly_running(root/pointer['version'])[1] if pointer else False
-            expressions = expression_reuse_state(self.factory.directory(self.owner, job))
-            if assembling or (expressions and expressions.get('busy')):
-                raise PipelineError('assembly_running', '현재 조립이나 표정 저장이 끝난 뒤 버전을 선택하세요.', 409)
-            if pointer.get('version') not in (expected_version, version):
-                raise PipelineError('revision_conflict', '현재 조립 버전이 변경되었습니다.', 409)
-            record = read_json(root/version/'record.json')
-            if record.get('status') != 'review_required':
-                raise PipelineError('version_incomplete', '저장 완료된 조립 버전을 선택하세요.', 409)
-            for name in {name for name in record.get('files', {}) if name.endswith('.glb')} | {'model.glb', 'body.glb'}:
-                native.artifact(self.owner, job, version, name)
-            _write_json(receipt, {'input': intent, 'status': 'accepted'})
-            directory = self.factory.directory(self.owner, job)
-            pipeline = read_json(directory/'pipeline.json')
-            for name in ('local_refit', 'native_part_reuse', 'expression_reuse'):
-                pipeline.pop(name, None)
-            selected = read_json(root/version/'input.json')
-            pipeline['native_assembly_version'] = version
-            selected_profiles = {p['slot']: p.get('fit_profile') or p.get('report', {}).get('fit_profile')
-                                 for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
-            selected_kinds = {p['slot']: p.get('garment_kind') or p.get('report', {}).get('garment_kind')
-                              for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
-            selected_builds = {p['slot']: saved_build(p) for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
-            for part in pipeline.get('parts', []):
-                if part['slot'] in selected_profiles:
-                    profile = selected_profiles[part['slot']]
-                    if profile:
-                        part['fit_profile'] = deepcopy(profile)
+        root = native.root(self.owner, job)
+        intent = {'version': version, 'expected_version': expected_version}
+        receipt = root/'selections'/f'{hashlib.sha256(key.encode()).hexdigest()}.json'
+        with admission(self.owner, job):
+            record = self._selectable(root, job, version, expected_version, receipt, intent)
+            if record is not None:
+                # The models are hashed before the process lock is taken; under it the checks are made again on the
+                # same sealed record before anything is written.
+                for name in {name for name in record.get('files', {}) if name.endswith('.glb')} | {'model.glb', 'body.glb'}:
+                    native.artifact(self.owner, job, version, name, record=record)
+                with _LOCK:
+                    self._select_locked(root, job, version, expected_version, receipt, intent, record)
+        return native.get(self.owner, job)
+
+    def _selectable(self, root, job, version, expected_version, receipt, intent):
+        """The sealed record of the version to select, or None when this request selected it already; a refusal while
+        the job runs, its current version moved elsewhere or the version is not sealed."""
+        from src.services.avatar_native_parts import assembly_running
+        from src.services.avatar_expression_reuse import expression_reuse_state
+        from src.services.avatar_stage_resume import ensure_stage_idle
+        previous = read_json(receipt)
+        if previous:
+            if previous['input'] != intent:
+                raise PipelineError('idempotency_conflict', '같은 요청의 선택 버전이 바뀌었습니다.', 409)
+            if previous.get('status') == 'complete':
+                return None
+        ensure_stage_idle(self.factory, self.owner, job)
+        pointer = read_json(root/'current.json')
+        assembling = assembly_running(root/pointer['version'])[1] if pointer else False
+        expressions = expression_reuse_state(self.factory.directory(self.owner, job))
+        if assembling or (expressions and expressions.get('busy')):
+            raise PipelineError('assembly_running', '현재 조립이나 표정 저장이 끝난 뒤 버전을 선택하세요.', 409)
+        if pointer.get('version') not in (expected_version, version):
+            raise PipelineError('revision_conflict', '현재 조립 버전이 변경되었습니다.', 409)
+        record = read_json(root/version/'record.json')
+        if record.get('status') != 'review_required':
+            raise PipelineError('version_incomplete', '저장 완료된 조립 버전을 선택하세요.', 409)
+        return record
+
+    def _select_locked(self, root, job, version, expected_version, receipt, intent, checked):
+        """Point the job at `version` once the checks of _selectable still hold for the record whose files were
+        hashed (`checked`)."""
+        record = self._selectable(root, job, version, expected_version, receipt, intent)
+        if record is None:
+            return
+        if record != checked:
+            raise PipelineError('revision_conflict', '선택한 조립 버전이 변경되었습니다. 다시 선택하세요.', 409)
+        _write_json(receipt, {'input': intent, 'status': 'accepted'})
+        directory = self.factory.directory(self.owner, job)
+        pipeline = read_json(directory/'pipeline.json')
+        for name in ('local_refit', 'native_part_reuse', 'expression_reuse'):
+            pipeline.pop(name, None)
+        selected = read_json(root/version/'input.json')
+        pipeline['native_assembly_version'] = version
+        selected_profiles = {p['slot']: p.get('fit_profile') or p.get('report', {}).get('fit_profile')
+                             for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
+        selected_kinds = {p['slot']: p.get('garment_kind') or p.get('report', {}).get('garment_kind')
+                          for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
+        selected_builds = {p['slot']: saved_build(p) for p in [*selected.get('parts', []), *selected.get('prefit_parts', [])]}
+        for part in pipeline.get('parts', []):
+            if part['slot'] in selected_profiles:
+                profile = selected_profiles[part['slot']]
+                if profile:
+                    part['fit_profile'] = deepcopy(profile)
+                else:
+                    part.pop('fit_profile', None)
+                part['garment_kind'] = (selected_kinds.get(part['slot'])
+                                        or (profile or {}).get('kind') or 'source')
+                # How the slot was built goes back with its fit: a refit that follows starts from this
+                # version's method and shape, not from a later version's.
+                method, shape = selected_builds[part['slot']]
+                if method:
+                    if method != part.get('part_method', 'isolated'):
+                        part['part_method'] = method
+                    if shape:
+                        part['shape'] = deepcopy(shape)
                     else:
-                        part.pop('fit_profile', None)
-                    part['garment_kind'] = (selected_kinds.get(part['slot'])
-                                            or (profile or {}).get('kind') or 'source')
-                    # How the slot was built goes back with its fit: a refit that follows starts from this
-                    # version's method and shape, not from a later version's.
-                    method, shape = selected_builds[part['slot']]
-                    if method:
-                        if method != part.get('part_method', 'isolated'):
-                            part['part_method'] = method
-                        if shape:
-                            part['shape'] = deepcopy(shape)
-                        else:
-                            part.pop('shape', None)
-            _write_json(directory/'pipeline.json', pipeline)
-            _write_json(root/'current.json', {'version': version})
-            _write_json(receipt, {'input': intent, 'status': 'complete'})
-            self.factory._listings.pop(int(self.owner), None)
-            return native.get(self.owner, job)
+                        part.pop('shape', None)
+        _write_json(directory/'pipeline.json', pipeline)
+        _write_json(root/'current.json', {'version': version})
+        _write_json(receipt, {'input': intent, 'status': 'complete'})
+        self.factory._listings.pop(int(self.owner), None)

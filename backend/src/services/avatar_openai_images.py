@@ -27,8 +27,10 @@ DEFAULT_MODEL = 'gpt-image-2.5-sunburst'
 DEFAULT_BASE = 'https://api.openai.com/v1'
 ERROR_RESPONSE_LIMIT = 64 * 1024
 AUTO_RETRIES = 2
-# The provider rejected our TLS records, so it never parsed the HTTP request.
-TLS_REJECTIONS = ('BAD_RECORD_MAC', 'DECRYPTION_FAILED')
+# A fatal alert the provider's TLS sent (SSLV3_ALERT_BAD_RECORD_MAC, ...), as opposed to our own decrypt error.
+TLS_ALERT = '_ALERT_'
+# Steps that write the request. A failure in them leaves the provider an incomplete request it never starts on.
+SEND_EVENTS = ('send_request_headers.failed', 'send_request_body.failed')
 ATTEMPT_FIELDS =('phase', 'events', 'request_started', 'transport_event', 'first_failed_event', 'failed_event',
                   'transport_error_type', 'socket_errno', 'tls_reason', 'tls_version', 'tls_cipher',
                   'request_body_complete', 'body_complete_seconds', 'elapsed_seconds', 'http_status', 'request_id',
@@ -61,12 +63,33 @@ class OpenAIImageHTTPError(httpx.HTTPStatusError):
                          request=request, response=response)
 
 
+class OpenAIImageUnconfirmed(httpx.HTTPError):
+    """A server error answer (500, 502, 504, ...) outside the busy refusals that are asked again. It does not say the
+    image was not made and billed, so the request is unconfirmed; the answer is kept only as evidence."""
+
+    def __init__(self, status_code, category, diagnostic_id, provider_error=None):
+        super().__init__(f'OpenAI image request unconfirmed after HTTP {status_code}; diagnostic {diagnostic_id}')
+        self.status_code = status_code
+        self.category = category
+        self.diagnostic_id = diagnostic_id
+        self.provider_error = provider_error or {}
+
+
+class ImageReceiptUnsaved(Exception):
+    """The receipt could not record that the request starts, so it was stopped before its first byte was written."""
+
+
 class _RetryableRejection(Exception):
     """A rate-limit or overload refusal: the provider generated nothing."""
 
     def __init__(self, delay):
         super().__init__('Retryable image provider rejection')
         self.delay = delay
+
+
+def _busy_refusal(status_code, category):
+    """A refusal for load (429, 503) that says nothing was generated: asked again, and final once the retries are used."""
+    return status_code in (429, 503) and category in ('rate_limit', 'provider_unavailable')
 
 
 def _unprocessed(metadata, exc):
@@ -80,10 +103,12 @@ def _unprocessed(metadata, exc):
     if not metadata.get('request_started'):
         return 'not_sent'
     if not metadata.get('request_body_complete'):
-        return 'incomplete_upload'  # The provider waits for the whole body before it starts.
-    if any(token in (metadata.get('tls_reason') or '') for token in TLS_REJECTIONS):
-        return 'tls_rejected'
-    # A connection lost after a complete upload stays unconfirmed: never replayed automatically.
+        # The provider waits for the whole body before it starts. A fatal alert it sent while the request was being
+        # written says the same of its TLS: it never read the request.
+        alert = TLS_ALERT in (metadata.get('tls_reason') or '')
+        return 'tls_rejected' if alert and (metadata.get('first_failed_event') or '').endswith(SEND_EVENTS) else 'incomplete_upload'
+    # After a complete upload nothing proves the provider did not process it, a TLS failure while its answer was read
+    # (our own decrypt error, or an alert) included: unconfirmed, never replayed automatically.
     return None
 
 
@@ -201,6 +226,14 @@ def _complete_partial(partial):
     return raw if isinstance(saved, dict) and 'data' in saved else None
 
 
+def response_kept(receipt):
+    """A complete answer to the receipt's request is kept, as .response.json or as a complete .response.partial.
+    Reads only: for status reads that must not move an answer a worker may still be writing."""
+    receipt = Path(receipt)
+    return (receipt.with_suffix('.response.json').is_file()
+            or _complete_partial(receipt.with_suffix('.response.partial')) is not None)
+
+
 def _keep_on_host(partial_path, received):
     """Write a paid answer the store refused to this host's copy of .response.partial, where promote_partial_response
     finds it. Never raises: the store's error is the one the caller reports."""
@@ -254,6 +287,14 @@ def saved_response(receipt):
                 or _complete_partial(receipt.with_suffix('.response.partial')) is not None)
 
 
+def never_sent(request):
+    """The saved receipt `request` (.request.json) shows its request never left: on record as not sent, or a receipt
+    that keeps its start on record before any byte is written (durable_start) and never started. An older receipt
+    that only lacks the start proves nothing: its start may have been lost to a failed write."""
+    return request.get('submission') == 'not_sent' or (
+        'submission' not in request and request.get('durable_start') is True and request.get('request_started') is False)
+
+
 def edit_response(client, base, key, payload, receipt=None, *, multipart=False, input_sha256=None, endpoint='/images/edits'):
     """Keep response bytes before decoding; a cached response never re-enters POST."""
     if endpoint not in ('/images/edits', '/images/generations') or (multipart and endpoint != '/images/edits'):
@@ -272,7 +313,7 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
         raise OpenAIImageHTTPError(saved['http_status'], _error_category(saved['http_status'], saved.get('provider_error', {})),
                                    saved['diagnostic_id'], saved.get('provider_error'))
     previous = json.loads(request_path.read_bytes()) if request_path and request_path.is_file() else {}
-    if previous and previous.get('submission') != 'not_sent':
+    if previous and not never_sent(previous):
         raise PipelineError('image_response_uncertain', '기존 이미지 요청의 접수 여부 확인 필요', 409)
     if multipart:
         fields = {k: str(v) for k, v in payload.items() if k != 'images'}
@@ -287,8 +328,10 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
     else:
         request_args = {'json': payload}
     clock = {'started': time.monotonic()}
+    # durable_start: no byte of the request is written before `request_started` is on record, so a receipt that says
+    # it never started is evidence that nothing was sent (settle_interrupted, classify_image_failure).
     metadata = {'transport': 's3-regional-image-urls-v2' if input_sha256 else 'buffered-multipart-v4' if multipart else 'buffered-json-v3', 'endpoint': endpoint, 'model': payload['model'], 'n': payload['n'],
-                'phase': 'prepared', 'events': [],
+                'phase': 'prepared', 'events': [], 'durable_start': True,
                 'client_request_id': previous.get('client_request_id') or uuid.uuid4().hex, 'request_started': False}
     # The multipart boundary is part of the request bytes; it stays fixed across attempts and resumes.
     metadata['boundary_id'] = previous.get('boundary_id') or previous.get('client_request_id') or metadata['client_request_id']
@@ -324,7 +367,8 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                 if reason:
                     metadata['tls_reason'] = reason
                 cause = cause.__cause__ or cause.__context__
-        if event.endswith('send_request_headers.started'):
+        starting = event.endswith('send_request_headers.started')
+        if starting:
             metadata.update(request_started=True, phase='sending')
         elif event.endswith('send_request_body.complete'):
             metadata['phase'] = 'awaiting_response'
@@ -334,7 +378,13 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
         try:
             record()
         except Exception as exc:
-            # httpx runs this inside the request: raising here would abort a paid request in flight over a receipt update.
+            if starting:
+                # Nothing is written yet, and a receipt that does not say the request started would let a restart
+                # call it unsent while the provider works on it: raising here stops httpx before the headers go out.
+                metadata.update(request_started=False, phase='prepared', start_unrecorded=type(exc).__name__)
+                raise ImageReceiptUnsaved('Image request start not recorded') from exc
+            # Later steps run inside a request already on record: raising would abort a paid request in flight over
+            # a receipt update.
             LOGGER.warning('Image request receipt not updated at %s: type=%s', event, type(exc).__name__)
     headers = {'Authorization': 'Bearer '+key, 'X-Client-Request-Id': metadata['client_request_id']}
     if multipart:
@@ -349,7 +399,7 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
     metadata.update(request_bytes=len(content), request_sha256=hashlib.sha256(content).hexdigest())
     # Expiring S3 signatures may change only for a definitely unsent request with
     # identical content-addressed images, prompt and generation settings.
-    refreshed_urls = input_sha256 and input_sha256 == previous.get('input_sha256') and previous.get('submission') == 'not_sent'
+    refreshed_urls = input_sha256 and input_sha256 == previous.get('input_sha256') and never_sent(previous)
     if previous.get('request_sha256') and previous['request_sha256'] != metadata['request_sha256'] and not refreshed_urls:
         raise PipelineError('image_request_changed', '저장된 이미지 요청 입력이 변경되었습니다.', 409)
     if previous:
@@ -371,11 +421,19 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                         provider_error, body = _read_error_response(response)
                         diagnostic_id = uuid.uuid4().hex[:12]
                         category = _error_category(response.status_code, provider_error)
-                        if (response.status_code in (429, 503) and category in ('rate_limit', 'provider_unavailable')
-                                and attempt < AUTO_RETRIES):
+                        busy = _busy_refusal(response.status_code, category)
+                        if busy and attempt < AUTO_RETRIES:
                             metadata.update(phase='response_retryable', provider_error=provider_error,
                                             provider_error_category=category)
                             raise _RetryableRejection(_retry_after(response, attempt))
+                        if response.status_code >= 500 and not busy:
+                            # An error page from the provider or a gateway in front of it (500, 502, 504) may follow
+                            # an image that was made and billed: no .error.json, which would make it a final refusal.
+                            metadata.update(phase='response_unconfirmed', diagnostic_id=diagnostic_id,
+                                            provider_error=provider_error, provider_error_category=category,
+                                            response_bytes=body['body_bytes'], response_sha256=body['body_sha256'])
+                            record()
+                            raise OpenAIImageUnconfirmed(response.status_code, category, diagnostic_id, provider_error)
                         error_record = {
                             'diagnostic_id': diagnostic_id,
                             'http_status': response.status_code,
@@ -441,14 +499,20 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                 continue
             event = metadata.get('failed_event', '')
             not_sent = not admitted or (not metadata['request_started'] and (
-                isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)) or
+                isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, ImageReceiptUnsaved)) or
                 event in ('connection.connect_tcp.failed', 'connection.start_tls.failed')))
             metadata['submission'] = 'not_sent' if not_sent else 'rejected' if isinstance(exc, OpenAIImageHTTPError) else 'unknown'
             cause = exc.__cause__
             if cause is not None:
                 metadata['cause_type'] = type(cause).__name__
-            record()
-            raise
+            try:
+                record()
+            except Exception as failure:
+                # The provider's outcome is what the caller classifies: a storage error here must not replace it. A
+                # receipt left without its outcome reads as unconfirmed once the request started.
+                LOGGER.warning('Image request outcome not recorded: submission=%s type=%s', metadata['submission'],
+                               type(failure).__name__)
+            raise exc
 
 
 def reference_data_url(source):

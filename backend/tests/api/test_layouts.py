@@ -159,3 +159,123 @@ def test_final_receipt_failure_keeps_paid_reservation_and_original_submission(cl
     with pytest.raises(PipelineError) as replay:
         StoreLayouts(1).interpret('카페', 'ai', 'layout-req-001')
     assert replay.value.status == 409 and len(calls) == 1
+
+
+def scripted_provider(monkeypatch, path, answers):
+    """A provider answering each POST with the next of `answers`: a status (its body names private details), a
+    completed interpretation, an exception to raise, or raw bytes for a 200."""
+    monkeypatch.setenv('OPENAI_API_KEY', 'offline-provider-fixture')
+    calls = []
+    class Client:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def post(self, url, **kwargs):
+            assert read_json(path)['status'] == 'submitting'  # Intent committed BEFORE payment.
+            calls.append((url, kwargs))
+            answer = answers.pop(0)
+            request = httpx.Request('POST', url)
+            if isinstance(answer, Exception):
+                raise answer
+            if isinstance(answer, int):
+                return httpx.Response(answer, json={'error': {'message': 'sk-private-detail C:\\keys\\openai.txt'}}, request=request)
+            if isinstance(answer, bytes):
+                return httpx.Response(200, content=answer, request=request)
+            document = {'id': 'resp-fixture', 'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(answer)}]}]}
+            return httpx.Response(200, json=document, request=request)
+    monkeypatch.setattr('src.services.store_layouts.httpx.Client', Client)
+    return calls
+
+
+@pytest.mark.parametrize('status, code', [(400, 'layout_ai_rejected'), (401, 'layout_ai_unavailable'),
+                                          (403, 'layout_ai_unavailable'), (404, 'layout_ai_rejected'),
+                                          (422, 'layout_ai_rejected'), (429, 'layout_ai_limited')])
+def test_definite_provider_refusal_is_a_failure_that_frees_the_request_id(client, monkeypatch, status, code):
+    api, root, _ = client
+    path = root/'avatar-factory/layout-interpretations/1/layout-req-001/record.json'
+    result = {**interpret_rules('카페'), 'interpretation': 'ai'}
+    calls = scripted_provider(monkeypatch, path, [status, result])
+    body = {'description': '카페', 'mode': 'ai', 'requestId': 'layout-req-001'}
+    refused = api.post('/api/studio/layouts/interpret', json=body, headers={'Idempotency-Key': 'layout-req-001'})
+    # 503 is not counted against the gateway's paid budget; the provider's own text never reaches the answer.
+    assert refused.status_code == 503 and refused.json()['error']['code'] == code
+    assert 'private' not in refused.text and 'keys' not in refused.text
+    record = read_json(path)
+    assert record['status'] == 'failed' and record['failure'] == code and record['providerStatus'] == status
+    # The same request ID (the screen keeps one per description) is sent again, under a new provider key.
+    again = api.post('/api/studio/layouts/interpret', json=body, headers={'Idempotency-Key': 'layout-req-001'})
+    assert again.status_code == 200 and again.json() == result and len(calls) == 2
+    keys = [call[1]['headers']['Idempotency-Key'] for call in calls]
+    assert keys[0] != keys[1]
+    assert read_json(path)['status'] == 'completed' and read_json(path)['attempt'] == 2
+    assert StoreLayouts(1).interpret('카페', 'ai', 'layout-req-001') == result and len(calls) == 2
+    with pytest.raises(PipelineError, match='설명이 달라졌습니다'):
+        StoreLayouts(1).interpret('사무실', 'ai', 'layout-req-001')
+
+
+@pytest.mark.parametrize('answer', [500, 502, 503, 409, 408, b'{"status": "comp', b'[]',
+                                    httpx.ConnectError('offline'), httpx.RemoteProtocolError('offline')])
+def test_unclear_provider_answers_stay_uncertain_and_are_not_sent_again(client, monkeypatch, answer):
+    _, root, _ = client
+    path = root/'avatar-factory/layout-interpretations/1/layout-req-001/record.json'
+    calls = scripted_provider(monkeypatch, path, [answer, {**interpret_rules('카페'), 'interpretation': 'ai'}])
+    with pytest.raises(PipelineError) as first:
+        StoreLayouts(1).interpret('카페', 'ai', 'layout-req-001')
+    assert first.value.status == 504 and first.value.code == 'layout_interpretation_uncertain'
+    assert read_json(path)['status'] == 'uncertain'
+    with pytest.raises(PipelineError) as repeated:
+        StoreLayouts(1).interpret('카페', 'ai', 'layout-req-001')
+    assert repeated.value.code == 'layout_interpretation_uncertain' and len(calls) == 1
+
+
+def test_refusal_whose_receipt_cannot_be_updated_keeps_refusing_the_request_id(client, monkeypatch):
+    _, root, _ = client
+    path = root/'avatar-factory/layout-interpretations/1/layout-req-001/record.json'
+    calls = scripted_provider(monkeypatch, path, [401])
+    from src.services import store_layouts
+    real_write = store_layouts._write_json
+    def write(record_path, document):
+        if document['status'] != 'submitting':
+            raise OSError('offline storage fixture failure')
+        real_write(record_path, document)
+    monkeypatch.setattr(store_layouts, '_write_json', write)
+    with pytest.raises(PipelineError) as refused:
+        StoreLayouts(1).interpret('카페', 'ai', 'layout-req-001')
+    assert refused.value.status == 503 and refused.value.code == 'layout_ai_unavailable'
+    assert read_json(path)['status'] == 'submitting'
+    with pytest.raises(PipelineError) as replay:
+        StoreLayouts(1).interpret('카페', 'ai', 'layout-req-001')
+    assert replay.value.code == 'layout_interpretation_uncertain' and len(calls) == 1
+
+
+@pytest.mark.parametrize('content', ['{"status": "complet', '[1, 2]', '', 'completed-with-invalid-result',
+                                     'failed-with-invalid-attempt'])
+def test_unreadable_record_is_reported_as_such_never_as_busy_and_left_alone(client, monkeypatch, content):
+    import hashlib
+    api, root, _ = client
+    path = root/'avatar-factory/layout-interpretations/1/layout-req-001/record.json'
+    digest = hashlib.sha256('카페'.encode()).hexdigest()
+    if content == 'completed-with-invalid-result':
+        content = json.dumps({'version': 1, 'descriptionSha256': digest, 'status': 'completed', 'result': {'kind': 'castle'}})
+    elif content == 'failed-with-invalid-attempt':
+        content = json.dumps({'version': 1, 'descriptionSha256': digest, 'status': 'failed', 'attempt': 'two'})
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding='utf-8')
+    calls = scripted_provider(monkeypatch, path, [])
+    response = api.post('/api/studio/layouts/interpret', json={'description': '카페', 'mode': 'ai', 'requestId': 'layout-req-001'},
+                        headers={'Idempotency-Key': 'layout-req-001'})
+    assert response.status_code == 500 and response.json()['error']['code'] == 'layout_record_unreadable'
+    assert path.read_text(encoding='utf-8') == content and calls == []
+    assert str(root) not in response.text
+
+
+def test_a_held_request_lock_is_still_busy(client, monkeypatch):
+    _, root, _ = client
+    from src.services.object_storage import StoredPath
+    from src.services.run_lock import run_lock
+    directory = StoredPath(root/'avatar-factory/layout-interpretations/1/layout-req-001')
+    calls = scripted_provider(monkeypatch, directory/'record.json', [])
+    with run_lock(directory, 0, blender=False):
+        with pytest.raises(PipelineError) as busy:
+            StoreLayouts(1).interpret('카페', 'ai', 'layout-req-001')
+    assert busy.value.code == 'layout_busy' and calls == []

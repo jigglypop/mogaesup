@@ -59,7 +59,8 @@ class Assembly:
                         'prefit_parts': [], 'unavailable_parts': [], 'output': str(self.output),
                         'contract': {}, 'production_spec': SPEC}
         (self.output/'input.json').write_text(json.dumps(self.payload), encoding='utf8')
-        self.coverage_calls, self.exports = [], []
+        # steps: ('export' | 'render', file name, the rig's pose position then), in order.
+        self.coverage_calls, self.exports, self.steps = [], [], []
         paths = {part['path']: part['slot'] for part in parts}
 
         def load(path):
@@ -85,9 +86,13 @@ class Assembly:
                    'accessors': [{'count': 3}], 'skins': [{'joints': [0]}]}
             path.write_bytes(build_glb(doc, b''))
             self.exports.append((path.name, sorted(obj.name for obj in meshes)))
+            self.steps.append(('export', path.name, self.rig.data.pose_position))
 
         def render(path, camera, center, direction, size):
-            path.write_bytes(f'render {path.name}'.encode())
+            # A render names the meshes it shows, so the hash the seal records says what was drawn.
+            shown = sorted(obj.name for obj in self.scene.objects if obj.type == 'MESH' and not obj.hide_render)
+            path.write_bytes(f'render {path.name}: {" ".join(shown)}'.encode())
+            self.steps.append(('render', path.name, self.rig.data.pose_position))
 
         def bind_shoes_rigid(meshes, rig, regions):
             for obj in meshes:
@@ -128,6 +133,10 @@ class Assembly:
         self.files, self.result = files, result
         self.reports = {part['slot']: part for part in result['parts']}
         return self
+
+    def drawn(self, name):
+        """The meshes the render `name` shows."""
+        return (self.output/name).read_text(encoding='utf8').split(': ', 1)[1].split()
 
 
 @pytest.fixture

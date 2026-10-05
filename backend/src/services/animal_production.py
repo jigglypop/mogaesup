@@ -17,7 +17,7 @@ import uuid
 from PIL import Image
 
 from src.services import character_jobs
-from src.services.animal_library import AnimalLibrary
+from src.services.animal_library import JOBS as _JOBS, AnimalLibrary
 from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
@@ -27,7 +27,7 @@ from src.services.character_pipeline import PipelineError, now, read_json, reque
 from src.services.model_providers import client as provider_client
 from src.services.object_storage import StoredPath as Path, local_workspace, provider_image
 from src.services.process_identity import identity, state as process_state
-from src.services.run_lock import WorkerLocks, final_write, worker_alive
+from src.services.run_lock import final_write, worker_alive
 
 LOGGER = logging.getLogger(__name__)
 VIEWS = ('front', 'left', 'back', 'right')
@@ -72,8 +72,6 @@ RIG_FAILED = '표준 골격을 씌우지 못했습니다.'
 RIG_ERRORS = {'mesh_missing': '3D 모델에서 메시를 찾지 못했습니다.', 'mesh_degenerate': '3D 모델의 크기를 읽지 못했습니다.',
               'paws_not_found': '네 발의 위치를 찾지 못했습니다.', 'head_not_found': '머리 위치를 찾지 못했습니다.'}
 LEGS = {'fore_L': '왼쪽 앞다리', 'fore_R': '오른쪽 앞다리', 'hind_L': '왼쪽 뒷다리', 'hind_R': '오른쪽 뒷다리'}
-# Jobs whose worker runs in this process, by job directory.
-_JOBS = WorkerLocks()
 
 
 class StepPaused(Exception):
@@ -190,34 +188,52 @@ class AnimalProduction:
             if not record:
                 raise PipelineError('not_found', '동물을 찾을 수 없습니다.', 404)
             job_path = self._jobs(animal_id)/job_id/'job.json'
-            held = _JOBS.busy(str(job_path.parent))
+            worker = str(job_path.parent)
+            held = _JOBS.busy(worker)
             job = read_json(job_path)
             if job:
                 if job['request'] != request:
                     raise PipelineError('idempotency_conflict', '같은 요청에 다른 설정이 있습니다.', 409)
                 paused = job['status'] == 'paused' or (job['status'] in ('accepted', 'running')
-                                                       and not worker_alive(job, held or _JOBS.busy(str(job_path.parent))))
+                                                       and not worker_alive(job, held or _JOBS.busy(worker), claimed=True))
                 if paused and record.get('production') != job_id:
                     raise PipelineError('job_replaced', '이 작업은 새 요청으로 대체됐습니다.', 409)
-                if paused:
-                    job.update(status='accepted', process=identity(), updated_at=now())
-                    _write_json(job_path, job)
-                return self.library.get(animal_id), paused
-            current = record.get('production')
-            if current:
-                work = self._jobs(animal_id)/current
-                held = _JOBS.busy(str(work))
-                active = read_json(work/'job.json')
-                # Only a job whose worker still runs blocks a new request; a stopped one is replaced.
-                if worker_alive(active, held or _JOBS.busy(str(work))):
+                # A worker still finishing its last save keeps the job; the request can be repeated once it lets go.
+                if not (paused and _JOBS.claim(worker)):
+                    return self.library.get(animal_id), False
+                job.update(status='accepted', process=identity(), updated_at=now())
+                self._accept(worker, lambda: _write_json(job_path, job))
+            else:
+                current = record.get('production')
+                if current:
+                    work = self._jobs(animal_id)/current
+                    held = _JOBS.busy(str(work))
+                    active = read_json(work/'job.json')
+                    # Only a job whose worker still runs blocks a new request; a stopped one is replaced.
+                    if worker_alive(active, held or _JOBS.busy(str(work)), claimed=True):
+                        raise PipelineError('animal_busy', '진행 중인 작업이 끝난 뒤 요청하세요.', 409)
+                self._require_inputs(record, views, model, rig)
+                if not _JOBS.claim(worker):
                     raise PipelineError('animal_busy', '진행 중인 작업이 끝난 뒤 요청하세요.', 409)
-            self._require_inputs(record, views, model, rig)
-            _write_json(job_path, {'id': job_id, 'request_key': key, 'request': request, 'steps': steps, 'done': [],
-                                   'status': 'accepted', 'step': None, 'process': identity(), 'error': None,
-                                   'created_at': now(), 'updated_at': now()})
-            record.update(production=job_id, updated_at=now())
-            _write_json(directory/'record.json', record)
-        return self.library.get(animal_id), True
+
+                def accept():
+                    _write_json(job_path, {'id': job_id, 'request_key': key, 'request': request, 'steps': steps,
+                                           'done': [], 'status': 'accepted', 'step': None, 'process': identity(),
+                                           'error': None, 'created_at': now(), 'updated_at': now()})
+                    record.update(production=job_id, updated_at=now())
+                    _write_json(directory/'record.json', record)
+                self._accept(worker, accept)
+        return self._accept(worker, lambda: (self.library.get(animal_id), True))
+
+    @staticmethod
+    def _accept(worker, step):
+        """A step of accepting a job whose worker lock is claimed. A failure lets go of the claim, so the job (if it was
+        saved) reads as paused and the same request runs it, instead of waiting for an executor that never starts."""
+        try:
+            return step()
+        except BaseException:
+            _JOBS.release(worker)
+            raise
 
     @staticmethod
     def _require_inputs(record, views, model, rig):
@@ -232,7 +248,8 @@ class AnimalProduction:
 
     def execute(self, animal_id, job_id):
         job_path = self._jobs(animal_id)/job_id/'job.json'
-        if not _JOBS.acquire(str(job_path.parent)):
+        # Takes over the claim that start() made when it accepted the job.
+        if not _JOBS.acquire(str(job_path.parent), claimed=True):
             return
         try:
             self._execute(job_id, animal_id, job_path)
@@ -240,11 +257,16 @@ class AnimalProduction:
             _JOBS.release(str(job_path.parent))
 
     def _execute(self, job_id, animal_id, job_path):
-        job = read_json(job_path)
-        if job.get('status') != 'accepted':
+        try:
+            job = read_json(job_path)
+            if job.get('status') != 'accepted':
+                return
+            job.update(status='running', process=identity(), error=None, updated_at=now())
+            final_write(lambda: _write_json(job_path, job), 'animal job')
+        except Exception:
+            # Nothing ran yet. Once this worker lets go, the job reads as paused and the same request runs it again.
+            LOGGER.exception('Animal job %s could not start', job_id)
             return
-        job.update(status='running', process=identity(), error=None, updated_at=now())
-        _write_json(job_path, job)
         try:
             for step in job['steps']:
                 if step in job['done']:
@@ -425,6 +447,10 @@ class AnimalProduction:
         refreshed = False
         with provider_client('meshy') as api:
             state = character_jobs.state(run) if (run/'character.json').is_file() else {}
+            if state:
+                # A task Meshy accepted, named only by its saved answer (its task ID was not recorded), is polled and
+                # never sent again.
+                state = character_jobs.adopt_submitted_task(run, state)
             if state.get('status') in ('submission_not_sent', 'submission_rejected'):
                 # Meshy never accepted this attempt, so a new submission cannot duplicate a task.
                 character_jobs.archive_attempt(run, state['status'])
@@ -497,6 +523,10 @@ class AnimalProduction:
             if state.get('status') in ('submission_not_sent', 'submission_rejected'):
                 character_jobs.archive_attempt(run, state['status'])
                 raise StepPaused('Meshy 요청이 접수되지 않았습니다. 같은 요청으로 이어서 실행할 수 있습니다.') from None
+            # Meshy accepted it and its saved answer names the task; only recording the task ID failed.
+            state = character_jobs.adopt_submitted_task(run, state)
+            if state.get('task_id'):
+                return state
             raise StepBlocked('Meshy 요청의 접수 여부를 확인하지 못했습니다. 다시 제출하지 않습니다.') from None
 
     @staticmethod

@@ -7,7 +7,7 @@ import struct
 from threading import RLock
 
 from src.services.character_pipeline import PipelineError, read_json
-from src.services.object_storage import read_byte_range
+from src.services.object_storage import ArtifactChanged, read_byte_range
 
 _cache = OrderedDict()
 _lock = RLock()
@@ -90,27 +90,36 @@ def model_stats(factory, owner, job_id, name, version=None):
     expected = record.get('files', {}).get(name)
     if not expected:
         raise PipelineError('not_found', '저장된 GLB 기록을 찾을 수 없습니다.', 404)
-    try:
-        header, size, etag, checksum = read_byte_range(path, 0, 20)
-        if checksum and checksum != expected:
-            raise ValueError('Stored model differs from its receipt')
-        key = (str(path), expected, etag)
-        with _lock:
-            if key in _cache:
-                _cache.move_to_end(key)
-                return deepcopy(_cache[key])
-        magic, version_number, declared_size, json_size, chunk_type = struct.unpack('<4sIIII', header)
-        if magic != b'glTF' or version_number != 2 or declared_size != size or chunk_type != 0x4e4f534a or not 0 < json_size <= min(size - 20, 4 * 1024 * 1024):
-            raise ValueError('Invalid GLB JSON header')
-        payload, _, _, _ = read_byte_range(path, 20, json_size, etag=etag)
-        result = {**_geometry(json.loads(payload)), 'file_bytes': size, 'name': name, 'source': 'glb_json',
-                  'expected_sha256': expected, 'version': version}
-        with _lock:
-            _cache[key] = result
-            if len(_cache) > 256:
-                _cache.popitem(last=False)
-        return deepcopy(result)
-    except FileNotFoundError as exc:
-        raise PipelineError('not_found', 'GLB 파일을 찾을 수 없습니다.', 404) from exc
-    except (ValueError, TypeError, KeyError, IndexError, struct.error, RecursionError) as exc:
-        raise PipelineError('model_stats_unavailable', 'GLB 구조 정보를 읽을 수 없습니다.', 422) from exc
+    for attempt in (1, 2):
+        try:
+            return _stats(path, name, expected, version)
+        except ArtifactChanged as exc:
+            # Replaced between the header and the JSON chunk: the new file is read once more and its checksum checked.
+            if attempt == 2:
+                raise PipelineError('artifact_changed', 'GLB 파일이 바뀌었습니다. 다시 불러오세요.', 409) from exc
+        except FileNotFoundError as exc:
+            raise PipelineError('not_found', 'GLB 파일을 찾을 수 없습니다.', 404) from exc
+        except (ValueError, TypeError, KeyError, IndexError, struct.error, RecursionError) as exc:
+            raise PipelineError('model_stats_unavailable', 'GLB 구조 정보를 읽을 수 없습니다.', 422) from exc
+
+
+def _stats(path, name, expected, version):
+    header, size, etag, checksum = read_byte_range(path, 0, 20)
+    if checksum and checksum != expected:
+        raise ValueError('Stored model differs from its receipt')
+    key = (str(path), expected, etag)
+    with _lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return deepcopy(_cache[key])
+    magic, version_number, declared_size, json_size, chunk_type = struct.unpack('<4sIIII', header)
+    if magic != b'glTF' or version_number != 2 or declared_size != size or chunk_type != 0x4e4f534a or not 0 < json_size <= min(size - 20, 4 * 1024 * 1024):
+        raise ValueError('Invalid GLB JSON header')
+    payload, _, _, _ = read_byte_range(path, 20, json_size, etag=etag)
+    result = {**_geometry(json.loads(payload)), 'file_bytes': size, 'name': name, 'source': 'glb_json',
+              'expected_sha256': expected, 'version': version}
+    with _lock:
+        _cache[key] = result
+        if len(_cache) > 256:
+            _cache.popitem(last=False)
+    return deepcopy(result)

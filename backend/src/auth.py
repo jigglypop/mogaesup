@@ -219,12 +219,19 @@ def _extract_roles(claims: dict) -> list[str]:
 async def get_current_user(request: Request) -> UserContext:
     """FastAPI Depends 용. JWT 를 검증하고 UserContext 반환.
 
+    A request that carries a token is decided by that token alone: the studio gateway signs a member's wardrobe reads
+    with MEMBER, and the AWS container's nginx (like the SSM port) adds X-User-Id on its way in, so the header must not
+    turn such a request into the operator. A token that cannot be verified is refused (401, or 503 when this server
+    has no JWT_SECRET); it never falls back to the header. Only a request without any Authorization header may use
+    the loopback X-User-Id identity.
+
     async: it reads headers and the environment and checks an HMAC signature, with no I/O, so authentication runs on
     the event loop and never waits for a worker thread that long background jobs may all be holding."""
-    dev_user = _local_dev_user(request)
-    if dev_user:
-        return dev_user
     token = _bearer_token(request)
+    if not token:
+        dev_user = _local_dev_user(request)
+        if dev_user:
+            return dev_user
     claims = _decode_claims(token)
     user_id = _extract_user_id(claims)
     # The gateway uses a fixed factory owner for storage and signs the actual

@@ -7,7 +7,9 @@ Set MOGA_STUDIO_APP_ORIGIN when the gateway's configured APP_ORIGIN differs
 from its API origin (for example, a development frontend and local API).
 The paid garment tools (studio_garments.py) are listed only when
 MOGA_STUDIO_MCP_PAID=1 is set as well; `asset-studio-mcp garments ...` runs
-their queue from a terminal under the same two settings.
+their queue from a terminal under the same two settings. One server process
+sends paid requests under at most MOGA_STUDIO_MCP_PAID_LIMIT keys (1-100,
+default 10).
 """
 from __future__ import annotations
 
@@ -29,11 +31,16 @@ RequestKey = Annotated[str, Field(pattern=r'^[a-zA-Z0-9_-]{8,100}$')]
 Revision = Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[a-zA-Z0-9_.-]+$')]
 _PRIVATE_KEYS = {'authorization', 'cookie', 'set-cookie', 'api_key', 'secret', 'token', 'credentials',
                  'executor', 'executor_process', 'command', 'payload', 'path', 'directory', 'raw_response'}
-_ABSOLUTE_PATH = re.compile(r'(?:[A-Za-z]:[\\/]|/(?:Users|home|srv|var|tmp|private|opt)/)[^\s\"<>]*')
+# Web addresses are matched first so a path inside one (or the `s:/` of `https://`) is not taken for a local path; a
+# drive letter counts only where no ASCII letter, digit or underscore (as in a URL scheme) comes before it.
+_PRIVATE_TEXT = re.compile(r'(?P<url>(?i:https?)://[^\s"<>]*)'
+                           r'|(?P<path>(?:(?<![A-Za-z0-9_])[A-Za-z]:[\\/]'
+                           r'|/(?:Users|home|srv|var|tmp|private|opt)/)[^\s"<>]*)')
 _API_ERROR_CODES = frozenset({
     'action_unavailable', 'assembly_changed', 'artifact_changed', 'assembly_incomplete',
     'busy', 'coverage_required', 'draining', 'executor_interrupted', 'expression_pending',
-    'factory_read_only', 'factory_paid_off', 'factory_budget', 'factory_unavailable', 'factory_timeout', 'forbidden',
+    'factory_read_only', 'factory_paid_off', 'factory_budget', 'factory_unavailable', 'factory_timeout', 'factory_auth',
+    'forbidden',
     'studio_waking', 'studio_stopping', 'studio_power_unconfigured', 'studio_power_unavailable', 'studio_start_failed',
     'studio_viewer_only', 'paid_operator_only', 'catalog_editor_only',
     'login_required', 'database', 'internal', 'conflict', 'invalid_value',
@@ -47,6 +54,22 @@ _API_ERROR_CODES = frozenset({
     'invalid_part_method', 'invalid_provider', 'invalid_fit_profile', 'invalid_description', 'invalid_bottom_kind',
     'texture_prompt_required',
 })
+
+
+def _signed(url: str) -> bool:
+    """Whether a web address carries more than a location: a query (a presigned URL's signature), or a login."""
+    try:
+        parts = urlsplit(url)
+        return bool(parts.query or parts.username or parts.password)
+    except ValueError:
+        return True
+
+
+def _private_text(match: re.Match) -> str:
+    url = match.group('url')
+    if url is None:
+        return '[private path]'
+    return '[private artifact URL]' if _signed(url) else url
 
 
 class ReviewInput(BaseModel):
@@ -69,9 +92,12 @@ class StudioClient:
         # Paid garment tools need both opt-ins (MOGA_STUDIO_MCP_WRITE=1 and MOGA_STUDIO_MCP_PAID=1).
         self.paid = bool(writable and paid)
         self._session = session
+        # The app server sets the session as `__Host-mogaesup_session` over HTTPS and as `mogaesup_session` on a local
+        # http origin (and still reads the old name for older sessions): the credential goes under both names.
         self._client = httpx.Client(base_url=self.origin, timeout=30, follow_redirects=False,
-                                   transport=transport, headers={'Cookie': 'mogaesup_session='+session,
-                                   'Origin': browser_origin, 'Accept': 'application/json'})
+                                   transport=transport,
+                                   headers={'Cookie': f'__Host-mogaesup_session={session}; mogaesup_session={session}',
+                                            'Origin': browser_origin, 'Accept': 'application/json'})
 
     @staticmethod
     def validate_origin(base_url, setting):
@@ -99,9 +125,9 @@ class StudioClient:
         if isinstance(value, str):
             if self._session in value:
                 return '[redacted]'
-            if value.startswith(('http://', 'https://')) and urlsplit(value).query:
+            if value.startswith(('http://', 'https://')) and _signed(value):
                 return '[private artifact URL]'
-            return _ABSOLUTE_PATH.sub('[private path]', value)
+            return _PRIVATE_TEXT.sub(_private_text, value)
         return value
 
     def _request(self, method, path, *, body=None, headers=None):
@@ -125,13 +151,14 @@ class StudioClient:
         if status >= 300:
             code = 'api_refused'
             try:
-                error = value.get('error', value)
-                candidate = error.get('code') if isinstance(error, dict) else None
-                if candidate in _API_ERROR_CODES:
-                    code = candidate
-                elif status == 503 and set(value) == {'detail'} and isinstance(value['detail'], str):
-                    # The character server's admission middleware refuses new mutations this way while it drains.
-                    code = 'draining'
+                # `{"error": {"code": ...}}` from the character server, `{"code": ...}` from the gateway and from the
+                # character server's admission middleware while it drains. Only a code says what happened: any other
+                # 503 (its authentication settings, say) stays `api_refused`.
+                for error in (value.get('error'), value):
+                    candidate = error.get('code') if isinstance(error, dict) else None
+                    if candidate in _API_ERROR_CODES:
+                        code = candidate
+                        break
             except (ValueError, AttributeError, TypeError):
                 pass
             return {'ok': False, 'status': status,
@@ -188,7 +215,12 @@ class StudioClient:
             raise ValueError('Invalid assembly SHA256')
         if not re.fullmatch(r'[a-zA-Z0-9_-]{8,100}', key):
             raise ValueError('Invalid request key')
-        payload = {'expected_assembly_sha256': expected_assembly_sha256, **ReviewInput.model_validate(body).model_dump()}
+        review = ReviewInput.model_validate(body).model_dump()
+        if review['decision'] == 'approved':
+            # The studio records an approval as a person's; that person approves in the studio screen.
+            return {'ok': False, 'error': {'code': 'mcp_approval_refused',
+                                           'message': 'Approval is made in the studio; record changes_requested only'}}
+        payload = {'expected_assembly_sha256': expected_assembly_sha256, **review}
         return self._request('POST', f'/api/avatar-factory/jobs/{job_id}/native-parts/{version}/review',
                              body=payload, headers={'Idempotency-Key': key})
 
@@ -198,8 +230,11 @@ def build_server(client: StudioClient, garments=None):
     from mcp.types import ToolAnnotations
     instructions = 'Read saved studio state; mutations use existing operation receipts. Never retry a timed-out mutation automatically.'
     if client.writable and client.paid:
+        from src.studio_garments import GarmentStudio
+        garments = garments or GarmentStudio(client)
         instructions += (' Garment tools start paid generation: keep one idempotency_key per intended garment or call,'
-                         ' and reuse it only to recover that call.')
+                         ' and reuse it only to recover that call.'
+                         f' This session sends paid requests under at most {garments.paid_limit} keys.')
     server = FastMCP('mogaesup-studio', instructions=instructions)
     read_only = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
     mutation = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -239,11 +274,12 @@ def build_server(client: StudioClient, garments=None):
     @server.tool(annotations=mutation)
     def record_native_review(job_id: FactoryId, version: FactoryId, expected_assembly_sha256: ArtifactSha,
                              idempotency_key: RequestKey, review: ReviewInput) -> dict[str, Any]:
+        """Records changes_requested on a native assembly; approval is made by a person in the studio."""
         return client.native_review(job_id, version, expected_assembly_sha256, idempotency_key, review.model_dump())
 
     if client.writable and client.paid:
-        from src.studio_garments import GarmentStudio, register_tools
-        register_tools(server, garments or GarmentStudio(client))
+        from src.studio_garments import register_tools
+        register_tools(server, garments)
     return server
 
 
@@ -260,7 +296,11 @@ def main(argv=None):
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     try:
-        build_server(client).run(transport='stdio')
+        try:
+            server = build_server(client)
+        except ValueError as exc:  # MOGA_STUDIO_MCP_PAID_LIMIT out of range
+            raise SystemExit(str(exc)) from None
+        server.run(transport='stdio')
     finally:
         client.close()
 

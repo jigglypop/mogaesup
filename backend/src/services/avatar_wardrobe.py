@@ -99,11 +99,15 @@ def _box(value):
 def registered_bodies(bodies):
     """Every (job_id, version) a registered body answers to, mapped to its current (job_id, version). A body registered
     again at a version with the same geometry keeps the version it replaced as an alias, so the parts built on that
-    version stay with it."""
+    version stay with it. Only aliases whose geometry was compared when they were written count (`aliases_verified`):
+    a list written before that check may carry a version of another shape, and registering the same version again
+    compares them (register)."""
     pairs = {}
     for body in bodies:
         current = (body['job_id'], body['version'])
         pairs[current] = current
+        if body.get('aliases_verified') is not True:
+            continue
         for version in body.get('aliases', []):
             pairs[(body['job_id'], version)] = current
     return pairs
@@ -214,9 +218,11 @@ class Wardrobe:
         from src.services.avatar_fitting_management import FittingManagement
 
         def pending():
-            """The stored list while this body still has to be added to it; None when it is there already."""
+            """The stored list while this body still has to be added to it; None when it is there already. A body listed
+            with aliases nobody compared (written before that check) is registered again, which compares them."""
             previous = self._stored()
-            if any(b['job_id'] == job and b['version'] == version for b in previous['bodies']):
+            if any(b['job_id'] == job and b['version'] == version
+                   and (not b.get('aliases') or b.get('aliases_verified') is True) for b in previous['bodies']):
                 return None
             if previous['revision'] != expected_revision:
                 raise PipelineError('revision_conflict', '옷장 몸 목록이 변경되었습니다. 다시 불러오세요.', 409)
@@ -249,7 +255,7 @@ class Wardrobe:
                     entry = {**{key: body[key] for key in _FIELDS},
                              'name': name or source_job.get('character_name') or job,
                              'body_type': (source_job.get('base_body') or {}).get('body_type'), 'registered_at': now(),
-                             **({'aliases': aliases} if aliases else {})}
+                             **({'aliases': aliases, 'aliases_verified': True} if aliases else {})}
                     self._write(others + [entry])
         return self.bodies()
 
@@ -340,30 +346,20 @@ class Wardrobe:
                 or metadata['parts'].get(f'{job_id}:{slot}', {}).get('deleted')):
             raise PipelineError('not_found', message, 404)
 
-    def member_file(self, job_id, version, name):
-        """The path of a GLB a wardrobe member may load, else 404 (`not_found`): the body.glb of a registered body at
-        its registered version, or a part file parts() lists: a job on a registered body's lineage (or the body's
-        own), the version that job offers, a slot it made, fitted and not tombstoned. Reads the few records that
-        takes, not the listing of every job. A *.runtime.glb derivative additionally needs its sealed delivery receipt
-        bound to the original slot. Operators read every assembly file through AvatarNativeParts.artifact."""
+    def _member_record(self, job_id, version, slot, message):
+        """The assembly record a wardrobe member may use `slot` of at `version`, else 404 (`not_found`): the body of a
+        registered body at its registered version, or a part parts() lists: a job on a registered body's lineage (or the
+        body's own), the version that job offers, a slot it made, fitted and not tombstoned. Reads the few records that
+        takes, not the listing of every job, and no part file."""
         from src.services.avatar_native_parts import AvatarNativeParts
-        message = '산출물을 찾을 수 없습니다.'
-        runtime = isinstance(name, str) and name.endswith('.runtime.glb')
-        suffix = '.runtime.glb' if runtime else '.glb'
-        slot = name[:-len(suffix)] if isinstance(name, str) and name.endswith(suffix) else ''
         if not _ID.fullmatch(job_id) or not _ID.fullmatch(version) or not _SLOT.fullmatch(slot):
             raise PipelineError('not_found', message, 404)
-        native = AvatarNativeParts(self.factory)
         bodies = self._stored()['bodies']
         own = next((b for b in bodies if b['job_id'] == job_id), None)
         if slot == 'body':
             if not own or own['version'] != version:
                 raise PipelineError('not_found', message, 404)
-            if runtime:
-                if not _runtime_delivery(self._record(job_id, version), slot):
-                    raise PipelineError('not_found', message, 404)
-                native.artifact(self.owner, job_id, version, 'body.glb')
-            return native.artifact(self.owner, job_id, version, name)
+            return self._record(job_id, version)
         jobs = _JobRecords(self.factory, self.owner)
         job = jobs.get(job_id)
         metadata = self.library.metadata()
@@ -371,7 +367,7 @@ class Wardrobe:
                 or self.library.is_job_deleted(job, metadata)
                 or metadata['parts'].get(f'{job_id}:{slot}', {}).get('deleted')):
             raise PipelineError('not_found', message, 404)
-        offered = own['version'] if own else native.ready_version(self.owner, job_id)
+        offered = own['version'] if own else AvatarNativeParts(self.factory).ready_version(self.owner, job_id)
         record = self._record(job_id, version) if offered == version else {}
         part = next((p for p in record.get('result', {}).get('parts', [])
                      if isinstance(p, dict) and p.get('slot') == slot), None)
@@ -379,8 +375,23 @@ class Wardrobe:
         made_elsewhere = (slot not in requested if isinstance(requested, list)
                           else (part or {}).get('origin') == 'reused_fitted_native')
         if (record.get('status') != 'review_required' or not part or part.get('available') is False
-                or made_elsewhere or name not in record.get('files', {})):
+                or made_elsewhere or f'{slot}.glb' not in record.get('files', {})):
             raise PipelineError('not_found', message, 404)
+        return record
+
+    def member_file(self, job_id, version, name):
+        """The path of a GLB a wardrobe member may load (see _member_record), else 404 (`not_found`). A *.runtime.glb
+        derivative additionally needs its sealed delivery receipt bound to the original slot. Operators read every
+        assembly file through AvatarNativeParts.artifact."""
+        from src.services.avatar_native_parts import AvatarNativeParts
+        message = '산출물을 찾을 수 없습니다.'
+        runtime = isinstance(name, str) and name.endswith('.runtime.glb')
+        suffix = '.runtime.glb' if runtime else '.glb'
+        slot = name[:-len(suffix)] if isinstance(name, str) and name.endswith(suffix) else ''
+        record = self._member_record(job_id, version, slot, message)
+        if slot != 'body' and name not in record.get('files', {}):
+            raise PipelineError('not_found', message, 404)
+        native = AvatarNativeParts(self.factory)
         if runtime:
             if not _runtime_delivery(record, slot):
                 raise PipelineError('not_found', message, 404)
@@ -470,15 +481,18 @@ class Wardrobe:
                              if delivery else {})})
         return items, missing
 
-    def preview(self, job_id, slot, version):
+    def preview(self, job_id, slot, version, *, member=False):
         """Front drawing of a part without the key-coloured mannequin, cropped; cached by drawing hash. A part with no
-        drawing (one made from an uploaded GLB) is shown as it is worn: its region of the assembly's front render."""
+        drawing (one made from an uploaded GLB) is shown as it is worn: its region of the assembly's front render.
+        A member (member=True) sees only the version a job offers of a slot it made, as with its files."""
         import numpy as np
         from PIL import Image
         from src.services.avatar_worn_images import _rgba, dilate, erode, key_mask
         if not _ID.fullmatch(job_id) or not _ID.fullmatch(version) or not _SLOT.fullmatch(slot):
             raise PipelineError('not_found', '미리보기를 찾을 수 없습니다.', 404)
         self._require_member(job_id, slot, '미리보기를 찾을 수 없습니다.')
+        if member:
+            self._member_record(job_id, version, slot, '미리보기를 찾을 수 없습니다.')
         record = self._record(job_id, version)
         if f'{slot}.glb' not in record.get('files', {}):
             raise PipelineError('not_found', '미리보기를 찾을 수 없습니다.', 404)
@@ -528,8 +542,10 @@ class Wardrobe:
         missing = PipelineError('preview_missing', '이 파츠에는 미리보기 그림이 없습니다.', 404)
         if record.get('status') != 'review_required' or report.get('available') is not True:
             raise missing
-        # Check the exact offered version and slot ownership even when a thumbnail is already cached.
-        hair = self.member_file(job_id, version, 'hair.glb')
+        # Check the exact offered version and slot ownership, and that its sealed files are still there as sealed, even
+        # when a thumbnail is already cached. Each file is checked once against its stored hash; the render is read
+        # only to draw a thumbnail.
+        self._member_record(job_id, version, 'hair', '산출물을 찾을 수 없습니다.')
         files = record.get('files', {})
         render = 'hair-front.png' if 'hair-front.png' in files else 'front.png'
         expected = files.get(render)
@@ -537,19 +553,22 @@ class Wardrobe:
             raise missing
         native = AvatarNativeParts(self.factory)
         try:
-            hair_content = hair.read_bytes()
-            content = native.artifact(self.owner, job_id, version, render).read_bytes()
+            native.artifact(self.owner, job_id, version, 'hair.glb')
+            source_path = native.artifact(self.owner, job_id, version, render)
         except OSError as exc:
             raise PipelineError('artifact_changed', '검증된 미리보기를 찾을 수 없습니다.', 404) from exc
-        if (hashlib.sha256(hair_content).hexdigest() != files.get('hair.glb')
-                or hashlib.sha256(content).hexdigest() != expected):
-            raise PipelineError('artifact_changed', '검증된 미리보기를 찾을 수 없습니다.', 404)
         target = self.library.root/'wardrobe-previews'/f'{version}-{expected}-native-v1.png'
         if target.is_file():
             return target
         with keyed_lock(('preview', str(target))):
             if target.is_file():
                 return target
+            try:
+                content = source_path.read_bytes()
+            except OSError as exc:
+                raise PipelineError('artifact_changed', '검증된 미리보기를 찾을 수 없습니다.', 404) from exc
+            if hashlib.sha256(content).hexdigest() != expected:
+                raise PipelineError('artifact_changed', '검증된 미리보기를 찾을 수 없습니다.', 404)
             with _COMPUTING:
                 try:
                     with Image.open(io.BytesIO(content)) as source:
@@ -618,19 +637,22 @@ class Wardrobe:
                 _write_file(target, buffer.getvalue())
         return target
 
-    def coverage(self, body_job_id, job_id, slot, version):
-        """Body triangles one garment of this wardrobe body covers; computed once per body and part file."""
+    def coverage(self, body_job_id, job_id, slot, version, *, member=False):
+        """Body triangles one garment of this wardrobe body covers; computed once per body and part file. A member
+        (member=True) asks only for the version a job offers of a slot it made."""
         from src.services.avatar_native_parts import AvatarNativeParts
         from src.services.avatar_wardrobe_coverage import GARMENT_SLOTS, coverage
         if slot not in GARMENT_SLOTS or not _ID.fullmatch(job_id) or not _ID.fullmatch(version):
             raise PipelineError('not_found', '가림 영역이 없는 파츠입니다.', 404)
         body = self._body(body_job_id)
         self._require_member(job_id, slot, '이 옷장 몸의 파츠가 아닙니다.', body)
+        if member:
+            self._member_record(job_id, version, slot, '이 옷장 몸의 파츠가 아닙니다.')
         part_sha = self._record(job_id, version).get('files', {}).get(f'{slot}.glb')
         if not part_sha:
             raise PipelineError('not_found', '파츠 파일을 찾을 수 없습니다.', 404)
-        # v11: shins and thighs of a prefixed skeleton ('mixamorig:LeftLeg') are found too.
-        target = self.library.root/'wardrobe-coverage'/f"{body['body_sha256'][:20]}-{part_sha[:20]}-v11.json"
+        # v12: shins and thighs of a prefixed skeleton ('mixamorig:LeftLeg', 'mixamorig_LeftLeg') are found too.
+        target = self.library.root/'wardrobe-coverage'/f"{body['body_sha256'][:20]}-{part_sha[:20]}-v12.json"
         value = read_json(target)
         if not value:
             with keyed_lock(('coverage', str(target))):
@@ -651,13 +673,16 @@ class Wardrobe:
         text = (part.get('description') or '').lower()
         return bool(_OUTERWEAR.search(text)) and not _DRESS.search(text)
 
-    def colors(self, job_id, slot, version):
-        """Colour regions of a part texture ({regions: [...]}) and the path of their mask PNG, cached per part file."""
+    def colors(self, job_id, slot, version, *, member=False):
+        """Colour regions of a part texture ({regions: [...]}) and the path of their mask PNG, cached per part file. A
+        member (member=True) asks only for the version a job offers of a slot it made."""
         from src.services.avatar_native_parts import AvatarNativeParts
-        from src.services.avatar_wardrobe_colors import color_regions
+        from src.services.avatar_wardrobe_colors import TextureTooLarge, color_regions
         if not _ID.fullmatch(job_id) or not _ID.fullmatch(version) or not _SLOT.fullmatch(slot):
             raise PipelineError('not_found', '색 영역을 찾을 수 없습니다.', 404)
         self._require_member(job_id, slot, '색 영역을 찾을 수 없습니다.')
+        if member:
+            self._member_record(job_id, version, slot, '색 영역을 찾을 수 없습니다.')
         part_sha = self._record(job_id, version).get('files', {}).get(f'{slot}.glb')
         if not part_sha:
             raise PipelineError('not_found', '파츠 파일을 찾을 수 없습니다.', 404)
@@ -673,7 +698,10 @@ class Wardrobe:
             if cached:
                 return cached, mask
             with _COMPUTING:
-                result = color_regions(AvatarNativeParts(self.factory).artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes())
+                try:
+                    result = color_regions(AvatarNativeParts(self.factory).artifact(self.owner, job_id, version, f'{slot}.glb').read_bytes())
+                except TextureTooLarge:
+                    raise PipelineError('texture_too_large', '텍스처가 너무 커서 색 영역을 나눌 수 없습니다.', 422) from None
             if not result:
                 raise PipelineError('no_texture', '색을 바꿀 텍스처가 없는 파츠입니다.', 422)
             png, regions, material = result

@@ -2,12 +2,15 @@ import os
 
 import pytest
 
+from lock_probe import lock_free
 from native_assembly_fixture import JOB, VERSION, seed_native_assembly
-from src.services import avatar_native_parts, avatar_variants
+from services.test_native_hair_upload import native_fixture
+from src.services import avatar_native_parts, avatar_variants, native_hair_upload
 from src.services.asset_editor import _write_json
-from src.services.avatar_factory import digest
+from src.services.avatar_factory import _LOCK, digest
+from src.services.avatar_glb_bodies import AvatarGlbBodies
 from src.services.avatar_native_parts import AvatarNativeParts, workspace_inputs
-from src.services.character_pipeline import read_json
+from src.services.character_pipeline import PipelineError, read_json
 from wardrobe_fixture import OWNER, Library
 
 BODY, BODY_VERSION = 'b' * 24, '1' * 24
@@ -192,3 +195,133 @@ def test_the_assembly_answer_names_files_never_where_the_worker_kept_them(refit)
     assert all(item['url'].startswith(f'/api/avatar-factory/jobs/{JOB}/native-parts/{VERSION}/') for item in state['artifacts'])
     # The record itself is left as it was sealed.
     assert read_json(path)['result']['parts'] == record['result']['parts']
+
+
+def uploaded_hair(native, root, monkeypatch, validate):
+    """The job's hair is an owner's rigged upload, checked by `validate` in place of the native hair validator."""
+    job = root.parent
+    content = native_fixture()
+    asset = AvatarGlbBodies(native.factory).upload(OWNER, content)
+    (job/'output/generated-hair.glb').write_bytes(content)
+    record = read_json(job/'job.json')
+    _write_json(job/'job.json', {**record, 'files': {**record['files'], 'generated-hair.glb': asset['id']}})
+    pipeline = read_json(job/'pipeline.json')
+    pipeline['parts'][1]['provenance'] = {'origin': 'uploaded_glb', 'asset_id': asset['id']}
+    _write_json(job/'pipeline.json', pipeline)
+    monkeypatch.setattr(native_hair_upload, 'validate_native_hair', validate)
+    return asset['id']
+
+
+def test_an_uploaded_hair_is_validated_and_every_input_hashed_while_the_process_lock_is_free(
+        refit, monkeypatch, storage_configured):
+    library, native, root = refit
+    validated, hashed = [], []
+    asset = uploaded_hair(native, root, monkeypatch,
+                          lambda content, **kwargs: (validated.append(lock_free()), {'budget_met': True})[1])
+    monkeypatch.setattr(avatar_native_parts, 'digest', lambda path: (hashed.append(_LOCK._is_owned()), digest(path))[1])
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    assert created and validated == [True]
+    assert hashed and not any(hashed)
+    contract = read_json(root/state['version']/'input.json')['contract']
+    assert contract['uploaded_native_hair'] == {'hair': {'sha256': asset, 'native_hair_budget': {'budget_met': True}}}
+
+
+def test_a_pipeline_written_while_the_inputs_are_read_is_kept_and_the_inputs_read_again(refit, monkeypatch, storage_configured):
+    library, native, root = refit
+    calls = []
+
+    def validate(content, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            pipeline = read_json(root.parent/'pipeline.json')
+            _write_json(root.parent/'pipeline.json', {**pipeline, 'note': 'written meanwhile'})
+        return {'budget_met': True}
+    uploaded_hair(native, root, monkeypatch, validate)
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    assert created and len(calls) == 2
+    pipeline = read_json(root.parent/'pipeline.json')
+    assert pipeline['note'] == 'written meanwhile' and pipeline['local_refit']['target_version'] == state['version']
+    assert read_json(root/'current.json') == {'version': state['version']}
+
+
+def test_a_pipeline_that_keeps_changing_admits_nothing_and_the_request_can_be_sent_again(refit, monkeypatch, storage_configured):
+    library, native, root = refit
+    calls = []
+
+    def validate(content, **kwargs):
+        calls.append(1)
+        pipeline = read_json(root.parent/'pipeline.json')
+        _write_json(root.parent/'pipeline.json', {**pipeline, 'note': len(calls)})
+        return {'budget_met': True}
+    uploaded_hair(native, root, monkeypatch, validate)
+    with pytest.raises(PipelineError) as error:
+        native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    assert error.value.code == 'base_changed' and error.value.status == 409 and len(calls) == 3
+    assert read_json(root/'current.json') == {'version': VERSION}
+    assert 'target_version' not in read_json(root.parent/'pipeline.json')['local_refit']
+    monkeypatch.setattr(native_hair_upload, 'validate_native_hair', lambda content, **kwargs: {'budget_met': True})
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    assert created and read_json(root/'current.json') == {'version': state['version']}
+
+
+def test_the_stage_check_runs_under_the_process_lock_before_anything_is_written(refit):
+    library, native, root = refit
+    checked = []
+
+    def admit():
+        checked.append(_LOCK._is_owned())
+        raise PipelineError('stage_running', '선택한 단계가 실행 중입니다.', 409)
+    pipeline = read_json(root.parent/'pipeline.json')
+    with pytest.raises(PipelineError) as error:
+        native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001', admit=admit)
+    assert error.value.code == 'stage_running' and checked == [True]
+    assert read_json(root.parent/'pipeline.json') == pipeline and not list((root/'refit-requests').iterdir())
+
+
+def test_a_refit_whose_base_was_moved_while_its_parts_were_copied_is_refused(refit, monkeypatch):
+    library, native, root = refit
+    pipeline = read_json(root.parent/'pipeline.json')
+    real = avatar_native_parts.copy_file
+
+    def copy(source, target):
+        _write_json(root/'current.json', {'version': 'd' * 24})
+        return real(source, target)
+    monkeypatch.setattr(avatar_native_parts, 'copy_file', copy)
+    with pytest.raises(PipelineError) as error:
+        native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    assert error.value.code == 'base_changed'
+    assert read_json(root.parent/'pipeline.json') == pipeline and not list((root/'refit-requests').iterdir())
+
+
+def test_a_resumed_version_is_answered_once_the_process_lock_is_released(refit, monkeypatch):
+    library, native, root = refit
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    held, real_get = [], AvatarNativeParts.get
+    monkeypatch.setattr(AvatarNativeParts, 'get',
+                        lambda self, *args, **kwargs: (held.append(_LOCK._is_owned()), real_get(self, *args, **kwargs))[1])
+    again, created_again = native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    assert created and not created_again and again['version'] == state['version']
+    assert held and not any(held)
+
+
+def test_an_assembly_file_is_found_from_the_job_record_alone(refit, monkeypatch):
+    library, native, root = refit
+    monkeypatch.setattr(native.factory, 'get', lambda *args: pytest.fail('reading a file must not read the whole job'))
+    assert native.artifact(OWNER, JOB, VERSION, 'hair.glb') == root/VERSION/'hair.glb'
+    assert native.get(OWNER, JOB)['version'] == VERSION
+    # Every check stays: the owner, the name, the sealed hash.
+    for owner, name in ((2, 'hair.glb'), (OWNER, 'missing.glb'), (OWNER, '../hair.glb')):
+        with pytest.raises(PipelineError) as error:
+            native.artifact(owner, JOB, VERSION, name)
+        assert error.value.status == 404
+    # Two files of one version read its record once when the caller holds it.
+    record = read_json(root/VERSION/'record.json')
+    reads, real_read = [], avatar_native_parts.read_json
+    monkeypatch.setattr(avatar_native_parts, 'read_json', lambda path, *args: (reads.append(path.name), real_read(path, *args))[1])
+    native.artifact(OWNER, JOB, VERSION, 'hair.glb', record=record)
+    native.artifact(OWNER, JOB, VERSION, 'body.glb', record=record)
+    assert 'record.json' not in reads
+    (root/VERSION/'hair.glb').write_bytes(b'changed')
+    with pytest.raises(PipelineError) as changed:
+        native.artifact(OWNER, JOB, VERSION, 'hair.glb', record=record)
+    assert changed.value.code == 'artifact_changed'

@@ -155,8 +155,12 @@ def execute(pipeline: CharacterPipeline, character_id: str, user_id: int, operat
 
 def _execute(pipeline, character_id, user_id, run, path, operation):
     operation_id = operation["id"]
+    # A split runs one isolated Blender worker in the directory perform() gives it. The lock names that worker's
+    # runner.json receipt, so a lock left by a killed server is reclaimed once the worker is proven gone too.
+    separate = operation["action_id"] in {"separate_materials", "separate_parts"}
+    blender = run / "operations" / operation_id / "blender" / "runner.json" if separate else False
     try:
-        with pipeline.lock(run, blender=operation["action_id"] in {"separate_materials", "separate_parts"}):
+        with pipeline.lock(run, blender=blender):
             operation = read_json(path)
             if operation.get("status") != "accepted" or operation.get("executor") != pipeline.instance:
                 return

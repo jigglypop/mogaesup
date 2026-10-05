@@ -142,3 +142,44 @@ async def test_send_error_closes_the_owned_s3_body():
         await response(s3)({'type': 'http', 'method': 'GET', 'headers': [],
                             'asgi': {'spec_version': '2.4'}}, receive, send)
     assert s3.bodies[0].closed
+
+
+class ChangedS3(S3):
+    """S3 whose GET after the HEAD finds the object replaced, deleted, or fails otherwise."""
+
+    def __init__(self, code, status):
+        super().__init__()
+        self.code, self.status = code, status
+
+    def get_object(self, **parameters):
+        from botocore.exceptions import ClientError
+        self.calls.append(parameters)
+        raise ClientError({'Error': {'Code': self.code}, 'ResponseMetadata': {'HTTPStatusCode': self.status}},
+                          'GetObject')
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+@pytest.mark.parametrize('code, status, answer', [('PreconditionFailed', 412, (409, 'artifact_changed')),
+                                                  ('NoSuchKey', 404, (404, 'not_found'))])
+async def test_an_object_replaced_or_deleted_after_its_head_is_answered_as_such(code, status, answer):
+    from src.api.characters import pipeline_error_handler
+    from src.services.character_pipeline import PipelineError
+    s3, app = ChangedS3(code, status), FastAPI()
+    app.add_exception_handler(PipelineError, pipeline_error_handler)
+    app.add_api_route('/model.glb', lambda: response(s3), methods=['GET'])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        received = await client.get('/model.glb', headers={'Range': 'bytes=0-3'})
+    assert (received.status_code, received.json()['error']['code']) == answer
+    assert s3.calls[0]['IfMatch'] == METADATA['ETag'] and not s3.bodies
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+async def test_other_s3_failures_stay_errors():
+    from botocore.exceptions import ClientError
+    s3, app = ChangedS3('InternalError', 500), FastAPI()
+    app.add_api_route('/model.glb', lambda: response(s3), methods=['GET'])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        with pytest.raises(ClientError):
+            await client.get('/model.glb')

@@ -1,11 +1,38 @@
 """The five frozen expression requests belonging to a character production job."""
 from src.services.asset_editor import _write_json
+from src.services.avatar_openai_images import never_sent, response_kept
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity
 from src.services.object_storage import sha256
 from src.services.run_lock import WorkerLocks, final_write, worker_alive
 
 _WORKERS = WorkerLocks()
+# The warning on a run that sends an expression request of unknown acceptance again, as images, models and rig have.
+UNCONFIRMED_RETRY = '접수 불명 표정 요청 재전송 · 중복 과금 가능'
+
+
+def unconfirmed_generation(generation):
+    """The expression generation in directory `generation` sent an image request whose acceptance is unknown: no
+    answer (kept or complete partial) and no refusal is saved, and its receipt does not show that it never left.
+    Requesting that expression again may pay twice."""
+    receipt = generation/'image-provider.json'
+    if read_json(generation/'record.json').get('status') == 'complete' or receipt.with_suffix('.error.json').is_file():
+        return False
+    if response_kept(receipt):
+        return False
+    request = read_json(receipt.with_suffix('.request.json'))
+    return bool(request) and not never_sent(request)
+
+
+def unconfirmed_expressions(directory, items):
+    """Names among the default expressions `items` (summary()) whose request may have been processed. Only items that
+    stopped without a resumable answer are read: a status read stays a record read for the others."""
+    stopped = [item for item in items if item.get('generation_id') and item.get('status') in ('blocked', 'accepted', 'running')]
+    if not stopped:
+        return []
+    record = read_json(directory/'default-expressions.json')
+    root = directory/'native-parts'/str(record.get('source_version'))/'expression-generations'
+    return [item['name'] for item in stopped if unconfirmed_generation(root/item['generation_id'])]
 
 
 def default_contract(prompts=None):
@@ -71,11 +98,12 @@ def summary(directory, version=None):
             'default_selected': bool(selected and selected == baked.get('neutral'))}
 
 
-def execute(factory, owner, job, version, *, retry_blocked=False):
+def execute(factory, owner, job, version, *, retry_blocked=False, retry_unconfirmed=False):
     """Only called by an admitted production/resume command, never by a GET.
 
-    retry_blocked is an explicit operator run: an expression whose request was refused
-    or left unconfirmed is requested again under a new key, keeping the old receipt.
+    retry_blocked is an explicit operator run: an expression whose request was refused is requested again under a new
+    key, keeping the old receipt. One whose request was left unconfirmed (it may have been processed and billed) is
+    requested again only with retry_unconfirmed too: a run admitted while UNCONFIRMED_RETRY was shown.
     """
     from src.services.avatar_expression_generation import AvatarExpressionGeneration
     from src.services.avatar_expressions import AvatarExpressions
@@ -115,7 +143,9 @@ def execute(factory, owner, job, version, *, retry_blocked=False):
                     record['generations'][name] = generation
                     _write_json(path, record)
                 item = source.get(generation)
-                if retry_blocked and item['status'] != 'complete' and not item['can_resume'] and item['status'] not in ('accepted', 'running'):
+                if (retry_blocked and item['status'] != 'complete' and not item['can_resume']
+                        and item['status'] not in ('accepted', 'running')
+                        and (retry_unconfirmed or not unconfirmed_generation(source.directory(generation)))):
                     previous = record.setdefault('previous_generations', {}).setdefault(name, [])
                     previous.append(generation)
                     item, _ = source.create(f'default-expression-{name}-v1-r{len(previous)}', {

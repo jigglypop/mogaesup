@@ -4,17 +4,20 @@ A prop's 3D provider (Meshy or Tripo) is frozen on the record when the job is ac
 `<provider>/character.json`. Only while no 3D task was accepted or left uncertain may a resume send the 3D step
 to a provider again, keeping the paid image.
 """
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import hashlib
 import json
 import os
 import re
+from threading import Lock
 import time
 
 import httpx
 
 from src.services import character_jobs
-from src.services.asset_editor import _write_json
+from src.services.asset_editor import _retry_file_io, _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, generate_image,
                                               generate_standard_part_image, OpenAIImageHTTPError,
@@ -40,6 +43,43 @@ UNSENT = ('submission_rejected', 'submission_not_sent')
 _WORKERS = WorkerLocks()
 # A listing reads every record and its receipts; in S3 mode one at a time it can outlast the proxy timeouts.
 _LISTING_READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='generation-listing')
+# Listing views of complete generations, most recently used last: record path -> (record sha256, the prop's 3D receipt
+# or None, its sha256 or None while there is none, view). An entry answers only while both files still hold the bytes
+# it was made from; a complete illustration still changes (rig, motions, SVG), and its record with it.
+_FINISHED = OrderedDict()
+_FINISHED_LIMIT = 1024
+_finished_lock = Lock()
+
+
+def _read_digested(path):
+    """(document, sha256 of the bytes it was parsed from), or ({}, None) for a missing file as read_json gives {}."""
+    try:
+        content = _retry_file_io(path.read_bytes)
+    except FileNotFoundError:
+        return {}, None
+    return json.loads(content.decode('utf-8')), hashlib.sha256(content).hexdigest()
+
+
+def _current_digest(path):
+    try:
+        return digest(path)
+    except FileNotFoundError:
+        return None
+
+
+def _finished_view(path):
+    """The kept view of a complete generation, or None when there is none or its record or receipt changed since."""
+    with _finished_lock:
+        entry = _FINISHED.get(str(path))
+    if entry is None:
+        return None
+    record_sha256, receipt, receipt_sha256, view = entry
+    if _current_digest(path) != record_sha256 or (receipt is not None and _current_digest(receipt) != receipt_sha256):
+        return None
+    with _finished_lock:
+        if str(path) in _FINISHED:
+            _FINISHED.move_to_end(str(path))
+    return deepcopy(view)
 
 
 class StudioGenerations:
@@ -64,11 +104,17 @@ class StudioGenerations:
 
     def listing(self, kind):
         def item(path):
-            # One read of each record, its receipts read once, all of them in parallel.
+            # One read of each record, its receipts read once, all of them in parallel. A complete generation whose
+            # files are unchanged since an earlier listing is answered from memory.
+            view = _finished_view(path)
+            if view is not None:
+                return view if view['kind'] == kind else None
             held = _WORKERS.busy(str(path.parent))
             record = read_json(path)
             if record.get('kind') != kind:
                 return None
+            if record.get('status') == 'complete':
+                return self._finished(path, record)
             return self._public(path.parent.name, record, held)
         items = [value for value in _LISTING_READERS.map(item, list(self.root.glob('*/record.json'))) if value]
         return {'items': sorted(items, key=lambda item: item['created_at'], reverse=True),
@@ -124,12 +170,31 @@ class StudioGenerations:
         held = _WORKERS.busy(str(directory))
         return self._public(job_id, self._record(job_id), held)
 
-    def _public(self, job_id, record, held):
-        """`held`: whether this generation's worker held its lock before the record was read."""
+    def _finished(self, path, record):
+        """The listing view of a complete generation, kept for later listings. It is made from the record and, for a
+        prop, the 3D receipt alone: no worker runs a complete generation. It is kept only under the digest of record
+        bytes that hold this very document, so a record that changed after it was read is never answered with it."""
+        directory = path.parent
+        receipt = self._run(directory, record)/'character.json' if record['kind'] == 'prop' else None
+        task, receipt_sha256 = _read_digested(receipt) if receipt is not None else ({}, None)
+        view = self._public(directory.name, record, False, task)
+        current, record_sha256 = _read_digested(path)
+        if current == record:
+            with _finished_lock:
+                _FINISHED[str(path)] = record_sha256, receipt, receipt_sha256, deepcopy(view)
+                _FINISHED.move_to_end(str(path))
+                while len(_FINISHED) > _FINISHED_LIMIT:
+                    _FINISHED.popitem(last=False)
+        return view
+
+    def _public(self, job_id, record, held, task=None):
+        """`held`: whether this generation's worker held its lock before the record was read. `task`: the prop's 3D
+        receipt when the caller has read it already."""
         directory = self.directory(job_id)
         alive = worker_alive(record, held or _WORKERS.busy(str(directory)))
         prop = record['kind'] == 'prop'
-        task = read_json(self._run(directory, record)/'character.json') if prop else {}
+        if task is None:
+            task = read_json(self._run(directory, record)/'character.json') if prop else {}
         image = (None if record['status'] == 'complete' else
                  self._image_reason(directory, record, idle=not (alive and record['status'] == 'running')))
         resumable, reason = self._resume_reason(directory, record, task, image)

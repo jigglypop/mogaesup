@@ -24,6 +24,21 @@ def _range(value, total):
     return start, end
 
 
+def _translated(exc):
+    """The S3 answer to the GET that follows the HEAD as the error the API answers for a changed or missing artifact,
+    or None. Raised before the response starts, so the app's PipelineError handler answers it instead of a 500."""
+    from src.services.character_pipeline import PipelineError
+    response = getattr(exc, 'response', None) or {}
+    code = str((response.get('Error') or {}).get('Code', ''))
+    status = (response.get('ResponseMetadata') or {}).get('HTTPStatusCode')
+    if code == 'PreconditionFailed' or status == 412:
+        # Replaced since the HEAD whose ETag and length this response carries.
+        return PipelineError('artifact_changed', '파일이 바뀌었습니다. 다시 불러오세요.', 409)
+    if code in ('404', 'NoSuchKey', 'NotFound') or status == 404:
+        return PipelineError('not_found', '저장된 산출물을 찾을 수 없습니다.', 404)
+    return None
+
+
 class RemoteArtifactResponse(StreamingResponse):
     def __init__(self, client, bucket, key, metadata, *, media_type, headers):
         self.client, self.bucket, self.key, self.metadata = client, bucket, key, metadata
@@ -72,7 +87,14 @@ class RemoteArtifactResponse(StreamingResponse):
             status = 206
 
         def open_body():
-            value = self.client.get_object(**parameters)
+            from botocore.exceptions import ClientError
+            try:
+                value = self.client.get_object(**parameters)
+            except ClientError as exc:
+                translated = _translated(exc)
+                if translated is None:
+                    raise
+                raise translated from None
             self._body = value['Body']
 
         def chunks():

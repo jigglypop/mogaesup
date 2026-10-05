@@ -218,11 +218,17 @@ class AvatarStageResume:
                    for stage in STAGES if stage != 'expressions' or expressions]
         # An explicit run re-sends a request whose acceptance was never confirmed.
         uncertain_models = any(unconfirmed_submission(directory/'parts'/p['slot']) for p in parts)
+        uncertain_expressions = False
+        if expressions and not reused_expressions:
+            from src.services.avatar_expression_pipeline import UNCONFIRMED_RETRY, unconfirmed_expressions
+            uncertain_expressions = bool(unconfirmed_expressions(directory, expressions.get('items', [])))
         for action in actions:
             if action['stage'] in ('images', 'models') and uncertain_models:
                 action['warning'] = '접수 불명 3D 요청 재전송 · 중복 과금 가능'
             elif action['stage'] == 'rig' and rig_problem and rig_problem.get('status') == 'submission_uncertain':
                 action['warning'] = '접수 불명 리깅 요청 재전송 · 중복 과금 가능'
+            elif action['stage'] == 'expressions' and uncertain_expressions:
+                action['warning'] = UNCONFIRMED_RETRY
         recommended = next((a['stage'] for a in reversed(actions) if a['enabled']), None)
         public_operation = {k: operation.get(k) for k in ('id', 'stage', 'status', 'error', 'created_at', 'updated_at')} if operation else None
         if public_operation and operation['status'] in ('accepted', 'running') and not running:
@@ -257,8 +263,10 @@ class AvatarStageResume:
             action = next((a for a in state['actions'] if a['stage'] == stage), None)
             if action is None or not action['enabled']:
                 raise PipelineError('stage_unavailable', (action or {}).get('reason') or '현재 실행할 수 없는 단계입니다.', 409)
+            # The warning shown when the run was admitted: what an explicit run confirmed it may send again.
             record = {'id': request_id, 'stage': stage, 'status': 'accepted', 'process': identity(),
-                      'explicit': explicit, 'created_at': now(), 'updated_at': now(), 'error': None}
+                      'explicit': explicit, 'warning': action.get('warning'), 'created_at': now(), 'updated_at': now(),
+                      'error': None}
             _write_json(path, record)
             _write_json(directory/'stage-runs/current.json', {'id': request_id})
         return self.get(owner, job_id), request_id
@@ -323,7 +331,9 @@ class AvatarStageResume:
                         from src.services.avatar_expression_reuse import reuse_saved_expressions
                         result = reuse_saved_expressions(self.factory, owner, job_id, pointer['version'])
                     else:
-                        expressions_execute(self.factory, owner, job_id, pointer['version'], retry_blocked=explicit)
+                        # A request that may have been processed is sent again only by a run admitted with its warning.
+                        expressions_execute(self.factory, owner, job_id, pointer['version'], retry_blocked=explicit,
+                                            retry_unconfirmed=explicit and bool(record.get('warning')))
                         result = summary(directory, pointer['version'])
                     pending_error = (result.get('error') or '기본 표정 텍스처 처리 대기') if result and result['status'] != 'complete' else None
                     update_json(directory/'job.json', lambda current: {**current, 'error': pending_error})

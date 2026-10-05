@@ -9,8 +9,8 @@ import httpx
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity
-from src.services.avatar_openai_images import (OpenAIImageHTTPError, image_error_message, _error_category,
-                                               saved_response)
+from src.services.avatar_openai_images import (OpenAIImageHTTPError, OpenAIImageUnconfirmed, image_error_message,
+                                               _busy_refusal, _error_category, never_sent, saved_response)
 
 RETRYABLE = {'submission_uncertain', 'rejected', 'failed', 'qc_failed'}
 REFERENCE = 'reference'
@@ -41,33 +41,55 @@ def reference_receipt(directory, view, image):
     return view_receipt(directory/'output', view, image)
 
 
+def _http_status(transport):
+    status = transport.get('http_status')
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
 def _answered(transport):
     """The provider's answer to the request arrived (HTTP 2xx): the request was processed and paid for."""
-    status = transport.get('http_status')
-    return isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300
+    status = _http_status(transport)
+    return status is not None and 200 <= status < 300
+
+
+# The warning on an explicit retry of an image whose request may have been processed (and billed).
+UNCONFIRMED_RETRY = '접수 불명 이미지 요청 재전송 · 중복 과금 가능'
+
+
+def _server_error_message(http_status):
+    return f'생성 서버 오류 응답 (HTTP {http_status}) · 접수 여부 확인 불가'
 
 
 def classify_image_failure(exc, receipt, *, messages=None):
     """(status, failure) of an image request that stopped with `exc`, from what its receipt kept; the one rule of every
     image stage (part views, the appearance reference, single part images).
 
-    An answer saved as .response.json is processed again without a request. A provider refusal is final. A request its
-    receipt shows never left is sent again. A connection lost after the request left is unconfirmed. An answer that
-    arrived (HTTP 2xx) but could not be stored was paid for: it is unconfirmed as well, never a plain local failure,
-    and a kept copy of it is used before any new request is offered (saved_response). `messages` replaces the message
-    given for a status."""
+    An answer saved as .response.json is processed again without a request. A provider refusal (4xx, or a busy 429/503
+    after its retries) is final. A request its receipt shows never left is sent again. A request that started without
+    a recorded outcome, a connection lost after the request left and a server error answer (500, 502, 504) are
+    unconfirmed: the provider may have made and billed the image. An answer that arrived (HTTP 2xx) but could not be
+    stored was paid for: it is unconfirmed as well, never a plain local failure, and a kept copy of it is used before
+    any new request is offered (saved_response). `messages` replaces the message given for a status."""
     transport = read_json(receipt.with_suffix('.request.json'))
+    http_status = _http_status(transport)
     if receipt.with_suffix('.response.json').is_file():
         status, category, message = 'submitting', 'local_processing', '수신 이미지 처리 중단'
     elif isinstance(exc, httpx.HTTPStatusError):
         status, category = 'rejected', getattr(exc, 'category', 'provider_http')
         message = image_error_message(category, exc.response.status_code)
-    elif transport.get('submission') == 'not_sent':
+    elif never_sent(transport):
         status, category, message = 'not_sent', 'provider_connection', '생성 서버 연결 실패 · 재개 가능'
-    elif isinstance(exc, httpx.RequestError):
+    elif isinstance(exc, OpenAIImageUnconfirmed) or (
+            http_status is not None and http_status >= 500 and transport.get('submission') != 'rejected'):
+        status, category = 'submission_uncertain', 'provider_unavailable'
+        message = _server_error_message(exc.status_code if isinstance(exc, OpenAIImageUnconfirmed) else http_status)
+    elif isinstance(exc, httpx.RequestError) or (transport.get('request_started') and not _answered(transport)):
+        # Also a request that started and whose outcome was never recorded: whatever stopped it, it may have arrived.
         status, category, message = 'submission_uncertain', 'provider_connection', '생성 서버 연결 끊김 · 수신된 응답 없음'
     elif _answered(transport):
         status, category, message = 'submission_uncertain', 'local_processing', '수신 이미지 저장 실패 · 응답 확인 필요'
+    elif transport.get('submission') == 'unknown':
+        status, category, message = 'submission_uncertain', 'provider_connection', '생성 서버 응답 확인 불가'
     else:
         status, category, message = 'failed', 'local_processing', '이미지 처리 실패'
     failure = {'id': getattr(exc, 'diagnostic_id', None) or uuid.uuid4().hex[:12], 'type': type(exc).__name__,
@@ -75,6 +97,8 @@ def classify_image_failure(exc, receipt, *, messages=None):
                'elapsed_seconds': transport.get('elapsed_seconds'), 'at': now()}
     if isinstance(exc, OpenAIImageHTTPError):
         failure.update(http_status=exc.response.status_code, provider_code=exc.provider_error.get('code'))
+    elif isinstance(exc, OpenAIImageUnconfirmed):
+        failure.update(http_status=exc.status_code, provider_code=exc.provider_error.get('code'))
     return status, failure
 
 
@@ -98,9 +122,11 @@ def settle_interrupted(directory, state):
         request = read_json(request_path)
         # Earlier automatic attempts in this receipt were all provably unprocessed, so only the stopped attempt
         # decides, and only a request that never started was never sent: the receipt marks a complete upload after
-        # the body is already on the wire, so a stop can leave a whole upload without that mark.
-        unsent = not saved and (not request or request.get('submission') == 'not_sent' or (
-            'submission' not in request and not request.get('request_started')))
+        # the body is already on the wire, so a stop can leave a whole upload without that mark. "Never started" is
+        # evidence only in a receipt that records the start before any byte is written (never_sent); an older one
+        # may have lost that record to a failed write while the request went out. No receipt at all: the one written
+        # before the request failed, so nothing was sent.
+        unsent = not saved and (not request or never_sent(request))
         token = hashlib.sha256(f'{receipt.name}:{image.get("attempted_at")}'.encode()).hexdigest()[:12]
         if unsent:
             if request and request.get('submission') != 'not_sent':
@@ -159,6 +185,8 @@ def reference_has_dependents(state, view):
 
 
 def _describe(failure, receipt, status):
+    """Fill the public fields of `failure` from the receipt and return the status to show. A refusal an earlier server
+    recorded for a server error answer (500, 502, 504) is shown as the unconfirmed request it is."""
     transport = read_json(receipt.with_suffix('.request.json'))
     if status == 'rejected':
         rejection = read_json(receipt.with_suffix('.error.json'))
@@ -167,10 +195,25 @@ def _describe(failure, receipt, status):
         category = _error_category(http_status, provider_error) if isinstance(http_status, int) else failure.get('category', 'unknown')
         failure.update(category=category, message=image_error_message(category, http_status),
                        http_status=http_status, provider_code=provider_error.get('code'))
+        if isinstance(http_status, int) and http_status >= 500 and not _busy_refusal(http_status, category):
+            failure['message'] = _server_error_message(http_status)
+            status = 'submission_uncertain'
     failure.setdefault('elapsed_seconds', transport.get('elapsed_seconds'))
     failure.setdefault('phase', transport.get('phase'))
     if failure.get('type') in ('ReadError', 'ReadTimeout', 'RemoteProtocolError'):
         failure.setdefault('message', '생성 서버 연결 끊김 · 수신된 응답 없음')
+    return status
+
+
+def _retry_action(slot, view, failure, status, blocked):
+    """An explicit paid retry of one image. One whose request may have been processed carries the double-charge
+    warning, as the stage runs that send unconfirmed requests again do."""
+    action = {'id': 'retry_image', 'enabled': not blocked,
+              'reason': '이 이미지를 사용하는 후속 작업이 있습니다.' if blocked else None,
+              'slot': slot, 'view': view, 'failure_id': failure['id'], 'additional_image_tasks': 1}
+    if status == 'submission_uncertain':
+        action['warning'] = UNCONFIRMED_RETRY
+    return action
 
 
 def decorate_job(directory, public):
@@ -189,7 +232,7 @@ def decorate_job(directory, public):
                 failure.update(category='local_processing', message='저장 이미지 처리 대기')
             saved = next((p for p in state.get('parts', []) if p['slot'] == part['slot']), {})
             receipt = receipt_path(directory, part['slot'], view, saved.get('views', {}).get(view, {}))
-            _describe(failure, receipt, image['status'])
+            image['status'] = _describe(failure, receipt, image['status'])
             part['image_status'] = image['status']
             part['image_failure'] = deepcopy(failure)
             if failure.get('message'):
@@ -200,9 +243,7 @@ def decorate_job(directory, public):
                 if image['status'] == 'qc_failed' and can_reuse_image(image):
                     continue
                 blocked = has_dependents(state, saved, view)
-                public['next_actions'].append({'id': 'retry_image', 'enabled': not blocked,
-                    'reason': '이 이미지를 사용하는 후속 작업이 있습니다.' if blocked else None,
-                    'slot': part['slot'], 'view': view, 'failure_id': failure['id'], 'additional_image_tasks': 1})
+                public['next_actions'].append(_retry_action(part['slot'], view, failure, image['status'], blocked))
     _, reference_views = _reference_views(state)
     public_reference = public.get('reference_preparation') or {}
     for view, image in reference_views.items():
@@ -210,23 +251,24 @@ def decorate_job(directory, public):
         if not failure or image.get('status') not in RETRYABLE:
             continue
         receipt = reference_receipt(directory, view, image)
-        _describe(failure, receipt, image['status'])
+        shown = _describe(failure, receipt, image['status'])
         public_view = (public_reference.get('views') or {}).get(view)
         if public_view is not None:
             public_view['failure'] = deepcopy(failure)
+            public_view['status'] = shown
         if failure.get('message'):
             failure_message = f'{LABELS[REFERENCE]} {REFERENCE_VIEW_LABELS.get(view, view)}: {failure["message"]}'
             failure_count += 1
         if failure.get('id') and not saved_response(receipt):
             blocked = reference_has_dependents(state, view)
-            public['next_actions'].append({'id': 'retry_image', 'enabled': not blocked,
-                'reason': '이 이미지를 사용하는 후속 작업이 있습니다.' if blocked else None,
-                'slot': REFERENCE, 'view': view, 'failure_id': failure['id'], 'additional_image_tasks': 1})
-    retryable = [{k: action[k] for k in ('slot', 'view', 'failure_id')}
-                 for action in public['next_actions'] if action['id'] == 'retry_image' and action['enabled']]
+            public['next_actions'].append(_retry_action(REFERENCE, view, failure, shown, blocked))
+    enabled = [action for action in public['next_actions'] if action['id'] == 'retry_image' and action['enabled']]
+    retryable = [{k: action[k] for k in ('slot', 'view', 'failure_id')} for action in enabled]
     if retryable:
-        public['next_actions'].append({'id': 'retry_images', 'enabled': True,
-            'images': retryable, 'additional_image_tasks': len(retryable)})
+        batch = {'id': 'retry_images', 'enabled': True, 'images': retryable, 'additional_image_tasks': len(retryable)}
+        if any(action.get('warning') for action in enabled):
+            batch['warning'] = UNCONFIRMED_RETRY
+        public['next_actions'].append(batch)
     if failure_message and paused:
         if failure_count > 1:
             failure_message = f'미완료 이미지 {failure_count}장 · {failure_message}'

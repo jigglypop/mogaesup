@@ -434,14 +434,14 @@ def wardrobe_parts(job_id: str, user: UserContext = Depends(get_current_user), f
 def wardrobe_coverage(body_job_id: str, job_id: str, slot: str, version: str,
                       user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
-    return Wardrobe(factory, user.user_id).coverage(body_job_id, job_id, slot, version)
+    return Wardrobe(factory, user.user_id).coverage(body_job_id, job_id, slot, version, member=not wardrobe_operator(user))
 
 
 @router.get('/wardrobe/colors/{job_id}/{slot}')
 def wardrobe_colors(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
                     factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
-    return Wardrobe(factory, user.user_id).colors(job_id, slot, version)[0]
+    return Wardrobe(factory, user.user_id).colors(job_id, slot, version, member=not wardrobe_operator(user))[0]
 
 
 @router.get('/wardrobe/colors/{job_id}/{slot}/mask')
@@ -449,7 +449,8 @@ def wardrobe_colors(job_id: str, slot: str, version: str, user: UserContext = De
 def wardrobe_color_mask(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
                         factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
-    return FileResponse(Wardrobe(factory, user.user_id).colors(job_id, slot, version)[1], media_type='image/png')
+    return FileResponse(Wardrobe(factory, user.user_id).colors(job_id, slot, version, member=not wardrobe_operator(user))[1],
+                        media_type='image/png')
 
 
 @router.get('/wardrobe/previews/{job_id}/{slot}')
@@ -457,7 +458,8 @@ def wardrobe_color_mask(job_id: str, slot: str, version: str, user: UserContext 
 def wardrobe_preview(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
                      factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
-    return FileResponse(Wardrobe(factory, user.user_id).preview(job_id, slot, version), media_type='image/png')
+    return FileResponse(Wardrobe(factory, user.user_id).preview(job_id, slot, version, member=not wardrobe_operator(user)),
+                        media_type='image/png')
 
 
 class WardrobeRef(BaseModel):
@@ -584,9 +586,11 @@ def review_native_parts(job_id: str, version: str, body: NativeReviewInput,
 def fit_native_parts(job_id: str, background: BackgroundTasks, canonical_pose: bool = False,
                      user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarNativeParts(factory)
-    with _LOCK:
-        ensure_stage_idle(factory, user.user_id, job_id)
-        state, created = service.start(user.user_id, job_id, canonical_pose=canonical_pose)
+    ensure_stage_idle(factory, user.user_id, job_id)
+    # The inputs are hashed and an uploaded hair validated outside the process lock; the stage is checked again under
+    # it, right before the version is written.
+    state, created = service.start(user.user_id, job_id, canonical_pose=canonical_pose,
+                                   admit=lambda: ensure_stage_idle(factory, user.user_id, job_id))
     if created or state.get('expression_pending'):
         background.add_task(service.execute_refit, user.user_id, job_id)
     return state
@@ -726,13 +730,13 @@ def refit_one_native_part(job_id: str, body: NativePartRefitInput, background: B
                           idempotency_key: str = Header(alias='Idempotency-Key'),
                           user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarNativeParts(factory)
-    with _LOCK:
-        ensure_stage_idle(factory, user.user_id, job_id)
-        state, created = service.start_refit(
-            user.user_id, job_id, body.source_version, body.slot, idempotency_key,
-            fit_profile=body.fit_profile.model_dump(exclude_none=True) if body.fit_profile is not None else None,
-            part_method=body.part_method,
-            shape=body.shape.model_dump(exclude_none=True) if body.shape is not None else None)
+    ensure_stage_idle(factory, user.user_id, job_id)
+    state, created = service.start_refit(
+        user.user_id, job_id, body.source_version, body.slot, idempotency_key,
+        fit_profile=body.fit_profile.model_dump(exclude_none=True) if body.fit_profile is not None else None,
+        part_method=body.part_method,
+        shape=body.shape.model_dump(exclude_none=True) if body.shape is not None else None,
+        admit=lambda: ensure_stage_idle(factory, user.user_id, job_id))
     from src.services.avatar_expression_reuse import expression_reuse_state
     expressions = expression_reuse_state(factory.directory(user.user_id, job_id))
     current_version = service.get(user.user_id, job_id).get('version')

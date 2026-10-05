@@ -239,9 +239,24 @@ def ping() -> dict:
                 raise _not_imported(prefix)
             # Check the exact schema and read permission used by records, not just the PostgreSQL connection.
             conn.execute(f'SELECT {_META}, content FROM {SCHEMA}.records WHERE prefix = %s LIMIT 0', (prefix,))
+            pending = _unapplied_migrations(conn)
+            if pending:
+                raise RecordStoreUnavailable(f'record migrations not applied as shipped: {", ".join(pending)}; '
+                                             f'run: uv run python -m src.records migrate')
         return {'configured': True, 'ok': True}
     except Exception as exc:
+        # server.py logs the error and keeps only `configured` and `ok` in its public health answer.
         return {'configured': True, 'ok': False, 'error': str(exc)}
+
+
+def _unapplied_migrations(conn):
+    """The migration files shipped with this release that the database has not applied, or applied with other bytes,
+    as `src.records migrate` records them (file name and sha256)."""
+    import hashlib
+    from src.records import MIGRATIONS
+    applied = dict(conn.execute(f'SELECT name, sha256 FROM {SCHEMA}.migrations').fetchall())
+    return [path.name for path in sorted(MIGRATIONS.glob('[0-9][0-9][0-9]_*.up.sql'))
+            if applied.get(path.name) != hashlib.sha256(path.read_bytes()).hexdigest()]
 
 
 # --- readiness -------------------------------------------------------------------------------
@@ -476,17 +491,51 @@ def move(prefix, source, target):
     return meta
 
 
-def listing(prefix, directory):
-    """{path: Meta} of every record below `directory` (a path ending in '/')."""
+def listing(prefix, directory, pattern=None):
+    """{path: Meta} of every record below `directory` (a path ending in '/'). A glob `pattern` relative to `directory`
+    lets the database leave out paths it cannot match; the result may still hold some that it does not match."""
     require(prefix)
     scope = scope_of(directory + '_')
     if scope and directory.startswith(scope):
         return {path: meta for path, meta in _scope_index(prefix, scope).items() if path.startswith(directory)}
+    like = _like(directory, pattern)
+    query = f'SELECT path, {_META} FROM {SCHEMA}.records WHERE prefix = %s AND path >= %s AND path < %s'
+    values = (prefix, directory, _upper(directory))
+    if like:
+        # Backslash, the escape character of _like, is LIKE's default one.
+        query, values = query + ' AND path LIKE %s', (*values, like)
     with connection() as conn:
-        rows = conn.execute(
-            f'SELECT path, {_META} FROM {SCHEMA}.records WHERE prefix = %s AND path >= %s AND path < %s',
-            (prefix, directory, _upper(directory))).fetchall()
+        rows = conn.execute(query, values).fetchall()
     return {row[0]: _meta(row[1:]) for row in rows}
+
+
+def _like(directory, pattern):
+    """A LIKE pattern that every path below `directory` matching the glob `pattern` (object_storage._glob_match) also
+    matches, or None when it would leave nothing out. Wildcards widen: `*` to `%`, `?` to `_`, `**/` to `%` (no
+    directory at all is a match too), and a character class ends the pattern with `%`. With `**` the glob matches from
+    the right, so the pattern may start anywhere below `directory`."""
+    if not pattern:
+        return None
+
+    def literal(text):
+        return text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+    # Tokens: a wildcard is exactly '%' or '_', a literal character is escaped ('\%' for a literal percent sign).
+    converted, index = ['%'] if '**' in pattern else [], 0
+    while index < len(pattern):
+        if pattern.startswith('**/', index) or pattern[index] in '*[':
+            if not converted or converted[-1] != '%':
+                converted.append('%')
+            if pattern[index] == '[':
+                break
+            index += 3 if pattern.startswith('**/', index) else 1
+        elif pattern[index] == '?':
+            converted.append('_')
+            index += 1
+        else:
+            converted.append(literal(pattern[index]))
+            index += 1
+    return None if converted == ['%'] else literal(directory) + ''.join(converted)
 
 
 def exists_under(prefix, directory):

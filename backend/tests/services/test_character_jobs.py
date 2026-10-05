@@ -149,3 +149,38 @@ def test_a_poll_that_changes_nothing_writes_nothing(tmp_path, monkeypatch):
     writes.clear()
     character_jobs.refresh(run, client)
     assert writes == [] and character_jobs.state(run)['status'] == 'IN_PROGRESS' and len(calls) == 2
+
+
+# --- an attempt whose files may not be deleted is archived once ------------------------------------------------------
+
+def test_an_attempt_whose_delete_is_refused_is_archived_once_however_often_it_is_retried(tmp_path, monkeypatch):
+    run = receipt(tmp_path, stage='rigging', status='FAILED', task_id='task-1')
+    (run / 'rigging-result.json').write_text('{"status": "FAILED"}', encoding='utf-8')
+    (run / 'rig-input.glb').write_bytes(b'glTF input')
+    unlink, refused = StoredPath.unlink, []
+
+    def denied(self, missing_ok=False):
+        # A role without s3:DeleteObject refuses the delete of every stored file (a local write's temporary is no object).
+        if self.name not in character_jobs.ATTEMPT_FILES:
+            return unlink(self, missing_ok=missing_ok)
+        refused.append(self.name)
+        raise PermissionError('AccessDenied')
+    monkeypatch.setattr(StoredPath, 'unlink', denied)
+    for _ in range(3):
+        with pytest.raises(PermissionError):
+            character_jobs.archive_attempt(run, 'retry')
+    assert len(refused) == 3 and character_jobs.state(run)['status'] == 'FAILED'
+    # One copy of the attempt and one archive record, however often the delete was refused.
+    assert sorted(path.parent.name for path in (run / 'attempts').glob('*/archive.json')) == ['1']
+    assert json.loads((run / 'attempts' / '1' / 'character.json').read_text(encoding='utf-8')) == {
+        'stage': 'rigging', 'status': 'FAILED', 'task_id': 'task-1'}
+    monkeypatch.setattr(StoredPath, 'unlink', unlink)
+    assert character_jobs.archive_attempt(run, 'retry') == 1
+    assert not (run / 'character.json').exists() and not (run / 'rig-input.glb').exists()
+    assert (run / 'attempts' / '1' / 'rig-input.glb').read_bytes() == b'glTF input'
+    assert not (run / 'attempts' / '2').exists()
+    # The next attempt is a new receipt, archived under the next number.
+    (run / 'character.json').write_text(json.dumps({'stage': 'rigging', 'status': 'FAILED', 'task_id': 'task-2'}),
+                                        encoding='utf-8')
+    assert character_jobs.archive_attempt(run, 'retry') == 2
+    assert json.loads((run / 'attempts' / '2' / 'archive.json').read_text(encoding='utf-8'))['task_id'] == 'task-2'

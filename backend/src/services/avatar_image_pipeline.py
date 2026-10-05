@@ -25,13 +25,13 @@ from src.services.avatar_blueprints import AvatarBlueprints, SLOTS
 from src.services.avatar_equipment import EQUIPMENT
 from src.services.avatar_openai_images import (DEFAULT_MODEL, DEFAULT_BASE, OpenAIImageHTTPError, saved_response,
                                                 generate_part_image as generate_openai_part_image)
-from src.services.avatar_factory import IMAGE_PROFILE as PROFILE, _LOCK, digest
+from src.services.avatar_factory import IMAGE_PROFILE as PROFILE, _LOCK, _RUN_LOCKS, digest
 from src.services.character_parts import blender_executable
 from src.services.model_providers import base_url, failure_text, uncertain_text
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.process_identity import identity, state as process_state
 from src.services.provider_http import transient
-from src.services.run_lock import WorkerLocks, final_write
+from src.services.run_lock import final_write
 from src.services.avatar_production_spec import (
     IMAGE_INTAKE_POLICY, production_spec, public_spec,
 )
@@ -72,7 +72,6 @@ WARDROBE_BODY_PROMPT = (
 )
 WHOLE_BODY_PROMPT += AXIS_LOCK
 WARDROBE_BODY_PROMPT += AXIS_LOCK
-_RUN_LOCKS = WorkerLocks()
 AUTO_RESUBMIT_LIMIT = 3
 
 
@@ -202,7 +201,9 @@ class AvatarImagePipeline:
         self.factory = factory
         self.blueprints = AvatarBlueprints(factory.data)
 
-    def _reuse_character_parts(self, owner, target, parts, reuse_job_id, character_id, source_sha256):
+    def _reuse_sources(self, owner, parts, reuse_job_id, character_id, source_sha256):
+        """The parts of `reuse_job_id` to reuse, checked against their receipts. Read before the factory lock; the
+        copies made under it are checked against the hashes read here."""
         if not reuse_job_id:
             return []
         source_public = self.factory.get(owner, reuse_job_id)
@@ -212,7 +213,7 @@ class AvatarImagePipeline:
                 or not (source/'source.png').is_file() or digest(source/'source.png') != source_sha256):
             raise PipelineError('reuse_source_mismatch', '같은 캐릭터 원본에서 만든 파츠만 재사용할 수 있습니다.', 422)
         source_state = read_json(source/'pipeline.json')
-        reused = []
+        sources = []
         for part in parts:
             if part['slot'] == 'body':
                 continue
@@ -228,17 +229,31 @@ class AvatarImagePipeline:
             if (not image_source.is_file() or digest(image_source) != image.get('sha256')
                     or not model_source.is_file() or digest(model_source) != receipt.get('sha256')):
                 raise PipelineError('reuse_artifact_changed', f'{part["slot"]}: 재사용할 파츠 증거가 변경되었습니다.', 422)
+            sources.append({'slot': part['slot'], 'image': image_source, 'image_sha256': image['sha256'],
+                            'asset': image.get('asset'), 'model': model_source, 'model_sha256': receipt['sha256'],
+                            'task_id': prior['model'].get('task_id')})
+        return sources
+
+    @staticmethod
+    def _reuse_character_parts(target, parts, reuse_job_id, sources):
+        """Copy the checked `sources` into the new job. A copy whose bytes changed since the check is refused."""
+        reused = []
+        for source in sources:
+            part = next(p for p in parts if p['slot'] == source['slot'])
             image_name = f'{part["slot"]}-image.png'
-            copy_file(image_source, target/'output'/image_name)
+            copy_file(source['image'], target/'output'/image_name)
             model_target = target/'parts'/part['slot']/'generated.glb'
             model_target.parent.mkdir(parents=True, exist_ok=True)
-            copy_file(model_source, model_target)
+            copy_file(source['model'], model_target)
+            if (digest(target/'output'/image_name) != source['image_sha256']
+                    or digest(model_target) != source['model_sha256']):
+                raise PipelineError('reuse_artifact_changed', f'{part["slot"]}: 재사용할 파츠 증거가 변경되었습니다.', 422)
             _write_json(model_target.parent/'generation-artifacts.json', {'generated': {
-                'path': str(model_target), 'sha256': digest(model_target),
+                'path': str(model_target), 'sha256': source['model_sha256'],
                 'reused_from': {'job_id': reuse_job_id, 'slot': part['slot']}}})
             part['image'] = {'status': 'succeeded', 'file': image_name,
-                'sha256': digest(target/'output'/image_name), 'asset': image.get('asset'), 'origin': 'reused'}
-            part['model'] = {'status': 'ready', 'task_id': prior['model'].get('task_id'), 'origin': 'reused'}
+                'sha256': source['image_sha256'], 'asset': source['asset'], 'origin': 'reused'}
+            part['model'] = {'status': 'ready', 'task_id': source['task_id'], 'origin': 'reused'}
             part['provenance'].update(origin='reused_generated_candidate', source_job_id=reuse_job_id)
             reused.append(part['slot'])
         return reused
@@ -312,73 +327,91 @@ class AvatarImagePipeline:
         job_id = request_job_id(owner, 'image', key)
         directory = self.factory.directory(owner, job_id)
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-        meshy_actions = []
-        if not read_json(directory/'job.json'):
-            # A replay returns its job; a new request must be affordable before any image is paid for.
-            from src.services.meshy_status import require_credits
-            slots = payload.get('slots') or []
-            require_credits(len(slots), rig='body' in slots)
-            # Asked here, not under the lock: a slow Meshy must not stall every other job action.
-            from src.services.avatar_meshy import AvatarMeshy
-            meshy_actions = AvatarMeshy(self.factory).library(owner)
-        with _LOCK:
+
+        def replay():
+            """The job this request key already made, or None; the same key with other settings is refused."""
             existing = read_json(directory/'job.json')
-            if existing:
-                if existing['fingerprint'] != fingerprint:
-                    raise PipelineError('idempotency_conflict', '같은 요청에 다른 생산 설정이 있습니다.')
+            if existing and existing['fingerprint'] != fingerprint:
+                raise PipelineError('idempotency_conflict', '같은 요청에 다른 생산 설정이 있습니다.')
+            return existing or None
+        if replay():
+            return self.factory.get(owner, job_id), False
+        # A new request must be affordable before any image is paid for.
+        from src.services.meshy_status import require_credits
+        slots = payload.get('slots') or []
+        require_credits(len(slots), rig='body' in slots)
+        # Everything the job is made from is read here, before the factory lock: Meshy's motion library, the owner's
+        # prompts and default motions (which may list the owner's whole prefix), the character, its source image and
+        # blueprint, and the parts to reuse. The source bytes and blueprint are the ones the request pins
+        # (source_sha256, blueprint_revision). The lock only re-checks that this key made no job meanwhile, and writes.
+        from src.services.avatar_meshy import AvatarMeshy, SLOTS as MOTION_SLOTS
+        meshy_actions = AvatarMeshy(self.factory).library(owner)
+        from src.services.studio_prompts import StudioPrompts
+        prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
+        design_prompts = {slot: (submitted_design_prompts or {}).get(slot, prompt_snapshot['parts'][slot])
+                          for slot in DEFAULT_DESIGN_PROMPTS}
+        fit_profiles = normalize_fit_profiles(submitted_fit_profiles, descriptions=design_prompts)
+        for fit_slot, fit_profile in fit_profiles.items():
+            reject_generation_fit_profile(fit_profile, slot=fit_slot)
+        ready = capabilities()
+        action = ready['next_actions'][0]
+        if not action['enabled']:
+            raise PipelineError('provider_unavailable', action['reason'], 422)
+        slots = payload['slots']
+        if not slots or len(slots) != len(set(slots)) or any(s not in PARTS for s in slots):
+            raise PipelineError('invalid_slots', '중복되지 않은 이미지 파츠를 선택하세요.', 422)
+        if slots != CHARACTER_PART_SLOTS:
+            raise PipelineError('invalid_slots', '몸·머리카락·머리 장식·상의·하의·신발 한 세트를 선택하세요.', 422)
+        submitted_motions = payload.get('motion_actions', {})
+        if not isinstance(submitted_motions, dict):
+            raise PipelineError('invalid_action', '기본 동작을 다시 선택하세요.', 422)
+        motions = {**AvatarMeshy(self.factory).default_actions(owner), **submitted_motions}
+        payload['motion_actions'] = motions
+        available = {i['action_id'] for i in meshy_actions} if motions else set()
+        if not set(motions) <= set(MOTION_SLOTS) or any(type(v) is not int or v not in available for v in motions.values()):
+            raise PipelineError('invalid_action', '기본 동작을 현재 Meshy 목록에서 다시 선택하세요.', 422)
+        character = self.factory.pipeline.detail(payload['character_id'], owner)
+        source = self.factory.pipeline.artifact(character['id'], owner, 'reference')
+        content = source.read_bytes()
+        source_hash = hashlib.sha256(content).hexdigest()
+        if source_hash != payload['source_sha256']:
+            raise PipelineError('source_changed', '원본 이미지가 바뀌었습니다. 다시 불러오세요.')
+        with Image.open(io.BytesIO(content)) as image:
+            image.verify()
+        blueprint = self.blueprints.read(owner, character['id'])
+        if blueprint['revision'] != payload['blueprint_revision']:
+            raise PipelineError('revision_conflict', '설계가 바뀌었습니다. 다시 불러오세요.')
+        parts = []
+        for slot in slots:
+            layer = {'description': DESCRIPTIONS['hair']} if slot == 'hair' else next(l for l in blueprint['layers'] if l['slot'] == slot)
+            part = {'slot': slot, 'description': layer.get('description', ''),
+                    'design_prompt': design_prompts.get(slot, layer.get('description', '')),
+                    'image': {'status': 'pending'}, 'model': {'status': 'pending'},
+                    'provenance': {'origin': 'generated_part_candidate', 'review': 'pending'}}
+            if slot in fit_profiles:
+                part['fit_profile'] = deepcopy(fit_profiles[slot])
+            if multiview:
+                part['views'] = {view: {'status': 'pending'} for view in generated_views}
+            parts.append(part)
+        reuse_sources = self._reuse_sources(owner, parts, payload.get('reuse_job_id'), character['id'], source_hash)
+        if multiview:
+            from src.services.meshy_options import freeze_options
+            reused_slots = {item['slot'] for item in reuse_sources}
+            for part in parts:
+                if part['slot'] not in reused_slots:
+                    # One submitted setting covers the whole set; each slot keeps its own budget and pose.
+                    part['meshy_options'] = freeze_options(self.factory, owner, payload.get('meshy_options'),
+                                                           part['slot'], prompt_snapshot['meshy_texture'],
+                                                           shared=True)
+        elif payload.get('meshy_options'):
+            raise PipelineError('multiview_required', 'Meshy 7.1 파츠 설정은 다중 시점 파츠 생성에서 사용하세요.', 422)
+        with _LOCK:
+            if replay():
                 return self.factory.get(owner, job_id), False
-            from src.services.studio_prompts import StudioPrompts
-            prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
-            design_prompts = {slot: (submitted_design_prompts or {}).get(slot, prompt_snapshot['parts'][slot])
-                              for slot in DEFAULT_DESIGN_PROMPTS}
-            fit_profiles = normalize_fit_profiles(submitted_fit_profiles, descriptions=design_prompts)
-            for fit_slot, fit_profile in fit_profiles.items():
-                reject_generation_fit_profile(fit_profile, slot=fit_slot)
-            action = capabilities()['next_actions'][0]
-            if not action['enabled']:
-                raise PipelineError('provider_unavailable', action['reason'], 422)
-            slots = payload['slots']
-            if not slots or len(slots) != len(set(slots)) or any(s not in PARTS for s in slots):
-                raise PipelineError('invalid_slots', '중복되지 않은 이미지 파츠를 선택하세요.', 422)
-            if slots != CHARACTER_PART_SLOTS:
-                raise PipelineError('invalid_slots', '몸·머리카락·머리 장식·상의·하의·신발 한 세트를 선택하세요.', 422)
-            submitted_motions = payload.get('motion_actions', {})
-            if not isinstance(submitted_motions, dict):
-                raise PipelineError('invalid_action', '기본 동작을 다시 선택하세요.', 422)
-            from src.services.avatar_meshy import AvatarMeshy, SLOTS as MOTION_SLOTS
-            motions = {**AvatarMeshy(self.factory).default_actions(owner), **submitted_motions}
-            payload['motion_actions'] = motions
-            available = {i['action_id'] for i in meshy_actions} if motions else set()
-            if not set(motions) <= set(MOTION_SLOTS) or any(type(v) is not int or v not in available for v in motions.values()):
-                raise PipelineError('invalid_action', '기본 동작을 현재 Meshy 목록에서 다시 선택하세요.', 422)
-            character = self.factory.pipeline.detail(payload['character_id'], owner)
-            source = self.factory.pipeline.artifact(character['id'], owner, 'reference')
-            content = source.read_bytes()
-            source_hash = hashlib.sha256(content).hexdigest()
-            if source_hash != payload['source_sha256']:
-                raise PipelineError('source_changed', '원본 이미지가 바뀌었습니다. 다시 불러오세요.')
-            with Image.open(io.BytesIO(content)) as image:
-                image.verify()
-            blueprint = self.blueprints.read(owner, character['id'])
-            if blueprint['revision'] != payload['blueprint_revision']:
-                raise PipelineError('revision_conflict', '설계가 바뀌었습니다. 다시 불러오세요.')
-            parts = []
-            for slot in slots:
-                layer = {'description': DESCRIPTIONS['hair']} if slot == 'hair' else next(l for l in blueprint['layers'] if l['slot'] == slot)
-                part = {'slot': slot, 'description': layer.get('description', ''),
-                        'design_prompt': design_prompts.get(slot, layer.get('description', '')),
-                        'image': {'status': 'pending'}, 'model': {'status': 'pending'},
-                        'provenance': {'origin': 'generated_part_candidate', 'review': 'pending'}}
-                if slot in fit_profiles:
-                    part['fit_profile'] = deepcopy(fit_profiles[slot])
-                if multiview:
-                    part['views'] = {view: {'status': 'pending'} for view in generated_views}
-                parts.append(part)
             directory.mkdir(parents=True, exist_ok=True)
             (directory/'source.png').write_bytes(content)
             (directory/'output').mkdir(exist_ok=True)
-            reused = self._reuse_character_parts(owner, directory, parts, payload.get('reuse_job_id'),
-                                                 character['id'], source_hash)
+            reused = self._reuse_character_parts(directory, parts, payload.get('reuse_job_id'), reuse_sources)
             reference_preparation = initial_reference_state(prompts=prompt_snapshot['reference']) if prepare_reference else None
             if default_expressions:
                 from src.services.avatar_expression_pipeline import default_contract
@@ -387,16 +420,6 @@ class AvatarImagePipeline:
                 expression_contract = None
             frozen_production_spec = (production_spec(hair_length, generated_views, fit_profiles=fit_profiles)
                                       if multiview else None)
-            if multiview:
-                from src.services.meshy_options import freeze_options
-                for part in parts:
-                    if part['slot'] not in reused:
-                        # One submitted setting covers the whole set; each slot keeps its own budget and pose.
-                        part['meshy_options'] = freeze_options(self.factory, owner, payload.get('meshy_options'),
-                                                               part['slot'], prompt_snapshot['meshy_texture'],
-                                                               shared=True)
-            elif payload.get('meshy_options'):
-                raise PipelineError('multiview_required', 'Meshy 7.1 파츠 설정은 다중 시점 파츠 생성에서 사용하세요.', 422)
             _write_json(directory/'pipeline.json', {'parts': parts, 'blueprint': blueprint,
                 'production_spec': frozen_production_spec,
                 'fit_profiles': fit_profiles,
@@ -410,7 +433,7 @@ class AvatarImagePipeline:
                 'motion_actions_explicit': bool(submitted_motions),
                 'body_purpose': 'wardrobe_base', 'body_prompt': WARDROBE_BODY_PROMPT,
                 'body_height_m': 1.2,
-                'image_provider': 'openai', 'image_model': capabilities()['image_model'],
+                'image_provider': 'openai', 'image_model': ready['image_model'],
                 'fit_profiles_revision': next(iter(fit_profiles.values()))['revision'],
                 'fit_profiles_sha256': (frozen_production_spec or {}).get('fit_profiles_sha256'),
                 'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
@@ -426,7 +449,7 @@ class AvatarImagePipeline:
                             'body_origin': 'generated_whole_character', 'rig': 'meshy-native', 'bones': None,
                             'head_height': None, 'head_ratio': None, 'height': 1.2,
                             'base_outfit': 'opaque_training_bodysuit'},
-                'image_provider': 'openai', 'image_model': capabilities()['image_model'],
+                'image_provider': 'openai', 'image_model': ready['image_model'],
                 'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
                 'limits': {'image_tasks': (sum(p['image']['status'] == 'pending' for p in parts) * (len(generated_views) if multiview else 1))
                                           + 2 * int(prepare_reference),

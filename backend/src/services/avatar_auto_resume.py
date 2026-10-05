@@ -1,8 +1,8 @@
 """Continue factory stages stopped by a server restart.
 
-Off unless ASSET_AUTO_RESUME opts in, and started only by the scan at startup: a resume can send paid requests that
-were never attempted, so no GET may trigger one. Only stages whose executor process has exited are resumed, through
-the same admitted stage runs as the UI. An unconfirmed paid request is never replayed:
+Off unless ASSET_AUTO_RESUME opts in, and started only by the scan at startup (repeated once admission reopens when it
+met a drain): a resume can send paid requests that were never attempted, so no GET may trigger one. Only stages whose
+executor process has exited are resumed, through the same admitted stage runs as the UI. An unconfirmed paid request is never replayed:
 its stage stays unavailable until the operator retries that request.
 """
 from datetime import datetime, timedelta, timezone
@@ -17,12 +17,13 @@ import time
 from src.services.character_pipeline import PipelineError, read_json
 from src.services.object_storage import child_names
 from src.services.process_identity import state as process_state
-from src.services.runtime_activity import running_task
+from src.services.runtime_activity import RuntimeDraining, draining, running_task
 
 LOGGER = logging.getLogger(__name__)
 RECENT = timedelta(hours=6)
 _scheduled = set()
 _guard = threading.Lock()
+_waiting = None  # The factory whose scan met a drain, scanned again once admission reopens.
 
 
 def opted_in():
@@ -108,40 +109,77 @@ def schedule(factory, owner, job_id):
         _scheduled.add(key)
 
     def run():
+        admitted = refused = False
         try:
             time.sleep(2)  # Let the request that noticed the stop finish first.
             with running_task():
+                admitted = True
                 resume(factory, owner, job_id)
-        except Exception:
-            LOGGER.exception('Auto resume stopped job=%s', job_id)
+        except Exception as exc:
+            refused = isinstance(exc, RuntimeDraining) and not admitted
+            if refused:
+                # Nothing started; the scan after the drain finds this stop again.
+                LOGGER.info('Auto resume waits for admission job=%s', job_id)
+            else:
+                LOGGER.exception('Auto resume stopped job=%s', job_id)
         finally:
             with _guard:
                 _scheduled.discard(key)
+        if refused:
+            _wait_for_admission(factory)
 
     threading.Thread(target=run, name=f'auto-resume-{job_id[:8]}', daemon=True).start()
+
+
+def _scan(factory):
+    time.sleep(5)
+    if draining():
+        # A deployment starts this server with admission closed; nothing could be admitted until it reopens.
+        _wait_for_admission(factory)
+        return
+    for owner in child_names(factory.root):
+        if not owner.isdigit():
+            continue
+        for job_id in child_names(factory.root/owner):
+            if not re.fullmatch(r'[a-f0-9]{24}', job_id):
+                continue
+            try:
+                factory.get(int(owner), job_id)  # Marks jobs whose executor exited.
+                if interrupted_stage(factory, int(owner), job_id):
+                    schedule(factory, int(owner), job_id)
+            except PipelineError as exc:
+                if exc.code != 'not_found':
+                    LOGGER.info('Auto resume scan skipped job=%s code=%s', job_id, exc.code)
+            except Exception:
+                LOGGER.exception('Auto resume scan skipped job=%s', job_id)
+
+
+def _start_scan(factory):
+    threading.Thread(target=lambda: _scan(factory), name='auto-resume-scan', daemon=True).start()
 
 
 def start(factory):
     """Scan once after startup for stages stopped with the previous server."""
     if not enabled():
         return
+    _start_scan(factory)
 
-    def scan():
-        time.sleep(5)
-        for owner in child_names(factory.root):
-            if not owner.isdigit():
-                continue
-            for job_id in child_names(factory.root/owner):
-                if not re.fullmatch(r'[a-f0-9]{24}', job_id):
-                    continue
-                try:
-                    factory.get(int(owner), job_id)  # Marks jobs whose executor exited.
-                    if interrupted_stage(factory, int(owner), job_id):
-                        schedule(factory, int(owner), job_id)
-                except PipelineError as exc:
-                    if exc.code != 'not_found':
-                        LOGGER.info('Auto resume scan skipped job=%s code=%s', job_id, exc.code)
-                except Exception:
-                    LOGGER.exception('Auto resume scan skipped job=%s', job_id)
 
-    threading.Thread(target=scan, name='auto-resume-scan', daemon=True).start()
+def _wait_for_admission(factory):
+    global _waiting
+    with _guard:
+        _waiting = factory
+    # The drain may have been resumed after the refusal and before the line above, with no one left to call reopened().
+    if not draining():
+        reopened()
+
+
+def reopened():
+    """Called once a drain is resumed: repeat a scan that met it. It is the startup scan itself, with the same
+    one-run-per-interruption keys, so it resumes nothing the startup scan would not have."""
+    global _waiting
+    with _guard:
+        factory, _waiting = _waiting, None
+    if factory is not None:
+        LOGGER.info('Auto resume scans again after admission reopened')
+        _start_scan(factory)

@@ -240,6 +240,116 @@ def test_a_job_whose_first_publish_failed_keeps_its_rig_budget(setup, monkeypatc
     assert saved['profile']['rig'] == 'meshy-native' and saved['profile']['height'] == 1.2
 
 
+def test_a_run_whose_pause_was_not_saved_reads_as_stopped_and_can_be_resumed(setup, monkeypatch):
+    from src.services import avatar_variants, run_lock
+    service, factory, payload, _, _, _ = setup
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    job, _ = service.create(1, 'character-parts-unsaved-pause',
+                            {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS})
+    directory = factory.directory(1, job['id'])
+    prepare_body = avatar_variants.prepare_body
+
+    def stop(*args):
+        raise PipelineError('fixture_stop', '고정 중단')
+    monkeypatch.setattr(avatar_variants, 'prepare_body', stop)
+    write = module._write_json
+
+    def refuse_pause(path, value):
+        if path.name == 'job.json' and value.get('status') == 'pipeline_paused':
+            raise OSError('storage unavailable')
+        return write(path, value)
+    monkeypatch.setattr(module, '_write_json', refuse_pause)
+    with pytest.raises(OSError):
+        service.execute(1, job['id'], poll_seconds=0)
+    monkeypatch.setattr(module, '_write_json', write)
+    monkeypatch.setattr(avatar_variants, 'prepare_body', prepare_body)
+    # The storage kept refusing the pause past its retries: the record still says running.
+    assert read_json(directory/'job.json')['status'] == 'pipeline_running'
+    # While a worker of this process holds the job, it runs.
+    assert module._RUN_LOCKS.acquire(str(directory))
+    try:
+        assert factory.get(1, job['id'])['status'] == 'pipeline_running'
+        with pytest.raises(PipelineError) as running:
+            service.resume(1, job['id'])
+        assert running.value.code == 'invalid_state'
+    finally:
+        module._RUN_LOCKS.release(str(directory))
+    # No worker runs it any more: readers see it stopped, and resume takes it.
+    public = factory.get(1, job['id'])
+    assert public['status'] == 'pipeline_paused' and public['error'] and 'interrupted' not in public
+    assert next(action for action in public['next_actions'] if action['id'] == 'resume')['enabled']
+    assert read_json(directory/'job.json')['status'] == 'pipeline_paused'
+    assert service.resume(1, job['id'])['status'] == 'pipeline_queued'
+
+
+def test_a_new_job_reads_its_inputs_outside_the_factory_lock(setup, monkeypatch):
+    from src.services.avatar_meshy import AvatarMeshy
+    from src.services.studio_prompts import StudioPrompts
+    service, factory, payload, _, _, _ = setup
+    held = {}
+
+    def observed(name, function):
+        def call(*args, **kwargs):
+            held[name] = module._LOCK._is_owned()
+            return function(*args, **kwargs)
+        return call
+    monkeypatch.setattr(AvatarMeshy, 'default_actions', observed('default_actions', AvatarMeshy.default_actions))
+    monkeypatch.setattr(StudioPrompts, 'snapshot', observed('prompts', StudioPrompts.snapshot))
+    monkeypatch.setattr(service.blueprints, 'read', observed('blueprint', service.blueprints.read))
+    monkeypatch.setattr(factory.pipeline, 'artifact', observed('source', factory.pipeline.artifact))
+    job, created = service.create(1, 'character-parts-unlocked-reads',
+                                  {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS})
+    assert created and held == {'default_actions': False, 'prompts': False, 'blueprint': False, 'source': False}
+    assert job['status'] == 'pipeline_queued'
+
+
+@pytest.mark.parametrize('same', [True, False])
+def test_a_job_made_by_the_same_key_while_inputs_were_read_is_kept(setup, monkeypatch, same):
+    from src.services.avatar_meshy import AvatarMeshy
+    service, factory, payload, _, _, _ = setup
+    request = {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS}
+    other = request if same else {**request, 'hair_length': 'short'}
+    default_actions = AvatarMeshy.default_actions
+    raced, racing = [], []
+
+    def race(self, owner):
+        if not racing:
+            racing.append(True)
+            # Another request with this key is accepted while this one reads its inputs.
+            raced.append(service.create(1, 'character-parts-raced-key', other))
+        return default_actions(self, owner)
+    monkeypatch.setattr(AvatarMeshy, 'default_actions', race)
+    if same:
+        job, created = service.create(1, 'character-parts-raced-key', request)
+        assert not created and job['id'] == raced[0][0]['id']
+    else:
+        with pytest.raises(PipelineError) as conflict:
+            service.create(1, 'character-parts-raced-key', request)
+        assert conflict.value.code == 'idempotency_conflict'
+    # The job the other request made is left as it made it.
+    directory = factory.directory(1, raced[0][0]['id'])
+    assert read_json(directory/'pipeline.json')['hair_length'] == other.get('hair_length', 'source')
+
+
+def test_a_reused_part_that_changed_after_its_check_is_refused(tmp_path):
+    from src.services.object_storage import StoredPath
+    source, target = StoredPath(tmp_path/'source'), StoredPath(tmp_path/'target')
+    (source/'output').mkdir(parents=True); (target/'output').mkdir(parents=True)
+    (source/'output'/'top-image.png').write_bytes(png())
+    (source/'generated.glb').write_bytes(b'glb')
+    checked = {'slot': 'top', 'image': source/'output'/'top-image.png', 'image_sha256': hashlib.sha256(png()).hexdigest(),
+               'asset': 'asset-1', 'model': source/'generated.glb', 'model_sha256': hashlib.sha256(b'glb').hexdigest(),
+               'task_id': 'task-1'}
+    parts = [{'slot': 'top', 'provenance': {}}]
+    (source/'generated.glb').write_bytes(b'changed')
+    with pytest.raises(PipelineError) as changed:
+        AvatarImagePipeline._reuse_character_parts(target, parts, 'a' * 24, [checked])
+    assert changed.value.code == 'reuse_artifact_changed'
+    (source/'generated.glb').write_bytes(b'glb')
+    assert AvatarImagePipeline._reuse_character_parts(target, parts, 'a' * 24, [checked]) == ['top']
+    assert parts[0]['image']['sha256'] == checked['image_sha256'] and parts[0]['model']['task_id'] == 'task-1'
+
+
 ANSWER = {'data': [{'b64_json': base64.b64encode(png()).decode()}]}
 
 

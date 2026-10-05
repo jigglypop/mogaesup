@@ -1,4 +1,5 @@
 """Local fitting candidates on the original Meshy skeleton; never a visual approval."""
+from contextlib import contextmanager
 from copy import deepcopy
 import json
 import math
@@ -38,6 +39,25 @@ from src.services.avatar_garment_geometry import (
 
 class InputChanged(ValueError):
     """A saved input differs from the one the request was accepted with: nothing is fitted from it."""
+
+
+class SlotFailure(Exception):
+    """A step of the whole assembly failed on one slot's meshes: that slot alone is withdrawn."""
+
+    def __init__(self, slot, error):
+        super().__init__(slot, error)
+        self.slot, self.error = slot, error
+
+
+@contextmanager
+def blame(slot):
+    """An error raised inside is `slot`'s own and is raised again as SlotFailure; a nested step's slot is kept."""
+    try:
+        yield
+    except SlotFailure:
+        raise
+    except Exception as exc:
+        raise SlotFailure(slot, exc) from exc
 
 
 def discard_objects(objects):
@@ -81,9 +101,9 @@ def object_mode():
 
 
 def withdraw(slot, report, exc, code, fitted, *, prefit_paths=None):
-    """A slot that fitted but failed a later step of the assembly (the shoes' final pose, the body crop, the export
-    check): its meshes leave the scene, its receipt says why it is not offered, and the other slots still assemble.
-    `fitted` loses the slot's meshes in place."""
+    """A slot that fitted but failed a later step of the assembly (the shoes' final pose, the body crop, the layering,
+    the export check): its meshes leave the scene, its receipt says why it is not offered, and the other slots still
+    assemble. `fitted` loses the slot's meshes in place."""
     object_mode()
     dropped = [obj for obj in fitted if obj['part_role'] == slot]
     fitted[:] = [obj for obj in fitted if obj['part_role'] != slot]
@@ -203,7 +223,9 @@ def pressed_under(fitted, body, rig):
     outer ones cover the body, as the wardrobe presses any outfit (avatar_wardrobe_coverage): the
     bottom under the top and into boots, low shoes under the bottom's hem, and hair on the head
     under a hat or a raised hood. The exported parts stay as fitted, so they still layer with
-    parts of any other job."""
+    parts of any other job. A failure on one part's meshes raises SlotFailure naming its slot (the
+    outer part whose cover was measured, or the inner part being pressed); one on the body's own
+    surface raises as it is."""
     import numpy as np
     from src.services.avatar_shell_garment import body_arrays
     from src.services.avatar_wardrobe_coverage import (ANCHOR_M, BOOT_SHIN_SHARE, HAIR_ANCHOR_M, HEAD_OUTSIDE_M,
@@ -233,10 +255,11 @@ def pressed_under(fitted, body, rig):
 
     def garment(role):
         if role not in garments:
-            points = gltf(np.concatenate([world(obj)[1] for obj in fitted if obj['part_role'] == role]))
-            if len(points) > 20000:
-                points = points[np.random.default_rng(0).choice(len(points), 20000, replace=False)]
-            garments[role] = points, _covered(skin, normals, points)
+            with blame(role):
+                points = gltf(np.concatenate([world(obj)[1] for obj in fitted if obj['part_role'] == role]))
+                if len(points) > 20000:
+                    points = points[np.random.default_rng(0).choice(len(points), 20000, replace=False)]
+                garments[role] = points, _covered(skin, normals, points)
         return garments[role]
     boot = 'shoes' in roles and bool(shins.any() and garment('shoes')[1][shins].mean() >= BOOT_SHIN_SHARE)
     moves = []
@@ -252,7 +275,8 @@ def pressed_under(fitted, body, rig):
             if inner == 'hair':
                 # A hat's crown or a hood's peak stands well off the scalp (the wardrobe's over).
                 flags = flags.copy()
-                flags[head] |= _covered(skin[head], normals[head], points, outside=HEAD_OUTSIDE_M)
+                with blame(role):
+                    flags[head] |= _covered(skin[head], normals[head], points, outside=HEAD_OUTSIDE_M)
                 # Hair goes under a hat or a raised hood only, never under a hood lying on the back.
                 if not (upper.any() and flags[upper].mean() >= HEAD_SHARE):
                     continue
@@ -267,11 +291,12 @@ def pressed_under(fitted, body, rig):
         if inner == 'hair':
             corners &= head
         for obj in (obj for obj in fitted if obj['part_role'] == inner):
-            local, points, matrix = world(obj)
-            index = nearest(gltf(points), skin, HAIR_ANCHOR_M if inner == 'hair' else ANCHOR_M)
-            index[index >= 0] = np.where(corners[index[index >= 0]], index[index >= 0], -1)
-            moved = points + blender(press(gltf(points), skin, normals, index, corners))
-            moves.append((obj, local, (moved - matrix[:3, 3]) @ np.linalg.inv(matrix[:3, :3]).T))
+            with blame(inner):
+                local, points, matrix = world(obj)
+                index = nearest(gltf(points), skin, HAIR_ANCHOR_M if inner == 'hair' else ANCHOR_M)
+                index[index >= 0] = np.where(corners[index[index >= 0]], index[index >= 0], -1)
+                moved = points + blender(press(gltf(points), skin, normals, index, corners))
+                moves.append((obj, local, (moved - matrix[:3, 3]) @ np.linalg.inv(matrix[:3, :3]).T))
 
     def put(which):
         for obj, local, pressed in moves:
@@ -291,6 +316,25 @@ def mark_shell_coverage(body, slot, covered):
             if index < len(values):
                 values[index] = 1.
         attribute.data.foreach_set('value', values)
+
+
+def coverage_failures(body, garments, rig, spec, profiles, shell_slots):
+    """{slot: exception} for the slots whose body cut raises on its own, once the cut for them all raised. Empty when
+    the body cannot be cut even with nothing worn, or when every slot can be cut alone: then no one slot is to blame.
+    The cut made afterwards for the slots left clears what these trial cuts hid, as a cut after a withdrawal does."""
+    try:
+        mark_body_coverage(body, {}, rig, spec, profiles, shell_slots=())
+    except Exception:
+        traceback.print_exc()
+        return {}
+    failures = {}
+    for slot in [*(slot for slot, meshes in garments.items() if meshes), *shell_slots]:
+        try:
+            mark_body_coverage(body, {slot: garments[slot]} if slot in garments else {}, rig, spec, profiles,
+                               shell_slots=(slot,) if slot in shell_slots else ())
+        except Exception as exc:
+            failures[slot] = exc
+    return failures
 
 
 def rig_signature(rig):
@@ -800,20 +844,84 @@ def run(payload):
                      and part['slot'] not in shell_coverage}
     coverage_profiles = {report['slot']: report.get('coverage') for report in reports
                          if report.get('coverage')}
+
+    def drop(slot, exc, code, report=None):
+        """Withdraw an offered slot from the scene, the body cut, the layering and the exported files."""
+        if report is None:
+            report = next(report for report in reports if report['slot'] == slot and report.get('available', True))
+        withdraw(slot, report, exc, code, fitted, prefit_paths=prefit_paths)
+        shell_coverage.pop(slot, None)
+        garment_meshes.pop(slot, None)
+        coverage_profiles.pop(slot, None)
+        (output/f'{slot}.glb').unlink(missing_ok=True)
     for slot in [slot for slot in ('top', 'bottom', 'shoes') if garment_meshes.get(slot)]:
         try:
             check_crop_region(slot, garment_meshes[slot], rig, spec, coverage_profiles)
         except Exception as exc:
-            report = next(report for report in reports if report['slot'] == slot and report.get('available', True))
-            withdraw(slot, report, exc, 'body_crop_failed', fitted, prefit_paths=prefit_paths)
-            garment_meshes.pop(slot)
-            coverage_profiles.pop(slot, None)
-    for slot, covered in shell_coverage.items():
-        mark_shell_coverage(body, slot, covered)
-    covered_materials, coverage, crop_lines = mark_body_coverage(
-        body, garment_meshes, rig, spec, coverage_profiles, shell_slots=tuple(shell_coverage))
+            drop(slot, exc, 'body_crop_failed')
+    for slot, covered in list(shell_coverage.items()):
+        try:
+            mark_shell_coverage(body, slot, covered)
+        except Exception as exc:
+            drop(slot, exc, 'body_crop_failed')
+    parts = [{'slot': 'body', 'objects': body_names, 'runtime_budget': body_budget}, *reports]
+    # What is offered is settled before anything is drawn, so every render below shows the exported model. A slot the
+    # body cut, the layering or the export check fails on is withdrawn alone; the body is cut and pressed again for the
+    # slots left and exported again with the composed model. A failure no one slot accounts for ends the assembly, as
+    # does a body exported without its skin.
+    rig.data.pose_position = 'POSE'
+    exported = False
+    while True:
+        try:
+            covered_materials, coverage, crop_lines = mark_body_coverage(
+                body, garment_meshes, rig, spec, coverage_profiles, shell_slots=tuple(shell_coverage))
+        except Exception:
+            failures = coverage_failures(body, garment_meshes, rig, spec, coverage_profiles, tuple(shell_coverage))
+            if not failures:
+                raise
+            for slot, exc in failures.items():
+                drop(slot, exc, 'body_crop_failed')
+            continue
+        try:
+            press_bottom, release_bottom = pressed_under(fitted, body, rig)
+        except SlotFailure as failure:
+            drop(failure.slot, failure.error, 'layer_press_failed')
+            continue
+        if exported:
+            export(output/'body.glb', [metric_frame, rig, *body])
+        export(output/'model.glb', [metric_frame, rig, *body, *fitted])
+        strip_covered_primitives(output/'model.glb')
+        if not exported:
+            export_roles = [('body', body), *[(p['slot'], [o for o in fitted if o['part_role'] == p['slot']])
+                                              for p in reports if p.get('available', True)]]
+            for role, meshes in export_roles:
+                if role in prefit_paths:
+                    # Preserve the sealed fitted slot byte-for-byte. The composed model
+                    # above uses the same geometry/UV/weights attached to the same rig.
+                    shutil.copyfile(prefit_paths[role], output/f'{role}.glb')
+                else:
+                    export(output/f'{role}.glb', [metric_frame, rig, *meshes])
+            exported = True
+        # Every offered slot is skinned in the composed model.
+        doc, _ = parse_glb((output/'model.glb').read_bytes(), strict=True)
+        broken = []
+        for part in parts:
+            if not part.get('available', True):
+                part['nodes'] = []
+                continue
+            try:
+                seal_part(output, doc, part)
+            except Exception as exc:
+                if part['slot'] == 'body':
+                    raise
+                broken.append((part, exc))
+        if not broken:
+            break
+        for part, exc in broken:
+            drop(part['slot'], exc, 'export_check_failed', part)
+    # The stills show the rest pose; the exports above and the motion render below use the pose.
+    rig.data.pose_position = 'REST'; bpy.context.view_layer.update()
     hidden = hide_covered_materials(covered_materials)
-    press_bottom, release_bottom = pressed_under(fitted, body, rig)
     press_bottom()
     camera, view_center = camera_setup(spec['body_height_m'])
     # How the product renders frame the body: the wardrobe crops part previews from the front render with it.
@@ -872,47 +980,6 @@ def run(payload):
         obj.hide_render = hidden_before
     release_bottom()
     rig.data.pose_position = 'POSE'
-    export(output/'model.glb', [metric_frame, rig, *body, *fitted])
-    strip_covered_primitives(output/'model.glb')
-    export_roles = [('body', body), *[(p['slot'], [o for o in fitted if o['part_role'] == p['slot']])
-                                      for p in reports if p.get('available', True)]]
-    for role, meshes in export_roles:
-        if role in prefit_paths:
-            # Preserve the sealed fitted slot byte-for-byte. The composed model
-            # above uses the same geometry/UV/weights attached to the same rig.
-            shutil.copyfile(prefit_paths[role], output/f'{role}.glb')
-        else:
-            export(output/f'{role}.glb', [metric_frame, rig, *meshes])
-    parts = [{'slot': 'body', 'objects': body_names, 'runtime_budget': body_budget}, *reports]
-    # Every offered slot is skinned in the composed model. One that is not is withdrawn alone: the body is cut again
-    # for the slots left and exported again with the composed model. A body without its skin ends the assembly.
-    while True:
-        doc, _ = parse_glb((output/'model.glb').read_bytes(), strict=True)
-        broken = []
-        for part in parts:
-            if not part.get('available', True):
-                part['nodes'] = []
-                continue
-            try:
-                seal_part(output, doc, part)
-            except Exception as exc:
-                if part['slot'] == 'body':
-                    raise
-                broken.append((part, exc))
-        if not broken:
-            break
-        for part, exc in broken:
-            withdraw(part['slot'], part, exc, 'export_check_failed', fitted, prefit_paths=prefit_paths)
-            shell_coverage.pop(part['slot'], None)
-            garment_meshes.pop(part['slot'], None)
-            coverage_profiles.pop(part['slot'], None)
-            (output/f'{part["slot"]}.glb').unlink(missing_ok=True)
-        covered_materials, coverage, crop_lines = mark_body_coverage(
-            body, garment_meshes, rig, spec, coverage_profiles, shell_slots=tuple(shell_coverage))
-        export(output/'body.glb', [metric_frame, rig, *body])
-        export(output/'model.glb', [metric_frame, rig, *body, *fitted])
-        strip_covered_primitives(output/'model.glb')
-        press_bottom, release_bottom = pressed_under(fitted, body, rig)
     animation = rig.animation_data
     motion = None
     for track in animation.nla_tracks if animation else []:

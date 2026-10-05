@@ -429,13 +429,26 @@ def test_a_read_that_overlaps_a_write_does_not_keep_the_old_bytes(bucket, s3, mo
 @pytest.mark.parametrize('race', ['exists', 'in_progress'])
 def test_an_exclusive_create_that_loses_the_race_is_a_file_exists_error(bucket, s3, monkeypatch, race):
     path = bucket / 'avatar-factory' / '1' / JOB / 'lease.json'
+    monkeypatch.setattr(object_storage, '_CONFLICT_DELAYS', (0, 0, 0, 0))
     if race == 'exists':
         # Another writer stored it after this one looked (412 Precondition Failed).
         s3.put(key(JOB, 'lease.json'), b'{"n": 0}')
         monkeypatch.setattr(StoredPath, 'is_file', lambda self: False)
     else:
-        # Another conditional write of the key is in progress (409 Conditional Request Conflict).
+        # Another conditional write of the key is in progress (409 Conditional Request Conflict) and stores the object
+        # while this one waits: the write sent again finds it (412).
         s3.conditional_writes.add(key(JOB, 'lease.json'))
+        put_object = s3.put_object
+
+        def other_writer_finishes(**kwargs):
+            try:
+                return put_object(**kwargs)
+            finally:
+                if key(JOB, 'lease.json') in s3.conditional_writes:
+                    s3.conditional_writes.discard(key(JOB, 'lease.json'))
+                    s3.put(key(JOB, 'lease.json'), b'{"n": 0}')
+
+        monkeypatch.setattr(s3, 'put_object', other_writer_finishes)
     with pytest.raises(FileExistsError):
         with path.open('xb') as stream:
             stream.write(b'{"n": 1}')
@@ -503,12 +516,14 @@ def test_an_attempt_whose_input_delete_is_refused_stays_retryable(bucket, s3):
         character_jobs.archive_attempt(run, 'retry')
     assert character_jobs.state(run)['status'] == 'FAILED'
     assert (run / 'rig-input.glb').is_file() and (run / 'rigging-result.json').is_file()
-    # Once the role may delete, the same retry archives the attempt and frees the run for a new submission.
+    # Once the role may delete, the same retry archives the attempt and frees the run for a new submission. It reuses
+    # the copy the refused retry made rather than piling up another one.
     s3.denied_deletes.clear()
-    assert character_jobs.archive_attempt(run, 'retry') == 2
+    assert character_jobs.archive_attempt(run, 'retry') == 1
     assert not (run / 'character.json').is_file() and not (run / 'rig-input.glb').is_file()
-    archived = json.loads((run / 'attempts' / '2' / 'archive.json').read_text(encoding='utf-8'))
-    assert archived['task_id'] == 'task-1' and (run / 'attempts' / '2' / 'rig-input.glb').read_bytes() == b'glTF input'
+    archived = json.loads((run / 'attempts' / '1' / 'archive.json').read_text(encoding='utf-8'))
+    assert archived['task_id'] == 'task-1' and (run / 'attempts' / '1' / 'rig-input.glb').read_bytes() == b'glTF input'
+    assert not (run / 'attempts' / '2').exists()
 
 
 def test_workspace_inputs_are_compared_and_written_outside_the_shared_lock(bucket, s3, monkeypatch):

@@ -4,15 +4,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from lock_probe import lock_free
 from native_assembly_fixture import JOB, VERSION, seed_native_assembly
 from src.api.avatar_factory import get_factory, router
 from src.api.characters import pipeline_error_handler
 from src.auth import UserContext, get_current_user
+from src.services import asset_delivery, avatar_native_reviews
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import digest
 from src.services.avatar_fitting_management import FittingManagement
 from src.services.avatar_native_reviews import AvatarNativeReviews
 from src.services.character_pipeline import PipelineError, read_json
+from src.services.run_lock import run_lock
 
 
 @pytest.fixture
@@ -137,3 +140,63 @@ def test_frozen_expression_application_must_finish_before_review(setup):
     _write_json(directory.parent.parent/'pipeline.json', {
         'native_assembly_version': VERSION, 'expression_reuse': {'expressions': [{'source_id': 'saved'}]}})
     assert submit(client, directory).json()['error']['code'] == 'expression_pending'
+
+
+def test_the_files_are_hashed_and_the_model_inspected_while_the_process_lock_is_free(setup, monkeypatch):
+    client, _, directory, _ = setup
+    hashed, inspected = [], []
+    monkeypatch.setattr(avatar_native_reviews, 'digest', lambda path: (hashed.append(lock_free()), digest(path))[1])
+    real_inspect = asset_delivery.inspect_glb
+    monkeypatch.setattr(asset_delivery, 'inspect_glb',
+                        lambda content, **kwargs: (inspected.append(lock_free()), real_inspect(content, **kwargs))[1])
+    response = submit(client, directory)
+    assert response.status_code == 200, response.text
+    assert response.json()['review']['status'] == 'approved'
+    assert hashed and all(hashed) and inspected == [True]
+
+
+def test_a_selection_made_while_the_files_are_hashed_is_not_reviewed(setup, monkeypatch):
+    client, _, directory, _ = setup
+
+    def select_meanwhile(path):
+        _write_json(directory.parent/'current.json', {'version': 'd'*24})
+        return digest(path)
+    monkeypatch.setattr(avatar_native_reviews, 'digest', select_meanwhile)
+    response = submit(client, directory)
+    assert response.status_code == 409 and response.json()['error']['code'] == 'assembly_changed'
+    assert not (directory/'reviews.json').exists()
+
+
+def test_expressions_frozen_while_the_model_is_inspected_stop_the_review(setup, monkeypatch):
+    client, _, directory, _ = setup
+    real_inspect = asset_delivery.inspect_glb
+
+    def refit_meanwhile(content, **kwargs):
+        _write_json(directory.parent.parent/'pipeline.json', {
+            'native_assembly_version': VERSION, 'expression_reuse': {'expressions': [{'source_id': 'saved'}]}})
+        return real_inspect(content, **kwargs)
+    monkeypatch.setattr(asset_delivery, 'inspect_glb', refit_meanwhile)
+    response = submit(client, directory)
+    assert response.status_code == 409 and response.json()['error']['code'] == 'expression_pending'
+    assert not (directory/'reviews.json').exists()
+
+
+def test_an_unreadable_review_record_is_an_error_of_its_own_not_a_busy_review(setup):
+    client, _, directory, _ = setup
+    (directory/'reviews.json').write_text('{"latest": ', encoding='utf-8')
+    with pytest.raises(ValueError) as error:
+        submit(client, directory)
+    assert not isinstance(error.value, PipelineError)
+    # The review lock was released: once the record is readable again the review is written.
+    (directory/'reviews.json').unlink()
+    response = submit(client, directory)
+    assert response.status_code == 200, response.text
+
+
+def test_a_review_that_holds_the_lock_makes_another_one_wait(setup):
+    client, _, directory, _ = setup
+    with run_lock(directory/'review-write', 0, blender=False):
+        response = submit(client, directory)
+    assert response.status_code == 409 and response.json()['error']['code'] == 'review_busy'
+    assert not (directory/'reviews.json').exists()
+    assert submit(client, directory).status_code == 200

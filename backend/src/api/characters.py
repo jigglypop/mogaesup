@@ -20,6 +20,7 @@ from src.services.character_pipeline import CharacterPipeline, PipelineError
 router = APIRouter(prefix="/characters", tags=["characters"])
 # An action's input is stored with its receipt (operation.json): face selections are bounded in total, not per part only.
 MAX_SELECTED_FACES = 300_000
+MAX_SELECTIONS = 100
 MAX_STORED_INPUT_BYTES = 4 * 1024 * 1024
 
 
@@ -50,7 +51,20 @@ class FaceSelection(Part):
 class SegmentationInput(StrictModel):
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_artifact_id: Literal["local_fallback", "imported", "rigged", "generated", "animated", "parts_model"] | None = None
-    selections: list[FaceSelection] = Field(min_length=1, max_length=100)
+    selections: list[FaceSelection] = Field(min_length=1, max_length=MAX_SELECTIONS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def bounded_before_conversion(cls, data):
+        # Summed on the raw lists: 100 lists each within its own cap would otherwise become 30 million ints first.
+        # A longer selection list is refused by its own cap, without this loop.
+        selections = data.get("selections") if isinstance(data, dict) else None
+        if isinstance(selections, (list, tuple)) and len(selections) <= MAX_SELECTIONS:
+            total = sum(len(selection["faces"]) for selection in selections
+                        if isinstance(selection, dict) and isinstance(selection.get("faces"), (list, tuple)))
+            if total > MAX_SELECTED_FACES:
+                raise ValueError("too many selected faces")
+        return data
 
     @model_validator(mode="after")
     def bounded(self):

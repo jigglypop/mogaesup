@@ -373,50 +373,64 @@ class PartBatches:
         require_request_key(key)
         batch = request_job_id(owner, 'part-batch', key)
         path = self._path(owner, batch); fingerprint = _hash(payload)
-        if not read_json(path):
-            from src.services.meshy_status import require_credits
-            require_credits(len(payload['items']))
-            if len(payload['items']) > 48:
-                raise PipelineError('batch_too_large', '일괄 작업은 최대 48개입니다.', 422)
-            # Up to 144 images are read and decoded: not under the process lock and the batch lease.
-            _validate_batch_images(self.factory, owner, payload['items'])
+        old = read_json(path)
+        if old:
+            # A replay: the request is answered from its record, its images are not read again.
+            if old['fingerprint'] != fingerprint:
+                raise PipelineError('idempotency_conflict', '접수한 일괄 작업 입력이 다릅니다.', 409)
+            return self._public(owner, old), False
+        from src.services.meshy_status import require_credits
+        require_credits(len(payload['items']))
+        if len(payload['items']) > 48:
+            raise PipelineError('batch_too_large', '일괄 작업은 최대 48개입니다.', 422)
+        # Up to 144 images are read and decoded, and the base body is read and hashed: not under the process lock and
+        # the batch lease.
+        _validate_batch_images(self.factory, owner, payload['items'])
+        base_receipt = self._base_receipt(owner, payload)
         with _LOCK, _batch_lease(self.root(owner, batch)):
             old = read_json(path)
-            if old:
-                if old['fingerprint'] != fingerprint:
-                    raise PipelineError('idempotency_conflict', '접수한 일괄 작업 입력이 다릅니다.', 409)
-                return self._public(owner, old), False
-            base_receipt = self._base_receipt(owner, payload)
-            prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
-            frozen_context = {'prompt_snapshot': prompt_snapshot,
-                'meshy_options': {'hair': freeze_options(self.factory, owner, payload['meshy_options'],
-                                                         'hair', prompt_snapshot['meshy_texture'])}}
-            if payload.get('redraw') is not None:
-                from src.services.avatar_hair_redraw import contract
-                from src.services.avatar_openai_images import DEFAULT_BASE
-                frozen_context['hair_redraw_contract'] = contract(**payload['redraw'])
-                available = capabilities()
-                if not available['image_configured']:
-                    raise PipelineError('image_provider_unavailable', '고화질 다시 그리기에는 이미지 서비스 연결이 필요합니다.', 503)
-                frozen_context['image_settings'] = {'image_provider': 'openai', 'image_model': available['image_model'],
-                    'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/')}
-            # Persist the full frozen batch before accepting any child. The worker uses
-            # deterministic child keys, so a crash can resume without a second request.
-            children = []
-            for index, source in enumerate(payload['items']):
-                child_key = f'{batch}-{index:03}'
-                job_id = request_job_id(owner, 'variant', child_key)
-                children.append({'index': index, 'name': source['name'], 'status': 'queued',
-                                 'key': child_key, 'job_id': job_id, 'task_id': None, 'error': None})
-            record = {'id': batch, 'fingerprint': fingerprint, 'input': payload,
-                      'base_job_id': payload['base_job_id'], 'base_version': payload['base_version'],
-                      'base_receipt': base_receipt, 'concurrency': payload['concurrency'],
-                      'budget': {'jobs': len(children), 'image_tasks_each': (3 if payload['redraw'].get('worn') else 4) if payload.get('redraw') is not None else 0, 'meshy_tasks_each': 1,
-                                 'meshy_rig_tasks_each': 0, 'meshy_animation_tasks_each': 0},
-                      'frozen_context': frozen_context, 'status': 'accepted', 'created_at': now(),
-                      'updated_at': now(), 'error': None, 'items': children}
-            _write_json(path, record)
+            if not old:
+                record = self._accept(owner, batch, payload, fingerprint, base_receipt)
+        if old:
+            # The same request was accepted meanwhile.
+            if old['fingerprint'] != fingerprint:
+                raise PipelineError('idempotency_conflict', '접수한 일괄 작업 입력이 다릅니다.', 409)
+            return self._public(owner, old), False
         return self._public(owner, record), True
+
+    def _accept(self, owner, batch, payload, fingerprint, base_receipt):
+        """Freeze and save a new batch record (under the process lock and the batch lease)."""
+        path = self._path(owner, batch)
+        prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
+        frozen_context = {'prompt_snapshot': prompt_snapshot,
+            'meshy_options': {'hair': freeze_options(self.factory, owner, payload['meshy_options'],
+                                                     'hair', prompt_snapshot['meshy_texture'])}}
+        if payload.get('redraw') is not None:
+            from src.services.avatar_hair_redraw import contract
+            from src.services.avatar_openai_images import DEFAULT_BASE
+            frozen_context['hair_redraw_contract'] = contract(**payload['redraw'])
+            available = capabilities()
+            if not available['image_configured']:
+                raise PipelineError('image_provider_unavailable', '고화질 다시 그리기에는 이미지 서비스 연결이 필요합니다.', 503)
+            frozen_context['image_settings'] = {'image_provider': 'openai', 'image_model': available['image_model'],
+                'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/')}
+        # Persist the full frozen batch before accepting any child. The worker uses
+        # deterministic child keys, so a crash can resume without a second request.
+        children = []
+        for index, source in enumerate(payload['items']):
+            child_key = f'{batch}-{index:03}'
+            job_id = request_job_id(owner, 'variant', child_key)
+            children.append({'index': index, 'name': source['name'], 'status': 'queued',
+                             'key': child_key, 'job_id': job_id, 'task_id': None, 'error': None})
+        record = {'id': batch, 'fingerprint': fingerprint, 'input': payload,
+                  'base_job_id': payload['base_job_id'], 'base_version': payload['base_version'],
+                  'base_receipt': base_receipt, 'concurrency': payload['concurrency'],
+                  'budget': {'jobs': len(children), 'image_tasks_each': (3 if payload['redraw'].get('worn') else 4) if payload.get('redraw') is not None else 0, 'meshy_tasks_each': 1,
+                             'meshy_rig_tasks_each': 0, 'meshy_animation_tasks_each': 0},
+                  'frozen_context': frozen_context, 'status': 'accepted', 'created_at': now(),
+                  'updated_at': now(), 'error': None, 'items': children}
+        _write_json(path, record)
+        return record
 
     def get(self, owner, batch):
         record = read_json(self._path(owner, batch))
@@ -446,15 +460,20 @@ class PartBatches:
         return {'items': sorted(items, key=lambda value: value['created_at'], reverse=True)}
 
     def resume(self, owner, batch):
-        with _LOCK, _batch_lease(self.root(owner, batch)):
-            record = read_json(self._path(owner, batch))
-            if not record:
-                raise PipelineError('not_found', '일괄 작업을 찾을 수 없습니다.', 404)
-            if record.get('base_receipt') != self._base_receipt(owner, record['input']):
-                raise PipelineError('base_changed', '접수한 기준 몸이 변경되었습니다.', 409)
-            public = self._public(owner, record)
-            if public['status'] == 'complete' or not public['can_resume']:
-                return public, False
+        root = self.root(owner, batch)
+        record = read_json(self._path(owner, batch))
+        if not record:
+            raise PipelineError('not_found', '일괄 작업을 찾을 수 없습니다.', 404)
+        # The base and every child are read and their files hashed before the process lock and the batch lease are
+        # taken; under them the batch record is only seen unchanged and written.
+        if record.get('base_receipt') != self._base_receipt(owner, record['input']):
+            raise PipelineError('base_changed', '접수한 기준 몸이 변경되었습니다.', 409)
+        public = self._public(owner, record)
+        if public['status'] == 'complete' or not public['can_resume']:
+            return public, False
+        with _LOCK, _batch_lease(root):
+            if read_json(self._path(owner, batch)) != record:
+                raise PipelineError('worker_active', '같은 일괄 작업을 다른 실행에서 처리 중입니다.', 409)
             record.update(status='accepted', process=None, error=None, resume_requested_at=now())
             self._save(owner, record)
         return self.get(owner, batch), True
@@ -527,8 +546,12 @@ class PartBatches:
                     future.result()
 
             def finish():
+                # The children are read and their files hashed outside the process lock and the batch lease. A record
+                # that changed meanwhile fails this attempt, and final_write reads it again.
+                current = read_json(path); public = self._public(owner, current)
                 with _LOCK, _batch_lease(self.root(owner, batch)):
-                    current = read_json(path); public = self._public(owner, current)
+                    if read_json(path) != current:
+                        raise PipelineError('worker_active', '같은 일괄 작업을 다른 실행에서 처리 중입니다.', 409)
                     current.update(status='complete' if public['completed'] == len(current['items']) else 'paused',
                                    process=None, error=None if public['completed'] == len(current['items'])
                                    else '완료되지 않은 헤어 작업을 저장했습니다. 이어가기로 계속하세요.')

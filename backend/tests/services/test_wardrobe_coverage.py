@@ -79,7 +79,7 @@ def describe(library, text):
 def reaching_the_legs(library):
     """The coverage a long top has once computed: it reaches the lower thighs, so it would take the bottom off."""
     body_sha = library.file_sha(BODY, BODY_VERSION, 'body')
-    put(library.wardrobe.library.root/'wardrobe-coverage'/f"{body_sha[:20]}-{library.file_sha(PART, V1, 'top')[:20]}-v11.json",
+    put(library.wardrobe.library.root/'wardrobe-coverage'/f"{body_sha[:20]}-{library.file_sha(PART, V1, 'top')[:20]}-v12.json",
         {'slot': 'top', 'covers_bottom': True})
 
 

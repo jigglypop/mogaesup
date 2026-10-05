@@ -62,6 +62,7 @@ class FakeGateway:
         self.keys = {}
         self.created = 0
         self.ready_version = VERSION
+        self.body_version = VERSION  # The version the wardrobe has the body registered at.
         self.listed = {}
         self.post_answers = []
 
@@ -73,8 +74,8 @@ class FakeGateway:
         if request.method != 'GET':
             return httpx.Response(405, json={'code': 'not_found', 'message': '찾을 수 없습니다.'})
         if path == '/api/avatar-factory/wardrobe/bodies':
-            return httpx.Response(200, json={'revision': 'r1', 'default': {'job_id': BODY, 'version': VERSION}, 'bodies': [
-                {'job_id': BODY, 'version': VERSION, 'name': '모개', 'body_type': 'female', 'is_default': True, 'part_jobs': 0}]})
+            return httpx.Response(200, json={'revision': 'r1', 'default': {'job_id': BODY, 'version': self.body_version}, 'bodies': [
+                {'job_id': BODY, 'version': self.body_version, 'name': '모개', 'body_type': 'female', 'is_default': True, 'part_jobs': 0}]})
         if path == f'/api/avatar-factory/jobs/{BODY}':
             return httpx.Response(200, json={'id': BODY, 'status': 'review_required', 'ready_version': self.ready_version})
         if path == f'/api/avatar-factory/wardrobe/bodies/{BODY}/parts':
@@ -299,14 +300,15 @@ def test_design_ids_stay_with_their_names_and_every_design_is_plain_text():
 def test_start_forwards_the_key_and_a_replay_gets_the_same_job(studio, gateway):
     first = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
     again = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
-    assert first['ok'] and again['data']['job_id'] == first['data']['job_id']
+    assert first['ok'] and again['data']['job_id'] == first['data']['job_id'] and again['replayed']
+    assert again['data'] == {**first['data'], 'status': 'pipeline_queued'}
     assert gateway.created == 1
-    posts = gateway.posts()
-    assert [post.url.path for post in posts] == [SINGLE_PART]*2
-    assert {post.headers['idempotency-key'] for post in posts} == {'garment-key-0001'}
-    assert all(post.headers['cookie'] == 'mogaesup_session='+SESSION and post.headers['origin'] == 'http://localhost:5173'
-               for post in posts)
-    assert posts[0].content == posts[1].content
+    # The accepted job is read again; nothing more is sent under its key.
+    post, = gateway.posts()
+    assert post.url.path == SINGLE_PART and post.headers['idempotency-key'] == 'garment-key-0001'
+    assert post.headers['cookie'] == f'__Host-mogaesup_session={SESSION}; mogaesup_session={SESSION}'
+    assert post.headers['origin'] == 'http://localhost:5173'
+    assert gateway.requests[-1].method == 'GET' and gateway.requests[-1].url.path.endswith(first['data']['job_id'])
     assert studio.start(designed(BLOUSON)[0], 'garment-key-0002')['data']['job_id'] != first['data']['job_id']
     assert gateway.created == 2
     assert SESSION not in json.dumps([first, again])
@@ -445,7 +447,9 @@ def test_queue_state_lives_in_one_file_per_origin_under_the_repository_data_dire
     (409, {'error': {'code': 'base_changed', 'message': '기본 몸 변경'}}, 'base_changed', 'failed'),
     (422, {'error': {'code': 'insufficient_credits', 'message': '크레딧 부족'}}, 'insufficient_credits', 'pending'),
     (429, {'code': 'factory_budget', 'message': '한도 소진'}, 'factory_budget', 'pending'),
-    (503, {'detail': '작업 수락이 중지되어 있습니다. 잠시 후 다시 시도하세요.'}, 'draining', 'pending'),
+    (503, {'detail': '작업 수락이 중지되어 있습니다. 잠시 후 다시 시도하세요.', 'code': 'draining'}, 'draining', 'pending'),
+    # The gateway's answer when the character server refused its credentials (401/403): nothing was taken.
+    (502, {'code': 'factory_auth', 'message': '캐릭터 서버가 이 서버의 인증을 받지 않았습니다.'}, 'factory_auth', 'pending'),
 ])
 def test_the_first_refusal_stops_the_advance(studio, gateway, status, answer, code, item_state):
     queued = studio.enqueue(designed(BLOUSON, SKIRT, SNEAKERS), 'enqueue-key-01')['queued']
@@ -600,10 +604,309 @@ def test_cli_needs_both_flags_and_a_valid_origin(monkeypatch, capsys):
 
 
 def test_drain_refusal_keeps_its_code_for_existing_tools():
-    client = StudioClient('http://localhost:8080', SESSION, writable=True,
-        transport=httpx.MockTransport(lambda request: httpx.Response(503, json={'detail': '작업 수락이 중지되어 있습니다.'})))
+    client = StudioClient('http://localhost:8080', SESSION, writable=True, transport=httpx.MockTransport(
+        lambda request: httpx.Response(503, json={'detail': '작업 수락이 중지되어 있습니다.', 'code': 'draining'})))
     try:
         result = client.action('char-'+'b'*12, 'inspect_model', 'r1', 'request-1234', {})
         assert result == {'ok': False, 'status': 503, 'error': {'code': 'draining', 'message': 'The API refused this request'}}
     finally:
         client.close()
+
+
+def test_a_503_that_is_not_a_drain_leaves_a_garment_uncertain(studio, gateway):
+    # The character server's authentication settings answer 503 with a detail only; it does not say nothing was taken.
+    unexplained = (503, {'detail': 'Authentication is not configured'})
+    queued = studio.enqueue(designed(BLOUSON, SKIRT), 'enqueue-key-01')['queued']
+    gateway.post_answers = [unexplained]
+    result = studio.advance(3, 'advance-key-01')
+    assert result['stopped'] == {'kind': 'uncertain', 'code': 'api_refused', 'status': 503, 'item': queued[0]['item']}
+    assert items(studio)[queued[0]['item']]['state'] == 'uncertain'
+    studio.advance(3, 'advance-key-02')
+    keys = [post.headers['idempotency-key'] for post in gateway.posts()]
+    assert len(keys) == 2 and len(set(keys)) == 2  # The uncertain garment is not sent again on its own.
+    gateway.post_answers = [unexplained]
+    started = studio.start(designed(HOODIE)[0], 'garment-key-0001')
+    assert started['outcome'] == 'uncertain' and 'same idempotency_key' in started['error']['message']
+
+
+# start_garment keeps its request by key ---------------------------------------------
+
+def saved_starts(studio):
+    return json.loads(studio.queue_path.read_text(encoding='utf-8'))['starts']
+
+
+def test_start_saves_its_request_and_key_before_the_post(studio, gateway, monkeypatch):
+    sent = []
+    real_post = studio._post
+
+    def post(request, key):
+        saved = saved_starts(studio)[key]
+        assert saved['state'] == 'submitting' and saved['request'] == request  # On disk before the paid POST.
+        sent.append(request)
+        return real_post(request, key)
+    monkeypatch.setattr(studio, '_post', post)
+    result = studio.start(designed(SKIRT)[0], 'garment-key-0001')
+    assert result['ok'] and len(sent) == 1
+    saved = saved_starts(studio)['garment-key-0001']
+    assert saved['state'] == 'accepted' and saved['job_id'] == result['data']['job_id']
+    assert SESSION not in studio.queue_path.read_text(encoding='utf-8')
+
+
+def test_a_start_replay_sends_the_saved_request_after_the_body_and_catalog_change(gateway, tmp_path):
+    catalog = tmp_path/'styles.json'
+    catalog.write_text(json.dumps(CATALOG, ensure_ascii=False), encoding='utf-8')
+    studio = make_studio(gateway, tmp_path)
+    studio.catalog_path = catalog
+    try:
+        gateway.post_answers = ['lost']
+        lost = studio.start(designed(HOODIE)[0], 'garment-key-0003')
+        assert lost['outcome'] == 'uncertain' and gateway.created == 1
+        # Meanwhile the body is registered again at another version and the catalog's brief is rewritten.
+        gateway.body_version = gateway.ready_version = 'd'*24
+        changed = {**CATALOG, 'garments': [{**item, 'brief': item['brief']+' Rewritten.'} for item in CATALOG['garments']]}
+        catalog.write_text(json.dumps(changed, ensure_ascii=False), encoding='utf-8')
+        reads = len(gateway.requests)
+        recovered = studio.start(designed(HOODIE)[0], 'garment-key-0003')
+        assert recovered['ok'] and recovered['data']['base_version'] == VERSION and gateway.created == 1
+        first, again = gateway.posts()
+        assert again.content == first.content and again.headers['idempotency-key'] == 'garment-key-0003'
+        assert [request.method for request in gateway.requests[reads:]] == ['POST']  # No body or catalog lookup.
+    finally:
+        studio.client.close()
+
+
+def test_a_start_key_is_bound_to_its_garment(studio, gateway):
+    assert studio.start(designed(BLOUSON)[0], 'garment-key-0001')['ok']
+    gateway.post_answers = ['lost']
+    assert studio.start(designed(SKIRT)[0], 'garment-key-0002')['outcome'] == 'uncertain'
+    posts = len(gateway.posts())
+    for key, other in (('garment-key-0001', SKIRT), ('garment-key-0002', BLOUSON)):
+        assert studio.start(designed(other)[0], key)['error']['code'] == 'idempotency_conflict'
+    brief = {'body_job_id': BODY, 'slot': 'top', 'name': '셔츠', 'brief': 'Navy shirt with a white collar'}
+    assert studio.start(brief, 'garment-key-0002')['error']['code'] == 'idempotency_conflict'
+    assert len(gateway.posts()) == posts and gateway.created == 2
+
+
+def test_an_interrupted_start_is_sent_again_as_saved_by_a_later_process(gateway, tmp_path, monkeypatch):
+    studio = make_studio(gateway, tmp_path)
+
+    def interrupted(request, key):
+        gateway.accept(key, request)  # The studio took it; the process ended before the answer.
+        raise KeyboardInterrupt
+    monkeypatch.setattr(studio, '_post', interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    studio.client.close()
+    assert saved_starts(studio)['garment-key-0001']['state'] == 'submitting'
+    later = make_studio(gateway, tmp_path)
+    try:
+        gateway.body_version = gateway.ready_version = 'd'*24
+        recovered = later.start(designed(BLOUSON)[0], 'garment-key-0001')
+        assert recovered['ok'] and gateway.created == 1 and recovered['data']['base_version'] == VERSION
+        record = saved_starts(later)['garment-key-0001']
+        assert record['state'] == 'accepted' and record['was_uncertain']
+    finally:
+        later.client.close()
+
+
+def test_a_refused_start_is_sent_again_under_its_key(studio, gateway):
+    gateway.post_answers = [(429, {'code': 'factory_budget', 'message': '한도 소진'})]
+    refused = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    assert refused['outcome'] == 'refused' and saved_starts(studio)['garment-key-0001']['state'] == 'refused'
+    again = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    first, second = gateway.posts()
+    assert again['ok'] and first.content == second.content and gateway.created == 1
+
+
+def test_start_keeps_requests_without_a_definite_answer(studio, gateway, monkeypatch):
+    monkeypatch.setattr('src.studio_garments.MAX_STARTS', 2)
+    assert studio.start(designed(BLOUSON)[0], 'garment-key-0001')['ok']
+    gateway.post_answers = ['lost']
+    studio.start(designed(SKIRT)[0], 'garment-key-0002')
+    assert studio.start(designed(HOODIE)[0], 'garment-key-0003')['ok']  # The accepted first one is forgotten.
+    assert set(saved_starts(studio)) == {'garment-key-0002', 'garment-key-0003'}
+    gateway.post_answers = ['lost']
+    studio.start(designed(JOGGERS)[0], 'garment-key-0004')
+    posts = len(gateway.posts())
+    assert studio.start(designed(SNEAKERS)[0], 'garment-key-0005')['error']['code'] == 'queue_full'
+    assert len(gateway.posts()) == posts and set(saved_starts(studio)) == {'garment-key-0002', 'garment-key-0004'}
+
+
+def test_a_queue_file_with_broken_start_records_is_left_alone(studio, gateway):
+    studio.enqueue(designed(BLOUSON), 'enqueue-key-01')
+    state = json.loads(studio.queue_path.read_text(encoding='utf-8'))
+    state['starts'] = {'garment-key-0001': {'state': 'accepted', 'fingerprint': 'x', 'request': {}}}
+    broken = json.dumps(state)
+    studio.queue_path.write_text(broken, encoding='utf-8')
+    assert studio.start(designed(BLOUSON)[0], 'garment-key-0001')['error']['code'] == 'queue_unreadable'
+    assert studio.queue_path.read_text(encoding='utf-8') == broken and gateway.posts() == []
+
+
+# A queue file that cannot be written -----------------------------------------------
+
+def failing_replace(monkeypatch, studio, when=lambda text: True):
+    """os.replace fails onto the queue file (a full disk, a file held open on Windows), naming local paths."""
+    import src.studio_garments as garments
+    real_replace = garments.os.replace
+
+    def replace(source, target):
+        if Path(target) == studio.queue_path and when(Path(source).read_text(encoding='utf-8')):
+            raise OSError(28, 'No space left on device', str(target))
+        return real_replace(source, target)
+    monkeypatch.setattr(garments.os, 'replace', replace)
+
+
+def test_start_sends_nothing_when_its_request_cannot_be_saved(studio, gateway, monkeypatch):
+    failing_replace(monkeypatch, studio)
+    result = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    assert result == {'ok': False, 'error': {'code': 'queue_unwritable', 'message': 'The local garment queue file could not be written'}}
+    assert gateway.posts() == [] and not studio.queue_path.exists()
+    assert not [path for path in studio.queue_path.parent.iterdir() if path.name.endswith('.tmp')]
+
+
+def test_start_answers_its_job_when_only_the_answer_cannot_be_saved(studio, gateway, monkeypatch):
+    failing_replace(monkeypatch, studio, when=lambda text: '"state": "submitting"' not in text)
+    started = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    assert started['ok'] and saved_starts(studio)['garment-key-0001']['state'] == 'submitting'
+    monkeypatch.undo()
+    again = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    assert again['data']['job_id'] == started['data']['job_id'] and gateway.created == 1
+
+
+def test_queue_tools_answer_a_code_without_paths_when_the_file_cannot_be_written(studio, gateway, monkeypatch):
+    queued = studio.enqueue(designed(BLOUSON, SKIRT), 'enqueue-key-01')['queued']
+    failing_replace(monkeypatch, studio, when=lambda text: '"state": "submitting"' in text)
+    result = studio.advance(3, 'advance-key-01')
+    assert result == {'ok': False, 'error': {'code': 'queue_unwritable', 'message': 'The local garment queue file could not be written'},
+                      'paid_submissions': 0}
+    assert gateway.posts() == [] and all(item['state'] == 'pending' for item in items(studio).values())
+    monkeypatch.undo()
+    failing_replace(monkeypatch, studio)
+    assert studio.enqueue(designed(HOODIE), 'enqueue-key-02')['error']['code'] == 'queue_unwritable'
+    monkeypatch.undo()
+    gateway.post_answers = ['lost']
+    studio.advance(1, 'advance-key-02')
+    failing_replace(monkeypatch, studio, when=lambda text: '"state": "submitting"' in text)
+    assert studio.resolve(queued[0]['item'], 'replay', 'resolve-key-01') == {
+        'ok': False, 'error': {'code': 'queue_unwritable', 'message': 'The local garment queue file could not be written'},
+        'paid_submissions': 0}
+    assert len(gateway.posts()) == 1
+
+
+def test_an_advance_whose_answers_cannot_be_saved_reports_what_it_sent(studio, gateway, monkeypatch):
+    studio.enqueue(designed(BLOUSON, SKIRT), 'enqueue-key-01')
+    failing_replace(monkeypatch, studio, when=lambda text: '"state": "running"' in text)
+    result = studio.advance(3, 'advance-key-01')
+    assert result['error']['code'] == 'queue_unwritable' and result['paid_submissions'] == 1 and len(gateway.posts()) == 1
+    monkeypatch.undo()
+    # The first garment's answer was lost with the file: it is uncertain now, and only sent again on request.
+    following = studio.advance(3, 'advance-key-02')
+    assert [item['code'] for item in following['attention']] == ['interrupted'] and len(following['started']) == 1
+
+
+def test_a_lock_that_cannot_be_taken_answers_a_code_without_paths(studio, gateway, monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def unwritable(path):
+        raise PermissionError(13, 'Permission denied', str(path)+'.lock.guard')
+        yield
+    monkeypatch.setattr('src.services.process_identity.lease_guard', unwritable)
+    answers = [studio.start(designed(BLOUSON)[0], 'garment-key-0001'), studio.enqueue(designed(BLOUSON), 'enqueue-key-01'),
+               studio.advance(3, 'advance-key-01'), studio.resolve('q-'+'a'*12, 'drop', 'resolve-key-01')]
+    assert {answer['error']['code'] for answer in answers} == {'queue_unwritable'}
+    assert studio.queue_path.parent.name not in json.dumps(answers) and gateway.posts() == []
+
+
+def test_the_start_tool_answers_a_code_without_paths_when_the_file_cannot_be_written(studio, gateway, monkeypatch):
+    pytest.importorskip('mcp')
+    failing_replace(monkeypatch, studio)
+    server = build_server(studio.client, studio)
+    answer = asyncio.run(server.call_tool('start_garment', {'garment': designed(BLOUSON)[0], 'idempotency_key': 'sdk-key-0001'}))
+    assert 'queue_unwritable' in str(answer) and studio.queue_path.parent.name not in str(answer)
+    assert gateway.posts() == []
+
+
+# The paid cap of one session -------------------------------------------------------
+
+def test_a_session_sends_paid_requests_under_its_cap_of_keys(gateway, tmp_path):
+    studio = GarmentStudio(make_studio(gateway, tmp_path).client, state_dir=tmp_path, paid_limit=2)
+    try:
+        assert studio.start(designed(BLOUSON)[0], 'garment-key-0001')['ok']
+        gateway.post_answers = ['lost']
+        assert studio.start(designed(SKIRT)[0], 'garment-key-0002')['outcome'] == 'uncertain'
+        capped = studio.start(designed(HOODIE)[0], 'garment-key-0003')
+        assert capped['error']['code'] == 'mcp_paid_limit' and len(gateway.posts()) == 2
+        assert 'garment-key-0003' not in saved_starts(studio)
+        # Sending a key again cannot start a second job, so it takes no new slot.
+        assert studio.start(designed(SKIRT)[0], 'garment-key-0002')['ok']
+        assert studio.start(designed(BLOUSON)[0], 'garment-key-0001')['replayed']
+        assert len(gateway.posts()) == 3 and gateway.created == 2
+        queued, = studio.enqueue(designed(JOGGERS), 'enqueue-key-01')['queued']
+        result = studio.advance(3, 'advance-key-01')
+        assert result['stopped'] == {'kind': 'refusal', 'code': 'mcp_paid_limit', 'item': queued['item']}
+        assert result['paid_submissions'] == 0 and len(gateway.posts()) == 3
+        assert items(studio)[queued['item']]['state'] == 'pending'
+    finally:
+        studio.client.close()
+
+
+def test_a_later_session_counts_a_saved_key_it_sends_again(gateway, tmp_path):
+    first = make_studio(gateway, tmp_path)
+    gateway.post_answers = ['lost']
+    first.start(designed(BLOUSON)[0], 'garment-key-0001')
+    first.client.close()
+    later = GarmentStudio(make_studio(gateway, tmp_path).client, state_dir=tmp_path, paid_limit=1)
+    try:
+        assert later.start(designed(BLOUSON)[0], 'garment-key-0001')['ok']
+        assert later.start(designed(SKIRT)[0], 'garment-key-0002')['error']['code'] == 'mcp_paid_limit'
+        assert len(gateway.posts()) == 2
+    finally:
+        later.client.close()
+
+
+def test_the_queue_cap_counts_resolve_and_advance_by_key(gateway, tmp_path):
+    studio = GarmentStudio(make_studio(gateway, tmp_path).client, state_dir=tmp_path, paid_limit=2)
+    try:
+        queued = studio.enqueue(designed(BLOUSON, SKIRT, HOODIE), 'enqueue-key-01')['queued']
+        gateway.post_answers = ['lost']
+        assert studio.advance(3, 'advance-key-01')['paid_submissions'] == 1
+        assert studio.resolve(queued[0]['item'], 'replay', 'resolve-key-01')['outcome'] == 'accepted'
+        step = studio.advance(3, 'advance-key-02')
+        assert step['paid_submissions'] == 1 and step['stopped'] == {'kind': 'refusal', 'code': 'mcp_paid_limit',
+                                                                      'item': queued[2]['item']}
+        assert len(gateway.posts()) == 3 and items(studio)[queued[2]['item']]['state'] == 'pending'
+    finally:
+        studio.client.close()
+
+
+@pytest.mark.parametrize('value, limit', [(None, 10), ('', 10), (' 3 ', 3), ('1', 1), ('100', 100),
+                                          ('0', None), ('101', None), ('-1', None), ('1.5', None), ('ten', None), ('٣', None)])
+def test_the_session_cap_comes_from_the_environment(value, limit):
+    from src.studio_garments import PAID_LIMIT, session_paid_limit
+    environ = {} if value is None else {'MOGA_STUDIO_MCP_PAID_LIMIT': value}
+    assert PAID_LIMIT == 10
+    if limit is None:
+        with pytest.raises(ValueError, match='MOGA_STUDIO_MCP_PAID_LIMIT'):
+            session_paid_limit(environ)
+    else:
+        assert session_paid_limit(environ) == limit
+
+
+def test_the_mcp_server_states_its_cap_and_refuses_a_bad_setting(gateway, tmp_path, monkeypatch, capsys):
+    pytest.importorskip('mcp')
+    monkeypatch.setenv('MOGA_STUDIO_MCP_PAID_LIMIT', '4')
+    client = make_studio(gateway, tmp_path).client
+    try:
+        server = build_server(client)
+        assert 'at most 4 keys' in server.instructions
+    finally:
+        client.close()
+    monkeypatch.setenv('MOGA_STUDIO_API_URL', 'http://127.0.0.1:1')
+    monkeypatch.setenv('MOGA_STUDIO_SESSION', SESSION)
+    monkeypatch.setenv('MOGA_STUDIO_MCP_WRITE', '1')
+    monkeypatch.setenv('MOGA_STUDIO_MCP_PAID', '1')
+    monkeypatch.setenv('MOGA_STUDIO_MCP_PAID_LIMIT', '1000')
+    with pytest.raises(SystemExit) as stopped:
+        main([])
+    assert 'MOGA_STUDIO_MCP_PAID_LIMIT' in str(stopped.value.code) and gateway.requests == []

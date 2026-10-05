@@ -11,6 +11,12 @@ Designed garments come from the studio's own garment-styles.json in this checkou
 The queue is one JSON file per API origin under .data/studio-mcp/ at the repository root, changed under an OS file lock.
 An item's request and key are written (fsynced) before its POST. A POST without a definite answer leaves the item
 `uncertain`, and only resolve_garment_item sends it again, under the same key. The first refusal stops an advance.
+start_garment keeps its request by key in the same file, written before its POST: calling it again with that key sends
+the saved request (or reads the job it started), never one rebuilt from the bodies and catalog of the moment.
+
+One process (one MCP session, or one terminal run) sends paid POSTs under at most `paid_limit` keys
+(MOGA_STUDIO_MCP_PAID_LIMIT, default PAID_LIMIT). A key counts once, however often it is sent: the studio keeps one job
+per key, so a resend cannot start a second paid job.
 """
 from __future__ import annotations
 
@@ -44,10 +50,14 @@ MAX_ENQUEUE = 30
 MAX_OPEN_ITEMS = 300
 MAX_CLOSED_ITEMS = 300
 MAX_RECEIPTS = 200
+MAX_STARTS = 200     # start_garment requests kept by key; the oldest settled ones are forgotten first
+PAID_LIMIT = 10      # keys one process sends paid POSTs under, unless MOGA_STUDIO_MCP_PAID_LIMIT says otherwise
+PAID_LIMIT_MAX = 100
 STALLED_CHECKS = 6   # stalled garments looked at again per advance, least recently checked first
 UNLISTED_CHECKS = 3  # polls a sealed garment may stay off the wardrobe listing before it is reported
 MAX_STATE_BYTES = 4*1024*1024
 STATES = ('pending', 'submitting', 'running', 'done', 'stalled', 'uncertain', 'failed', 'dropped')
+START_STATES = ('submitting', 'accepted', 'refused', 'rejected', 'uncertain')
 
 # SinglePart.tsx as it opens: the first method of methodOptions (sent only for these slots), fitProfileFor() with sleeve
 # and ease untouched, and meshyDefaultsFor(slot) from meshy-options.ts. The tests compare these with those files.
@@ -76,8 +86,9 @@ _ADDRESS = re.compile(r'(?i)www\.|\.(?:com|net|org|io|ai|kr|co|dev|app|me|xyz|ht
                       r'|json|py|js|ts|sh|ps1|exe|env)\b')
 _BUSY = ('pipeline_queued', 'pipeline_running', 'accepted', 'running')
 # Answers after which nothing was accepted although the request is not wrong: the item waits for a later advance.
+# factory_auth: the gateway's 502 for a character server that refused its credentials (401/403); nothing was taken.
 _REFUSALS = frozenset({'insufficient_credits', 'conflict', 'busy', 'draining', 'provider_unavailable',
-                       'storage_required', 'worker_running', 'listing_pending'})
+                       'storage_required', 'worker_running', 'listing_pending', 'factory_auth'})
 # Answers that do not say whether the POST was taken; the gateway may have sent it on.
 _UNSURE = frozenset({'api_unavailable', 'response_too_large', 'invalid_response', 'studio_waking', 'studio_stopping',
                      'factory_unavailable', 'factory_timeout', 'internal'})
@@ -320,6 +331,11 @@ def _view(item):
     return view
 
 
+def _start_view(request):
+    return {'slot': request['slot'], 'name': request['part_name'], 'body_job_id': request['base_job_id'],
+            'base_version': request['base_version']}
+
+
 def _counts(items):
     return {state: sum(item['state'] == state for item in items) for state in STATES if state != 'submitting'}
 
@@ -355,19 +371,58 @@ def _valid_receipt(receipt):
             and isinstance(receipt.get('fingerprint'), str) and isinstance(receipt.get('result'), dict))
 
 
+def _valid_start(key, record):
+    request = record.get('request') if isinstance(record, dict) else None
+    job_id = record.get('job_id') if isinstance(record, dict) else None
+    return (isinstance(key, str) and _KEY.fullmatch(key) is not None and isinstance(request, dict)
+            and record.get('state') in START_STATES and isinstance(record.get('fingerprint'), str)
+            and isinstance(request.get('base_job_id'), str) and isinstance(request.get('base_version'), str)
+            and request.get('slot') in SLOTS and isinstance(request.get('part_name'), str)
+            and (job_id is None or isinstance(job_id, str) and _ID.fullmatch(job_id) is not None)
+            and (record['state'] != 'accepted' or job_id is not None))
+
+
+def _settled(record):
+    """A start request whose answers were all definite: accepted, or refused without any send that went unanswered."""
+    return (record['state'] == 'accepted'
+            or record['state'] in ('refused', 'rejected') and not record.get('was_uncertain'))
+
+
+def session_paid_limit(environ=None) -> int:
+    """MOGA_STUDIO_MCP_PAID_LIMIT (1 to PAID_LIMIT_MAX), or PAID_LIMIT when it is not set."""
+    text = (os.environ if environ is None else environ).get('MOGA_STUDIO_MCP_PAID_LIMIT', '').strip()
+    if not text:
+        return PAID_LIMIT
+    if not re.fullmatch(r'[0-9]{1,3}', text) or not 1 <= int(text) <= PAID_LIMIT_MAX:
+        raise ValueError(f'MOGA_STUDIO_MCP_PAID_LIMIT must be a whole number from 1 to {PAID_LIMIT_MAX}')
+    return int(text)
+
+
 class GarmentStudio:
     """The paid garment operations over one StudioClient, and the local queue for its API origin."""
 
-    def __init__(self, client: StudioClient, *, catalog_path: Path = CATALOG_PATH, state_dir: Path = STATE_DIR):
+    def __init__(self, client: StudioClient, *, catalog_path: Path = CATALOG_PATH, state_dir: Path = STATE_DIR,
+                 paid_limit: int | None = None):
         self.client = client
         self.catalog_path = Path(catalog_path)
         origin = hashlib.sha256(client.origin.encode('utf-8')).hexdigest()[:16]
         self.queue_path = Path(state_dir)/f'garments-{origin}.json'
+        self.paid_limit = session_paid_limit() if paid_limit is None else paid_limit
+        self._paid_keys = set()
 
     def _paid_off(self):
         if not (self.client.writable and getattr(self.client, 'paid', False)):
             return {'ok': False, 'error': {'code': 'mcp_paid_off'}}
         return None
+
+    def _reserve(self, key):
+        """Counts `key` against this process's paid cap before its POST is saved and sent; a key counts once."""
+        if key in self._paid_keys:
+            return
+        if len(self._paid_keys) >= self.paid_limit:
+            raise GarmentError('mcp_paid_limit', f'This session has sent its {self.paid_limit} paid garment requests; '
+                                                 'start a new session to send more')
+        self._paid_keys.add(key)
 
     def _get(self, path):
         return self.client._request('GET', path)
@@ -404,21 +459,27 @@ class GarmentStudio:
             with open(self.queue_path, 'rb') as stream:
                 raw = stream.read(MAX_STATE_BYTES+1)
         except FileNotFoundError:
-            return {'version': 1, 'origin': self.client.origin, 'items': [], 'receipts': {}}
+            return {'version': 1, 'origin': self.client.origin, 'items': [], 'receipts': {}, 'starts': {}}
         except OSError:
             raise GarmentError('queue_unreadable') from None
         try:
             state = json.loads(raw) if len(raw) <= MAX_STATE_BYTES else None
         except ValueError:
             state = None
+        if isinstance(state, dict):
+            state.setdefault('starts', {})  # A file from before start_garment kept its requests.
         if (not isinstance(state, dict) or state.get('version') != 1 or not isinstance(state.get('items'), list)
                 or not isinstance(state.get('receipts'), dict) or not all(_valid_item(item) for item in state['items'])
-                or not all(_valid_receipt(receipt) for receipt in state['receipts'].values())):
+                or not all(_valid_receipt(receipt) for receipt in state['receipts'].values())
+                or not isinstance(state['starts'], dict)
+                or not all(_valid_start(key, record) for key, record in state['starts'].items())):
             # Never replaced by an empty queue: it holds the keys of requests that may have been paid for.
             raise GarmentError('queue_unreadable', 'The local garment queue file is not readable; it is left as it is')
         return state
 
     def _save(self, state):
+        """Writes the queue file whole (fsynced, then renamed over it); `queue_unwritable` when it cannot, so a POST
+        that was to follow is not sent."""
         items = state['items']
         closed = [item for item in items if item['state'] in ('done', 'failed', 'dropped')]
         if len(closed) > MAX_CLOSED_ITEMS:
@@ -427,13 +488,21 @@ class GarmentStudio:
         receipts = state['receipts']
         while len(receipts) > MAX_RECEIPTS:
             receipts.pop(next(iter(receipts)))
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.queue_path.with_name(f'{self.queue_path.name}.{os.getpid()}.tmp')
-        with open(temporary, 'w', encoding='utf-8') as stream:
-            json.dump(state, stream, ensure_ascii=False, indent=1)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, self.queue_path)
+        try:
+            self.queue_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(temporary, 'w', encoding='utf-8') as stream:
+                json.dump(state, stream, ensure_ascii=False, indent=1)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.queue_path)
+        except OSError:
+            # A full disk or a file held open by another program; the error names local paths, so it is not passed on.
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise GarmentError('queue_unwritable', 'The local garment queue file could not be written') from None
 
     @contextmanager
     def _queue(self):
@@ -444,10 +513,15 @@ class GarmentStudio:
             guard.__enter__()
         except ValueError:
             raise GarmentError('queue_busy', 'Another run is changing the garment queue; try again shortly') from None
+        except OSError:
+            raise GarmentError('queue_unwritable', 'The local garment queue lock could not be taken') from None
         try:
             yield self._load()
         finally:
-            guard.__exit__(None, None, None)
+            try:
+                guard.__exit__(None, None, None)
+            except OSError:
+                pass  # Closing the lock file, which the guard does on its way out, releases the lock.
 
     @staticmethod
     def _receipt(state, key, kind, request):
@@ -485,30 +559,66 @@ class GarmentStudio:
         return {'ok': True, 'data': data}
 
     def start(self, garment, key: str) -> dict:
+        """One garment under `key`. The request is saved by key before its POST; the same garment under the same key
+        sends that saved request again (or, once a job was accepted, reads the job), and another garment under it is
+        refused."""
         refused = self._paid_off()
         if refused:
             return refused
         _require_key(key)
         garment = garment if isinstance(garment, GarmentRequest) else GarmentRequest.model_validate(garment)
+        fingerprint = _digest(garment.model_dump())
         try:
-            spec = garment_spec(garment, *load_catalog(self.catalog_path))
+            with self._queue() as state:
+                starts = state['starts']
+                record = starts.get(key)
+                if record is not None:
+                    if record['fingerprint'] != fingerprint:
+                        raise GarmentError('idempotency_conflict',
+                                           'This idempotency_key was used for a different garment')
+                    if record['state'] == 'accepted':
+                        return self._started_job(record)
+                    if record['state'] in ('submitting', 'uncertain'):
+                        record['was_uncertain'] = True  # A send without its answer may have been accepted.
+                    self._reserve(key)
+                else:
+                    spec = garment_spec(garment, *load_catalog(self.catalog_path))
+                    registered, failure = self._bodies()
+                    if failure:
+                        return failure
+                    version = registered.get(garment.body_job_id)
+                    if version is None:
+                        raise GarmentError('wardrobe_body_not_found', 'Register the body in the studio wardrobe first')
+                    failure = self._body_ready(garment.body_job_id, version)
+                    if failure:
+                        return failure
+                    settled = [known for known, saved in starts.items() if _settled(saved)]
+                    for known in settled[:max(0, len(starts)+1-MAX_STARTS)]:
+                        del starts[known]
+                    if len(starts) >= MAX_STARTS:
+                        raise GarmentError('queue_full', f'At most {MAX_STARTS} start_garment requests without a definite '
+                                                         'answer are kept; call them again with their keys first')
+                    self._reserve(key)
+                    record = starts[key] = {'fingerprint': fingerprint, 'job_id': None, 'created_at': _now(),
+                                            'request': single_part_request(spec, garment.body_job_id, version)}
+                record.update(state='submitting', updated_at=_now())
+                self._save(state)  # The request and its key are on disk before the paid POST.
+                response = self._post(record['request'], key)
+                outcome, job_id = post_outcome(response)
+                record.update(state=outcome, updated_at=_now())
+                if outcome == 'accepted':
+                    record['job_id'] = job_id
+                elif outcome == 'uncertain':
+                    record['was_uncertain'] = True
+                try:
+                    self._save(state)
+                except GarmentError:
+                    pass  # Left `submitting` on disk: the same key sends the saved request again.
         except GarmentError as exc:
             return exc.answer()
-        registered, failure = self._bodies()
-        if failure:
-            return failure
-        version = registered.get(garment.body_job_id)
-        if version is None:
-            return GarmentError('wardrobe_body_not_found', 'Register the body in the studio wardrobe first').answer()
-        failure = self._body_ready(garment.body_job_id, version)
-        if failure:
-            return failure
-        response = self._post(single_part_request(spec, garment.body_job_id, version), key)
-        outcome, job_id = post_outcome(response)
         if outcome == 'accepted':
             return {'ok': True, 'data': {'job_id': job_id, 'status': response['data'].get('status'),
-                                         'slot': spec['slot'], 'name': spec['name'], 'body_job_id': garment.body_job_id,
-                                         'base_version': version}}
+                                         **_start_view(record['request'])}}
         answer = {'ok': False, 'outcome': outcome, 'error': dict(response['error'])}
         if response.get('status'):
             answer['status'] = response['status']
@@ -516,6 +626,15 @@ class GarmentStudio:
             answer['error']['message'] = ('No definite answer; call start_garment again with the same idempotency_key '
                                           'to get the job. A new key starts another paid garment.')
         return answer
+
+    def _started_job(self, record):
+        """The job an earlier call with this key started, read again; nothing is sent."""
+        response = self._get(f"/api/avatar-factory/jobs/{record['job_id']}")
+        if not response['ok']:
+            return response
+        job = response['data'] if isinstance(response['data'], dict) else {}
+        return {'ok': True, 'replayed': True, 'data': {'job_id': record['job_id'], 'status': job.get('status'),
+                                                       **_start_view(record['request'])}}
 
     def status(self, job_id: str) -> dict:
         if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
@@ -603,21 +722,22 @@ class GarmentStudio:
         _require_key(key)
         if isinstance(max_new, bool) or not isinstance(max_new, int) or not 0 <= max_new <= MAX_NEW:
             raise ValueError(f'max_new must be 0 to {MAX_NEW}')
+        result = {'ok': True, 'started': [], 'finished': [], 'failed': [], 'attention': [], 'waiting': [],
+                  'paid_submissions': 0, 'stopped': None}
         try:
             with self._queue() as state:
                 replay = self._receipt(state, key, 'advance', {'max_new': max_new})
                 if replay is not None:
                     return {**replay, 'replayed': True}
-                result = self._advance(state, max_new)
+                self._advance(state, max_new, result)
                 self._remember(state, key, 'advance', {'max_new': max_new}, result)
                 self._save(state)
                 return result
         except GarmentError as exc:
-            return exc.answer()
+            # The queue file failed after some POSTs went out: those are still counted for the caller.
+            return {**exc.answer(), 'paid_submissions': result['paid_submissions']}
 
-    def _advance(self, state, max_new):
-        result = {'ok': True, 'started': [], 'finished': [], 'failed': [], 'attention': [], 'waiting': [],
-                  'paid_submissions': 0, 'stopped': None}
+    def _advance(self, state, max_new, result):
         for item in state['items']:
             if item['state'] == 'submitting':
                 # Its request was written and the run ended before the answer: the POST may have been accepted.
@@ -711,6 +831,10 @@ class GarmentStudio:
                     result['waiting'].append({'body_job_id': body, 'code': 'wardrobe_body_not_ready'})
             if not ready[body]:
                 continue
+            try:
+                self._reserve(item['key'])
+            except GarmentError as exc:
+                return {'kind': 'refusal', 'code': exc.code, 'item': item['id']}  # Left pending; nothing was sent.
             request = item.get('request')
             if request is not None and request.get('base_version') != version and not item.get('was_uncertain'):
                 request = None  # Never accepted under its key: it is made for the body's current version instead.
@@ -753,6 +877,7 @@ class GarmentStudio:
         _require_key(key)
         if not isinstance(item_id, str) or not _ITEM.fullmatch(item_id) or action not in ('replay', 'drop'):
             raise ValueError('Invalid queue item or action')
+        sent = 0
         try:
             with self._queue() as state:
                 replay = self._receipt(state, key, 'resolve', {'item': item_id, 'action': action})
@@ -769,11 +894,13 @@ class GarmentStudio:
                 else:
                     if item['state'] != 'uncertain' or not item.get('request'):
                         raise GarmentError('action_unavailable', 'Only an uncertain item is sent again')
+                    self._reserve(item['key'])
                     item['attempts'] = item.get('attempts', 0)+1
                     _move(item, 'submitting')
                     self._save(state)
                     # The same request under the same key: the studio answers with the job it took, or takes it now.
                     response = self._post(item['request'], item['key'])
+                    sent = 1
                     outcome, job_id = post_outcome(response)
                     code, status = (response.get('error') or {}).get('code'), response.get('status')
                     if outcome == 'accepted':
@@ -788,7 +915,7 @@ class GarmentStudio:
                 self._save(state)
                 return result
         except GarmentError as exc:
-            return exc.answer()
+            return {**exc.answer(), 'paid_submissions': sent}
 
 
 def register_tools(server, studio: GarmentStudio):
@@ -806,7 +933,8 @@ def register_tools(server, studio: GarmentStudio):
     @server.tool(annotations=paid)
     def start_garment(garment: GarmentRequest, idempotency_key: RequestKey) -> dict[str, Any]:
         """Paid: one garment on a wardrobe body, as the studio's single-part screen makes it (3 images and 1 3D model).
-        After a lost answer call again with the same idempotency_key; a new key starts another paid garment."""
+        After a lost answer call again with the same garment and idempotency_key: the request saved under that key is
+        sent again, as it was. A new key starts another paid garment."""
         return studio.start(garment, idempotency_key)
 
     @server.tool(annotations=read_only)
@@ -880,7 +1008,8 @@ def cli(argv=None, *, studio: GarmentStudio | None = None, sleep=time.sleep, clo
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        studio = GarmentStudio(client)
+        # --max-paid is this run's cap; the session cap of an MCP process does not apply here.
+        studio = GarmentStudio(client, paid_limit=args.max_paid)
     run, began, paid, waits, step, code = uuid.uuid4().hex[:12], clock(), 0, 0, 0, None
     try:
         while code is None:

@@ -14,11 +14,14 @@ from src.services.asset_editor import _write_json, update_json
 from src.services.character_pipeline import CharacterPipeline, PipelineError, read_json, now
 from src.services.process_identity import state as process_state
 from src.services.object_storage import changed_since, child_names, sha256
+from src.services.run_lock import WorkerLocks, worker_alive
 
 LOGGER = logging.getLogger(__name__)
 # Concurrent Blender workers. Each one uses 1-2 CPU threads and about 1-2 GB of RAM.
 _QUEUE = Semaphore(max(1, int(os.getenv('BLENDER_CONCURRENCY', '2') or 2)))
 _LOCK = RLock()
+# The production worker of each job directory (AvatarImagePipeline.execute) while it runs in this process.
+_RUN_LOCKS = WorkerLocks()
 _LISTING_REFRESH = ThreadPoolExecutor(max_workers=2, thread_name_prefix='avatar-listing')
 _LISTING_READERS = ThreadPoolExecutor(max_workers=12, thread_name_prefix='avatar-listing-read')
 # A settled job is re-read after this many seconds even without a local write (another process may own it).
@@ -64,20 +67,37 @@ class AvatarFactory:
             raise PipelineError('not_found', '생산 작업을 찾을 수 없습니다.', 404)
         return self.root/str(int(owner))/job_id
 
-    def _executor_gone(self, job):
-        """Queued or running for another server instance whose process has exited."""
-        return (job.get('status') in ('pipeline_queued', 'pipeline_running') and job.get('executor') != self.instance
-                and process_state(job.get('executor_process')) == 'exited')
+    def _executor_gone(self, job, held):
+        """Queued or running for another server instance whose process has exited; or running in a live process with no
+        worker any more. A run of this process runs only while its worker holds the job's lock (`held`, observed
+        before and after reading `job`): one whose last save failed leaves `pipeline_running` behind and nothing runs
+        it, so it reads as stopped instead of refusing every resume until a restart."""
+        status = job.get('status')
+        if status not in ('pipeline_queued', 'pipeline_running'):
+            return False
+        if job.get('executor') != self.instance and process_state(job.get('executor_process')) == 'exited':
+            return True
+        return status == 'pipeline_running' and not worker_alive(
+            {'status': 'running', 'process': job.get('executor_process')}, held)
+
+    def _worker_held(self, directory):
+        return _RUN_LOCKS.busy(str(directory))
 
     def get(self, owner, job_id):
-        directory = self.directory(owner, job_id); job = read_json(directory/'job.json')
+        directory = self.directory(owner, job_id)
+        held = self._worker_held(directory)
+        job = read_json(directory/'job.json')
         if not job:
             raise PipelineError('not_found', '생산 작업을 찾을 수 없습니다.', 404)
-        if self._executor_gone(job):
+        if self._executor_gone(job, held or self._worker_held(directory)):
             def pause(current):
                 # A resume or a finished run may have landed since the read; only a record still stopped is paused.
-                if not self._executor_gone(current):
+                if not self._executor_gone(current, held or self._worker_held(directory)):
                     return None
+                if process_state(current.get('executor_process')) != 'exited':
+                    # This live process's worker ended without saving its pause; the stage it stopped in is unknown.
+                    return {**current, 'status': 'pipeline_paused', 'updated_at': now(),
+                            'error': '생산 실행이 중단 상태를 저장하지 못한 채 끝났습니다. 저장된 단계에서 이어서 실행할 수 있습니다.'}
                 # The last recorded activity dates the stop; detecting it late must not make it look recent.
                 return {**current, 'status': 'pipeline_paused', 'error': '서버 재시작으로 중단됨',
                         'interrupted': {'stage': current.get('resume_stage', 'images'),

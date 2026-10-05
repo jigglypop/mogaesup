@@ -58,7 +58,8 @@ _RUNTIME = runtime_identity()
 WORKER_THREADS = 200
 # Health and the loopback drain control read the admission lock and the work lease files. They do that in worker
 # threads of their own few, so they neither block the event loop nor wait for a thread the long jobs hold: a
-# deployment drains and polls health exactly while jobs run.
+# deployment drains and polls health exactly while jobs run. ActivityMiddleware admits mutations the same way, with
+# threads of its own (runtime_activity.ADMISSION_THREADS).
 CONTROL_THREADS = 4
 _control_threads = RunVar('runtime_control_threads')
 
@@ -120,12 +121,27 @@ async def auth_middleware(request: Request, call_next):
     )
 
 
+async def missing_file_handler(request: Request, exc: FileNotFoundError):
+    """A read of a stored file that is gone, such as a record whose bytes S3 no longer holds
+    (object_storage.artifact_response): the file is missing, not the server broken. Any other request that meets one is
+    still a server failure."""
+    if request.method not in ('GET', 'HEAD'):
+        return await unhandled_exception_handler(request, exc)
+    request_id = ensure_request_id(request)
+    logger.warning('stored file missing requestId=%s path=%s', request_id, request.url.path)
+    return attach_request_id(
+        JSONResponse(status_code=404, content={'error': {'code': 'not_found', 'message': '저장된 산출물을 찾을 수 없습니다.'}}),
+        request_id,
+    )
+
+
 # The middleware added last runs first. The API-key check sits inside request logging
 # so its 401 responses are logged like any other response.
 app.middleware("http")(auth_middleware)
 app.middleware("http")(request_logging_middleware)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
+app.add_exception_handler(FileNotFoundError, missing_file_handler)
 app.add_exception_handler(PipelineError, pipeline_error_handler)
 
 
@@ -193,7 +209,11 @@ async def drain_runtime(request: Request, body: DrainInput):
 
 @app.delete('/internal/drain', include_in_schema=False)
 async def resume_runtime(request: Request, body: DrainInput):
-    return await _control(request, resume, body.token)
+    snapshot = await _control(request, resume, body.token)
+    # A startup auto-resume scan that met this drain (a deployment starts the server closed) runs again now.
+    from src.services.avatar_auto_resume import reopened
+    reopened()
+    return snapshot
 
 
 # health() takes the admission file lock and reads every work lease: in a control thread, not on the event loop.

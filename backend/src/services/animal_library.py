@@ -16,7 +16,7 @@ from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, valid_request_key
 from src.services.object_storage import copy_file
-from src.services.process_identity import state as process_state
+from src.services.run_lock import WorkerLocks, worker_alive
 
 STAGES = ('views', 'model', 'rig', 'walk', 'standard')
 SPECIES = ('dog',)
@@ -25,6 +25,9 @@ MAX_REFERENCE_PIXELS = 32_000_000
 # The reference is an appearance input for 1024px view images; a larger photo adds upload cost only.
 REFERENCE_EDGE = 2048
 _SHA = re.compile(r'[a-f0-9]{64}')
+# Regeneration jobs of this process, by job directory: claimed when a job is accepted and held by its executor
+# until its last save (animal_production).
+JOBS = WorkerLocks()
 
 
 def normalized_reference(content):
@@ -98,13 +101,18 @@ class AnimalLibrary:
         raise PipelineError('not_found', '동물 파일을 찾을 수 없습니다.', 404)
 
     def production(self, animal_id, record):
-        """The latest regeneration job; a live-looking job whose process is gone reads as paused."""
+        """The latest regeneration job; one that nothing runs any more (its process is gone, or this process's executor
+        ended without saving) reads as paused."""
         job_id = record.get('production')
-        job = read_json(self.directory(animal_id)/'jobs'/job_id/'job.json') if job_id else None
+        if not job_id:
+            return None
+        work = self.directory(animal_id)/'jobs'/job_id
+        held = JOBS.busy(str(work))
+        job = read_json(work/'job.json')
         if not job:
             return None
         status = job['status']
-        if status in ('accepted', 'running') and process_state(job.get('process')) == 'exited':
+        if status in ('accepted', 'running') and not worker_alive(job, held or JOBS.busy(str(work)), claimed=True):
             status = 'paused'
         return {'id': job['id'], 'request_key': job['request_key'], 'status': status, 'step': job.get('step'),
                 'steps': job['steps'], 'done': job.get('done', []), 'views': job['request']['views'], 'note': job['request']['note'],

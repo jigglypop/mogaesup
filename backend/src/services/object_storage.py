@@ -32,10 +32,17 @@ LOGGER = logging.getLogger(__name__)
 # untouched for _MEMORY seconds are dropped.
 _MEMORY = 120
 _TABLE_LIMIT = 4096
+# How long a listing answers for the keys below its prefix, absent ones included.
+_INDEX_SECONDS = 15
+# S3 answers 409 while another conditional write or a delete of the same key is in flight, and asks for the request
+# again: seconds between the attempts.
+_CONFLICT_DELAYS = (.2, .5, 1, 2)
+_DIGEST_LIMIT = 4096
 
 _working = ContextVar('asset_workspaces', default=())
 _cache = {}
 _content_cache = record_store.ByteBoundedCache(record_store.CONTENT_CACHE_BYTES)  # (bucket, key) -> (monotonic, bytes)
+_digests = OrderedDict()    # (bucket, key, ETag) -> sha256 of an object stored without ChecksumSHA256, oldest first
 _key_index = {}
 _written_keys = {}          # bucket -> {key: monotonic time of the write}
 _generations = OrderedDict()  # (bucket, key) -> (change number, monotonic time); a read stores only if it did not change
@@ -45,6 +52,15 @@ _cache_lock = RLock()
 _workspace_lock = RLock()   # guards the bookkeeping below, never held while a worker runs
 _directory_locks = {}       # one active workspace per local directory: [lock, workspaces holding or waiting for it]
 _materialized = {}          # shared input path -> [workspaces using it, created by a workspace]
+
+
+class StorageConflict(OSError):
+    """S3 kept refusing a write while another conditional write or a delete of the same key was in flight (409). It
+    says nothing about whether the object exists; the write may be tried again."""
+
+
+class ArtifactChanged(ValueError):
+    """The stored file changed between two reads that had to see the same bytes."""
 
 
 def _forget_old(table, horizon, limit=0, at=lambda value: value):
@@ -213,7 +229,7 @@ def _index(bucket, prefix):
     """Cached key set of one prefix. Callers only test membership; writers add under _cache_lock."""
     with _cache_lock:
         cached = _key_index.get((bucket, prefix))
-        if cached and time.monotonic() - cached[0] < 15:
+        if cached and time.monotonic() - cached[0] < _INDEX_SECONDS:
             return cached[1]
     result = set()
     for page in _s3().get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
@@ -224,8 +240,12 @@ def _index(bucket, prefix):
         if written:
             _forget_old(written, _MEMORY)
             result.update(key for key in written if key.startswith(prefix))
-        if len(_key_index) > 4096:
-            _key_index.clear()
+        if len(_key_index) > _TABLE_LIMIT:
+            now = time.monotonic()
+            for stale in [entry for entry, (at, _) in _key_index.items() if now - at >= _INDEX_SECONDS]:
+                del _key_index[stale]
+            if len(_key_index) > _TABLE_LIMIT:
+                _key_index.clear()
         _key_index[bucket, prefix] = time.monotonic(), result
     return result
 
@@ -237,11 +257,18 @@ def _keys(bucket, prefix):
 
 
 def _scope(key):
-    """The job-sized prefix of a key (prefix/<namespace>/<owner>/<item>/), or None for shallow keys."""
-    prefix = os.getenv('ASSET_S3_PREFIX', 'assets').strip('/')
+    """The job-sized prefix of a key (prefix/<namespace>/<owner>/<item>/), or None for shallow keys.
+
+    An owner's library holds collections of items (library/<collection>/<item>/), so there the scope is one item, and
+    a file directly in the library or in a collection is a scope of its own: no check of one file lists the library."""
+    prefix = _prefix()
     depth = (len(prefix.split('/')) if prefix else 0) + 3
     parts = key.split('/')
-    return '/'.join(parts[:depth]) + '/' if len(parts) > depth else None
+    if len(parts) <= depth:
+        return None
+    if parts[depth - 1] == 'library':
+        return '/'.join(parts[:depth + 2]) + '/' if len(parts) > depth + 2 else key
+    return '/'.join(parts[:depth]) + '/'
 
 
 def _head_object(location):
@@ -304,17 +331,27 @@ def _put(path, content, *, exclusive=False):
 def _upload(bucket, key, content, mime, *, exclusive=False):
     from botocore.exceptions import ClientError
     digest = hashlib.sha256(content).digest()
-    try:
-        _s3().put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime,
-                         Metadata={'sha256': digest.hex()}, ChecksumSHA256=base64.b64encode(digest).decode('ascii'),
-                         ServerSideEncryption='AES256', **({'IfNoneMatch': '*'} if exclusive else {}))
-    except ClientError as exc:
-        code, status = _s3_error(exc)
-        # An exclusive create that lost the race: the object exists (412) or another conditional write of it is in
-        # progress (409). Callers handle the same FileExistsError as for a local file or a record.
-        if exclusive and (code in ('PreconditionFailed', 'ConditionalRequestConflict') or status in (409, 412)):
-            raise FileExistsError(key) from None
-        raise
+    for delay in (*_CONFLICT_DELAYS, None):
+        try:
+            _s3().put_object(Bucket=bucket, Key=key, Body=content, ContentType=mime,
+                             Metadata={'sha256': digest.hex()}, ChecksumSHA256=base64.b64encode(digest).decode('ascii'),
+                             ServerSideEncryption='AES256', **({'IfNoneMatch': '*'} if exclusive else {}))
+            return
+        except ClientError as exc:
+            code, status = _s3_error(exc)
+            if code in ('ConditionalRequestConflict', 'OperationAborted') or status == 409:
+                # Another conditional write or a delete of the key is in flight and S3 asks for this one again. That
+                # says nothing about the object existing, so it is not an exclusive create that lost the race.
+                if delay is None:
+                    raise StorageConflict(f'S3 kept refusing the write of {key} while another write of it was in '
+                                          f'flight; try again') from exc
+                time.sleep(delay)
+                continue
+            # An exclusive create that lost the race: the object exists. Callers handle the same FileExistsError as for
+            # a local file or a record.
+            if exclusive and (code == 'PreconditionFailed' or status == 412):
+                raise FileExistsError(key) from None
+            raise
 
 
 def _put_record(record, content, *, exclusive=False, expected_version=None):
@@ -600,7 +637,7 @@ class StoredPath(type(LocalPath())):
             if records:
                 namespace, directory = _logical(self)
                 directory = directory.rstrip('/')+'/'
-                for path in record_store.listing(namespace, directory):
+                for path in record_store.listing(namespace, directory, pattern):
                     if _glob_match(path[len(directory):], pattern):
                         found.add(self/path[len(directory):])
         yield from sorted(found)
@@ -736,7 +773,7 @@ def read_byte_range(path, start, length, *, etag=None):
         meta = found[0]
         identity = f'"{meta.sha256}:{meta.version}"'
         if etag and identity != etag:
-            raise ValueError('Model changed during metadata read')
+            raise ArtifactChanged('Model changed during metadata read')
         content = StoredPath(path).read_bytes()[start:start + length]
         total, checksum = meta.size, meta.sha256
     elif location and not _is_working(path) and not record:
@@ -749,7 +786,7 @@ def read_byte_range(path, start, length, *, etag=None):
             if code in ('NoSuchKey', 'NotFound', '404') or status == 404:
                 raise FileNotFoundError(str(path)) from None
             if code == 'PreconditionFailed' or status == 412:
-                raise ValueError('Model changed during metadata read') from None
+                raise ArtifactChanged('Model changed during metadata read') from None
             if code == 'InvalidRange' or status == 416:
                 raise ValueError('Incomplete model metadata') from None
             raise
@@ -763,7 +800,7 @@ def read_byte_range(path, start, length, *, etag=None):
         stat = local.stat()
         total, identity, checksum = stat.st_size, f'{stat.st_mtime_ns}:{stat.st_size}', None
         if etag and identity != etag:
-            raise ValueError('Model changed during metadata read')
+            raise ArtifactChanged('Model changed during metadata read')
         with local.open('rb') as stream:
             stream.seek(start)
             content = stream.read(length)
@@ -789,7 +826,40 @@ def sha256(path):
     head = _head(path) if not _is_working(path) and not record else None
     if head and head.get('ChecksumSHA256') and head.get('ChecksumType', 'FULL_OBJECT') == 'FULL_OBJECT':
         return base64.b64decode(head['ChecksumSHA256'], validate=True).hex()
+    if head and head.get('ETag'):
+        digest = _object_sha256(*_location(path), head['ETag'])
+        if digest:
+            return digest
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _object_sha256(bucket, key, etag):
+    """sha256 of the version `etag` names of an object stored without ChecksumSHA256 (one that other tools uploaded),
+    downloaded once: a replaced object has another ETag and is hashed again. None when that version is gone."""
+    with _cache_lock:
+        digest = _digests.get((bucket, key, etag))
+        if digest:
+            _digests.move_to_end((bucket, key, etag))
+            return digest
+    from botocore.exceptions import ClientError
+    try:
+        # IfMatch: the bytes hashed are the version the ETag names, not one written since the HEAD.
+        response = _s3().get_object(Bucket=bucket, Key=key, IfMatch=etag)
+    except ClientError as exc:
+        code, status = _s3_error(exc)
+        if code in ('404', 'NoSuchKey', 'NotFound', 'PreconditionFailed') or status in (404, 412):
+            return None
+        raise
+    hasher = hashlib.sha256()
+    with response['Body'] as body:
+        while chunk := body.read(1024 * 1024):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
+    with _cache_lock:
+        _digests[bucket, key, etag] = digest
+        while len(_digests) > _DIGEST_LIMIT:
+            _digests.popitem(last=False)
+    return digest
 
 
 def copy_tree(source, target):
@@ -814,8 +884,16 @@ def artifact_response(path, **kwargs):
         return Response(found[1], media_type=kwargs.get('media_type') or _content_type(path), headers=headers)
     head = None
     if found:
+        from botocore.exceptions import ClientError
         location = location[0], found[0].blob_key
-        head = _s3().head_object(Bucket=location[0], Key=location[1])
+        try:
+            head = _s3().head_object(Bucket=location[0], Key=location[1])
+        except ClientError as exc:
+            code, status = _s3_error(exc)
+            if code in ('404', 'NoSuchKey', 'NotFound') or status == 404:
+                # The record names bytes that S3 does not hold: a missing file, not a server failure.
+                raise FileNotFoundError(str(path)) from None
+            raise
     elif location and not record:
         head = _head(path)
     if head:

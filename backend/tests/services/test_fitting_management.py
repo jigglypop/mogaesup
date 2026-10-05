@@ -2,9 +2,12 @@ import hashlib
 
 import pytest
 
+from lock_probe import lock_free
+from src.services import avatar_native_parts
 from src.services.asset_editor import _write_json
+from src.services.avatar_factory import digest
 from src.services.avatar_fitting_management import FittingManagement, saved_build
-from src.services.character_pipeline import read_json
+from src.services.character_pipeline import PipelineError, read_json
 from wardrobe_fixture import OWNER, Library, put
 
 JOB, V1, V2 = 'c' * 24, 'a' * 24, 'e' * 24
@@ -127,3 +130,46 @@ def test_a_slot_whose_input_does_not_show_its_method_keeps_the_one_it_has(librar
     FittingManagement(library.factory, OWNER).select(JOB, V1, V2, 'select-v1')
     parts = pipeline_parts(library)
     assert (parts['top']['part_method'], parts['top']['shape'], parts['bottom']['part_method']) == ('body_shell', {'hem': .3}, 'body_shell')
+
+
+def two_versions(library):
+    seal(library, V1, {'parts': [{'slot': 'top', 'part_method': 'isolated'}], 'prefit_parts': []})
+    seal(library, V2, {'parts': [{'slot': 'top', 'part_method': 'body_shell'}], 'prefit_parts': []})
+    library.current(JOB, V2)
+
+
+def test_a_selection_hashes_the_models_while_the_process_lock_is_free(library, monkeypatch):
+    two_versions(library)
+    hashed = []
+    monkeypatch.setattr(avatar_native_parts, 'digest', lambda path: (hashed.append(lock_free()), digest(path))[1])
+    state = FittingManagement(library.factory, OWNER).select(JOB, V1, V2, 'select-v1')
+    assert state['version'] == V1 and read_json(library.directory(JOB)/'native-parts/current.json') == {'version': V1}
+    # body, model, top and bottom of the selected version, each hashed with the lock free.
+    assert len(hashed) == 4 and all(hashed)
+
+
+def test_a_version_moved_while_the_models_are_hashed_is_not_selected(library, monkeypatch):
+    two_versions(library)
+    pipeline = read_json(library.directory(JOB)/'pipeline.json')
+
+    def assembled_meanwhile(path):
+        library.current(JOB, 'd' * 24)
+        return digest(path)
+    monkeypatch.setattr(avatar_native_parts, 'digest', assembled_meanwhile)
+    with pytest.raises(PipelineError) as error:
+        FittingManagement(library.factory, OWNER).select(JOB, V1, V2, 'select-v1')
+    assert error.value.code == 'revision_conflict'
+    assert read_json(library.directory(JOB)/'pipeline.json') == pipeline
+    assert read_json(library.directory(JOB)/'native-parts/current.json') == {'version': 'd' * 24}
+    assert not list((library.directory(JOB)/'native-parts/selections').iterdir())
+
+
+def test_a_selection_that_was_made_is_answered_again_without_hashing(library, monkeypatch):
+    two_versions(library)
+    service = FittingManagement(library.factory, OWNER)
+    service.select(JOB, V1, V2, 'select-v1')
+    monkeypatch.setattr(avatar_native_parts, 'digest', lambda path: pytest.fail('a replay must not hash the models'))
+    assert service.select(JOB, V1, V2, 'select-v1')['version'] == V1
+    with pytest.raises(PipelineError) as error:
+        service.select(JOB, V2, V1, 'select-v1')
+    assert error.value.code == 'idempotency_conflict'

@@ -270,3 +270,75 @@ def test_authentication_needs_no_worker_thread(monkeypatch):
 
     response = anyio.run(call)
     assert response.status_code == 200 and response.json() == {'user_id': 1}
+
+
+# The AWS container's nginx sends every studio request to the API from the loopback with Host 127.0.0.1 and, on the SSM
+# port, X-User-Id 1. The studio gateway's token must still decide who the request is from.
+
+def _behind_nginx(token=None, host=b'127.0.0.1'):
+    headers = [(b'host', host), (b'x-user-id', b'1')]
+    if token is not None:
+        headers.append((b'authorization', token.encode()))
+    return Request({'type': 'http', 'headers': headers, 'client': ('127.0.0.1', 41234)})
+
+
+def test_a_gateway_member_token_wins_over_the_loopback_operator_header(monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    request = _behind_nginx('Bearer ' + _token(roles=['ADMIN', 'MEMBER'], name='member-7'))
+    assert auth.trusted_loopback(request)
+    user = current_user(request)
+    assert (user.user_id, user.username, user.roles) == (1, 'member-7', ['ADMIN', 'MEMBER'])
+
+
+def test_a_gateway_operator_token_names_the_operator_who_sent_it(monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    user = current_user(_behind_nginx('Bearer ' + _token(roles=['ADMIN'], name='studio-admin')))
+    assert (user.user_id, user.username, user.roles) == (1, 'studio-admin', ['ADMIN'])
+
+
+@pytest.mark.parametrize('token', [
+    'Bearer ' + _token(roles=['ADMIN'], exp=1),                        # expired
+    'Bearer ' + _token(roles=['ADMIN'], iss='signight'),               # another issuer
+    'Bearer ' + _token(roles=['ADMIN'], token_type='refresh'),         # not an access token
+    'Bearer ' + _token(roles=['ADMIN'])[:-2] + 'xx',                    # bad signature
+    'Bearer ' + pyjwt.encode({'sub': '1', 'exp': 4102444800, 'iss': 'mogaesup', 'aud': 'mogaesup-client',
+                              'token_type': 'access', 'roles': ['ADMIN']}, b'y' * 32, algorithm='HS256'),
+    'Bearer not-a-jwt',
+    'Basic dXNlcjpwYXNz',
+])
+def test_a_token_that_fails_is_refused_never_the_loopback_operator(monkeypatch, token):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    with pytest.raises(HTTPException) as exc:
+        current_user(_behind_nginx(token))
+    assert exc.value.status_code == 401
+
+
+def test_a_token_this_server_cannot_verify_is_a_server_fault_not_the_operator(monkeypatch):
+    monkeypatch.delenv('JWT_SECRET', raising=False)
+    with pytest.raises(HTTPException) as exc:
+        current_user(_behind_nginx('Bearer ' + _token(roles=['ADMIN', 'MEMBER'])))
+    assert exc.value.status_code == 503
+
+
+def test_a_signed_member_without_the_operator_role_is_refused_even_behind_nginx(monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    with pytest.raises(HTTPException) as exc:
+        current_user(_behind_nginx('Bearer ' + _token(roles=['MEMBER'])))
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize('authorization', [None, ''])
+def test_the_owners_own_requests_without_a_token_stay_the_operator(monkeypatch, authorization):
+    # The studio UI the owner opens from the allowed address carries no token; nginx names it user 1.
+    monkeypatch.delenv('JWT_SECRET', raising=False)
+    user = current_user(_behind_nginx(authorization))
+    assert (user.user_id, user.username, user.roles) == (1, 'dev:1', ['ADMIN'])
+
+
+def test_without_a_token_a_foreign_peer_still_needs_one(monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    request = Request({'type': 'http', 'headers': [(b'host', b'127.0.0.1'), (b'x-user-id', b'1')],
+                       'client': ('203.0.113.5', 41234)})
+    with pytest.raises(HTTPException) as exc:
+        current_user(request)
+    assert exc.value.status_code == 401

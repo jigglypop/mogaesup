@@ -105,6 +105,89 @@ def test_scheduling_does_nothing_for_a_server_that_did_not_opt_in(monkeypatch):
     auto.schedule(object(), 1, JOB)
 
 
+@pytest.fixture
+def inline_scan(tmp_path, monkeypatch):
+    """An opted-in server whose scan and resume threads run inline, over its own data root."""
+    monkeypatch.setenv('ASSET_DATA_ROOT', str(tmp_path))
+    monkeypatch.setattr(auto, 'threading', types.SimpleNamespace(Thread=InlineThread, Lock=threading.Lock))
+    monkeypatch.setattr(auto, 'time', types.SimpleNamespace(sleep=lambda seconds: None))
+    monkeypatch.setattr(auto, 'enabled', lambda: True)
+    monkeypatch.setattr(auto, '_waiting', None)
+    monkeypatch.setattr(auto, '_scheduled', set())
+    resumed = []
+
+    def resume(factory, owner, job_id):
+        from src.services.runtime_activity import _admitted
+        resumed.append((owner, job_id, _admitted.get() is not None))
+        return True
+    monkeypatch.setattr(auto, 'resume', resume)
+    factory = AvatarFactory(tmp_path)
+    paused_job(factory)
+    return factory, resumed
+
+
+def test_a_startup_scan_that_meets_the_deployment_drain_runs_again_once_admission_reopens(inline_scan):
+    from src.services import runtime_activity as activity
+    factory, resumed = inline_scan
+    activity.begin_drain('a' * 32)
+    auto.start(factory)
+    # Nothing is read or started while admission is closed, and nothing is dropped either.
+    assert resumed == [] and read_json(factory.root / '1' / JOB / 'job.json')['status'] == 'pipeline_running'
+    auto.reopened()  # A reopen the drain's owner has not made yet changes nothing.
+    assert resumed == []
+    activity.resume('a' * 32)
+    auto.reopened()
+    assert resumed == [(1, JOB, True)]
+    # Once rescanned, a later reopen without a new refusal scans nothing.
+    auto.reopened()
+    assert resumed == [(1, JOB, True)]
+
+
+def test_a_resume_refused_by_a_drain_that_began_after_the_scan_is_scanned_again_after_it(inline_scan):
+    from src.services import runtime_activity as activity
+    factory, resumed = inline_scan
+    activity.begin_drain('a' * 32)
+    auto.schedule(factory, 1, JOB)
+    assert resumed == [] and auto._waiting is factory and auto._scheduled == set()
+    activity.resume('a' * 32)
+    auto.reopened()
+    assert resumed == [(1, JOB, True)] and auto._waiting is None
+
+
+def test_a_drain_resumed_between_the_refusal_and_its_record_is_not_missed(inline_scan):
+    # No one calls reopened() for a resume that came before the refusal was recorded: the waiter scans by itself.
+    factory, resumed = inline_scan
+    auto._wait_for_admission(factory)
+    assert resumed == [(1, JOB, True)] and auto._waiting is None
+
+
+def test_the_scan_after_a_drain_uses_the_same_key_as_the_one_before_it(tmp_path, monkeypatch):
+    from src.services import avatar_stage_resume
+    monkeypatch.setenv('ASSET_DATA_ROOT', str(tmp_path))
+    factory = AvatarFactory(tmp_path)
+    paused_job(factory)
+    factory.get(1, JOB)
+    keys, executed = [], []
+
+    class Recorded:
+        def __init__(self, factory):
+            pass
+
+        def start(self, owner, job_id, stage, key, *, explicit):
+            assert explicit is False
+            replay = key in keys
+            keys.append(key)
+            return {}, None if replay else 'request-1'
+
+        def execute(self, owner, job_id, request_id):
+            executed.append(request_id)
+    monkeypatch.setattr(avatar_stage_resume, 'AvatarStageResume', Recorded)
+    # The scan before the drain and the one after it find the same interruption.
+    assert auto.resume(factory, 1, JOB) is True
+    assert auto.resume(factory, 1, JOB) is False
+    assert len(set(keys)) == 1 and executed == ['request-1']
+
+
 def test_the_environment_template_leaves_automatic_resume_off():
     template = (Path(__file__).resolve().parents[1] / '.env.example').read_text(encoding='utf-8')
     assert re.search(r'^ASSET_AUTO_RESUME=0$', template, re.MULTILINE)

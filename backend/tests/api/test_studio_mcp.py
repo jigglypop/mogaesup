@@ -38,7 +38,8 @@ def test_exact_read_routes_and_session_stays_in_transport(adapter):
         result = client.read(name, CHARACTER if name == 'get_character' else JOB)
         assert result['ok']
         assert calls[-1].url.path == path
-        assert calls[-1].headers['cookie'] == 'mogaesup_session='+SESSION
+        # Production sessions are `__Host-mogaesup_session`; local http and older sessions use `mogaesup_session`.
+        assert calls[-1].headers['cookie'] == f'__Host-mogaesup_session={SESSION}; mogaesup_session={SESSION}'
         assert calls[-1].headers['origin'] == 'http://localhost:5173'
         assert SESSION not in json.dumps(result)
     client.read('get_character_operation', CHARACTER, OPERATION)
@@ -56,10 +57,11 @@ def test_allowlisted_mutations_keep_existing_revision_and_idempotency(adapter):
     body = {'decision': 'approved', 'notes': '외형 및 동작 확인', 'appearance_checked': True, 'motion_checked': True}
     assert client.action(CHARACTER, 'record_review', 'r124', 'request-1235', body)['ok']
     assert json.loads(calls[-1].content) == body
-    assert client.native_review(JOB, 'e'*24, 'f'*64, 'native-review-1234', body)['ok']
+    changes = {'decision': 'changes_requested', 'notes': '옷 겹침 수정 필요', 'appearance_checked': True, 'motion_checked': False}
+    assert client.native_review(JOB, 'e'*24, 'f'*64, 'native-review-1234', changes)['ok']
     assert calls[-1].url.path == f'/api/avatar-factory/jobs/{JOB}/native-parts/'+('e'*24)+'/review'
     assert calls[-1].headers['idempotency-key'] == 'native-review-1234'
-    assert json.loads(calls[-1].content) == {'expected_assembly_sha256': 'f'*64, **body}
+    assert json.loads(calls[-1].content) == {'expected_assembly_sha256': 'f'*64, **changes}
     assert 'if-match' not in calls[-1].headers
 
 
@@ -207,3 +209,83 @@ def test_local_stdio_process_initializes_and_lists_tools_without_api_calls():
                     'character_id': CHARACTER, 'revision': 'r1', 'idempotency_key': 'request-1234'})
                 assert response.structuredContent['error']['code'] == 'mcp_read_only'
     asyncio.run(check())
+
+
+def sanitized(value):
+    with StudioClientForTest({}) as client:
+        return client.sanitize(value)
+
+
+@pytest.mark.parametrize('url', ['https://cdn.example.com/models/hero.glb', 'http://localhost:8080/api/characters/'+CHARACTER,
+                                 'https://example.com', 'HTTPS://Example.com/home/user/model.glb',
+                                 'https://studio.example.com/var/tmp/opt/srv/file'])
+def test_web_addresses_without_a_query_are_kept_whole(url):
+    assert sanitized(url) == url
+    assert sanitized({'message': f'download {url} again'}) == {'message': f'download {url} again'}
+
+
+@pytest.mark.parametrize('value, expected', [
+    ('C:\\Users\\operator\\model.glb', '[private path]'),
+    ('failed at D:/data/avatar/model.glb', 'failed at [private path]'),
+    ('open "c:\\temp\\x.png" now', 'open "[private path]" now'),
+    ('/Users/operator/private/file.glb', '[private path]'),
+    ('read /home/ubuntu/app/.env', 'read [private path]'),
+    ('from /srv/mogaesup/data and /var/lib/x', 'from [private path] and [private path]'),
+    ('file:///C:/Users/op/x.glb', 'file:///[private path]'),
+    ('경로C:\\Users\\operator\\x.glb 없음', '경로[private path] 없음'),
+    ('ftp://example.com/x and s3://bucket/key', 'ftp://example.com/x and s3://bucket/key'),
+    ('see https://s3.example.com/x.glb?X-Amz-Signature=abc then', 'see [private artifact URL] then'),
+    ('https://s3.example.com/x.glb?X-Amz-Signature=abc', '[private artifact URL]'),
+    ('https://user:pw@example.com/x', '[private artifact URL]'),
+    ('https://[::1', '[private artifact URL]'),
+])
+def test_local_paths_signed_urls_and_logins_are_hidden(value, expected):
+    assert sanitized(value) == expected
+
+
+def refusal(status, body):
+    client = StudioClient('http://localhost:8080', SESSION, writable=True,
+                          transport=httpx.MockTransport(lambda request: httpx.Response(status, json=body)))
+    try:
+        return client.action(CHARACTER, 'inspect_model', 'r1', 'request-1234', {})
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize('body, code', [
+    ({'detail': '작업 수락이 중지되어 있습니다. 잠시 후 다시 시도하세요.', 'code': 'draining'}, 'draining'),
+    ({'error': {'code': 'draining', 'message': '작업 수락이 중지되어 있습니다.'}}, 'draining'),
+    # The character server's authentication settings answer 503 with a detail only: that is not a drain.
+    ({'detail': 'Authentication is not configured'}, 'api_refused'),
+    ({'detail': '작업 수락이 중지되어 있습니다.', 'code': 'something_else'}, 'api_refused'),
+    ({'error': 'plain text', 'code': 'draining'}, 'draining'),
+])
+def test_draining_is_read_from_its_code_only(body, code):
+    assert refusal(503, body) == {'ok': False, 'status': 503, 'error': {'code': code, 'message': 'The API refused this request'}}
+
+
+def test_native_review_approval_stays_with_a_person(adapter):
+    client, calls = adapter
+    approved = {'decision': 'approved', 'notes': '외형 및 동작 확인', 'appearance_checked': True, 'motion_checked': True}
+    result = client.native_review(JOB, 'e'*24, 'f'*64, 'native-review-1234', approved)
+    assert result['ok'] is False and result['error']['code'] == 'mcp_approval_refused' and calls == []
+    pytest.importorskip('mcp')
+    server = build_server(client)
+    tool = {tool.name: tool for tool in asyncio.run(server.list_tools())}['record_native_review']
+    assert 'changes_requested' in tool.description
+    answer = asyncio.run(server.call_tool('record_native_review', {'job_id': JOB, 'version': 'e'*24,
+        'expected_assembly_sha256': 'f'*64, 'idempotency_key': 'native-key-1234', 'review': approved}))
+    structured = answer[1] if isinstance(answer, tuple) else answer.structuredContent
+    assert structured['error']['code'] == 'mcp_approval_refused' and calls == []
+
+
+def test_a_gateway_auth_refusal_keeps_its_code():
+    client = StudioClient('http://localhost:8080', SESSION, writable=True, transport=httpx.MockTransport(
+        lambda request: httpx.Response(502, json={'code': 'factory_auth', 'message': '인증 거부'})))
+    try:
+        result = client.action(CHARACTER, 'inspect_model', 'r1', 'request-1234', {})
+        assert result == {'ok': False, 'status': 502, 'error': {'code': 'factory_auth', 'message': 'The API refused this request'}}
+    finally:
+        client.close()
+    from src.studio_garments import post_outcome
+    assert post_outcome(result) == ('refused', None)

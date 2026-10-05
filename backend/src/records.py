@@ -16,7 +16,9 @@ that is stale from now on.
 `export` is the rollback aid: it writes the records created or changed in the database since their import
 back to their S3 keys and removes the marker, so the server can run without CHARACTER_DATABASE_URL again. JSON
 that S3 still holds for records deleted in the database would be read again by such a server, so while any is
-left the marker stays (delete those objects, or pass --ignore-stale to accept them).
+left the marker stays (delete those objects, or pass --ignore-stale to accept them). Stop the character server
+first: export refuses to run while one holds this data root's server guard, and it keeps the marker when any
+record changed while it ran (a server elsewhere still writing), since S3 would then miss that write.
 
 `migrate` applies each numbered file once. A file that changed after it was applied is refused: the change goes
 into a new numbered file.
@@ -24,8 +26,9 @@ into a new numbered file.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from datetime import timedelta
 import hashlib
 import json
 import os
@@ -36,6 +39,9 @@ from src.services.runtime_activity import running_task
 
 NAMESPACES = ('avatar-factory', 'avatar-blueprints', 'characters')
 MIGRATIONS = BACKEND_ROOT / 'migrations'
+# An S3 LastModified has whole seconds on S3's clock and the last import's start comes from the database's clock, so
+# an object written about when that import ran is read again and compared by content, never skipped by its time.
+IMPORT_MARGIN = timedelta(minutes=15)
 
 
 def _schema():
@@ -102,6 +108,7 @@ class Report:
     blobs: int = 0
     conflicts: list = field(default_factory=list)
     not_restored: list = field(default_factory=list)
+    around_import: list = field(default_factory=list)
     database_only: list = field(default_factory=list)
     removed: int = 0
 
@@ -113,6 +120,8 @@ class Report:
                f'{self.unchanged_since_import}, above 1 MiB kept in S3 {self.blobs}')
         for title, paths in (('changed in both S3 and the database since the last import (database kept)', self.conflicts),
                              ('in S3 but deleted from the database since the last import (not restored)', self.not_restored),
+                             ('in S3 from about the time of the last import but not in the database: deleted there since, '
+                              'or written while that import ran (not imported)', self.around_import),
                              ('in the database but not in S3', self.database_only)):
             if paths:
                 yield f'  {title}: {len(paths)}'
@@ -166,13 +175,16 @@ def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=Fal
 
     wanted = []
     for path, item in objects.items():
-        # Objects not written since the last import are already in the database (or were deleted there).
+        # Objects not written since the last import are already in the database (or were deleted there). One written
+        # about when it ran is read and compared by content below; without a row it may also be a deleted record, which
+        # is never brought back.
         if last_import is not None and item.modified <= last_import:
-            if path in rows:
+            if path not in rows:
+                (report.not_restored if item.modified < last_import - IMPORT_MARGIN else report.around_import).append(path)
+                continue
+            if item.modified < last_import - IMPORT_MARGIN:
                 report.unchanged_since_import += 1
-            else:
-                report.not_restored.append(path)
-            continue
+                continue
         wanted.append(item)
 
     # The snapshot above is old by the time a batch is written, and the server may be running: the row itself says
@@ -195,6 +207,10 @@ def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=Fal
                         if current[1] != digest and not dry_run:
                             conn.execute(f'UPDATE {schema}.records SET imported_sha256 = %s WHERE prefix = %s AND path = %s',
                                          (digest, prefix, item.path))
+                        continue
+                    if current and current[1] == digest:
+                        # S3 still holds what was imported: only the database changed it since.
+                        report.unchanged_since_import += 1
                         continue
                     if current and current[0] != current[1]:
                         report.conflicts.append(item.path)
@@ -237,12 +253,45 @@ def import_prefix(conn, s3, bucket, prefix, *, dry_run=False, delete_missing=Fal
     return report
 
 
+@contextmanager
+def _server_stopped():
+    """Hold the character server's own guard (runtime_activity.server_lease) while records go back to S3: a server on
+    this data root holds it while it runs, so the export is refused, and one started meanwhile refuses to start."""
+    from src.services.runtime_activity import _open_lock, _root, _take_lock
+    stream = _open_lock(_root() / 'server.guard')
+    try:
+        try:
+            _take_lock(stream, blocking=False)
+        except OSError:
+            raise SystemExit('The character server is running on this data root: stop it before export, or the records '
+                             'it writes meanwhile are missing from S3.') from None
+        yield
+    finally:
+        stream.close()
+
+
+def _records_state(conn, schema, prefix):
+    """(rows, digest of every path and sha256, rows changed since their import) of a prefix: any write, insert or
+    delete changes it; export's own imported_sha256 updates do not."""
+    return conn.execute(
+        f"SELECT count(*), encode(sha256(convert_to(coalesce(string_agg(path || ' ' || sha256, E'\\n' ORDER BY path), "
+        f"''), 'UTF8')), 'hex'), count(*) FILTER (WHERE imported_sha256 IS DISTINCT FROM sha256) "
+        f'FROM {schema}.records WHERE prefix = %s', (prefix,)).fetchone()
+
+
 def export_prefix(conn, s3, bucket, prefix, *, dry_run=False, out=print, ignore_stale=False):
     """Write the records created or changed in the database since their import back to their S3 keys, then remove the
-    marker unless S3 still holds JSON of records deleted in the database (`ignore_stale` accepts them)."""
+    marker unless S3 still holds JSON of records deleted in the database (`ignore_stale` accepts them). Refused while a
+    character server runs on this data root; the marker stays when a record changed while the export ran."""
+    with nullcontext() if dry_run else _server_stopped():
+        return _export_prefix(conn, s3, bucket, prefix, dry_run=dry_run, out=out, ignore_stale=ignore_stale)
+
+
+def _export_prefix(conn, s3, bucket, prefix, *, dry_run, out, ignore_stale):
     from botocore.exceptions import ClientError
     from src.services.object_storage import _content_type, _upload, records_marker_key
     schema = _schema()
+    before = _records_state(conn, schema, prefix)[:2]
     rows = conn.execute(f'SELECT path, content, blob_key, sha256 FROM {schema}.records '
                         f'WHERE prefix = %s AND imported_sha256 IS DISTINCT FROM sha256 ORDER BY path', (prefix,)).fetchall()
     written = total = 0
@@ -276,6 +325,12 @@ def export_prefix(conn, s3, bucket, prefix, *, dry_run=False, out=print, ignore_
         out(f'  The marker {marker} stays, so servers without CHARACTER_DATABASE_URL keep refusing to start: delete '
             f'that JSON from S3, or run export again with --ignore-stale to let servers read it.')
         raise SystemExit(f'{prefix or "(no prefix)"}: records written back, marker kept because of stale JSON in S3')
+    count, digest, changed = _records_state(conn, schema, prefix)
+    if (count, digest) != before or changed:
+        # A server elsewhere still writes: S3 lacks what it wrote after the rows were read.
+        out(f'  Records changed while the export ran, so the marker {marker} stays. Stop every character server that '
+            f'uses this database, then run export again.')
+        raise SystemExit(f'{prefix or "(no prefix)"}: records changed during the export, marker kept')
     try:
         # S3 holds the records again, so a server without CHARACTER_DATABASE_URL may start.
         s3.delete_object(Bucket=bucket, Key=marker)
@@ -318,9 +373,10 @@ def main(argv=None):
     migrate_command.add_argument('--create-database', action='store_true',
                                  help='first create the database itself when missing (local development)')
     for name, help_text in (('import', 'copy S3 JSON records into the database'),
-                            ('export', 'write records changed in the database back to S3'),
+                            ('export', 'write records changed in the database back to S3 (stop the character '
+                                       'server first; refused while it runs on this data root)'),
                             ('status', 'show imported prefixes and record counts')):
-        command = commands.add_parser(name, help=help_text)
+        command = commands.add_parser(name, help=help_text, description=help_text)
         command.add_argument('--prefix', action='append', required=name != 'status',
                              help='storage prefix (ASSET_S3_PREFIX); repeat for several')
         if name != 'status':

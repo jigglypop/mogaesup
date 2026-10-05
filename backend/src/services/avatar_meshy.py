@@ -105,15 +105,19 @@ class AvatarMeshy:
     def defaults(self, owner, selections=None, job_id=None):
         if job_id:
             self.factory.get(owner, job_id)
-        if selections is not None:
-            self.validate_actions(owner, selections)
+        # A read takes no lock: the file is replaced whole. Before the owner's file was written in its own scope, the
+        # defaults are resolved from every job's file, a listing of the owner's whole prefix; it is done (and cached by
+        # the owner file's content) before the process lock, which a write takes only to re-read and replace the file.
+        saved = self._saved_defaults(owner)
+        if selections is None:
+            return saved
+        self.validate_actions(owner, selections)
         with _LOCK:
             saved = self._saved_defaults(owner)
-            if selections is not None:
-                saved = {'scope': 'owner', 'selections': {**saved['selections'], **selections}, 'updated_at': now()}
-                path = self.factory.root/str(int(owner))/'motion-defaults.json'
-                path.parent.mkdir(parents=True, exist_ok=True)
-                _write_json(path, saved)
+            saved = {'scope': 'owner', 'selections': {**saved['selections'], **selections}, 'updated_at': now()}
+            path = self.factory.root/str(int(owner))/'motion-defaults.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_json(path, saved)
             return saved
 
     def validate_actions(self, owner, selections):

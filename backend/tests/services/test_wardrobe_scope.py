@@ -51,7 +51,7 @@ def cached_coverage(library, job, slot='hair'):
     root = library.wardrobe.library.root/'wardrobe-coverage'
     root.mkdir(parents=True, exist_ok=True)
     body_sha = library.file_sha(BODY, BODY_VERSION, 'body')
-    put(root/f'{body_sha[:20]}-{library.file_sha(job, V1, slot)[:20]}-v11.json', {'slot': slot, 'covers_bottom': False})
+    put(root/f'{body_sha[:20]}-{library.file_sha(job, V1, slot)[:20]}-v12.json', {'slot': slot, 'covers_bottom': False})
 
 
 def not_found(call):

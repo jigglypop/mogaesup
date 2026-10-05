@@ -230,7 +230,9 @@ def test_a_stopped_upload_without_its_completion_mark_stays_unconfirmed(tmp_path
 
 
 def test_a_stopped_request_that_never_started_is_settled_as_not_sent(tmp_path):
-    state, receipt = stopped_attempt(tmp_path, {'phase': 'prepared', 'request_started': False, 'client_request_id': 'x'})
+    # A receipt written since the start is made durable before any byte (durable_start): its missing start is evidence.
+    state, receipt = stopped_attempt(tmp_path, {'phase': 'prepared', 'request_started': False, 'durable_start': True,
+                                                'client_request_id': 'x'})
     assert settle_interrupted(tmp_path, state)
     assert state['parts'][0]['views']['front']['status'] == 'not_sent'
     assert json.loads(receipt.with_suffix('.request.json').read_text())['submission'] == 'not_sent'
@@ -435,13 +437,15 @@ def test_a_receipt_that_cannot_be_updated_during_transport_does_not_abort_the_pa
     monkeypatch.setattr(images, '_write_json', write)
 
     def handler(request):
-        # httpx reports each step of the request to the trace extension, inside the request.
-        unavailable['now'] = True
-        try:
-            for event in TRANSPORT_EVENTS:
+        # httpx reports each step of the request to the trace extension, inside the request. The start is on record
+        # before the request is written (a start that cannot be recorded stops it: test_image_request_outcomes.py);
+        # only the steps around it fail to save.
+        for event in TRANSPORT_EVENTS:
+            unavailable['now'] = event != 'http11.send_request_headers.started'
+            try:
                 request.extensions['trace'](event, {})
-        finally:
-            unavailable['now'] = False
+            finally:
+                unavailable['now'] = False
         return httpx.Response(200, json=answer())
     serve(monkeypatch, handler)
     with caplog.at_level(logging.WARNING, logger=images.LOGGER.name):

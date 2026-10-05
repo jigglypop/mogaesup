@@ -18,11 +18,18 @@ MAX_REGIONS = 4
 MASK_EDGE = 1024
 # Texels are clustered at the mask's resolution: a 4096 px texture would otherwise take gigabytes as float arrays.
 TEXTURE_EDGE = MASK_EDGE
+# Only a JPEG decodes straight at a fraction of its size; a PNG is decoded whole before it is reduced. A texture larger
+# than this (4096 px a side) is refused before it is decoded rather than held as hundreds of MB per request.
+MAX_DECODED_PIXELS = 4096*4096
 LIGHTNESS_WEIGHT = .35
 MERGE_DISTANCE = 14.     # Lab units (lightness weighted) below which two regions are one colour
 MIN_SHARE = .03
 _XYZ = np.array([[.4124, .3576, .1805], [.2126, .7152, .0722], [.0193, .1192, .9505]], np.float32).T
 _WHITE = np.array([.95047, 1., 1.08883], np.float32)
+
+
+class TextureTooLarge(ValueError):
+    """The base colour texture is larger than MAX_DECODED_PIXELS once decoded."""
 
 
 def _linear(srgb):
@@ -75,8 +82,11 @@ def _texture(doc, binary):
         view = doc['bufferViews'][image['bufferView']]
         start = view.get('byteOffset', 0)
         with Image.open(io.BytesIO(binary[start:start + view['byteLength']])) as picture:
-            # A JPEG decodes straight at a fraction of its size; any other image is reduced after decoding.
+            # A JPEG decodes straight at a fraction of its size; any other image is reduced after decoding, so its
+            # decoded size is bounded first (the header gives it without decoding).
             picture.draft('RGB', (TEXTURE_EDGE, TEXTURE_EDGE))
+            if picture.size[0]*picture.size[1] > MAX_DECODED_PIXELS:
+                raise TextureTooLarge(f'{picture.size[0]}x{picture.size[1]}')
             picture = picture.convert('RGB')
         if max(picture.size) > TEXTURE_EDGE:
             picture.thumbnail((TEXTURE_EDGE, TEXTURE_EDGE), Image.Resampling.BOX)
@@ -84,9 +94,18 @@ def _texture(doc, binary):
     return None
 
 
+def _fill(draw, triangles):
+    """Fill `triangles` ((n, 3, 2) pixel coordinates) on `draw`. Each is passed as one flat list of six numbers made by a
+    single tolist(): building a tuple per corner cost most of the time of a part with tens of thousands of triangles."""
+    triangles = triangles[np.isfinite(triangles).all(axis=(1, 2))]
+    polygon = draw.polygon
+    for corners in triangles.reshape(-1, 6).tolist():
+        polygon(corners, fill=255)
+
+
 def color_regions(part_content):
     """(mask PNG bytes, [{index, color, share, light}], glTF material index) or None when the part has no texture.
-    The mask follows that material's UV layout only."""
+    The mask follows that material's UV layout only. TextureTooLarge when the texture is too large to decode."""
     doc, binary = parse_glb(part_content)
     found = _texture(doc, binary)
     if not found:
@@ -102,9 +121,8 @@ def color_regions(part_content):
                 continue
             uv = _accessor(doc, binary, attribute)*np.array([width, height])
             triangles = (_accessor(doc, binary, primitive['indices']).astype(np.int64).reshape(-1, 3)
-                         if 'indices' in primitive else np.arange(len(uv)).reshape(-1, 3))
-            for triangle in uv[triangles]:
-                draw.polygon([tuple(point) for point in triangle], fill=255)
+                         if 'indices' in primitive else np.arange(len(uv) - len(uv) % 3).reshape(-1, 3))
+            _fill(draw, uv[triangles].astype(np.float64))
     used = np.asarray(used) > 0
     pixels = np.asarray(picture, dtype=np.float32)/np.float32(255.)
     if used.sum() < 100:

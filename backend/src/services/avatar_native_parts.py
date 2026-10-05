@@ -11,6 +11,7 @@ from src.services.avatar_factory import _LOCK, _QUEUE, digest
 from src.services.avatar_meshy import AvatarMeshy
 from src.services.character_parts import blender_executable, blender_process, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
+from src.services.keyed_lock import keyed_lock
 from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import WorkspaceUploadError, copy_file, local_workspace, publish_checkpoint
 from src.services.avatar_production_spec import production_spec, refresh_fitting_spec
@@ -23,6 +24,8 @@ SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
 RECIPE = 'native-parts-v14-matte-limb-fit'
 # The assembly worker of each version directory that runs in this process.
 _WORKERS = WorkerLocks()
+# How often an admission reads its inputs again when they changed before it could write.
+_ADMISSION_ATTEMPTS = 3
 # Absolute paths in worker text (C:\..., \\host\..., /srv/...); the worker's public_message cuts them the same way.
 _ABSOLUTE_PATH = re.compile(r'(?:\b[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/]|(?<![\w.:/~-])/(?=[^\s/]+/))'
                             r'(?:[^\s\'"<>|*?\\/]+[\\/])*([^\s\'"<>|*?\\/]*)')
@@ -117,6 +120,31 @@ def assembly_running(directory):
     return record, worker_alive(record, held or _WORKERS.busy(str(directory)))
 
 
+def admission(owner, job):
+    """The lock every admission of a job's assembly holds in this process: a new or resumed version, a refit, a version
+    selection. Its inputs are read, hashed and validated under it, outside the process lock, which is taken only to
+    check that they are unchanged and to write; so two admissions of one job do not interleave. It is never taken
+    while the process lock is held."""
+    return keyed_lock(('native-admission', int(owner), job))
+
+
+def frozen_expressions_pending(pipeline, expression_run, version):
+    """True while the saved expressions a refit froze for the assembly `version` are not all applied to it."""
+    local_refit = pipeline.get('local_refit') or {}
+    frozen = (pipeline.get('expression_reuse') or {}).get('expressions') or []
+    target = local_refit.get('target_version', version) if local_refit else pipeline.get('native_assembly_version')
+    return bool(target == version and frozen and not (
+        expression_run.get('target_version') == version
+        and expression_run.get('status') == 'complete'
+        and all(item['source_id'] in (expression_run.get('expressions') or {}) for item in frozen)))
+
+
+def expression_pending(job_directory, version):
+    """frozen_expressions_pending from the job's saved pipeline and expression run."""
+    return frozen_expressions_pending(read_json(job_directory/'pipeline.json') or {},
+                                      read_json(job_directory/'expression-reuse.json') or {}, version)
+
+
 def placed_head_bounds(bounds, spec, slot):
     """True when a head part's measured canvas bounds are a placement on the shared canvas: the
     part reaches the crown and is not much wider than the slot's fitting bounds. A provider that
@@ -136,8 +164,15 @@ class AvatarNativeParts:
         self.factory.get(owner, job)
         return self.factory.directory(owner, job)/'native-parts'
 
+    def _owned_root(self, owner, job):
+        """root() for a read: the owner's job is found from its job.json alone, without the job's whole state."""
+        directory = self.factory.directory(owner, job)
+        if not read_json(directory/'job.json'):
+            raise PipelineError('not_found', '생산 작업을 찾을 수 없습니다.', 404)
+        return directory/'native-parts'
+
     def get(self, owner, job, version=None):
-        root = self.root(owner, job)
+        root = self._owned_root(owner, job)
         pointer = {'version': version} if version else read_json(root/'current.json')
         if not pointer:
             return {'status': 'not_started', 'parts': [], 'artifacts': []}
@@ -150,25 +185,15 @@ class AvatarNativeParts:
             status = 'recovery_required'
         error = '조립 재개 필요' if status == 'qc_failed' else record.get('error')
         saved_contract = read_json(directory/'input.json').get('contract', {})
-        job_directory = self.factory.directory(owner, job)
+        job_directory = root.parent
         pipeline = read_json(job_directory/'pipeline.json') or {}
         local_refit = pipeline.get('local_refit') or {}
-        expression_contract = pipeline.get('expression_reuse') or {}
-        frozen_expressions = expression_contract.get('expressions') or []
         expression_run = read_json(job_directory/'expression-reuse.json') or {}
-        expression_version = (local_refit.get('target_version', version) if local_refit
-                              else pipeline.get('native_assembly_version'))
-        expression_pending = bool(expression_version == version
-            and frozen_expressions and not (
-            expression_run.get('target_version') == version
-            and expression_run.get('status') == 'complete'
-            and all(item['source_id'] in (expression_run.get('expressions') or {})
-                    for item in frozen_expressions)))
         result = public_result(record.get('result', {}))
         state = {'version': version, 'status': status, 'error': error,
                 'error_stage': record.get('error_stage'), 'error_type': record.get('error_type'),
                 **result,
-                'expression_pending': expression_pending,
+                'expression_pending': frozen_expressions_pending(pipeline, expression_run, version),
                 'refit_request_key': (local_refit.get('request_key')
                     if local_refit.get('target_version') == version else None),
                 'fit_update_available': (
@@ -179,7 +204,7 @@ class AvatarNativeParts:
                 'artifacts': [{'name': name, 'sha256': value,
                     'url': f'/api/avatar-factory/jobs/{job}/native-parts/{version}/{name}'}
                     for name, value in record.get('files', {}).items()]}
-        if status != 'review_required' or expression_pending:
+        if status != 'review_required' or state['expression_pending']:
             source_version = local_refit.get('source_version')
             if (isinstance(source_version, str) and re.fullmatch(r'[a-f0-9]{24}', source_version)
                     and source_version != version):
@@ -197,19 +222,22 @@ class AvatarNativeParts:
         state['review'] = AvatarNativeReviews(self.factory).overlay(owner, job, version, record)
         return state
 
-    def start_refit(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None):
+    def start_refit(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None,
+                    admit=None):
         """Freeze every other fitted slot, then refit only one saved raw part.
 
         part_method='body_shell' rebuilds a top or bottom from the frozen body and its
         saved views, with no provider request; 'isolated' refits the saved model.
         shape {'sleeve', 'hem', 'fit'} (body-shell top/bottom) replaces the saved shape;
         {} returns to the drawing; None keeps the saved shape.
+        admit: a check (the API's idle stage) that runs under the process lock before anything is written.
         """
-        with _LOCK:
-            return self._start_refit_locked(owner, job, source_version, slot, request_key,
-                                            fit_profile=fit_profile, part_method=part_method, shape=shape)
+        with admission(owner, job):
+            return self._start_refit(owner, job, source_version, slot, request_key,
+                                     fit_profile=fit_profile, part_method=part_method, shape=shape, admit=admit)
 
-    def _start_refit_locked(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None):
+    def _start_refit(self, owner, job, source_version, slot, request_key, *, fit_profile=None, part_method=None, shape=None,
+                     admit=None):
         if not re.fullmatch(r'[a-f0-9]{24}', source_version):
             raise PipelineError('not_found', '기준 조립 버전을 찾을 수 없습니다.', 404)
         require_request_key(request_key)
@@ -234,22 +262,28 @@ class AvatarNativeParts:
                 raise PipelineError('idempotency_conflict', '같은 요청의 피팅 입력이 변경되었습니다.', 409)
             if receipt.get('version'):
                 return self._resume_version(owner, job, receipt['version'],
-                    recover_from=source_version, request_key=request_key)
+                    recover_from=source_version, request_key=request_key, admit=admit)
         previous_intent = pipeline.get('local_refit') or {}
         if previous_intent.get('request_key') == request_key:
             if previous_intent.get('fingerprint') != fingerprint:
                 raise PipelineError('idempotency_conflict', '같은 요청 식별자에 다른 파츠를 사용할 수 없습니다.', 409)
             if previous_intent.get('target_version'):
                 return self._resume_version(owner, job, previous_intent['target_version'],
-                    recover_from=source_version, request_key=request_key)
-            return self.start(owner, job)
+                    recover_from=source_version, request_key=request_key, admit=admit)
+            return self.start(owner, job, admit=admit)
         from src.services.avatar_expression_reuse import reuse_running
-        expression_run, running = reuse_running(directory)
-        if running and expression_run.get('process'):
+
+        def expression_running():
+            expression_run, running = reuse_running(directory)
+            return bool(running and expression_run.get('process'))
+        if expression_running():
             raise PipelineError('expression_running', '기존 표정을 적용 중입니다. 완료 후 파츠를 선택하세요.', 409)
         current = read_json(directory/'native-parts/current.json')
         if current.get('version') != source_version:
             raise PipelineError('base_changed', '현재 조립 버전을 다시 선택하세요.', 409)
+        # What the request is checked against. The saved parts are hashed and copied below, outside the process lock,
+        # which is taken only to see this unchanged and to write the request.
+        read_pipeline = deepcopy(pipeline)
         source = directory/'native-parts'/source_version
         record = read_json(source/'record.json')
         if record.get('status') != 'review_required':
@@ -319,24 +353,37 @@ class AvatarNativeParts:
         pipeline['local_refit'] = {'source_version': source_version, 'slot': slot,
                                    'request_key': request_key, 'fingerprint': fingerprint,
                                    'fit_spec': fit_spec}
-        _write_json(receipt_path, {'fingerprint': fingerprint, 'input': submitted, 'status': 'accepted'})
-        _write_json(directory/'pipeline.json', pipeline)
-        return self.start(owner, job)
-
-    def _resume_version(self, owner, job, version, *, recover_from=None, request_key=None):
-        """Recover the sealed input, even after source code or defaults change. The pointers, the pipeline and the
-        record it moves are written under the process lock, as a new version's are."""
         with _LOCK:
-            return self._resume_version_locked(owner, job, version, recover_from=recover_from, request_key=request_key)
+            if admit:
+                admit()
+            # A selection, an assembly or an expression run may have landed while the parts were hashed and copied.
+            if (read_json(directory/'pipeline.json') != read_pipeline or read_json(receipt_path) != receipt
+                    or read_json(directory/'native-parts/current.json').get('version') != source_version
+                    or expression_running()):
+                raise PipelineError('base_changed', '현재 조립 버전을 다시 선택하세요.', 409)
+            _write_json(receipt_path, {'fingerprint': fingerprint, 'input': submitted, 'status': 'accepted'})
+            _write_json(directory/'pipeline.json', pipeline)
+        return self.start(owner, job, admit=admit)
 
-    def _resume_version_locked(self, owner, job, version, *, recover_from=None, request_key=None):
+    def _resume_version(self, owner, job, version, *, recover_from=None, request_key=None, admit=None):
+        """Recover the sealed input, even after source code or defaults change. The pointers, the pipeline and the
+        record it moves are checked and written under the process lock, as a new version's are, after `admit`; the
+        state answered is read once the lock is released."""
         root = self.root(owner, job)
+        with _LOCK:
+            if admit:
+                admit()
+            created = self._resume_version_locked(root, version, recover_from=recover_from, request_key=request_key)
+        return self.get(owner, job, version), created
+
+    def _resume_version_locked(self, root, version, *, recover_from=None, request_key=None):
+        """True when the version was admitted to run again; False when it is sealed or its worker still runs."""
         record, running = assembly_running(root/version)
         if record.get('status') == 'review_required':
-            return self.get(owner, job, version), False
+            return False
         current_version = read_json(root/'current.json').get('version')
         if current_version != version:
-            pipeline_path = self.factory.directory(owner, job)/'pipeline.json'
+            pipeline_path = root.parent/'pipeline.json'
             pipeline = read_json(pipeline_path)
             refit = pipeline.get('local_refit') or {}
             sealed = read_json(root/version/'input.json')
@@ -354,13 +401,13 @@ class AvatarNativeParts:
             self._move_current(root, version)
         runner = read_json(root/version/'runner.json')
         if runner.get('process') and process_state(runner['process']) != 'exited':
-            return self.get(owner, job, version), False
+            return False
         if record.get('status') in ('failed', 'qc_failed', 'running', 'accepted'):
             if record.get('status') in ('accepted', 'running') and running:
-                return self.get(owner, job, version), False
+                return False
             record.update(status='accepted', process=identity(), error=None)
             _write_json(root/version/'record.json', record)
-            return self.get(owner, job, version), True
+            return True
         raise PipelineError('assembly_missing', '저장된 피팅 요청을 확인할 수 없습니다.', 409)
 
     def _move_current(self, root, version):
@@ -391,16 +438,31 @@ class AvatarNativeParts:
         reuse_saved_expressions(self.factory, owner, job, state['version'])
         return self.get(owner, job)
 
-    def start(self, owner, job, *, canonical_pose=False):
+    def start(self, owner, job, *, canonical_pose=False, admit=None):
+        """(state, created) of an assembly of the job's saved parts: the version it accepted, resumed, or a new one.
+
+        The inputs are read, hashed and validated (an uploaded hair as well) under the job's admission lock, outside
+        the process lock. That lock is taken to run `admit` (the API's idle stage check), see the pipeline as it was
+        read, and write; when the pipeline changed meanwhile, the inputs are read again."""
+        with admission(owner, job):
+            for _ in range(_ADMISSION_ATTEMPTS):
+                started = self._start(owner, job, canonical_pose, admit)
+                if started is not None:
+                    return started
+        raise PipelineError('base_changed', '조립 입력이 계속 바뀌고 있습니다. 잠시 후 다시 시도해 주세요.', 409)
+
+    def _start(self, owner, job, canonical_pose, admit):
+        """start() from one read of the pipeline; None when it changed before the version could be written."""
         job_state = self.factory.get(owner, job)
         if job_state.get('production_mode') != 'character_parts':
             raise PipelineError('parts_required', '몸과 의상을 개별 생성한 파츠 작업이 필요합니다.', 422)
         job_directory = self.factory.directory(owner, job)
         pipeline = read_json(job_directory/'pipeline.json')
+        read_pipeline = deepcopy(pipeline)
         local_refit = pipeline.get('local_refit') or {}
         accepted_version = local_refit.get('target_version') if local_refit else pipeline.get('native_assembly_version')
         if accepted_version and not canonical_pose:
-            return self._resume_version(owner, job, accepted_version)
+            return self._resume_version(owner, job, accepted_version, admit=admit)
         if local_refit:
             source_version = local_refit['source_version']
             source_record = read_json(job_directory/'native-parts'/source_version/'record.json')
@@ -555,7 +617,6 @@ class AvatarNativeParts:
                     'body': digest(body), 'parts': [(p['slot'], p['sha256']) for p in parts],
                     'prefit_parts': [(p['slot'], p['sha256']) for p in prefit_parts],
                     'unavailable_parts': unavailable_parts}
-        pipeline = read_json(self.factory.directory(owner, job)/'pipeline.json')
         # Generation keeps its accepted sizing. An explicit refit freezes the
         # current fitting rules separately before dispatching its worker.
         saved_spec = pipeline.get('production_spec')
@@ -575,40 +636,54 @@ class AvatarNativeParts:
                         fit_worker_sha256=digest(Path(__file__).with_name('avatar_fit_geometry.py')),
                         garment_worker_sha256=digest(Path(__file__).with_name('avatar_garment_geometry.py')))
         version = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()[:24]
-        root = self.root(owner, job); directory = root/version
+        root = job_directory/'native-parts'; directory = root/version
         if not blender_executable():
             raise PipelineError('blender_unavailable', '로컬 Blender 설치가 필요합니다.', 422)
         with _LOCK:
-            previous = read_json(root/'current.json')
-            if previous:
-                current, running = assembly_running(root/previous['version'])
-                if current.get('status') in ('accepted', 'running') and running:
-                    return self.get(owner, job), False
-            record = read_json(directory/'record.json')
-            if record.get('status') == 'review_required':
-                _write_json(root/'current.json', {'version': version})
-                return self.get(owner, job), False
-            runner = read_json(directory/'runner.json')
-            if runner and process_state(runner.get('process')) != 'exited':
-                raise PipelineError('worker_running', '기존 Blender 작업이 아직 실행 중입니다.', 409)
-            directory.mkdir(parents=True, exist_ok=True)
-            _write_json(directory/'input.json', {'source': str(body), 'source_sha256': digest(body),
-                        'parts': parts, 'prefit_parts': prefit_parts, 'unavailable_parts': unavailable_parts,
-                        'output': str(directory), 'contract': contract,
-                        'production_spec': fit_spec, 'source_measurements': measurements,
-                        'base_version': previous.get('version') if previous else None,
-                        'canonical_pose': canonical_pose})
-            _write_json(directory/'record.json', {'status': 'accepted', 'process': identity(), 'files': {}, 'created_at': now()})
-            if local_refit:
-                pipeline['local_refit']['target_version'] = version
-                receipt_path = job_directory/'native-parts'/'refit-requests'/f'{hashlib.sha256(local_refit["request_key"].encode()).hexdigest()}.json'
-                receipt = read_json(receipt_path)
-                _write_json(receipt_path, {**receipt, 'fingerprint': local_refit['fingerprint'], 'version': version})
-            else:
-                pipeline['native_assembly_version'] = version
-            _write_json(job_directory/'pipeline.json', pipeline)
-            self._move_current(root, version)
-        return self.get(owner, job), True
+            if admit:
+                admit()
+            pipeline = read_json(job_directory/'pipeline.json')
+            if pipeline != read_pipeline:
+                return None
+            created = self._admit_locked(root, version, {
+                'source': str(body), 'source_sha256': contract['body'],
+                'parts': parts, 'prefit_parts': prefit_parts, 'unavailable_parts': unavailable_parts,
+                'output': str(directory), 'contract': contract,
+                'production_spec': fit_spec, 'source_measurements': measurements,
+                'base_version': None, 'canonical_pose': canonical_pose}, pipeline)
+        return self.get(owner, job), created
+
+    def _admit_locked(self, root, version, payload, pipeline):
+        """Write the input (`payload`, whose base_version is the current version read here) and the accepted record of
+        a new version and point the pipeline and current.json at it. False, writing nothing but the pointer to a sealed
+        version, when the job's current version still runs or this one is sealed already."""
+        directory = root/version
+        previous = read_json(root/'current.json')
+        if previous:
+            current, running = assembly_running(root/previous['version'])
+            if current.get('status') in ('accepted', 'running') and running:
+                return False
+        record = read_json(directory/'record.json')
+        if record.get('status') == 'review_required':
+            _write_json(root/'current.json', {'version': version})
+            return False
+        runner = read_json(directory/'runner.json')
+        if runner and process_state(runner.get('process')) != 'exited':
+            raise PipelineError('worker_running', '기존 Blender 작업이 아직 실행 중입니다.', 409)
+        directory.mkdir(parents=True, exist_ok=True)
+        _write_json(directory/'input.json', {**payload, 'base_version': previous.get('version') if previous else None})
+        _write_json(directory/'record.json', {'status': 'accepted', 'process': identity(), 'files': {}, 'created_at': now()})
+        local_refit = pipeline.get('local_refit')
+        if local_refit:
+            local_refit['target_version'] = version
+            receipt_path = root/'refit-requests'/f'{hashlib.sha256(local_refit["request_key"].encode()).hexdigest()}.json'
+            receipt = read_json(receipt_path)
+            _write_json(receipt_path, {**receipt, 'fingerprint': local_refit['fingerprint'], 'version': version})
+        else:
+            pipeline['native_assembly_version'] = version
+        _write_json(root.parent/'pipeline.json', pipeline)
+        self._move_current(root, version)
+        return True
 
     def execute(self, owner, job):
         root = self.root(owner, job)
@@ -686,11 +761,15 @@ class AvatarNativeParts:
                     result={})
             final_write(lambda: _write_json(directory/'record.json', record), 'assembly record')
 
-    def artifact(self, owner, job, version, name):
-        root = self.root(owner, job)
+    def artifact(self, owner, job, version, name, *, record=None):
+        """The path of an assembly file that still matches the hash its version's record gives it, else 404. The
+        owner's job is found from its job.json alone. `record`: the version's record.json when the caller holds it
+        already, so that checking two files of one version reads it once."""
+        root = self._owned_root(owner, job)
         if not re.fullmatch('[a-f0-9]{24}', version) or Path(name).name != name:
             raise PipelineError('not_found', '산출물을 찾을 수 없습니다.', 404)
-        record = read_json(root/version/'record.json')
+        if record is None:
+            record = read_json(root/version/'record.json')
         expected = record.get('files', {}).get(name)
         path = root/version/name
         if not expected or not path.is_file() or digest(path) != expected:

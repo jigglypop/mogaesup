@@ -11,6 +11,7 @@ onto the skin; where an outer garment worn with it covers those body vertices, t
 presses the inner garment under it. Nothing is hidden, so a flared hem never shows a gap.
 """
 import base64
+import re
 
 import numpy as np
 
@@ -171,10 +172,20 @@ def press(points, skin, normals, index, allowed=None, rounds=3):
     return target - points
 
 
+# A Mixamo rig exported through some tools names its bones 'mixamorig_LeftLeg' or 'mixamorig1_LeftLeg' instead of
+# 'mixamorig:LeftLeg'.
+_RIG_PREFIX = re.compile(r'^(?:.*[:])?(?:mixamorig\d*_)?')
+
+
 def bone_keys(names):
-    """Bone names compared across skeletons: lower case, without a rig prefix ('mixamorig:LeftLeg' is 'leftleg')."""
+    """Bone names compared across skeletons: lower case, without a rig prefix ('mixamorig:LeftLeg' and
+    'mixamorig_LeftLeg' are 'leftleg'). Each distinct name is matched once: a body passes one name per vertex."""
     names = np.char.lower(np.asarray(names).astype(str))
-    return np.char.rpartition(names, ':')[..., 2] if names.size else names
+    if not names.size:
+        return names
+    distinct, index = np.unique(names, return_inverse=True)
+    keys = np.array([_RIG_PREFIX.sub('', name, count=1) for name in distinct.tolist()], dtype=distinct.dtype)
+    return keys[index].reshape(names.shape)
 
 
 def _driven(primitive, *names):

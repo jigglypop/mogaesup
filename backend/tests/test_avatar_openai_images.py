@@ -237,18 +237,42 @@ def test_a_request_that_may_have_been_processed_is_never_sent_again(retried, ans
     assert uncertain.value.code == 'image_response_uncertain' and len(posts) == 1
 
 
-def test_a_tls_record_rejection_after_the_upload_is_sent_again(retried):
-    run, answers, posts, delays, receipt = retried
-
-    def rejected(request):
+def tls_failure(event, reason, *, body_complete):
+    """A TLS failure reported at `event` whose cause carries the OpenSSL `reason`."""
+    def answer(request):
         trace = request.extensions['trace']
         trace('http11.send_request_headers.started', {})
-        trace('http11.send_request_body.complete', {})
-        failure = httpx.ReadError('tls failure')
-        cause = OSError('bad record mac')
-        cause.reason = 'SSLV3_ALERT_BAD_RECORD_MAC'
-        trace('http11.receive_response_headers.failed', {'exception': cause})
-        raise failure
-    answers.extend([rejected, ok()])
+        if body_complete:
+            trace('http11.send_request_body.complete', {})
+        cause = OSError('tls failure')
+        cause.reason = reason
+        trace(event, {'exception': cause})
+        raise httpx.ReadError('tls failure')
+    return answer
+
+
+def test_a_fatal_alert_received_while_the_request_was_written_is_sent_again(retried):
+    run, answers, posts, delays, receipt = retried
+    answers.extend([tls_failure('http11.send_request_body.failed', 'SSLV3_ALERT_BAD_RECORD_MAC', body_complete=False), ok()])
     assert run() == png()
+    assert len(posts) == 2 and posts[0] == posts[1]
     assert [attempt['reason'] for attempt in metadata(receipt)['auto_retries']] == ['tls_rejected']
+
+
+@pytest.mark.parametrize('reason', [
+    # Our own TLS could not decrypt the provider's answer: the provider had the whole request and may have made it.
+    'DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
+    # An alert read while waiting for the answer does not say which record it was about.
+    'SSLV3_ALERT_BAD_RECORD_MAC',
+])
+def test_a_tls_failure_while_the_answer_is_read_after_a_complete_upload_is_never_sent_again(retried, reason):
+    run, answers, posts, delays, receipt = retried
+    answers.append(tls_failure('http11.receive_response_headers.failed', reason, body_complete=True))
+    with pytest.raises(httpx.ReadError):
+        run()
+    assert len(posts) == 1 and delays == []
+    saved = metadata(receipt)
+    assert saved['submission'] == 'unknown' and saved['tls_reason'] == reason and 'auto_retries' not in saved
+    with pytest.raises(PipelineError) as uncertain:
+        run()
+    assert uncertain.value.code == 'image_response_uncertain' and len(posts) == 1

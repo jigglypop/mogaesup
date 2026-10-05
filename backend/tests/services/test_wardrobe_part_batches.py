@@ -1,15 +1,17 @@
 from contextlib import contextmanager
 import hashlib
 import io
+import shutil
 
 from PIL import Image
 import pytest
 
+from lock_probe import lock_free
 from native_assembly_fixture import JOB, VERSION, seed_native_assembly
-from src.services import avatar_part_batches, meshy_status, run_lock
+from src.services import avatar_native_parts, avatar_part_batches, meshy_status, run_lock
 from src.services.asset_editor import _write_json
 from src.services.avatar_blueprints import AvatarBlueprints
-from src.services.avatar_factory import _LOCK
+from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_native_parts import SLOTS
 from src.services.avatar_part_batches import PartBatches
 from src.services.character_pipeline import PipelineError, read_json
@@ -134,7 +136,7 @@ def test_a_replayed_request_is_answered_without_reading_its_images_again(batches
     assert error.value.code == 'idempotency_conflict'
 
 
-def test_the_base_is_checked_under_the_lock_and_its_messages_do_not_name_a_sex(batches):
+def test_a_changed_base_is_refused_and_its_messages_do_not_name_a_sex(batches):
     factory, directory, service = batches
     request = payload(factory, ('헤어', three((40, 40, 60, 255))))
     record, _ = service.create(1, 'part-batch-key-0007', request)
@@ -194,3 +196,83 @@ def test_a_batch_whose_last_save_fails_is_not_left_running(batches, monkeypatch)
     monkeypatch.setattr(avatar_part_batches, '_write_json', write)
     resumed, dispatch = service.resume(1, record['id'])
     assert dispatch and read_json(service.root(1, record['id'])/'batch.json')['status'] == 'accepted'
+
+
+def hashes_while_free(monkeypatch):
+    """Each base and model hash a batch takes, as whether the process lock was free for other threads meanwhile."""
+    seen = []
+    for module in (avatar_part_batches, avatar_native_parts):
+        monkeypatch.setattr(module, 'digest', lambda path: (seen.append(lock_free()), digest(path))[1])
+    return seen
+
+
+def test_the_base_is_read_and_hashed_while_the_process_lock_is_free(batches, monkeypatch):
+    factory, _, service = batches
+    request = payload(factory, ('헤어', three((40, 40, 60, 255))))
+    seen = hashes_while_free(monkeypatch)
+    record, dispatch = service.create(1, 'part-batch-key-0010', request)
+    assert dispatch and seen and all(seen)
+    path = service.root(1, record['id'])/'batch.json'
+    _write_json(path, {**read_json(path), 'status': 'paused'})
+    seen.clear()
+    resumed, dispatch = service.resume(1, record['id'])
+    assert dispatch and read_json(path)['status'] == 'accepted' and seen and all(seen)
+
+
+def test_a_batch_written_while_its_base_is_hashed_is_not_resumed_over(batches, monkeypatch):
+    factory, _, service = batches
+    record, _ = service.create(1, 'part-batch-key-0011', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    path = service.root(1, record['id'])/'batch.json'
+    _write_json(path, {**read_json(path), 'status': 'paused'})
+
+    def written_meanwhile(file):
+        _write_json(path, {**read_json(path), 'error': '다른 실행이 남긴 기록'})
+        return digest(file)
+    monkeypatch.setattr(avatar_part_batches, 'digest', written_meanwhile)
+    with pytest.raises(PipelineError) as error:
+        service.resume(1, record['id'])
+    assert error.value.code == 'worker_active'
+    saved = read_json(path)
+    assert saved['status'] == 'paused' and saved['error'] == '다른 실행이 남긴 기록'
+
+
+def test_the_last_save_reads_the_children_outside_the_lock_and_again_when_the_record_changed(batches, monkeypatch):
+    factory, _, service = batches
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    record, _ = service.create(1, 'part-batch-key-0012', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    path = service.root(1, record['id'])/'batch.json'
+
+    class Stopped:
+        def __init__(self, factory):
+            pass
+
+        def create_single_part(self, *args, **kwargs):
+            raise PipelineError('fixture_stopped', '헤어 처리 중단', 409)
+    monkeypatch.setattr(avatar_part_batches, 'AvatarVariants', Stopped)
+    held, real_public = [], PartBatches._public
+
+    def public(self, owner, current, **kwargs):
+        held.append(_LOCK._is_owned())
+        if len(held) == 1:
+            _write_json(path, {**read_json(path), 'note': 'written meanwhile'})
+        return real_public(self, owner, current, **kwargs)
+    monkeypatch.setattr(PartBatches, '_public', public)
+    service.execute(1, record['id'])
+    saved = read_json(path)
+    assert held == [False, False]
+    assert saved['status'] == 'paused' and saved['note'] == 'written meanwhile' and saved['items'][0]['status'] == 'paused'
+
+
+def test_a_listing_reads_the_job_of_a_made_child_once(batches, monkeypatch):
+    factory, directory, service = batches
+    record, _ = service.create(1, 'part-batch-list-0100', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    child = record['items'][0]['job_id']
+    # A child that was made and assembled: a copy of the sealed fixture job.
+    shutil.copytree(directory.parent.parent, factory.directory(1, child))
+    gets, real_get = [], factory.get
+    monkeypatch.setattr(factory, 'get', lambda owner, job: (gets.append(job), real_get(owner, job))[1])
+    [batch] = service.list(1)['items']
+    [item] = batch['items']
+    assert item['status'] == 'complete' and item['native_receipt']['version'] == VERSION
+    # The assembly state is read from the child's records; the whole job is read once, for its own state.
+    assert gets == [child]

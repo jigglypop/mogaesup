@@ -191,6 +191,27 @@ async def test_artifact_head_uses_the_same_operator_authentication_as_get(monkey
         server.app.dependency_overrides.pop(get_factory, None)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+async def test_only_a_resumed_drain_lets_a_waiting_auto_resume_scan_run_again(monkeypatch, tmp_path):
+    import httpx
+    from src.services import avatar_auto_resume
+    monkeypatch.setenv('ASSET_DATA_ROOT', str(tmp_path))
+    monkeypatch.setattr(server, '_API_KEY', '')
+    calls = []
+    monkeypatch.setattr(avatar_auto_resume, 'reopened', lambda: calls.append(server.activity_state()['admission']))
+    token = 'd' * 32
+    transport = httpx.ASGITransport(app=server.app, client=('127.0.0.1', 1234))
+    async with httpx.AsyncClient(transport=transport, base_url='http://127.0.0.1:8000') as client:
+        assert (await client.post('/internal/drain', json={'token': token})).status_code == 200
+        refused = await client.post('/api/characters', json={})
+        assert refused.status_code == 503 and refused.json()['code'] == 'draining'
+        assert (await client.request('DELETE', '/internal/drain', json={'token': 'e' * 32})).status_code == 409
+        assert calls == []
+        assert (await client.request('DELETE', '/internal/drain', json={'token': token})).status_code == 200
+    assert [admission['draining'] for admission in calls] == [False]
+
+
 def test_the_server_raises_the_worker_thread_limit_long_jobs_share_with_requests(monkeypatch, tmp_path):
     import anyio
     from fastapi.testclient import TestClient
@@ -254,3 +275,31 @@ async def test_health_and_drain_read_the_lock_files_off_the_event_loop_while_job
         finally:
             finish.set()
     assert threads == ['worker thread'] * 4
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+async def test_a_stored_file_that_is_gone_is_not_found_on_a_read_and_a_failure_elsewhere(monkeypatch):
+    import httpx
+    from fastapi import APIRouter
+
+    monkeypatch.setattr(server, '_API_KEY', '')
+    router = APIRouter()
+
+    def gone():
+        # What object_storage.artifact_response raises for a record whose bytes S3 no longer holds.
+        raise FileNotFoundError('/private/data/owner/job/model.glb')
+
+    router.add_api_route('/api/test-missing-file', gone, methods=['GET', 'POST'])
+    server.app.include_router(router)
+    try:
+        transport = httpx.ASGITransport(app=server.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+            read = await client.get('/api/test-missing-file')
+            assert read.status_code == 404 and read.json()['error']['code'] == 'not_found'
+            assert 'private' not in read.text and read.headers.get('x-request-id')
+            written = await client.post('/api/test-missing-file')
+            assert written.status_code == 500 and 'private' not in written.text
+    finally:
+        server.app.router.routes[:] = [route for route in server.app.router.routes
+                                       if getattr(route, 'path', '') != '/api/test-missing-file']
