@@ -47,6 +47,8 @@ _GEOMETRIES = 4
 _READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='wardrobe-records')
 # Colour and coverage work holds hundreds of MB of arrays: only a few run at once, however many members open the wardrobe.
 _COMPUTING = Semaphore(2)
+# (body job, version, registered geometry) already compared by _adopt_versions: each body version is parsed once.
+_COMPARED = set()
 
 
 def _write_file(path, content):
@@ -192,13 +194,15 @@ class Wardrobe:
     def bodies(self):
         """Registered bodies with the common body marked and how many part jobs build on each."""
         from src.services.avatar_fitting_management import FittingManagement
-        value = self._stored()
-        default = FittingManagement(self.factory, self.owner).body_default().get('body') or None
-        registered = registered_bodies(value['bodies'])
         try:
             jobs = self.factory.listing(self.owner)
         except PipelineError:
             jobs = None  # The listing is still loading; counts arrive with the next read.
+        if jobs is not None:
+            self._adopt_versions(jobs)
+        value = self._stored()
+        default = FittingManagement(self.factory, self.owner).body_default().get('body') or None
+        registered = registered_bodies(value['bodies'])
         counts = {}
         if jobs is not None:
             jobs_by_id = {job['id']: job for job in jobs}
@@ -252,6 +256,8 @@ class Wardrobe:
                     candidates = [*(replaced or {}).get('aliases', []), *([replaced['version']] if replaced else [])]
                     aliases = [alias for alias in dict.fromkeys(candidates)
                                if alias != body['version'] and shapes.get(alias) == body['geometry_sha256']]
+                    # Compared here already: _adopt_versions does not parse them again.
+                    _COMPARED.update((job, version, body['geometry_sha256']) for version in shapes)
                     entry = {**{key: body[key] for key in _FIELDS},
                              'name': name or source_job.get('character_name') or job,
                              'body_type': (source_job.get('base_body') or {}).get('body_type'), 'registered_at': now(),
@@ -273,6 +279,55 @@ class Wardrobe:
             except (PipelineError, OSError, ValueError, KeyError) as exc:
                 LOGGER.info('Wardrobe body %s drops alias %s: its body cannot be read (%s)', job, alias, type(exc).__name__)
         return shapes
+
+    def _adopt_versions(self, jobs):
+        """Adds to a registered body, as verified aliases, the other versions of its job that part jobs were made on and
+        whose body has the registered geometry, so their parts stay in the wardrobe. register() keeps such a version
+        only when it is the one being replaced; a body registered afresh at a later version of the same shape left the
+        parts made on the earlier one out. Each version is parsed once per process; a version that cannot be read or
+        has another shape is left out."""
+        stored = self._stored()
+        entries = {b['job_id']: b for b in stored['bodies'] if not b.get('aliases') or b.get('aliases_verified') is True}
+        registered = registered_bodies(stored['bodies'])
+        wanted = sorted({(job.get('base_job_id'), job.get('base_version')) for job in jobs
+                         if job.get('base_job_id') in entries and isinstance(job.get('base_version'), str)
+                         and _ID.fullmatch(job['base_version'])} - set(registered))
+        wanted = [(job, version) for job, version in wanted
+                  if (job, version, entries[job]['geometry_sha256']) not in _COMPARED]
+        if not wanted:
+            return
+        try:
+            self.library.require_storage()
+        except PipelineError:
+            return
+        from src.services.avatar_fitting_management import FittingManagement
+        management = FittingManagement(self.factory, self.owner)
+        found = {}
+        for job, version in wanted:
+            geometry = entries[job]['geometry_sha256']
+            _COMPARED.add((job, version, geometry))
+            try:
+                shape = management.body_entry(job, version)[0]['geometry_sha256']
+            except (PipelineError, OSError, ValueError, KeyError) as exc:
+                LOGGER.info('Wardrobe body %s leaves version %s out: its body cannot be read (%s)', job, version,
+                            type(exc).__name__)
+                continue
+            if shape == geometry:
+                found.setdefault((job, geometry), []).append(version)
+        if not found:
+            return
+        with _LOCK:
+            current = self._stored()
+            bodies, changed = [], False
+            for body in current['bodies']:
+                extra = [version for version in found.get((body['job_id'], body['geometry_sha256']), [])
+                         if version != body['version'] and version not in body.get('aliases', [])]
+                if extra and (not body.get('aliases') or body.get('aliases_verified') is True):
+                    body = {**body, 'aliases': [*body.get('aliases', []), *extra], 'aliases_verified': True}
+                    changed = True
+                bodies.append(body)
+            if changed:
+                self._write(bodies)
 
     def unregister(self, job, expected_revision):
         if not _ID.fullmatch(job):
@@ -410,9 +465,11 @@ class Wardrobe:
         operator=False is a member's listing: the parts to wear, without the parts that could not be
         fitted (`unavailable` is empty) or the messages of failed fit checks (`fit_check` is None).
         """
+        self._body(job_id)
+        jobs = self.factory.listing(self.owner)
+        self._adopt_versions(jobs)
         body = self._body(job_id)
         registered = registered_bodies(self._stored()['bodies'])
-        jobs = self.factory.listing(self.owner)
         jobs_by_id = {job['id']: job for job in jobs}
         metadata = self.library.metadata()
         members = []

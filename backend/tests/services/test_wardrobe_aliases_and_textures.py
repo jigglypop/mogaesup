@@ -84,6 +84,44 @@ def test_an_old_alias_of_the_same_shape_comes_back_once_compared(library, monkey
     assert [part[:3] for part in library.listed(BODY)] == [(PART, PART_VERSION, 'hair')]
 
 
+def fresh_list(library, geometry):
+    """NEXT_VERSION registered afresh (no version replaced, so register() kept no alias)."""
+    _write_json(library.wardrobe.path, {'revision': 'fresh', 'updated_at': 'then', 'bodies': [
+        {'job_id': BODY, 'version': NEXT_VERSION, 'profile_id': f'body-{BODY[:8]}', 'geometry_sha256': sha(geometry),
+         'body_sha256': sha(BODY + NEXT_VERSION), 'name': '몸', 'body_type': 'male', 'registered_at': 'then'}]})
+
+
+def test_parts_made_on_an_earlier_version_of_the_same_shape_are_listed(library, monkeypatch):
+    fresh_list(library, 'one shape')
+    calls = shapes(monkeypatch, {VERSION: 'one shape', NEXT_VERSION: 'one shape'})
+    assert [part[:3] for part in library.listed(BODY)] == [(PART, PART_VERSION, 'hair')]
+    [body] = library.wardrobe._stored()['bodies']
+    assert body['aliases'] == [VERSION] and body['aliases_verified'] is True
+    assert library.wardrobe._member_record(PART, PART_VERSION, 'hair', 'missing')['status'] == 'review_required'
+    assert library.wardrobe.bodies()['bodies'][0]['part_jobs'] == 1
+    assert calls == [VERSION]
+
+
+def test_parts_made_on_an_earlier_version_of_another_shape_stay_out(library, monkeypatch):
+    fresh_list(library, 'second shape')
+    calls = shapes(monkeypatch, {VERSION: 'first shape', NEXT_VERSION: 'second shape'})
+    assert library.listed(BODY) == []
+    assert library.listed(BODY) == []
+    library.wardrobe.bodies()
+    [body] = library.wardrobe._stored()['bodies']
+    assert 'aliases' not in body and calls == [VERSION]
+
+
+def test_an_earlier_version_whose_body_cannot_be_read_stays_out(library, monkeypatch):
+    fresh_list(library, 'one shape')
+
+    def body_entry(management, job, version):
+        raise PipelineError('body_incomplete', 'gone', 409)
+    monkeypatch.setattr(FittingManagement, 'body_entry', body_entry)
+    assert library.listed(BODY) == []
+    assert 'aliases' not in library.wardrobe._stored()['bodies'][0]
+
+
 def test_a_stale_revision_still_refuses_the_comparison(library, monkeypatch):
     legacy_list(library, 'one shape')
     shapes(monkeypatch, {VERSION: 'one shape', NEXT_VERSION: 'one shape'})
