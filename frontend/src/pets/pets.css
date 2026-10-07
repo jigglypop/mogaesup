@@ -1,0 +1,156 @@
+/* The island's pet: the owner's 펫 button and sheet over the world's bottom, and the ball's colour in the world. */
+:root { --mg-pet-ball: #f2d43d; }
+
+.mg-pet-toggle { position: relative; height: 44px; }
+
+.mg-pet {
+  justify-self: center;
+  display: grid;
+  gap: 10px;
+  width: min(560px, 100%);
+  max-height: min(60vh, 520px);
+  max-height: min(60dvh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 12px 14px;
+  border-radius: var(--mg-r-card);
+  scrollbar-width: thin;
+}
+.mg-pet-head { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.mg-pet-heading { display: flex; align-items: center; gap: 8px; flex: 1; font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
+.mg-pet-face {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--mg-tint);
+  font-size: 24px;
+}
+.mg-pet-face img { width: 100%; height: 100%; object-fit: contain; }
+.mg-pet-who { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.mg-pet-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--mg-ink);
+}
+.mg-pet-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 850; }
+.mg-pet-name svg { flex: none; width: 15px; height: 15px; color: var(--mg-muted); }
+@media (hover: hover) {
+  .mg-pet-name:hover { background: var(--mg-tint); }
+}
+.mg-pet-rename .mg-field { height: 34px; width: 11em; }
+.mg-pet-doing { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.mg-pet-more { font-size: 20px; font-weight: 900; line-height: 1; }
+/* The panel sits at the bottom of the world: its menu opens upward. */
+.mg-pet-menu { top: auto; bottom: calc(100% + 8px); min-width: 200px; }
+
+.mg-pet-bars { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.mg-pet-bar { display: grid; gap: 4px; min-width: 0; }
+.mg-pet-bar dt { font-size: 12px; font-weight: 750; color: var(--mg-muted); }
+.mg-pet-bar dd { display: flex; align-items: center; gap: 6px; margin: 0; }
+.mg-pet-bar i {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--mg-accent), var(--mg-primary)) left / var(--mg-pet-value, 0%) 100% no-repeat, var(--mg-tint);
+  transition: background-size 0.4s ease;
+}
+.mg-pet-bar span { min-width: 2ch; font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; }
+
+.mg-pet-commands { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.mg-pet-command {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 1px;
+  min-height: 48px;
+  padding: 4px 2px;
+  border: 1px solid var(--mg-line);
+  border-radius: var(--mg-r-control);
+  background: var(--mg-glass-strong);
+  color: var(--mg-ink);
+}
+.mg-pet-command span { font-size: 13px; font-weight: 800; white-space: nowrap; }
+.mg-pet-command small { font-size: 11px; font-weight: 750; color: var(--mg-muted); font-variant-numeric: tabular-nums; }
+.mg-pet-command[aria-pressed='true'] { border-color: var(--mg-primary); background: var(--mg-primary-soft); color: var(--mg-primary); }
+.mg-pet-command[aria-pressed='true'] small { color: inherit; }
+.mg-pet-command:disabled { opacity: 0.5; }
+@media (hover: hover) {
+  .mg-pet-command:hover:not(:disabled) { border-color: var(--mg-hair-strong); background: var(--mg-card); }
+}
+.mg-pet-command:active:not(:disabled) { transform: scale(0.97); }
+
+.mg-pet-feedback { display: flex; gap: 8px; }
+.mg-pet-feedback .mg-btn { flex: 1; }
+
+.mg-pet-conflict,
+.mg-pet-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border-radius: var(--mg-r-control);
+  background: var(--mg-warn-soft);
+  color: var(--mg-warn);
+  font-size: 13px;
+  font-weight: 750;
+}
+.mg-pet-confirm { background: var(--mg-tint); color: var(--mg-ink); }
+
+/* Adopting: the breeds as pictures, then a name. */
+.mg-pet-breeds {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 6px;
+  max-height: 228px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+  scrollbar-width: thin;
+}
+.mg-pet-breeds button {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 6px 4px;
+  border: 1px solid var(--mg-hair);
+  border-radius: 14px;
+  background: var(--mg-card);
+  color: var(--mg-ink);
+}
+.mg-pet-breeds button[aria-checked='true'] { border-color: var(--mg-primary); box-shadow: 0 0 0 2px var(--mg-primary-soft); }
+.mg-pet-breeds img, .mg-pet-breeds span { width: 56px; height: 56px; object-fit: contain; display: grid; place-items: center; font-size: 32px; }
+.mg-pet-breeds small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 750; }
+.mg-pet-adopt-row { display: flex; gap: 8px; }
+.mg-pet-adopt-row .mg-field { flex: 1; min-width: 0; }
+
+/* Phones: the button keeps its icon, the commands wrap to two rows. */
+@media (max-width: 720px) {
+  .mg-pet-toggle { width: 44px; padding: 0; }
+  .mg-pet-toggle-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .mg-pet { max-height: 46dvh; padding: 10px; }
+  .mg-pet-commands { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .mg-pet-bars { gap: 8px; }
+}
+/* A phone on its side: the sheet stays short. */
+@media (max-height: 500px) {
+  .mg-pet { max-height: 58dvh; }
+  .mg-pet-breeds { max-height: 120px; }
+}
+
+/* 운영 › 카탈로그: the pet breeds under the catalog. */
+.mg-admin-pets { display: grid; gap: 12px; margin-top: 24px; }
+.mg-admin-pets-title { display: flex; align-items: center; gap: 8px; }
+.mg-admin-pets-shipped { list-style: none; margin: 0; padding: 0; }

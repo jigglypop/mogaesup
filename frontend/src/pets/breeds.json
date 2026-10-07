@@ -1,0 +1,534 @@
+[
+  {
+    "slug": "golden-retriever",
+    "name": "골든리트리버",
+    "source": "c0105e174869ed6f38b56085",
+    "order": 1,
+    "model": "/gltf/pets/golden-retriever.glb",
+    "thumbnail": "/gltf/pets/golden-retriever.webp",
+    "sha256": "201ddba0b17476453013fe5fa48bac09c055bf7b019b56c24c74777b1150d0ad",
+    "bytes": 940672,
+    "height_m": 0.55,
+    "length_m": 0.54,
+    "width_m": 0.566,
+    "stride_mps": {
+      "walk": 0.353,
+      "run": 0.55
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "bichon-frise",
+    "name": "비숑프리제",
+    "source": "91094f742dbb388fb05f5e44",
+    "order": 2,
+    "model": "/gltf/pets/bichon-frise.glb",
+    "thumbnail": "/gltf/pets/bichon-frise.webp",
+    "sha256": "9b1d896581cd979b8d925137c0cf3e3620569a4c756e4c9a160e3a51cb0031d2",
+    "bytes": 846936,
+    "height_m": 0.55,
+    "length_m": 0.587,
+    "width_m": 0.513,
+    "stride_mps": {
+      "walk": 0.265,
+      "run": 0.412
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "poodle",
+    "name": "푸들",
+    "source": "a69572dde678a32079af6302",
+    "order": 3,
+    "model": "/gltf/pets/poodle.glb",
+    "thumbnail": "/gltf/pets/poodle.webp",
+    "sha256": "427b3b81242a39a8d51635bd028fadc3fc9e0f42f755fade03e2f18b4adcfe02",
+    "bytes": 1025252,
+    "height_m": 0.55,
+    "length_m": 0.541,
+    "width_m": 0.565,
+    "stride_mps": {
+      "walk": 0.259,
+      "run": 0.578
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "welsh-corgi",
+    "name": "웰시코기",
+    "source": "0fe21567b168507ffc299c2c",
+    "order": 4,
+    "model": "/gltf/pets/welsh-corgi.glb",
+    "thumbnail": "/gltf/pets/welsh-corgi.webp",
+    "sha256": "4b7b1d4c03fbd2e997dd825dddeb04308521d48028d888e366582d784c7bf9e5",
+    "bytes": 728160,
+    "height_m": 0.55,
+    "length_m": 0.546,
+    "width_m": 0.43,
+    "stride_mps": {
+      "walk": 0.211,
+      "run": 0.329
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "samoyed",
+    "name": "사모예드",
+    "source": "8d0d57b90dd2abb3bb87507b",
+    "order": 5,
+    "model": "/gltf/pets/samoyed.glb",
+    "thumbnail": "/gltf/pets/samoyed.webp",
+    "sha256": "5b462eb0baf0bed9af5fa6c9d346426aec40b77413f508562f66f9e8bec905f2",
+    "bytes": 1185240,
+    "height_m": 0.55,
+    "length_m": 0.57,
+    "width_m": 0.435,
+    "stride_mps": {
+      "walk": 0.39,
+      "run": 0.708
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "siberian-husky",
+    "name": "시베리안허스키",
+    "source": "147207a1a4da0fbe68ba4623",
+    "order": 6,
+    "model": "/gltf/pets/siberian-husky.glb",
+    "thumbnail": "/gltf/pets/siberian-husky.webp",
+    "sha256": "7819bcb1094f827b3ccb5eaf0f114c0e0b144782ab076a5e6f8e0d92bbca706e",
+    "bytes": 1293568,
+    "height_m": 0.55,
+    "length_m": 0.559,
+    "width_m": 0.38,
+    "stride_mps": {
+      "walk": 0.432,
+      "run": 0.918
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "shiba-inu",
+    "name": "시바견",
+    "source": "fa357047d711d0f6328e2f32",
+    "order": 7,
+    "model": "/gltf/pets/shiba-inu.glb",
+    "thumbnail": "/gltf/pets/shiba-inu.webp",
+    "sha256": "1a9e5b7c2d8517eeae171676b86131771c17ce4cb15e0c6d8c060dda2635bb42",
+    "bytes": 867532,
+    "height_m": 0.55,
+    "length_m": 0.495,
+    "width_m": 0.42,
+    "stride_mps": {
+      "walk": 0.468,
+      "run": 0.943
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "dachshund",
+    "name": "닥스훈트",
+    "source": "fd0ec825ccedc6e7bac18286",
+    "order": 8,
+    "model": "/gltf/pets/dachshund.glb",
+    "thumbnail": "/gltf/pets/dachshund.webp",
+    "sha256": "ed8472ea593a08f0f39c9877bf3b294af1c1524b4cab8bdde9b9f82b72c0c438",
+    "bytes": 762800,
+    "height_m": 0.55,
+    "length_m": 0.538,
+    "width_m": 0.614,
+    "stride_mps": {
+      "walk": 0.268,
+      "run": 0.341
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "maltese",
+    "name": "말티즈",
+    "source": "6394aa3fa72edf58217fcc4f",
+    "order": 9,
+    "model": "/gltf/pets/maltese.glb",
+    "thumbnail": "/gltf/pets/maltese.webp",
+    "sha256": "05ae54f51259efa0dae080a39ed7dc7d4364b4d9d0835de3677271bdb48493d6",
+    "bytes": 1009792,
+    "height_m": 0.55,
+    "length_m": 0.553,
+    "width_m": 0.598,
+    "stride_mps": {
+      "walk": 0.333,
+      "run": 0.605
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "french-bulldog",
+    "name": "프렌치불독",
+    "source": "171e47f9d22dec6dfffed9e0",
+    "order": 10,
+    "model": "/gltf/pets/french-bulldog.glb",
+    "thumbnail": "/gltf/pets/french-bulldog.webp",
+    "sha256": "ccff8ac8dfcfd5d712aabcf28fa2705438a222adf9888a54de23e46bf79341eb",
+    "bytes": 762208,
+    "height_m": 0.55,
+    "length_m": 0.488,
+    "width_m": 0.423,
+    "stride_mps": {
+      "walk": 0.425,
+      "run": 0.999
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "pug",
+    "name": "퍼그",
+    "source": "505cb0c57d1b44fe143418c1",
+    "order": 11,
+    "model": "/gltf/pets/pug.glb",
+    "thumbnail": "/gltf/pets/pug.webp",
+    "sha256": "90670fb6ecdd65565e247f456fd31f54c40c5b1bd229bf3f503745e4d3db63e7",
+    "bytes": 1027752,
+    "height_m": 0.55,
+    "length_m": 0.604,
+    "width_m": 0.562,
+    "stride_mps": {
+      "walk": 0.436,
+      "run": 0.926
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "dalmatian",
+    "name": "달마시안",
+    "source": "2c8f11ce4dc9ac4d67a86a22",
+    "order": 12,
+    "model": "/gltf/pets/dalmatian.glb",
+    "thumbnail": "/gltf/pets/dalmatian.webp",
+    "sha256": "e942a3e96090a89ba5116fbe81c20ba32e7ecc62edfa3636d89b53302a56eb79",
+    "bytes": 801812,
+    "height_m": 0.55,
+    "length_m": 0.54,
+    "width_m": 0.666,
+    "stride_mps": {
+      "walk": 0.261,
+      "run": 0.499
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "pomeranian",
+    "name": "포메라니안",
+    "source": "ad7b816f3c345474c608b12e",
+    "order": 13,
+    "model": "/gltf/pets/pomeranian.glb",
+    "thumbnail": "/gltf/pets/pomeranian.webp",
+    "sha256": "c2401935d12bd578eee2f1531225a10291b10bc9f6759c7a6a5a1777d88b870f",
+    "bytes": 1230228,
+    "height_m": 0.55,
+    "length_m": 0.591,
+    "width_m": 0.442,
+    "stride_mps": {
+      "walk": 0.549,
+      "run": 1.106
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "schnauzer",
+    "name": "슈나우저",
+    "source": "87dbcb6935256725e039a9f3",
+    "order": 14,
+    "model": "/gltf/pets/schnauzer.glb",
+    "thumbnail": "/gltf/pets/schnauzer.webp",
+    "sha256": "c4241d17e0e9426e8d6d05aed4e528870e3cc981d492096cd57b485d65e8a508",
+    "bytes": 1511256,
+    "height_m": 0.55,
+    "length_m": 0.582,
+    "width_m": 0.531,
+    "stride_mps": {
+      "walk": 0.512,
+      "run": 1.033
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "cocker-spaniel",
+    "name": "코카스파니엘",
+    "source": "374cac242f065685aadf2692",
+    "order": 15,
+    "model": "/gltf/pets/cocker-spaniel.glb",
+    "thumbnail": "/gltf/pets/cocker-spaniel.webp",
+    "sha256": "c978c75bfd2ad9785a57d51d92709c3603d5a7cb04b3e75e0664d4dc976fd9bc",
+    "bytes": 1205140,
+    "height_m": 0.55,
+    "length_m": 0.575,
+    "width_m": 0.632,
+    "stride_mps": {
+      "walk": 0.186,
+      "run": 0.321
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "chihuahua",
+    "name": "치와와",
+    "source": "27b52a8779933beac02d9902",
+    "order": 17,
+    "model": "/gltf/pets/chihuahua.glb",
+    "thumbnail": "/gltf/pets/chihuahua.webp",
+    "sha256": "9653cf438dc4206414ce9659e4f815695675edf1c2f05d71ce9e0339382dc6df",
+    "bytes": 898492,
+    "height_m": 0.55,
+    "length_m": 0.465,
+    "width_m": 0.459,
+    "stride_mps": {
+      "walk": 0.377,
+      "run": 0.759
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "border-collie",
+    "name": "보더콜리",
+    "source": "12eb94391cddc24dea7caf57",
+    "order": 18,
+    "model": "/gltf/pets/border-collie.glb",
+    "thumbnail": "/gltf/pets/border-collie.webp",
+    "sha256": "1638ce6b549ecf7e1e41381611ba4809ff925f63b8bd96b0c82bdc839a75815f",
+    "bytes": 1513592,
+    "height_m": 0.55,
+    "length_m": 0.601,
+    "width_m": 0.497,
+    "stride_mps": {
+      "walk": 0.274,
+      "run": 0.552
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "papillon",
+    "name": "파피용",
+    "source": "e5e69ad0bc50a9d22716971a",
+    "order": 19,
+    "model": "/gltf/pets/papillon.glb",
+    "thumbnail": "/gltf/pets/papillon.webp",
+    "sha256": "b272f582d2a22d1b6cc2b2c722aca52a12c8707ca530eba26bc9a347a20f0867",
+    "bytes": 962428,
+    "height_m": 0.55,
+    "length_m": 0.522,
+    "width_m": 0.613,
+    "stride_mps": {
+      "walk": 0.135,
+      "run": 0.245
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  },
+  {
+    "slug": "bulldog",
+    "name": "불독",
+    "source": "5393d5e7d3c29db9b9382035",
+    "order": 20,
+    "model": "/gltf/pets/bulldog.glb",
+    "thumbnail": "/gltf/pets/bulldog.webp",
+    "sha256": "4546f35ad3f3f77de725f027967726a8b1f40b37dbf383e599ab2f277a2b56d7",
+    "bytes": 776392,
+    "height_m": 0.55,
+    "length_m": 0.555,
+    "width_m": 0.48,
+    "stride_mps": {
+      "walk": 0.455,
+      "run": 1.128
+    },
+    "clips": {
+      "bark": 1,
+      "idle": 2,
+      "jump": 1.5,
+      "lie": 2,
+      "run": 0.3,
+      "sit": 2,
+      "walk": 0.4,
+      "sit_hold": 2,
+      "lie_hold": 3
+    }
+  }
+]
