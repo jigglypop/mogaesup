@@ -77,11 +77,27 @@ def factory_settings(existing, args, fetch_gateway_key):
     return {key: settings[key] for key in order if settings[key] != ''}
 
 
-def server_env_lines(args, database_url, ticket_secret, settings):
+def model_sweep(existing):
+    """MODEL_SWEEP as server.env has it, so an operator who turned the sweep off keeps it off through every deploy; `on`
+    only for a file without it, since this server owns its MODEL_STORE (the site's bucket). Empty is off, as the server
+    reads it. Another value would stop the server at its start (and the previous release with it, on the same file):
+    nothing is installed until the file says on or off."""
+    value = existing.get('MODEL_SWEEP')
+    if value is None:
+        return 'on'
+    if value in ('on', 'off', ''):
+        return value or 'off'
+    raise RuntimeError(f'server.env has MODEL_SWEEP={value!r}, which the server refuses; set it to on or off on the '
+                       'instance (/etc/mogaesup/server.env) and deploy again')
+
+
+def server_env_lines(args, database_url, ticket_secret, settings, sweep='on'):
+    """server.env, with the model store's sweep as model_sweep() decided."""
     origins = [value.strip() for value in args.origin.split(',') if value.strip()]
     return [f'DATABASE_URL={database_url}', 'LISTEN_ADDR=0.0.0.0:8080', f"APP_ORIGIN={','.join(dict.fromkeys(origins))}",
             'COOKIE_SECURE=true', f'REALTIME_TICKET_SECRET={ticket_secret}', f'MODEL_STORE={args.model_store}',
-            f'AWS_REGION={args.region}', 'RUST_LOG=info', *(f'{key}={value}' for key, value in settings.items())]
+            f'MODEL_SWEEP={sweep}', f'AWS_REGION={args.region}', 'RUST_LOG=info',
+            *(f'{key}={value}' for key, value in settings.items())]
 
 
 def describe_factory(settings):
@@ -181,10 +197,12 @@ def main():
         create_app_role(args, root, password)
     url = (f"postgres://mogaesup_app:{urllib.parse.quote(password, safe='')}@{args.endpoint}:5432/mogaesup"
            f"?sslmode=verify-full&sslrootcert={root}/global-bundle.pem")
-    # The studio gateway settings come from the arguments given and, for the rest, from the file this run replaces.
-    settings = factory_settings(read_env(config / 'server.env'), args,
-                                lambda: secret_value(args.factory_gateway_secret, args.region))
-    (config / 'server.env').write_text('\n'.join(server_env_lines(args, url, ticket_secret, settings)) + '\n')
+    # The studio gateway settings come from the arguments given and, for the rest, from the file this run replaces; the
+    # model store's sweep from that file.
+    existing = read_env(config / 'server.env')
+    sweep = model_sweep(existing)
+    settings = factory_settings(existing, args, lambda: secret_value(args.factory_gateway_secret, args.region))
+    (config / 'server.env').write_text('\n'.join(server_env_lines(args, url, ticket_secret, settings, sweep)) + '\n')
     (config / 'server.env').chmod(0o600)
     Path('/etc/systemd/system/mogaesup.service').write_text(SERVICE)
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
@@ -193,6 +211,7 @@ def main():
         subprocess.run(['systemctl', 'restart', 'mogaesup'], check=True)
     print('Application role and service installed. Credentials stay in root-readable configuration.')
     print(describe_factory(settings))
+    print(f'Model sweep: {sweep}')
 
 
 if __name__ == '__main__':

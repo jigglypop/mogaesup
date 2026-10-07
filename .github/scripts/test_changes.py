@@ -5,7 +5,9 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -205,6 +207,38 @@ class ReleaseRouting(unittest.TestCase):
         self.base = self.head()
         self.assertEqual(self.route(), {"backend_check", "deploy_studio"})
 
+    def test_the_web_the_site_runs_is_its_base_after_a_run_that_did_not_deploy_it(self):
+        # The web went out at `live`; a later run passed with a server change only, so the runs give that run's commit
+        # as every base. The site still names `live`, which is on main: the next push deploys the web only when a web
+        # path changed since `live`.
+        self.commit("frontend/src/main.tsx")
+        live = self.head()
+        self.commit("server/src/main.rs")
+        passed = self.head()
+        self.commit("docs/notes.txt")
+        bases = load_bases()
+        found = bases.reconcile({"check": passed, "server": passed, "web": passed, "studio": passed}, live,
+                                lambda commit: bases.on_main(commit, cwd=self.repo))
+        self.assertEqual(found["web"], live)
+        self.base = found["check"]
+        self.deployed.update(server=found["server"], web=found["web"], studio=found["studio"])
+        self.assertEqual(self.route(), set())
+        self.commit("frontend/src/page.tsx")
+        self.assertEqual(self.route(), {"frontend_check", "deploy_web"})
+
+    def test_only_commits_of_mains_history_count_as_on_main(self):
+        on_main = load_bases().on_main
+        first = self.head()
+        self.git("checkout", "--quiet", "-b", "elsewhere")
+        self.commit("frontend/src/main.tsx")
+        elsewhere = self.head()
+        self.git("checkout", "--quiet", "-")
+        self.commit("server/src/main.rs")
+        self.assertTrue(on_main(first, cwd=self.repo))
+        self.assertTrue(on_main(self.head(), cwd=self.repo))
+        self.assertFalse(on_main(elsewhere, cwd=self.repo))
+        self.assertFalse(on_main("f" * 40, cwd=self.repo))
+
 
 class ReleasePaths(unittest.TestCase):
     """The studio release (backend/infra/prepare-aws.ps1) and its routing hold the same files."""
@@ -232,6 +266,92 @@ class ReleasePaths(unittest.TestCase):
                     self.assertNotIn("studio", routes[path])
                 else:
                     self.assertEqual("studio" in routes[path], packed(path))
+
+
+class Pins(unittest.TestCase):
+    """The tool versions the pipeline names are the ones the builds and local checks use."""
+
+    def setUp(self):
+        self.pipeline = (ROOT / ".github/workflows/pipeline.yml").read_text(encoding="utf-8")
+
+    def env(self, name):
+        found = re.search(rf"^  {name}: (\S+)$", self.pipeline, re.M)
+        self.assertIsNotNone(found, f"pipeline.yml must set {name}")
+        return found.group(1)
+
+    def test_one_rust_compiler(self):
+        version = self.env("RUST_VERSION")
+        self.assertTrue(self.env("RUST_IMAGE").startswith(f"rust:{version}-alpine@sha256:"))
+        toolchain = (ROOT / "server/rust-toolchain.toml").read_text(encoding="utf-8")
+        self.assertIn(f'channel = "{version}"', toolchain)
+
+    def test_one_uv(self):
+        dockerfile = (ROOT / "backend/infra/Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(f"uv=={self.env('UV_VERSION')}", dockerfile)
+
+    def test_one_postgresql(self):
+        compose = (ROOT / "server/docker-compose.yml").read_text(encoding="utf-8")
+        major = re.search(r"EngineVersion: '(\d+)\.", (ROOT / "server/infra/aws-server.yaml").read_text(encoding="utf-8"))
+        self.assertIsNotNone(major)
+        self.assertIn(f"image: postgres:{major.group(1)}-alpine", compose)
+        self.assertEqual(set(re.findall(r"image: (postgres:\S+)", self.pipeline)), {f"postgres:{major.group(1)}-alpine"})
+
+    def test_one_aws_account(self):
+        # The account, the buckets named after it and the deploy role are written into each script and template that
+        # needs them (no shared settings file): they must all name the same account.
+        files = (".github/workflows/pipeline.yml", ".github/aws/deploy-role.yaml", "frontend/infra/aws-static.yaml",
+                 "frontend/scripts/deploy-aws.ps1", "server/infra/aws-server.yaml", "server/scripts/deploy-rust-server.py",
+                 "server/scripts/set-factory-jwt.py", "server/scripts/lock-studio.py", "backend/infra/prepare-aws.ps1",
+                 "backend/infra/import-studio-glb.py", "backend/infra/sync-gateway-secret.py")
+        found = {}
+        for name in files:
+            accounts = set(re.findall(r"(?<![0-9A-Za-z])([0-9]{12})(?![0-9A-Za-z])",
+                                      (ROOT / name).read_text(encoding="utf-8")))
+            with self.subTest(file=name):
+                self.assertTrue(accounts, "names no account any more: take it off this list")
+            found[name] = accounts
+        self.assertEqual(len(set().union(*found.values())), 1, found)
+
+
+class ServerLive(unittest.TestCase):
+    """server-live: the site's /api/health must name the commit this run installed (MOGAESUP_COMMIT of the build)."""
+    COMMIT = "a" * 40
+
+    def script(self):
+        text = (ROOT / ".github/workflows/pipeline.yml").read_text(encoding="utf-8")
+        job = text[text.index("\n  server-live:\n"):]
+        job = job[:job.index("\n\n  ")]
+        return textwrap.dedent(job[job.index("run: |\n") + len("run: |\n"):])
+
+    def check(self, answer):
+        """Runs the job's script as the runner does (bash -eo pipefail), with curl answering `answer` (None: fails)."""
+        if not BASH:
+            self.fail("bash is required")
+        stubs = ('curl() { if [ -z "${FAKE_HEALTH+set}" ]; then return 22; fi; printf "%s" "$FAKE_HEALTH"; }\n'
+                 'python3() { "$PYTHON_EXE" "$@"; }\n')
+        env = {**os.environ, "PYTHON_EXE": sys.executable, "GITHUB_SHA": self.COMMIT}
+        env.pop("FAKE_HEALTH", None)
+        if answer is not None:
+            env["FAKE_HEALTH"] = answer
+        done = subprocess.run([BASH, "-eo", "pipefail"], input=(stubs + self.script()).encode("utf-8"),
+                              capture_output=True, env=env, timeout=60)
+        return done.returncode, done.stdout.decode("utf-8", "replace")
+
+    def test_the_site_must_serve_this_runs_commit(self):
+        self.assertEqual(self.check('{"status":"ok","commit":"%s"}' % self.COMMIT)[0], 0)
+        code, out = self.check('{"status":"ok","commit":"%s"}' % ("b" * 40))
+        self.assertEqual(code, 1)
+        self.assertIn("::error::", out)
+
+    def test_a_server_that_names_no_commit_is_a_warning_and_no_answer_fails(self):
+        for answer in ('{"status":"ok","commit":null}', '{"status":"ok"}', "not json"):
+            with self.subTest(answer=answer):
+                code, out = self.check(answer)
+                self.assertEqual(code, 0)
+                self.assertIn("::warning::", out)
+        code, out = self.check(None)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::", out)
 
 
 class DeployBases(unittest.TestCase):
@@ -275,13 +395,62 @@ class DeployBases(unittest.TestCase):
         found = self.bases([self.run_("c", conclusion="failure")], lambda run: [])
         self.assertEqual(found, dict.fromkeys(("check", *PARTS), ""))
 
-    def test_a_web_deployed_by_hand_is_deployed_again(self):
+    def test_the_web_base_is_the_commit_the_site_runs_when_main_has_it(self):
         reconcile = load_bases().reconcile
         found = {"check": "b", "server": "b", "web": "b", "studio": "b"}
-        self.assertEqual(reconcile(found, "c" * 40)["web"], "")
-        self.assertEqual(reconcile(found, "b"), found)
+        # A run that passed without deploying the web (nothing of it changed) is every routing base, while the site
+        # still names the commit it was deployed from: that commit is the web's base, not a deploy by hand.
+        self.assertEqual(reconcile(found, "a" * 40, lambda commit: True), {**found, "web": "a" * 40})
+        self.assertEqual(reconcile(found, "b", lambda commit: self.fail("not asked")), found)
         # A site that does not say what it runs (an older release) changes nothing.
-        self.assertEqual(reconcile(found, None), found)
+        self.assertEqual(reconcile(found, None, lambda commit: self.fail("not asked")), found)
+        # No run recorded the web, but the site names a commit of main: deployed since that one, not in full.
+        self.assertEqual(reconcile({**found, "web": ""}, "a" * 40, lambda commit: True)["web"], "a" * 40)
+
+    def test_a_web_deployed_by_hand_from_off_main_is_deployed_again(self):
+        reconcile = load_bases().reconcile
+        found = {"check": "b", "server": "b", "web": "b", "studio": "b"}
+        self.assertEqual(reconcile(found, "c" * 40, lambda commit: False), {**found, "web": ""})
+
+    def test_a_web_deployed_by_hand_is_deployed_again_from_the_checked_build(self):
+        # A deploy by hand builds from the PC's own node_modules (an older engine, say), not the build a run checked: it
+        # stays live only until the next run, even when its commit is main's and nothing of the web changed since.
+        reconcile = load_bases().reconcile
+        found = {"check": "b", "server": "b", "web": "a" * 40, "studio": "b"}
+        self.assertEqual(reconcile(found, "a" * 40, lambda commit: True, manual=True), {**found, "web": ""})
+        self.assertEqual(reconcile(found, "c" * 40, lambda commit: True, manual=True), {**found, "web": ""})
+        self.assertEqual(reconcile(found, "a" * 40, lambda commit: True, manual=False), found)
+
+    def test_the_site_says_which_commit_it_runs_and_who_deployed_it(self):
+        import http.server
+        import json
+        import threading
+        bodies = {"/pipeline/release.json": {"git_commit": "a" * 40, "by": "pipeline"},
+                  "/manual/release.json": {"git_commit": "b" * 40, "by": "manual"},
+                  "/older/release.json": {"git_commit": "c" * 40},
+                  "/none/release.json": {"git_commit": None, "by": "manual"}}
+
+        class Site(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps(bodies.get(self.path, {})).encode()
+                self.send_response(200 if self.path in bodies else 404)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Site)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        site = f"http://127.0.0.1:{server.server_port}"
+        release = load_bases().live_web_release
+        self.assertEqual(release(f"{site}/pipeline"), ("a" * 40, False))
+        self.assertEqual(release(f"{site}/manual"), ("b" * 40, True))
+        self.assertEqual(release(f"{site}/older"), ("c" * 40, False))
+        self.assertEqual(release(f"{site}/none"), (None, False))
+        self.assertEqual(release(f"{site}/missing"), (None, False))
 
 
 if __name__ == "__main__":

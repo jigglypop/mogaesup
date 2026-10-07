@@ -6,11 +6,16 @@ kept per part, so a studio that could not be reached leaves only the studio pend
 deployed again with every later push. `check` is the newest push run that passed in full; the checks look at what changed
 since then.
 
-The web also reports what it runs (release.json, written by frontend/scripts/deploy-aws.ps1). When that is another
-commit than the runs say, a deploy by hand put it there, and the web is deployed in full again.
+The web also reports what it runs (release.json, written by frontend/scripts/deploy-aws.ps1), and that is its base when
+it is a commit of main's history up to this run's that the pipeline deployed: the web is deployed when a web path changed
+since then. That holds after a run that passed without deploying the web (its routing base is that run's commit, the
+site still names the commit it was last deployed from). A site deployed by hand (`by: manual`: built on a PC from its
+own node_modules, not the build this pipeline checks) or from a commit off that history is deployed in full again; one
+that names no commit changes nothing.
 
-Environment: GITHUB_REPOSITORY, GH_TOKEN (read by gh), GITHUB_OUTPUT, SITE_URL (default https://mogaesup.com). Writes
-check=, server=, web= and studio=; a value is empty when no run qualifies, which checks or deploys that part in full.
+Run from the repository root of a full clone (git answers which commits are on main's history). Environment:
+GITHUB_REPOSITORY, GH_TOKEN (read by gh), GITHUB_OUTPUT, SITE_URL (default https://mogaesup.com). Writes check=,
+server=, web= and studio=; a value is empty when no run qualifies, which checks or deploys that part in full.
 """
 import json
 import os
@@ -48,24 +53,43 @@ def bases(runs, jobs_of):
     return found
 
 
-def live_web_commit(site):
-    """The commit the site says it runs, or None when it does not say (an older release, a failed request)."""
+def live_web_release(site):
+    """The commit the site says it runs and whether it was deployed by hand; (None, False) when it does not say (an
+    older release, a failed request)."""
     try:
         request = urllib.request.Request(f'{site}/release.json', headers={'Cache-Control': 'no-cache'})
         with urllib.request.urlopen(request, timeout=20) as response:
-            commit = json.loads(response.read(4096)).get('git_commit')
+            release = json.loads(response.read(4096))
+        commit, by = release.get('git_commit'), release.get('by')
     except (OSError, ValueError, AttributeError):
-        return None
-    return commit if isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit) else None
+        return None, False
+    if not (isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit)):
+        return None, False
+    return commit, by == 'manual'
 
 
-def reconcile(found, live_web):
-    """`found` with the web base dropped when the site runs another commit than the runs recorded."""
-    if found.get('web') and live_web and live_web != found['web']:
-        print(f"::warning::운영 웹은 {live_web[:12]} 를 돌리는데 마지막 배포 기록은 {found['web'][:12]} 입니다. "
-              '손으로 배포한 것으로 보고 웹을 다시 배포합니다')
+def on_main(commit, cwd=None):
+    """Whether `commit` is this checkout's HEAD or one of its ancestors (main's history up to this run's commit)."""
+    done = subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'HEAD'], cwd=cwd, capture_output=True)
+    return done.returncode == 0
+
+
+def reconcile(found, live_web, is_on_main=on_main, manual=False):
+    """`found` with the web base set to the commit the site runs: kept when it is on main's history (the routing then
+    deploys the web only for a web change since that commit), dropped (a full deploy) when it is not or when the site
+    was deployed by hand (`manual`), whose build no run checked."""
+    if live_web and manual:
+        print(f'::warning::운영 웹은 손으로 배포한 빌드({live_web[:12]})입니다. 점검을 거친 이 실행의 빌드로 웹을 다시 배포합니다')
         return {**found, 'web': ''}
-    return found
+    if not live_web or live_web == found.get('web'):
+        return found
+    if is_on_main(live_web):
+        if found.get('web'):
+            print(f"운영 웹은 {live_web[:12]} 에서 배포됐습니다(실행 기록의 기준 {found['web'][:12]}). 그 뒤 바뀐 웹 경로가 "
+                  '있을 때만 웹을 배포합니다', file=sys.stderr)
+        return {**found, 'web': live_web}
+    print(f"::warning::운영 웹은 main에 없는 커밋 {live_web[:12]} 를 돌립니다. 손으로 배포한 것으로 보고 웹을 다시 배포합니다")
+    return {**found, 'web': ''}
 
 
 def main():
@@ -75,8 +99,8 @@ def main():
     def jobs_of(run):
         return gh(f"repos/{repository}/actions/runs/{run['id']}/jobs?filter=all&per_page=100").get('jobs', [])
 
-    found = reconcile(bases(runs.get('workflow_runs', []), jobs_of),
-                      live_web_commit(os.environ.get('SITE_URL', 'https://mogaesup.com')))
+    live_web, manual = live_web_release(os.environ.get('SITE_URL', 'https://mogaesup.com'))
+    found = reconcile(bases(runs.get('workflow_runs', []), jobs_of), live_web, manual=manual)
     lines = [f'{key}={value}' for key, value in found.items()]
     with open(os.environ.get('GITHUB_OUTPUT', '/dev/stdout'), 'a', encoding='utf-8') as out:
         out.write(''.join(f'{line}\n' for line in lines))

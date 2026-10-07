@@ -113,3 +113,28 @@ def test_the_repository_template_may_move_the_policy_and_change_it(script):
         assert script.evaluate([*moved, role], 'repo')
     assert script.evaluate([*moved, change('Modify', 'SecurityGroup', 'AWS::EC2::SecurityGroup', 'True',
                                            ('Properties', 'GroupDescription'))], 'repo')
+
+
+def test_the_repository_template_takes_over_from_the_live_add_on(script):
+    # After one --from live --execute the stack has the add-on: the next change goes --from repo, which removes it.
+    policy = change('Modify', 'StudioAccessPolicy', 'AWS::IAM::Policy', 'False', ('Properties', 'PolicyDocument'))
+    removed = change('Remove', script.ADDON, 'AWS::IAM::Policy')
+    assert script.evaluate([policy, removed], 'repo') == []
+    assert script.evaluate([change('Modify', 'InstanceRole', 'AWS::IAM::Role', 'False', ('Properties', 'Policies')),
+                            change('Add', 'StudioAccessPolicy', 'AWS::IAM::Policy'), removed], 'repo') == []
+    # The repository's StudioAccessPolicy is in place as the stack has it; only the add-on goes.
+    assert script.evaluate([removed], 'repo') == []
+    # Only that policy, only removed, and only from the repository's template.
+    for other in (change('Remove', script.ADDON, 'AWS::IAM::ManagedPolicy'),
+                  change('Modify', script.ADDON, 'AWS::IAM::Policy', 'False', ('Properties', 'PolicyDocument')),
+                  change('Remove', 'StudioAccessPolicy', 'AWS::IAM::Policy'),
+                  change('Remove', 'InstanceRole', 'AWS::IAM::Role')):
+        assert script.evaluate([policy, other], 'repo')
+    assert script.evaluate([removed], 'live')
+
+
+def test_the_repository_policy_holds_what_the_add_on_gave(script):
+    text = (INFRA / 'ec2.yaml').read_text(encoding='utf-8')
+    policy = text[text.index('  StudioAccessPolicy:'):text.index('  Profile:')]
+    assert "'s3:DeleteObject'" in policy and '${AssetBucket}/assets/*' in policy
+    assert "['ssm:PutParameter']" in policy and 'parameter/asset-studio/current-release' in policy

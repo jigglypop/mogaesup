@@ -36,6 +36,16 @@ Parameters:
     Default: ''
     Description: Managed prefix list com.amazonaws.global.cloudfront.origin-facing in this Region. Required when PublicStudio is true.
     AllowedPattern: '^$|^pl-[0-9a-f]+$'
+  StudioOrigin:
+    Type: String
+    Default: internet
+    AllowedValues: [internet, vpc]
+    Description: How CloudFront reaches the instance with PublicStudio. internet is plain HTTP to the Elastic IP's public name, x-gateway-key and uploads included. vpc is a CloudFront VPC origin (as the mogaesup server has), which reaches the instance inside the VPC; switching replaces the distribution's origin, so lock-studio.py is run again after it.
+  CloudFrontVpcOriginGroup:
+    Type: String
+    Default: ''
+    Description: With StudioOrigin vpc, the group CloudFront creates in the instance's VPC with its first VPC origin there (CloudFront-VPCOrigins-Service-SG). Given, port 80 takes that group only instead of the whole CloudFront prefix list.
+    AllowedPattern: '^$|^sg-[0-9a-f]+$'
   InstanceType: {Type: String, Default: t3.large, AllowedValues: [t3.large, t3.xlarge, c7i.large, c7i.xlarge]}
   ImageId:
     # Pinned, with no default: another image replaces the instance, and the deploy role (SendCommand), the server
@@ -70,6 +80,10 @@ Conditions:
   HasPublicStudio: !Equals [!Ref PublicStudio, 'true']
   StaysOn: !Equals [!Ref IdleStop, 'off']
   IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
+  HasVpcOrigin: !And [!Condition HasPublicStudio, !Equals [!Ref StudioOrigin, vpc]]
+  HasVpcOriginGroup: !And [!Condition HasVpcOrigin, !Not [!Equals [!Ref CloudFrontVpcOriginGroup, '']]]
+  # The prefix list rule stays until the VPC origin's own group is given (CloudFront creates it with that origin).
+  HasPrefixListIngress: !And [!Condition HasPublicStudio, !Not [!Condition HasVpcOriginGroup]]
 Resources:
   InstanceRole:
     Type: AWS::IAM::Role
@@ -122,7 +136,7 @@ Resources:
       SecurityGroupEgress: [{IpProtocol: '-1', CidrIp: 0.0.0.0/0}]
   CloudFrontHttpIngress:
     Type: AWS::EC2::SecurityGroupIngress
-    Condition: HasPublicStudio
+    Condition: HasPrefixListIngress
     Properties:
       GroupId: !Ref SecurityGroup
       IpProtocol: tcp
@@ -130,6 +144,16 @@ Resources:
       ToPort: 80
       SourcePrefixListId: !Ref CloudFrontPrefixListId
       Description: CloudFront origin requests
+  VpcOriginHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasVpcOriginGroup
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref CloudFrontVpcOriginGroup
+      Description: CloudFront VPC origin requests
   Instance:
     Type: AWS::EC2::Instance
     Properties:
@@ -215,6 +239,19 @@ Resources:
           HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization, x-gateway-key]}
           CookiesConfig: {CookieBehavior: none}
           QueryStringsConfig: {QueryStringBehavior: all}
+  # StudioOrigin vpc: CloudFront reaches the instance through network interfaces of its own in the VPC, not over the
+  # internet. Plain HTTP still, but only inside the VPC.
+  StudioVpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Condition: HasVpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub '${AWS::StackName}-studio'
+        Arn: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Instance}'
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+        OriginSSLProtocols: [TLSv1.2]
   StudioDistribution:
     Type: AWS::CloudFront::Distribution
     Condition: HasPublicStudio
@@ -228,16 +265,26 @@ Resources:
         Origins:
           - Id: studio
             DomainName: !If
-              - IsUsEast1
-              - !Sub ['ec2-${Address}.compute-1.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
-              - !Sub ['ec2-${Address}.${AWS::Region}.compute.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
-            # Plain HTTP between CloudFront and the instance, x-gateway-key included: no certificate can name an EC2 public
-            # DNS name. Closing it takes a CloudFront VPC origin (as server/infra/aws-server.yaml has), which needs the
-            # instance in a private subnet, that is, a new instance.
-            CustomOriginConfig:
-              OriginProtocolPolicy: http-only
-              HTTPPort: 80
-              OriginReadTimeout: 60
+              - HasVpcOrigin
+              - !GetAtt Instance.PrivateDnsName
+              - !If
+                - IsUsEast1
+                - !Sub ['ec2-${Address}.compute-1.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
+                - !Sub ['ec2-${Address}.${AWS::Region}.compute.amazonaws.com', {Address: !Join ['-', !Split ['.', !GetAtt StudioAddress.PublicIp]]}]
+            # StudioOrigin internet: plain HTTP between CloudFront and the instance across the internet, x-gateway-key
+            # and uploads included. No public certificate can name an EC2 public DNS name, so origin TLS would take a
+            # domain of its own and a certificate the instance renews; the VPC origin closes the internet path instead.
+            CustomOriginConfig: !If
+              - HasVpcOrigin
+              - !Ref AWS::NoValue
+              - OriginProtocolPolicy: http-only
+                HTTPPort: 80
+                OriginReadTimeout: 60
+            VpcOriginConfig: !If
+              - HasVpcOrigin
+              - VpcOriginId: !GetAtt StudioVpcOrigin.Id
+                OriginReadTimeout: 60
+              - !Ref AWS::NoValue
         DefaultCacheBehavior:
           TargetOriginId: studio
           ViewerProtocolPolicy: redirect-to-https

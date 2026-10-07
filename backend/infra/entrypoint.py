@@ -1,12 +1,27 @@
-"""Single-owner deployment: the API through SSM port forwarding, or through CloudFront when configured."""
+"""Single-owner deployment: the API through SSM port forwarding, or through CloudFront when configured.
+
+    python /app/entrypoint.py                    the API and nginx (the container's command)
+    python /app/entrypoint.py --share-data
+        the whole data root shared with the workers' group; deploy-on-instance.sh runs it in the new image before the
+        worker check, with what its time limit leaves (the first time it changes every entry; one cut short is carried
+        on by the next, as what it changed stays changed)
+    python /app/entrypoint.py --check-workers [--metadata-guard]
+        Blender starts as its worker user and writes where the API leaves work: the pipeline runs it in the studio
+        image, deploy-on-instance.sh in each candidate before it is committed (with --metadata-guard, which also reports
+        whether the worker reaches the instance metadata service; that is a warning, the workers still run).
+"""
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import time
+import uuid
 
 # JWT_SECRET (the app server's FACTORY_JWT_SECRET) lets the API verify the tokens the studio gateway signs, a member's
 # wardrobe reads among them (src/auth.py); without it a request that carries a token is refused with 503.
@@ -16,6 +31,123 @@ allowed = {'OPENAI_API_KEY', 'MESHY_API_KEY', 'OPENAI_API_BASE', 'AVATAR_IMAGE_M
 # The gateway key is written into nginx's rules: no quote, space, `;`, `$` or anything else nginx would read.
 GATEWAY_KEY = re.compile(r'[A-Za-z0-9._~-]{16,}')
 GIT_COMMIT = re.compile(r'[0-9a-f]{40}')
+# studio-worker, the user every Blender runs as (infra/Dockerfile, infra/blender-worker.py, infra/worker-guard.sh).
+WORKER = 10001
+# The API's umask: what it creates under the data root is writable by the workers' group too.
+API_UMASK = 0o002
+METADATA = ('169.254.169.254', 80)
+
+
+def share_entry(path, bits, gid=WORKER, lstat=os.lstat, chown=getattr(os, 'lchown', None), chmod=os.chmod):
+    """One entry of the data root in the workers' group with `bits` added; whether anything had to change. A link is
+    left alone and not followed, and an entry gone meanwhile (a workspace the running API cleared) is skipped."""
+    try:
+        found = lstat(path)
+        if stat.S_ISLNK(found.st_mode):
+            return False
+        changed = False
+        if found.st_gid != gid:
+            chown(path, -1, gid)
+            changed = True
+        if stat.S_IMODE(found.st_mode) & bits != bits:
+            chmod(path, stat.S_IMODE(found.st_mode) | bits)
+            changed = True
+        return changed
+    except FileNotFoundError:
+        return False
+
+
+def share_with_workers(root, gid=WORKER, lstat=os.lstat, chown=getattr(os, 'lchown', None), chmod=os.chmod):
+    """The data root as the API (root) and its Blender workers (studio-worker) share it: every folder the workers' group's,
+    group-writable and setgid (what is made in it keeps the group), every file group-writable. Releases before the
+    workers had a user of their own left root's folders behind; only what is not so yet is changed, so a restart only
+    reads the tree. Returns how many entries it changed."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    changed = share_entry(root, 0o2070, gid, lstat, chown, chmod)
+    for folder, folders, files in os.walk(root):
+        for name in folders:
+            changed += share_entry(os.path.join(folder, name), 0o2070, gid, lstat, chown, chmod)
+        for name in files:
+            changed += share_entry(os.path.join(folder, name), 0o060, gid, lstat, chown, chmod)
+    return int(changed)
+
+
+def share_runtime(root, gid=WORKER, lstat=os.lstat, chown=getattr(os, 'lchown', None), chmod=os.chmod):
+    """What the worker check writes in, and nothing else: the data root itself and its .runtime folder. However large the
+    tree, the check takes the same time; the deploy shares the whole of it just before (--share-data) and the API again
+    when it starts."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    share_entry(root, 0o2070, gid, lstat, chown, chmod)
+    share_entry(root / '.runtime', 0o2070, gid, lstat, chown, chmod)
+
+
+def share_data(root=None, share=share_with_workers):
+    """--share-data: the whole data root shared with the workers' group, and how much of it changed."""
+    root = Path(root or os.environ.get('ASSET_DATA_ROOT', '/app/data'))
+    changed = share(root)
+    print(f"{root} is shared with uid {WORKER}'s group ({changed} entries changed)")
+    return 0
+
+
+def reaches(address, timeout=2):
+    try:
+        socket.create_connection(address, timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
+def as_worker(uid=WORKER):
+    os.setgroups([])
+    os.setresgid(uid, uid, uid)
+    os.setresuid(uid, uid, uid)
+
+
+def check_workers(data_root=None, blender='/usr/local/bin/blender', metadata_guard=False, worker=WORKER,
+                  share=share_runtime):
+    """0 when Blender, started as the API starts it, runs as studio-worker and can write a file in a folder the API made
+    under the data root (only the root and its .runtime are shared here, so the check does not grow with the tree). With
+    `metadata_guard` it also says whether that user reaches the instance metadata service while root does
+    (infra/worker-guard.sh closes it to the worker); a worker that still reaches it is a warning only."""
+    root = Path(data_root or os.environ.get('ASSET_DATA_ROOT', '/app/data'))
+    share(root)
+    previous = os.umask(API_UMASK)
+    try:
+        folder = root / '.runtime' / f'worker-check-{uuid.uuid4().hex}'
+        folder.mkdir(parents=True)
+    finally:
+        os.umask(previous)
+    target = folder / 'worker.txt'
+    try:
+        done = subprocess.run(
+            [blender, '--background', '--factory-startup', '--python-exit-code', '1', '--python-expr',
+             "import os; open(os.environ['STUDIO_WORKER_CHECK'], 'w').write(str(os.getuid()))"],
+            env={**os.environ, 'STUDIO_WORKER_CHECK': str(target)}, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=180, umask=API_UMASK)
+        written = target.read_text(encoding='utf-8').strip() if target.is_file() else None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    if done.returncode or written != str(worker):
+        tail = done.stderr.decode('utf-8', 'replace').strip().splitlines()[-5:]
+        print(f'worker check failed: Blender exited {done.returncode} and wrote {written!r} (want uid {worker}) in '
+              f'{root}', *tail, sep='\n', file=sys.stderr)
+        return 1
+    print(f'Blender runs as uid {worker} and writes under {root}')
+    if metadata_guard:
+        if not reaches(METADATA):
+            print('the instance metadata service does not answer here; nothing to keep the workers from')
+        else:
+            probe = subprocess.run([sys.executable, '-I', '-c', 'import socket, sys\n'
+                                    'try: socket.create_connection(("169.254.169.254", 80), timeout=2).close()\n'
+                                    'except OSError: sys.exit(1)'], preexec_fn=lambda: as_worker(worker), timeout=30)
+            if probe.returncode == 0:
+                print(f'warning: uid {worker} reaches the instance metadata service and with it the role credentials; '
+                      'infra/worker-guard.sh did not take effect', file=sys.stderr)
+            else:
+                print(f'the instance metadata service refuses uid {worker}')
+    return 0
 
 
 def _gate(gateway_key, previous_key):
@@ -100,7 +232,10 @@ def main():
     gateway_key = os.environ.pop('STUDIO_GATEWAY_KEY', '').strip()
     previous_key = os.environ.pop('STUDIO_GATEWAY_KEY_PREVIOUS', '').strip()
     write_public_rules(Path('/etc/nginx/studio-public.conf'), public, gateway_key, previous_key)
-    children = [subprocess.Popen(['python', '-m', 'uvicorn', 'src.api.server:app', '--host', '127.0.0.1', '--port', '8000', '--workers', '1', '--no-proxy-headers']),
+    # The Blender workers the API starts run as studio-worker (infra/blender-worker.py) and write under the data root.
+    share_with_workers(Path(os.environ.get('ASSET_DATA_ROOT', '/app/data')))
+    children = [subprocess.Popen(['python', '-m', 'uvicorn', 'src.api.server:app', '--host', '127.0.0.1', '--port', '8000', '--workers', '1', '--no-proxy-headers'],
+                                 umask=API_UMASK),
                 subprocess.Popen(['nginx', '-g', 'daemon off;'])]
 
     def stop(*_):
@@ -122,4 +257,8 @@ def main():
 
 
 if __name__ == '__main__':
+    if '--check-workers' in sys.argv[1:]:
+        sys.exit(check_workers(metadata_guard='--metadata-guard' in sys.argv[1:]))
+    if '--share-data' in sys.argv[1:]:
+        sys.exit(share_data())
     main()

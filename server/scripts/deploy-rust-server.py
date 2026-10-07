@@ -5,10 +5,13 @@ Uses the existing AWS CLI credentials only and never brings a secret to the deve
 Build first: see README "배포". Usage: python scripts/deploy-rust-server.py [--skip-provision] [--yes] [--factory-url URL]
 [--factory-access read|write|paid] [--factory-paid-monthly N] [--studio-instance-id i-…]
 Infrastructure changes are listed and left unapplied until --yes, which runs that listed change set, never one that
-replaces the instance or the database. The studio gateway flags are optional: one left out keeps the value
-/etc/mogaesup/server.env already has, and the setting the server ended with is printed at the end. Run by hand, it refuses
-uncommitted server files, a binary older than the last server commit, and a pipeline run in progress on main; the commit
-goes with the release (/opt/mogaesup/current-release.json on the instance).
+replaces, may replace or removes the instance, the database or another kept resource (KEEP). The studio gateway flags are
+optional: one left out keeps the value /etc/mogaesup/server.env already has, and the setting the server ended with is
+printed at the end. Before anything is installed it checks that CloudFront (the web stack) sends /api/* to this stack's
+instance. Run by hand, it refuses uncommitted server files, a HEAD other than origin's main as the remote has it now,
+a binary older than the last server commit, and a pipeline run queued or in progress on main (it warns when gh cannot
+tell); the commit goes with the release (/opt/mogaesup/current-release.json on the instance). `--provision-only --yes`
+refuses such a run too; `--provision-only` alone only lists the change set and goes on.
 """
 import argparse
 import hashlib
@@ -33,7 +36,7 @@ IMAGE = 'ami-03137ee2d0c5af1fe'
 CHANGE_SET = re.compile(r'arn:aws[a-z-]*:cloudformation:\S+:changeSet/\S+')
 UNAPPLIED = 'Infrastructure changes are listed above and not applied; run again with --yes to apply them'
 DATABASE = 'mogaesup-postgres'
-# Resources whose replacement --yes never applies.
+# Resources whose replacement or removal --yes never applies.
 KEEP = ('ApiInstance', 'Database', 'RuntimeBucket', 'VpcOrigin', 'RealtimeTicketSecret', 'FactoryGatewaySecret',
         'CharacterDatabaseSecret', 'ApiSecurityGroup')
 WEB_STACK = 'mogaesup-web'
@@ -137,10 +140,15 @@ def wait_for_command(command, instance, deadline_seconds=COMMAND_WAIT, interval=
 
 
 def replacements(description):
-    """The resources a change set replaces or may replace whose loss takes the site down or its data away."""
-    return [change['ResourceChange']['LogicalResourceId'] for change in description.get('Changes', [])
-            if change.get('ResourceChange', {}).get('LogicalResourceId') in KEEP
-            and change['ResourceChange'].get('Replacement') in ('True', 'Conditional')]
+    """The kept resources (KEEP) a change set replaces, may replace or removes: their loss takes the site down or its
+    data away. A logical id renamed in the template shows as the old one's Remove and the new one's Add."""
+    found = []
+    for change in description.get('Changes', []):
+        resource = change.get('ResourceChange', {})
+        if resource.get('LogicalResourceId') in KEEP and (resource.get('Action') == 'Remove'
+                                                          or resource.get('Replacement') in ('True', 'Conditional')):
+            found.append(resource['LogicalResourceId'])
+    return found
 
 
 def template_engine_version(text=None):
@@ -201,9 +209,9 @@ def provision(studio_instance=None, yes=False):
     except RuntimeError:
         pass
     if replaced:
-        raise SystemExit(f"The change set replaces or may replace {', '.join(replaced)}; nothing was applied. A new "
-                         'instance has a new private DNS name (the web stack points at it) and a new database starts '
-                         'empty: change the stack by hand after reading the change set')
+        raise SystemExit(f"The change set replaces, may replace or removes {', '.join(replaced)}; nothing was applied. "
+                         'A new instance has a new private DNS name (the web stack points at it) and a new database '
+                         'starts empty: change the stack by hand after reading the change set')
     raise SystemExit(UNAPPLIED)
 
 
@@ -345,9 +353,11 @@ def release_commit(binary, environ=None):
             raise RuntimeError('Uncommitted server files would go live unreviewed; commit them first: '
                                + '; '.join(changed[:10]))
         commit = git('rev-parse', 'HEAD').stdout.strip()
-        # A commit only this PC has would go live before anyone else can see it, and the pipeline would not know it.
-        if git('merge-base', '--is-ancestor', 'HEAD', 'origin/main').returncode:
-            raise RuntimeError('HEAD is not on origin/main; push it (git fetch first if origin/main is stale)')
+        # Main's newest commit only: one only this PC has would go live before anyone else can see it (and the pipeline
+        # would not know it), and an older one would take back what main has changed since.
+        tip = origin_main()
+        if commit != tip:
+            raise RuntimeError(f"HEAD {commit[:12]} is not origin's main ({tip[:12]}); pull it, or push this commit first")
         built_from = git('log', '-1', '--format=%ct', '--', 'server/src', 'server/migrations', 'server/Cargo.toml',
                          'server/Cargo.lock', 'server/build.rs').stdout.strip()
         if built_from.isdigit() and binary.stat().st_mtime < int(built_from):
@@ -359,20 +369,36 @@ def release_commit(binary, environ=None):
     return commit
 
 
-def pipeline_running():
+def origin_main():
+    """The commit origin's main points at, asked of the remote itself (a local origin/main may be stale)."""
+    done = git('ls-remote', '--exit-code', 'origin', 'refs/heads/main')
+    found = re.match(r'([0-9a-f]{40})\s', done.stdout) if done.returncode == 0 else None
+    if not found:
+        raise RuntimeError("origin's main could not be read (git ls-remote origin refs/heads/main)")
+    return found.group(1)
+
+
+STACK_REFUSAL = ('A pipeline run on main is queued or in progress and may be installing the server; wait for it to end '
+                 'before changing the stack')
+
+
+def pipeline_running(run=subprocess.run, refusal=None):
     """Run by hand, refuse while a pipeline run on main may deploy too (its deploys take turns; this script is not one
-    of them). The instance's install lock still keeps two installs apart."""
+    of them). The instance's install lock still keeps two installs apart. When gh cannot answer (not installed, not
+    signed in) that is said, and the deploy goes on."""
     try:
-        done = subprocess.run(['gh', 'run', 'list', '--workflow', 'pipeline.yml', '--branch', 'main', '--limit', '20',
-                               '--json', 'status', '--jq', '[.[] | select(.status != "completed")] | length'],
-                              capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        print('Warning: gh is not available, so a pipeline run that deploys at the same time cannot be ruled out',
-              flush=True)
+        done = run(['gh', 'run', 'list', '--workflow', 'pipeline.yml', '--branch', 'main', '--limit', '20',
+                    '--json', 'status'], capture_output=True, text=True, timeout=60, cwd=ROOT.parent)
+        runs = json.loads(done.stdout) if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        runs = None
+    if not isinstance(runs, list):
+        print('Warning: gh could not list the pipeline runs (install it and run gh auth login), so a pipeline run that '
+              'deploys at the same time cannot be ruled out', flush=True)
         return
-    if done.returncode == 0 and done.stdout.strip().isdigit() and int(done.stdout.strip()) > 0:
-        raise RuntimeError('A pipeline run on main is queued or in progress and may deploy the server as well; wait '
-                           'for it, or use its Run workflow (target server) instead')
+    if any(not isinstance(item, dict) or item.get('status') != 'completed' for item in runs):
+        raise RuntimeError(refusal or 'A pipeline run on main is queued or in progress and may deploy the server as '
+                           'well; wait for it, or use its Run workflow (target server) instead')
 
 
 def check_web_origin(outputs):
@@ -399,6 +425,10 @@ def main():
     if args.studio_instance_id and not re.fullmatch(r'i-[0-9a-f]{8,17}', args.studio_instance_id):
         raise RuntimeError('--studio-instance-id must be an EC2 instance id (i-…)')
     if args.provision_only:
+        # Applying a change set updates the stack an install of the pipeline may be reading and the instance it may be
+        # installing on; listing one changes nothing.
+        if args.yes and os.environ.get('GITHUB_ACTIONS') != 'true':
+            pipeline_running(refusal=STACK_REFUSAL)
         if aws('sts', 'get-caller-identity')['Account'] != ACCOUNT:
             raise RuntimeError('Unexpected AWS account')
         provision(args.studio_instance_id, args.yes)
@@ -427,6 +457,9 @@ def main():
                        for item in stack.get('Parameters', [])}.get('StudioInstanceId', '')
     if args.studio_instance_id is not None and args.studio_instance_id != studio_instance:
         raise RuntimeError('The stack names another studio instance; deploy without --skip-provision')
+    # Before anything is installed: a release the site does not reach would fail the check through the site, and the
+    # next run would install it again.
+    check_web_origin(outputs)
 
     release = datetime.now(timezone.utc).strftime('release-%Y%m%dT%H%M%SZ')
     receipt_dir = ROOT / 'artifacts' / release
@@ -461,14 +494,13 @@ def main():
         raise RuntimeError(f"SSM {result['Status']}; inspect {receipt_dir / 'ssm-result.json'} (once the script has stopped "
                            'the service, a release that does not come up is replaced by the previous binary)')
     for line in result.get('StandardOutputContent', '').splitlines():
-        if line.startswith('Studio gateway:'):
+        if line.startswith(('Studio gateway:', 'Model sweep:')):
             print(line, flush=True)
     receipt['status'] = 'server-deployed'
     receipt['git_commit'] = commit
     (receipt_dir / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
     print(json.dumps({'receipt': str(receipt_dir / 'receipt.json'), 'status': receipt['status'], 'git_commit': commit}),
           flush=True)
-    check_web_origin(outputs)
     # The first VPC origin creates CloudFront's service group; from then on only it may reach port 8080.
     if not args.skip_provision and service_group() and 'CloudFrontServiceGroup' not in {
             item['ParameterKey'] for item in stack.get('Parameters', []) if item.get('ParameterValue')}:

@@ -14,10 +14,13 @@ distribution and its gate) makes it stop and delete the change set.
 --from live (default) takes the template the stack runs now and changes only two things in it: the image parameter
 becomes a plain image id (the image the instance runs), and a policy resource with what that template lacks is added
 (s3:DeleteObject under assets/, ssm:PutParameter for /asset-studio/current-release). The change set must then hold that
-one addition. --from repo applies this checkout's ec2.yaml, whose role permissions are the StudioAccessPolicy resource:
-allowed are that policy's addition or change and the role losing its inline policies, nothing else. Moving the inline
-policy out leaves the role without its storage permissions for the seconds between those two steps, so run that one
-while the studio has no work running.
+one addition, so --from live runs once: a stack that has the add-on refuses it. Every later change goes --from repo,
+which applies this checkout's ec2.yaml, whose role permissions are the StudioAccessPolicy resource: allowed are that
+policy's addition or change, the role losing its inline policies, and the add-on's removal (StudioAccessPolicy holds
+what the add-on gave), nothing else. CloudFormation removes resources after it has added and changed the others, so the
+add-on goes only once StudioAccessPolicy is in place. Moving the inline policy
+out leaves the role without its storage permissions for the seconds between those two steps, so run that one while the
+studio has no work running.
 """
 import argparse
 import json
@@ -130,25 +133,32 @@ def evaluate(changes, mode):
     """The reasons the change set may not run; empty when it holds only the allowed IAM changes."""
     problems = []
     seen = []
+    addon_removed = False
     for change in changes:
         resource = change.get('ResourceChange', {})
         action, name = resource.get('Action'), resource.get('LogicalResourceId')
         kind, replacement = resource.get('ResourceType'), resource.get('Replacement')
-        seen.append(name)
         targets = {(detail.get('Target', {}).get('Attribute'), detail.get('Target', {}).get('Name'))
                    for detail in resource.get('Details', [])}
         if mode == 'live' and name == ADDON and action == 'Add' and kind == 'AWS::IAM::Policy':
+            seen.append(name)
             continue
         if mode == 'repo' and name == 'StudioAccessPolicy' and kind == 'AWS::IAM::Policy' and action in ('Add', 'Modify') \
                 and replacement in (None, 'False'):
+            seen.append(name)
             continue
         if mode == 'repo' and name == 'InstanceRole' and action == 'Modify' and replacement == 'False' \
                 and targets <= {('Properties', 'Policies')} and targets:
             continue
+        # What --from live added once; the repository's StudioAccessPolicy holds the same permissions.
+        if mode == 'repo' and name == ADDON and action == 'Remove' and kind == 'AWS::IAM::Policy':
+            addon_removed = True
+            continue
         problems.append(f'{action} {name} ({kind}), replacement {replacement or "-"}, '
                         f"changes {', '.join(sorted(f'{a}.{n}' if n else str(a) for a, n in targets)) or '-'}")
     wanted = {'live': ADDON, 'repo': 'StudioAccessPolicy'}[mode]
-    if wanted not in seen and not problems:
+    # The add-on's removal alone is the repository's template with StudioAccessPolicy already as the stack has it.
+    if wanted not in seen and not addon_removed and not problems:
         problems.append(f'the change set does not change {wanted}')
     return problems
 

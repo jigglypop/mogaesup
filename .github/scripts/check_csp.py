@@ -8,10 +8,12 @@
     python3 check_csp.py --html frontend/dist/index.html --live https://mogaesup.com [--template ...]
         warns when the site's policy lacks a script's hash, and, given the template, when the site's policy differs from
         it: the stack was not applied yet (the pipeline never applies it), and until it is, browsers follow the old one.
+        A site that does not answer is a warning too: this compares, it never holds a release back.
 """
 import argparse
 import base64
 import hashlib
+import http.client
 import re
 import sys
 import urllib.parse
@@ -65,13 +67,18 @@ def template_policy(text, host):
     return policy.replace('${LiveRoom}', f' wss://{host}' if host else '')
 
 
-def live_policy(url):
+def live_policy(url, opener=urllib.request.urlopen):
+    """The policy the site sends, or None when it cannot be read (an HTTP error, a timeout, no connection)."""
     request = urllib.request.Request(url, method='HEAD', headers={'Cache-Control': 'no-cache'})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return response.headers.get('content-security-policy', '')
+    try:
+        with opener(request, timeout=20) as response:
+            return response.headers.get('content-security-policy', '')
+    except (OSError, http.client.HTTPException) as error:
+        print(f'::warning::{url}의 CSP를 읽지 못했습니다({error}). 운영 정책과 비교하지 않고 넘어갑니다')
+        return None
 
 
-def main(argv=None):
+def main(argv=None, opener=urllib.request.urlopen):
     parser = argparse.ArgumentParser()
     parser.add_argument('--html', required=True)
     parser.add_argument('--template')
@@ -96,7 +103,9 @@ def main(argv=None):
         if not missing and not outside:
             print(f'{args.html}: {len(wanted)}개 인라인 스크립트의 해시가 CSP에 있고 다른 출처의 자원이 없습니다')
         return 1 if missing or outside else 0
-    policy = live_policy(args.live)
+    policy = live_policy(args.live, opener)
+    if policy is None:
+        return 0
     for value in wanted:
         if value not in policy:
             print(f'::warning::{args.live}의 CSP에 인라인 스크립트 해시 {value}가 없습니다. '

@@ -1,9 +1,24 @@
 # Local PostgreSQL for the server and its tests. Port 55432 matches the character server's CHARACTER_DATABASE_URL (backend/.env).
+# PostgreSQL 17, as the pipeline's checks (.github/workflows/pipeline.yml) and production (RDS, server/infra/aws-server.yaml)
+# run it. Its data is a volume of its own: an older checkout ran 18 in `postgres-data`, whose files 17 cannot open (that
+# volume is left as it is). scripts/dev.ps1 and server/scripts/start-rust-server.ps1 refuse to start 17 while only the
+# 18 volume exists. To carry the data over, from the repository root (the dump goes through files inside the containers and
+# `docker cp`, never through a shell redirect, which in Windows PowerShell would re-encode the Korean text in it):
+#   docker stop mogaesup-server-postgres-1
+#   docker run -d --name pg18-dump -e POSTGRES_PASSWORD=postgres-dev -v mogaesup-server_postgres-data:/var/lib/postgresql postgres:18-alpine
+#   docker exec pg18-dump sh -c "until pg_isready -q -U postgres; do sleep 1; done; pg_dumpall -U postgres -f /tmp/pg18.sql"
+#   docker cp pg18-dump:/tmp/pg18.sql pg18.sql
+#   docker rm -f pg18-dump
+#   docker compose -f server/docker-compose.yml up -d --wait postgres
+#   docker cp pg18.sql mogaesup-server-postgres-1:/tmp/pg18.sql
+#   docker exec mogaesup-server-postgres-1 psql -q -U postgres -d postgres -f /tmp/pg18.sql
+# Errors for the role and database that exist already are expected. Starting 17 empty on purpose is the compose up line
+# alone; either way the 18 volume stays until `docker volume rm mogaesup-server_postgres-data`.
 name: mogaesup-server
 
 services:
   postgres:
-    image: postgres:18-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres-dev}
@@ -11,7 +26,7 @@ services:
     ports:
       - 127.0.0.1:${POSTGRES_PORT:-55432}:5432
     volumes:
-      - postgres-data:/var/lib/postgresql
+      - postgres17-data:/var/lib/postgresql/data
     healthcheck:
       test: [CMD-SHELL, pg_isready -U postgres]
       interval: 3s
@@ -19,4 +34,4 @@ services:
       retries: 20
 
 volumes:
-  postgres-data:
+  postgres17-data:

@@ -42,14 +42,42 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     $head = Invoke-Git @('rev-parse', 'HEAD')
     if ($head.ExitCode -ne 0 -or $head.Lines.Count -ne 1 -or $head.Lines[0] -notmatch '^[0-9a-f]{40}$') { throw 'The git commit could not be read.' }
     $gitCommit = $head.Lines[0]
-    # Run by hand, a release goes out only from a commit that is on origin/main: one only this PC has would go live
-    # before anyone could see it, and the pipeline would not know it. The pipeline checks out main itself.
+    # Run by hand, a release goes out only from origin's main as the remote has it now: one only this PC has would go
+    # live before anyone could see it (and the pipeline would not know it), an older one would take back what main has
+    # changed since. The pipeline checks out main itself.
     if ($Upload -and $env:GITHUB_ACTIONS -ne 'true') {
-      $pushed = Invoke-Git @('merge-base', '--is-ancestor', 'HEAD', 'origin/main')
-      if ($pushed.ExitCode -ne 0) { throw 'HEAD is not on origin/main; push it first (git fetch if origin/main is stale).' }
+      $remote = Invoke-Git @('ls-remote', '--exit-code', 'origin', 'refs/heads/main')
+      $tip = if ($remote.ExitCode -eq 0 -and $remote.Lines.Count -gt 0 -and $remote.Lines[0] -match '^([0-9a-f]{40})\s') { $Matches[1] } else { $null }
+      if (-not $tip) { throw "origin's main could not be read (git ls-remote origin refs/heads/main)." }
+      if ($gitCommit -ne $tip) { throw "HEAD is not origin's main ($($tip.Substring(0, 12))); pull it, or push this commit first." }
     }
   }
 }
+
+# Run by hand, nothing goes up while a pipeline run on main is queued or in progress: it may deploy the studio as well.
+# gh's JSON is read here rather than through a --jq argument whose quotes Windows PowerShell 5.1 would strip.
+function Assert-NoPipelineRun {
+  $listed = $false
+  $active = 0
+  if (Get-Command gh -ErrorAction SilentlyContinue) {
+    $previous = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $json = (& gh run list --workflow pipeline.yml --branch main --limit 20 --json status 2>$null) -join "`n"; $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $previous }
+    if ($code -eq 0) {
+      try {
+        $runs = ConvertFrom-Json -InputObject $json
+        $active = @($runs | Where-Object { $null -ne $_ -and $_.status -ne 'completed' }).Count
+        $listed = $true
+      } catch { $listed = $false }
+    }
+  }
+  if (-not $listed) {
+    Write-Warning 'gh could not list the pipeline runs (install it and run gh auth login), so a pipeline run that deploys at the same time cannot be ruled out.'
+  } elseif ($active -gt 0) {
+    throw 'A pipeline run on main is queued or in progress and may deploy the studio as well; wait for it, or use its Run workflow (target studio) instead.'
+  }
+}
+if ($Upload -and $env:GITHUB_ACTIONS -ne 'true') { Push-Location $root; try { Assert-NoPipelineRun } finally { Pop-Location } }
 
 function Invoke-Aws([string[]]$Arguments) {
   $common = @('--region', $Region, '--cli-connect-timeout', '5', '--cli-read-timeout', '20', '--output', 'json')

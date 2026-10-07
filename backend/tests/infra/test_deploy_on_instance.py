@@ -199,8 +199,12 @@ if family == 'docker':
             print('\n'.join(state.get('images', [])))
         elif args[1] == 'rm':
             state['images'] = [line for line in state.get('images', []) if line.split('|')[1] != args[-1]]; save()
+        elif args[1] == 'inspect':
+            sys.exit(0 if state.get('image_built', True) else 1)
         sys.exit(0)
-    if command == 'inspect':
+    if command == 'build':
+        state['image_built'] = True; save()
+    elif command == 'inspect':
         # As docker does: an answer per container found, and a failure when any is missing.
         form = args[args.index('-f') + 1] if '-f' in args else None
         names = args[args.index('-f') + 2:] if form else args[1:]
@@ -225,6 +229,16 @@ if family == 'docker':
     elif command == 'rm':
         item = container(args[-1])
         if item: state['containers'].remove(item); save()
+    elif command == 'run' and '--share-data' in args:
+        # The data root shared with the new image's workers, before their check.
+        event(['share-data', state['draining'], [item['name'] for item in state['containers'] if item['running']]])
+        print('/app/data is shared with uid 10001\'s group (0 entries changed)')
+        sys.exit(int(os.environ.get('FAKE_SHARE_EXIT', '0')))
+    elif command == 'run' and '--check-workers' in args:
+        # The new image's Blender worker check, before anything is stopped.
+        event(['worker-check', state['draining'], [item['name'] for item in state['containers'] if item['running']]])
+        print('Blender runs as uid 10001 and writes under /app/data')
+        sys.exit(int(os.environ.get('FAKE_WORKER_CHECK_EXIT', '0')))
     elif command == 'run' and '--rm' in args:
         # The record database migration in the new image, before anything is stopped.
         event(['migrate', state['draining'], [item['name'] for item in state['containers'] if item['running']]])
@@ -295,6 +309,23 @@ elif family == 'curl':
 elif family == 'systemctl':
     event(['systemctl', *args])
     sys.exit(int(os.environ.get('FAKE_POWEROFF_EXIT', '0')))
+elif family == 'install':
+    # GNU install -d: every folder named gets the mode and group given, one that exists already as well.
+    assert args[0] == '-d', args
+    given, paths, rest = {'-m': None, '-o': None, '-g': None}, [], list(args[1:])
+    while rest:
+        word = rest.pop(0)
+        if word in given: given[word] = rest.pop(0)
+        else: paths.append(word)
+    for path in paths:
+        Path(path).mkdir(parents=True, exist_ok=True)
+        state.setdefault('modes', {})[path] = {'mode': given['-m'], 'group': given['-g'] or 'root'}
+    save()
+elif family == 'chmod':
+    mode, *paths = args
+    for path in paths:
+        state.setdefault('modes', {}).setdefault(path, {'group': 'root'})['mode'] = mode
+    save()
 elif family == 'aws':
     if args[0] == 'secretsmanager':
         sys.stdout.write(os.environ['FAKE_SECRET_PAYLOAD'])
@@ -303,15 +334,18 @@ elif family == 'aws':
 '''
 
 
-def run_host_deploy(bash, tmp_path, *, root=None, database=False, interrupted=False, **env):
+def run_host_deploy(bash, tmp_path, *, root=None, database=False, interrupted=False, mode=None, **env):
     """Run the entire deploy script against a disposable host and command doubles, never Docker/AWS. Passing the `root`
-    of an earlier run deploys again on that host, as the next deployment would."""
+    of an earlier run deploys again on that host, as the next deployment would; `mode` is the script's fourth argument.
+    The folder modes and groups `install` and `chmod` set are kept in the state's `modes`, the time limits `timeout` was
+    given in the host's `timeouts`."""
     again = root is not None
     root = root or tmp_path / 'host'
     source = root / 'studio/incoming' / ('a' * 64) / 'source'
     (source / 'infra').mkdir(parents=True, exist_ok=True)
     (source / 'infra/Dockerfile').write_text('FROM fixture')
     (source / 'infra/idle-stop.sh').write_text('#!/bin/bash\nexit 0\n')
+    (source / 'infra/worker-guard.sh').write_text('#!/bin/bash\nexit "${FAKE_GUARD_EXIT:-0}"\n')
     (source / '.release-sha256').write_text('a' * 64 + '\n')
     if not again:
         (root / 'studio/provider.json').write_text(json.dumps({'revision': 'old'}))
@@ -342,9 +376,11 @@ def run_host_deploy(bash, tmp_path, *, root=None, database=False, interrupted=Fa
         state['refusals'] = 0
         (root / 'state.json').write_text(json.dumps(state))
         (root / 'events.jsonl').unlink(missing_ok=True)
+        (root / 'timeouts').unlink(missing_ok=True)
     else:
         (root / 'state.json').write_text(json.dumps({'draining': False, 'drain_owner': env.pop('FAKE_DRAIN_OWNER', None),
-                                                     'containers': containers, 'images': env.pop('FAKE_IMAGES', [])}))
+                                                     'containers': containers, 'images': env.pop('FAKE_IMAGES', []),
+                                                     'image_built': not env.pop('FAKE_IMAGE_MISSING', None)}))
     fixture = root / 'commands.py'
     fixture.write_text(FAKE_HOST)
     text = replace_host_paths(SCRIPT.read_text(encoding='utf-8'), {
@@ -356,12 +392,16 @@ def run_host_deploy(bash, tmp_path, *, root=None, database=False, interrupted=Fa
         'docker() { local code=0; "$PYTHON_EXE" "$FAKE_COMMANDS" docker "$@" || code=$?; '
         'if [[ "${FAKE_TERMINATE:-}" == 1 && "$1" == stop ]]; then kill -TERM $$; fi; return $code; }',
         'curl() { "$PYTHON_EXE" "$FAKE_COMMANDS" curl "$@"; }',
-        'aws() { "$PYTHON_EXE" "$FAKE_COMMANDS" aws "$@"; }', 'timeout() { shift 2; "$@"; }',
+        'aws() { "$PYTHON_EXE" "$FAKE_COMMANDS" aws "$@"; }',
+        # `timeout --kill-after=10 <seconds> command…`: the limit is noted, the command runs.
+        'timeout() { printf "%s\\n" "$2" >> "$FAKE_HOST_ROOT/timeouts"; shift 2; "$@"; }',
         'python3() { "$PYTHON_EXE" "$@"; }', 'sleep() { :; }', 'seq() { echo "1 2 3"; }',
         # A stub file descriptor lock: no other fake host shares this directory.
-        'flock() { :; }', 'chmod() { :; }',
-        'install() { shift 3; mkdir -p "$@"; }',
-        'set -- "releases/studio/' + 'a'*64 + '.tar.gz" "' + 'a'*64 + '" "$FAKE_SOURCE"', text])
+        'flock() { :; }',
+        'chmod() { "$PYTHON_EXE" "$FAKE_COMMANDS" chmod "$@"; }',
+        'install() { "$PYTHON_EXE" "$FAKE_COMMANDS" install "$@"; }',
+        'set -- "releases/studio/' + 'a'*64 + '.tar.gz" "' + 'a'*64 + '" "$FAKE_SOURCE"' + (f' {mode}' if mode else ''),
+        text])
     done = run_bash(bash, script, FAKE_HOST_ROOT=str(root), FAKE_COMMANDS=str(fixture),
                     FAKE_SOURCE=source.as_posix(), FAKE_SECRET_PAYLOAD=json.dumps(secret), ASSET_DEPLOY_DRAIN_SECONDS='0', **env)
     events = [json.loads(line) for line in (root / 'events.jsonl').read_text().splitlines()] if (root / 'events.jsonl').exists() else []
@@ -442,7 +482,8 @@ def test_live_leftover_containers_are_preserved_for_recovery(bash, tmp_path, lef
     assert done.code == 5
     assert all(item['running'] for item in state['containers'])
     assert any(item['id'] == 'leftover-id' for item in state['containers'])
-    assert not any(event[0] == 'docker' and event[1] in ('stop', 'run') for event in events)
+    # The new image's worker check may have run beside them; nothing was started or stopped.
+    assert not any(event[:2] == ['docker', 'stop'] or event[:3] == ['docker', 'run', '-d'] for event in events)
     assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
 
 
@@ -500,7 +541,9 @@ def test_a_drain_owned_by_another_operation_is_named_and_left_alone(bash, tmp_pa
     assert done.code == 6 and 'already closed by another operation' in done.err
     assert 'does not support' not in done.err
     assert state['drain_owner'] == TOKEN and not token_file(root).exists()
-    assert not any(event[:2] in (['docker', 'stop'], ['docker', 'run'], ['curl', 'DELETE']) for event in events)
+    # The new image's worker check ran beside the running release; nothing was started or stopped.
+    assert not any(event[:2] in (['docker', 'stop'], ['curl', 'DELETE']) or event[:3] == ['docker', 'run', '-d']
+                   for event in events)
     assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
 
 
@@ -513,7 +556,7 @@ def test_a_runtime_that_starts_listening_late_is_drained_once_it_answers(bash, t
     assert not state['draining'] and not token_file(root).exists()
 
 
-@pytest.mark.parametrize('budget, ran', [(100, False), (400, True)])
+@pytest.mark.parametrize('budget, ran', [(100, False), (460, True)])
 def test_admission_is_closed_only_when_the_time_limit_covers_the_replacement_and_a_rollback(bash, tmp_path, budget, ran):
     import time
     done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1',
@@ -634,6 +677,137 @@ def test_a_failed_migration_leaves_the_running_release_alone(bash, tmp_path):
     assert not any(event[:2] in (['docker', 'stop'], ['curl', 'POST']) or event[:3] == ['docker', 'run', '-d']
                    for event in events)
     assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+
+
+def test_the_new_images_workers_are_checked_before_anything_is_stopped(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, database=True, FAKE_READY='1')
+    assert done.code == 0 and 'Blender runs as uid 10001' in done.out
+    checked = next(index for index, event in enumerate(events) if event[0] == 'worker-check')
+    assert events[checked][1:] == [False, ['gaesup-asset-studio']]
+    migrated = next(index for index, event in enumerate(events) if event[0] == 'migrate')
+    drained = next(index for index, event in enumerate(events) if event[:2] == ['curl', 'POST'])
+    assert migrated < checked < drained
+    run = next(event for event in events if event[0] == 'docker' and '--check-workers' in event)
+    assert '--network' in run and '--metadata-guard' in run and not any('provider.json' in value for value in run)
+
+
+def test_workers_that_fail_their_check_leave_the_running_release_alone(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1', FAKE_WORKER_CHECK_EXIT='1')
+    assert done.code == 9 and 'Blender workers failed their check' in done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining']
+    assert not any(event[:2] in (['docker', 'stop'], ['curl', 'POST']) or event[:3] == ['docker', 'run', '-d']
+                   for event in events)
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+
+
+def test_a_host_that_cannot_guard_the_workers_still_deploys_with_a_warning(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1', FAKE_GUARD_EXIT='1')
+    assert done.code == 0 and 'deployment healthy' in done.out
+    assert 'not kept from the instance metadata service' in done.err
+
+
+def timeouts(root):
+    """The time limits the deployment gave `timeout`, in order."""
+    path = root / 'timeouts'
+    return [int(line) for line in path.read_text().split()] if path.exists() else []
+
+
+def test_the_data_root_is_made_once_for_the_workers_and_never_set_again(bash, tmp_path):
+    # GNU `install -d -m` also changes the mode of a folder that exists: run on the data root by every deployment, it
+    # shut the running release's Blender workers (uid 10001) out of it until a new container shared it again.
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1')
+    scratch = (root / 'studio/scratch').as_posix()
+    assert done.code == 0 and state['modes'][scratch] == {'mode': '2770', 'group': '10001'}
+    # As the running release's share left it (entrypoint.py adds the group's bits to what is there).
+    state['modes'][scratch] = {'mode': '2775', 'group': '10001'}
+    (root / 'state.json').write_text(json.dumps(state))
+    again, state, events, root = run_host_deploy(bash, tmp_path, root=root, FAKE_READY='1')
+    assert again.code == 0 and 'deployment healthy' in again.out
+    assert state['modes'][scratch] == {'mode': '2775', 'group': '10001'}
+
+
+def test_a_data_root_an_older_release_made_is_left_to_the_share(bash, tmp_path):
+    (tmp_path / 'host/studio/scratch').mkdir(parents=True)
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1')
+    assert done.code == 0 and (root / 'studio/scratch').as_posix() not in state.get('modes', {})
+    assert any(event[0] == 'share-data' for event in events)
+
+
+def test_the_data_root_is_shared_before_the_worker_check_while_the_running_release_serves(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, database=True, FAKE_READY='1')
+    assert done.code == 0 and 'deployment healthy' in done.out
+    migrated, shared, checked = (next(index for index, event in enumerate(events) if event[0] == kind)
+                                 for kind in ('migrate', 'share-data', 'worker-check'))
+    drained = next(index for index, event in enumerate(events) if event[:2] == ['curl', 'POST'])
+    assert migrated < shared < checked < drained
+    assert events[shared][1:] == [False, ['gaesup-asset-studio']]
+    run = next(event for event in events if event[0] == 'docker' and '--share-data' in event)
+    # It only changes the data root's group and modes: no network, no provider secret.
+    assert any(value.endswith('/studio/scratch:/app/data') for value in run)
+    assert run[run.index('--network') + 1] == 'none'
+    assert not any('provider.json' in value or 'secrets' in value for value in run)
+    # Without a deployment time limit (an instance's first boot) the share has half an hour; the worker check its 90 s.
+    assert timeouts(root) == [300, 1800, 90]
+    # What a deployment the SSM time limit killed left under those names goes first: `docker run --name` would refuse.
+    leftovers = events.index(['docker', 'rm', '-f', 'gaesup-asset-studio-share-' + 'a' * 12,
+                              'gaesup-asset-studio-workers-' + 'a' * 12])
+    assert leftovers < shared
+
+
+def test_a_share_the_time_limit_cuts_short_stops_before_anything_and_is_carried_on_by_the_next(bash, tmp_path):
+    import time
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1', FAKE_SHARE_EXIT='124',
+                                                ASSET_DEPLOY_DEADLINE=str(int(time.time()) + 900))
+    assert done.code == 7 and 'still being shared' in done.err and 'deploy again' in done.err
+    # What the time limit leaves beyond the worker check, the drain, the replacement and a rollback.
+    (share,) = timeouts(root)
+    assert 400 <= share <= 900 - 240 - 30 - 90
+    assert ['docker', 'rm', '-f', 'gaesup-asset-studio-share-' + 'a' * 12] in events
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining'] and not any(event[0] == 'worker-check' or event[:2] == ['curl', 'POST']
+                                             for event in events)
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+    again, state, events, root = run_host_deploy(bash, tmp_path, root=root, FAKE_READY='1')
+    assert again.code == 0 and 'deployment healthy' in again.out
+    assert [event[0] for event in events if event[0] in ('share-data', 'worker-check')] == ['share-data', 'worker-check']
+
+
+def test_a_share_that_fails_leaves_the_running_release_alone(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_READY='1', FAKE_SHARE_EXIT='1')
+    assert done.code == 9 and 'could not share the data root' in done.err
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert not state['draining'] and not any(event[0] == 'worker-check' or event[:2] == ['docker', 'stop']
+                                             for event in events)
+
+
+def test_the_build_command_builds_the_image_and_touches_nothing_else(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, mode='build', FAKE_IMAGE_MISSING='1')
+    assert done.code == 0 and 'image built: gaesup-asset-studio:' + 'a' * 64 in done.out
+    assert [event[:2] for event in events] == [['docker', 'image'], ['docker', 'build']]
+    assert state['image_built'] and 'modes' not in state and not timeouts(root)
+    assert state['containers'] == [{'id': 'old-id', 'name': 'gaesup-asset-studio', 'running': True}]
+    assert json.loads((root / 'studio/provider.json').read_text())['revision'] == 'old'
+    # Built already: nothing to do, and the deployment after it builds nothing either.
+    again, state, events, root = run_host_deploy(bash, tmp_path, root=root, mode='build')
+    assert again.code == 0 and [event[:2] for event in events] == [['docker', 'image']]
+    deployed, state, events, root = run_host_deploy(bash, tmp_path, root=root, FAKE_READY='1')
+    assert deployed.code == 0 and 'deployment healthy' in deployed.out
+    assert not any(event[:2] == ['docker', 'build'] for event in events)
+
+
+def test_the_build_command_asks_only_a_release_that_has_the_build_mode():
+    # deploy-aws.ps1's build command hands `build` only to a release whose script has the mode: an older script would
+    # take it for a deployment, without the deployment's time limit.
+    assert 'mode="${4:-deploy}"' in SCRIPT.read_text(encoding='utf-8')
+    command = (SCRIPT.parent / 'deploy-aws.ps1').read_text(encoding='utf-8')
+    assert "if grep -qF 'mode=\"`${4:-deploy}\"' \"`$incoming/source/infra/deploy-on-instance.sh\"; then" in command
+    assert command.index("Invoke-OnInstance 'build'") < command.index("Invoke-OnInstance 'deployment'")
+
+
+def test_an_unknown_mode_stops_before_anything(bash, tmp_path):
+    done, state, events, root = run_host_deploy(bash, tmp_path, mode='everything')
+    assert done.code == 2 and 'invalid mode' in done.err and not events
 
 
 def test_without_a_record_database_nothing_is_migrated(bash, tmp_path):

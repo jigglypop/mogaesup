@@ -152,10 +152,28 @@ def test_the_template_does_not_promise_a_static_site(template):
 
 
 def test_port_80_is_open_to_cloudfront_only(template):
-    ingress = re.findall(r'\n  (\w+):\n    Type: AWS::EC2::SecurityGroupIngress\n((?:    .*\n)+)', template)
-    assert [name for name, _ in ingress] == ['CloudFrontHttpIngress']
-    assert 'SourcePrefixListId: !Ref CloudFrontPrefixListId' in ingress[0][1] and 'CidrIp' not in ingress[0][1]
-    assert 'Condition: HasPublicStudio' in ingress[0][1]
+    ingress = dict(re.findall(r'^  (\w+):\n    Type: AWS::EC2::SecurityGroupIngress\n((?:    .*\n)+)', template, re.M))
+    assert list(ingress) == ['CloudFrontHttpIngress', 'VpcOriginHttpIngress']
+    assert not any('CidrIp' in rule for rule in ingress.values())
+    assert 'SourcePrefixListId: !Ref CloudFrontPrefixListId' in ingress['CloudFrontHttpIngress']
+    assert 'Condition: HasPrefixListIngress' in ingress['CloudFrontHttpIngress']
+    assert 'SourceSecurityGroupId: !Ref CloudFrontVpcOriginGroup' in ingress['VpcOriginHttpIngress']
+    assert 'Condition: HasVpcOriginGroup' in ingress['VpcOriginHttpIngress']
+    # Without a VPC origin's group the prefix list rule is the one a public studio has, as before.
+    assert 'HasPrefixListIngress: !And [!Condition HasPublicStudio, !Not [!Condition HasVpcOriginGroup]]' in template
+
+
+def test_the_vpc_origin_is_asked_for_and_the_internet_origin_stays_otherwise(template):
+    # Defaults render the distribution as before: a stack update that does not ask for it changes nothing there.
+    block = parameter(template, 'StudioOrigin')
+    assert 'Default: internet' in block and 'AllowedValues: [internet, vpc]' in block
+    assert "Default: ''" in parameter(template, 'CloudFrontVpcOriginGroup')
+    assert 'HasVpcOrigin: !And [!Condition HasPublicStudio, !Equals [!Ref StudioOrigin, vpc]]' in template
+    vpc_origin = template[template.index('\n  StudioVpcOrigin:'):template.index('\n  StudioDistribution:')]
+    assert 'Condition: HasVpcOrigin' in vpc_origin and 'instance/${Instance}' in vpc_origin
+    distribution = template[template.index('\n  StudioDistribution:'):template.index('\nOutputs:')]
+    assert 'CustomOriginConfig: !If\n              - HasVpcOrigin\n              - !Ref AWS::NoValue' in distribution
+    assert 'VpcOriginId: !GetAtt StudioVpcOrigin.Id' in distribution
 
 
 def test_the_template_says_a_stack_update_must_pass_the_current_release(template):

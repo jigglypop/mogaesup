@@ -83,6 +83,36 @@ Resources:
         - Key: application
           Value: mogaesup
 
+  # The distribution's access logs (standard logging). It writes them through a bucket ACL grant it adds when logging is
+  # turned on, so this bucket keeps ACLs (BucketOwnerPreferred); nothing in it is public, and the logs go after 90 days.
+  AccessLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: application
+          Value: mogaesup
+
   OriginAccessControl:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
@@ -275,6 +305,11 @@ Resources:
         HttpVersion: http2and3
         IPV6Enabled: true
         PriceClass: PriceClass_200
+        Logging:
+          # The form CloudFront takes: <bucket>.s3.amazonaws.com.
+          Bucket: !GetAtt AccessLogBucket.DomainName
+          Prefix: cloudfront/
+          IncludeCookies: false
         Origins:
           - Id: private-s3-origin
             DomainName: !GetAtt SiteBucket.RegionalDomainName

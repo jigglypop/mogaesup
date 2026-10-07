@@ -21,10 +21,12 @@ permissions:
 
 # The deploy lock. Runs on main wait for each other in the `production` group and are never cancelled midway; one still
 # waiting when a newer run arrives is replaced by it, and every run deploys what each part still lacks since its last
-# deploy (.github/scripts/deploy_bases.py), so nothing the replaced run would have deployed is lost. A deploy by hand goes
-# through this workflow too (Run workflow, `target`), so it waits its turn in the same group; the scripts run from a PC
-# refuse while a run here is queued or in progress, and the instances' install locks keep two installs apart. Pull
-# requests and other branches only check, in a group of their own.
+# deploy (.github/scripts/deploy_bases.py), so no change the replaced run would have deployed is lost. What is lost is
+# a manual run's forced deploy of a part with no pending change (target=studio to load a changed provider secret, say):
+# GitHub keeps one waiting run per group, so run it again once the newer run has started. A deploy by hand goes through
+# this workflow too (Run workflow, `target`), so it waits its turn in the same group; the scripts run from a PC refuse
+# while a run here is queued or in progress, and the instances' install locks keep two installs apart. Pull requests and
+# other branches only check, in a group of their own.
 concurrency:
   group: ${{ (github.event_name == 'pull_request' || github.ref != 'refs/heads/main') && format('check-{0}', github.ref) || 'production' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -32,9 +34,10 @@ concurrency:
 env:
   AWS_REGION: ap-northeast-2
   AWS_ROLE_ARN: arn:aws:iam::960243570517:role/mogaesup-github-deploy
-  # Checks and the release binary use this one compiler (server/Cargo.toml asks for 1.95 or newer). The lints a newer
-  # clippy (1.98) raised in server/src/look_bake.rs and looks.rs were fixed, but `cargo clippy --all-targets -D warnings`
-  # has not been run with a newer toolchain yet: raise this, and RUST_IMAGE with it, once it passes there.
+  # Checks and the release binary use this one compiler (server/Cargo.toml asks for 1.95 or newer), as local builds do
+  # (server/rust-toolchain.toml). The lints a newer clippy (1.98) raised in server/src/look_bake.rs and looks.rs were
+  # fixed, but `cargo clippy --all-targets -D warnings` has not been run with a newer toolchain yet: raise this, RUST_IMAGE
+  # and the toolchain file together, once it passes there.
   RUST_VERSION: 1.95.0
   # rust:1.95.0-alpine, by digest: a retagged image cannot change the release build.
   RUST_IMAGE: rust:1.95.0-alpine@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2
@@ -126,7 +129,11 @@ jobs:
       # Game modules are declared inside the `registry!` macro (src/games/mod.rs), where cargo fmt does not look.
       - run: rustfmt --edition 2024 --check $(find src/games -name '*.rs')
       - run: cargo clippy --all-targets --locked -- -D warnings
+      # The war game's rules (src/war) are kept but not served: the default build leaves them out, so they are linted
+      # with their feature and their own tests run (server/Cargo.toml).
+      - run: cargo clippy --all-targets --locked --features war -- -D warnings
       - run: cargo test --locked
+      - run: "cargo test --locked --features war --lib war::"
 
   # 3.11 is what .python-version and the local machines use; the studio image (backend/infra/Dockerfile) runs 3.12.
   backend-check:
@@ -195,6 +202,12 @@ jobs:
         run: >-
           docker run --rm -v "$PWD/.github/scripts/blender_smoke.py:/smoke.py:ro" studio-check
           blender --background --factory-startup --python-exit-code 1 --python /smoke.py
+      # Blender as its worker user (infra/blender-worker.py), writing where the API leaves work; the deploy shares the
+      # instance's data root (--share-data) and runs the same check there before it stops the running release.
+      - name: Blender 워커
+        run: |
+          docker run --rm studio-check python /app/entrypoint.py --share-data
+          docker run --rm studio-check python /app/entrypoint.py --check-workers
       - name: 기록 DB 명령
         run: docker run --rm studio-check python -c "import src.records, src.services.record_store"
       # nginx.conf with the port-80 rules entrypoint.py writes for a public studio (a stand-in key, rotation included).
@@ -266,6 +279,7 @@ jobs:
           "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/pipeline.yml
           python3 .github/scripts/test_changes.py
           python3 .github/scripts/test_check_migrations.py
+          python3 .github/scripts/test_check_csp.py
       # cfn-lint and every package it needs, pinned by hash.
       - name: CloudFormation 템플릿
         run: |
@@ -321,15 +335,20 @@ jobs:
             server/target
           key: musl-${{ env.RUST_VERSION }}-${{ hashFiles('server/Cargo.lock') }}
           restore-keys: musl-${{ env.RUST_VERSION }}-
+      # RUSTUP_TOOLCHAIN: the image's own compiler, without the components server/rust-toolchain.toml lists for local
+      # checks. musl-dev comes from the image's Alpine branch, which keeps only its newest build of a package, so it is
+      # not pinned (a pin would break the build at the next security fix); the log records the version linked in.
+      # MOGAESUP_COMMIT: the commit the binary is built from, which /api/health names (server-live compares it).
       - name: 리눅스 릴리스 바이너리
         working-directory: server
         run: >-
           mkdir -p target "$HOME/.cache/musl-cargo/registry" &&
           docker run --rm
-          -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/target
+          -e "RUSTFLAGS=-C target-feature=+crt-static" -e CARGO_TARGET_DIR=/target -e "RUSTUP_TOOLCHAIN=$RUST_VERSION"
+          -e "MOGAESUP_COMMIT=$GITHUB_SHA"
           -v "$HOME/.cache/musl-cargo/registry":/usr/local/cargo/registry
           -v "$PWD":/src:ro -v "$PWD/target":/target -w /src "$RUST_IMAGE"
-          sh -c "apk add --no-cache musl-dev && cargo build --release --locked --target x86_64-unknown-linux-musl"
+          sh -c "apk add --no-cache musl-dev && { apk info -v musl musl-dev || true; } && cargo build --release --locked --target x86_64-unknown-linux-musl"
       - name: 바이너리
         id: binary
         working-directory: server/target/x86_64-unknown-linux-musl/release
@@ -379,13 +398,11 @@ jobs:
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      # --skip-provision: the stack is not touched; the server keeps the FACTORY_* settings it has. The script also checks
-      # that CloudFront (the web stack) sends /api/* to this stack's instance.
+      # --skip-provision: the stack is not touched; the server keeps the FACTORY_* settings it has. Before anything is
+      # installed the script checks that CloudFront (the web stack) sends /api/* to this stack's instance.
       - name: 서버 릴리스
         working-directory: server
         run: python3 scripts/deploy-rust-server.py --skip-provision
-      - name: 운영 주소 확인
-        run: curl --fail --silent --show-error --max-time 10 --retry 5 --retry-delay 3 --retry-all-errors https://mogaesup.com/api/health
       - name: 설치 실패 기록
         if: failure()
         working-directory: server
@@ -395,11 +412,42 @@ jobs:
             python3 -c "import json, sys; d = json.load(open(sys.argv[1])); print(d.get('Status')); print(d.get('StandardErrorContent', '')[-4000:])" "$file"
           done
 
-  deploy-studio:
-    needs: [changes, gate, deploy-server]
-    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && needs.changes.outputs.deploy_studio == 'true' }}
+  # The installed release answered on the instance; this is the site's way to it, and the server it reaches must name this
+  # run's commit. A job of its own: deploy-server stays a success (deploy_bases.py counts the server as deployed), so a
+  # failure here fails the run without the next run installing and restarting the same server again.
+  server-live:
+    needs: deploy-server
+    if: ${{ !cancelled() && needs.deploy-server.result == 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 5
+    steps:
+      - name: 운영 주소 확인
+        run: |
+          if ! health=$(curl --fail --silent --show-error --max-time 10 --retry 5 --retry-delay 3 --retry-all-errors https://mogaesup.com/api/health); then
+            echo "::error::설치는 끝났지만 https://mogaesup.com/api/health 가 답하지 않습니다. CloudFront와 서버 연결을 확인하세요(다음 실행은 서버를 다시 설치하지 않습니다)"
+            exit 1
+          fi
+          echo "$health"
+          commit=$(python3 -c 'import json, sys
+          try: value = json.loads(sys.argv[1]).get("commit")
+          except (ValueError, AttributeError): value = None
+          print(value if isinstance(value, str) else "")' "$health")
+          if [ -z "$commit" ]; then
+            echo "::warning::/api/health 가 서버의 커밋을 알리지 않습니다(커밋을 싣지 않은 빌드)"
+          elif [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "::error::https://mogaesup.com/api/health 의 서버는 커밋 $commit 입니다. 이 실행은 $GITHUB_SHA 를 설치했습니다. CloudFront가 다른 서버로 보내는지 확인하세요"
+            exit 1
+          fi
+
+  # Studio and web go out only when this run's server release did (or had nothing to do): a server build or deploy that
+  # failed leaves them for the next run, so the web never goes live without the server API of the same commit.
+  deploy-studio:
+    needs: [changes, gate, build-server, deploy-server]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.build-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && needs.changes.outputs.deploy_studio == 'true' }}
+    runs-on: ubuntu-24.04
+    # deploy-aws.ps1: the image build (up to 25 minutes, a whole rebuild when the Dockerfile changed), then the deployment
+    # (up to 15), each an SSM command of its own.
+    timeout-minutes: 55
     environment: ${{ vars.DEPLOY_ENVIRONMENT || '' }}
     permissions:
       contents: read
@@ -438,8 +486,9 @@ jobs:
       - name: 릴리스 묶음
         shell: pwsh
         run: ./backend/infra/prepare-aws.ps1 -Upload
-      # deploy-on-instance.sh applies the record database migrations, then waits for running paid work to finish and
-      # stops with 4 or 5 when it cannot (backend/README.md).
+      # deploy-on-instance.sh builds the image first (a command of its own), then applies the record database
+      # migrations, shares the data root with the Blender workers and checks them, waits for running paid work to finish
+      # and stops with 4, 5, 7 or 9 when it cannot (backend/README.md).
       - name: 인스턴스에 배포
         shell: pwsh
         env:
@@ -449,8 +498,8 @@ jobs:
           ./backend/infra/deploy-aws.ps1 -InstanceId $env:STUDIO_INSTANCE_ID -Bucket $receipt.bucket -ReleaseKey $receipt.release_key
 
   deploy-web:
-    needs: [changes, gate, deploy-server, deploy-studio]
-    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-studio.result) && needs.changes.outputs.deploy_web == 'true' }}
+    needs: [changes, gate, build-server, deploy-server, deploy-studio]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.build-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-studio.result) && needs.changes.outputs.deploy_web == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: ${{ vars.DEPLOY_ENVIRONMENT || '' }}

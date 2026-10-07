@@ -6,9 +6,18 @@ FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf2583
 ARG BLENDER_VERSION=4.5.3
 # blender-<version>.sha256 next to the download on download.blender.org; change both together.
 ARG BLENDER_SHA256=975c58fcb244273838534bba771e64ad87739216b0f9b39a888531a49a72d845
-RUN apt-get update && apt-get install -y --no-install-recommends nginx curl xz-utils libx11-6 libxxf86vm1 libxi6 libxrender1 libxfixes3 libxkbcommon0 libsm6 libice6 libgl1 libegl1 libgomp1 && rm -rf /var/lib/apt/lists/*
-RUN curl --fail --location --retry 2 https://download.blender.org/release/Blender4.5/blender-${BLENDER_VERSION}-linux-x64.tar.xz -o /tmp/blender.tar.xz && echo "${BLENDER_SHA256}  /tmp/blender.tar.xz" | sha256sum -c - && tar -xJf /tmp/blender.tar.xz -C /opt && ln -s /opt/blender-${BLENDER_VERSION}-linux-x64/blender /usr/local/bin/blender && rm /tmp/blender.tar.xz
-# Fails the build when a system library Blender links against is missing.
+# Not pinned to versions: bookworm's archive keeps only the newest build of each package, so a pin would fail the build
+# at the next security fix (the base image digest above fixes the release). The build log names what was installed.
+RUN apt-get update && apt-get install -y --no-install-recommends nginx curl xz-utils libx11-6 libxxf86vm1 libxi6 libxrender1 libxfixes3 libxkbcommon0 libsm6 libice6 libgl1 libegl1 libgomp1 && dpkg-query -W nginx curl libgl1 libegl1 && rm -rf /var/lib/apt/lists/*
+RUN curl --fail --location --retry 2 https://download.blender.org/release/Blender4.5/blender-${BLENDER_VERSION}-linux-x64.tar.xz -o /tmp/blender.tar.xz && echo "${BLENDER_SHA256}  /tmp/blender.tar.xz" | sha256sum -c - && tar -xJf /tmp/blender.tar.xz -C /opt && ln -s /opt/blender-${BLENDER_VERSION}-linux-x64 /opt/blender && rm /tmp/blender.tar.xz
+# The Blender workers run as studio-worker (uid and gid 10001), not as root: /usr/local/bin/blender starts the real one
+# under that user (infra/blender-worker.py), the data root is shared with its group (entrypoint.py), and the host's
+# firewall keeps that uid away from the instance metadata service (infra/worker-guard.sh). The API stays root in the
+# container: nginx's port 80, the rules it writes under /etc/nginx, and stopping its workers need it.
+RUN groupadd --gid 10001 studio-worker && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/studio-worker --shell /usr/sbin/nologin studio-worker
+COPY infra/blender-worker.py /usr/local/bin/blender
+RUN sed -i 's/\r$//' /usr/local/bin/blender && chmod 755 /usr/local/bin/blender
+# Fails the build when a system library Blender links against is missing, or Blender cannot start as its worker.
 RUN blender --background --factory-startup --version
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.11.9

@@ -122,7 +122,13 @@ $savedRecords = [Environment]::GetEnvironmentVariable('CHARACTER_DATABASE_URL', 
 # the caller's location back afterwards.
 Push-Location -LiteralPath $root
 try {
-  $serverArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'server\scripts\start-rust-server.ps1'))
+  $serverScript = Join-Path $root 'server\scripts\start-rust-server.ps1'
+  $serverArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $serverScript)
+  # The compose PostgreSQL, here where its refusals show (another PostgreSQL on 55432, data still in the PostgreSQL 18
+  # volume): the server starts hidden. Not needed while what would use it runs already.
+  if (-not (Test-Listening 8080) -or ($Character -and -not (Test-Listening 8016))) {
+    & $serverScript -DatabaseOnly
+  }
   if ($Character) {
     $values = @{}
     foreach ($line in Get-Content -LiteralPath (Join-Path $root 'backend\.env')) {
@@ -131,11 +137,7 @@ try {
     # Stages a previous run left unfinished are not resumed by a dev start: that would be paid work nobody asked for.
     $env:ASSET_AUTO_RESUME = '0'
     if (-not (Test-Listening 8016)) {
-      # Character records live in a local database (mogaesup_character) on the compose PostgreSQL.
-      $ErrorActionPreference = 'Continue'
-      & docker compose -f (Join-Path $root 'server\docker-compose.yml') up -d --wait postgres
-      $ErrorActionPreference = 'Stop'
-      if ($LASTEXITCODE -ne 0) { throw 'Local PostgreSQL (docker compose) did not start.' }
+      # Character records live in a local database (mogaesup_character) on the compose PostgreSQL started above.
       $password = if ($env:POSTGRES_PASSWORD) { $env:POSTGRES_PASSWORD } else { 'postgres-dev' }
       $env:CHARACTER_DATABASE_URL = "postgresql://postgres:$password@127.0.0.1:55432/mogaesup_character"
       & uv run python -m src.records migrate --create-database

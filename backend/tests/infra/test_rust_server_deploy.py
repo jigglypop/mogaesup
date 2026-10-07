@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,18 +56,40 @@ def server_env(bootstrap, tmp_path):
         if existing is not None:
             path.write_text(existing)
         args = bootstrap.parse_args([*BASE, *flags])
-        found = bootstrap.factory_settings(bootstrap.read_env(path), args, lambda: ROTATED)
-        return found, bootstrap.server_env_lines(args, 'postgres://app', 'ticket-secret', found)
+        existing = bootstrap.read_env(path)
+        found = bootstrap.factory_settings(existing, args, lambda: ROTATED)
+        return found, bootstrap.server_env_lines(args, 'postgres://app', 'ticket-secret', found,
+                                                 bootstrap.model_sweep(existing))
     return build
 
 
 def test_a_deploy_without_the_studio_flags_keeps_the_gateway_as_it_was(server_env):
     found, lines = server_env(EXISTING)
-    assert lines[:8] == ['DATABASE_URL=postgres://app', 'LISTEN_ADDR=0.0.0.0:8080', 'APP_ORIGIN=https://mogaesup.com,https://www.mogaesup.com',
+    assert lines[:9] == ['DATABASE_URL=postgres://app', 'LISTEN_ADDR=0.0.0.0:8080', 'APP_ORIGIN=https://mogaesup.com,https://www.mogaesup.com',
                          'COOKIE_SECURE=true', 'REALTIME_TICKET_SECRET=ticket-secret', 'MODEL_STORE=s3://bucket/models',
-                         'AWS_REGION=ap-northeast-2', 'RUST_LOG=info']
-    assert lines[8:] == ['FACTORY_URL=https://studio.example.cloudfront.net', 'FACTORY_ACCESS=write', 'FACTORY_PAID_MONTHLY=20',
+                         'MODEL_SWEEP=on', 'AWS_REGION=ap-northeast-2', 'RUST_LOG=info']
+    assert lines[9:] == ['FACTORY_URL=https://studio.example.cloudfront.net', 'FACTORY_ACCESS=write', 'FACTORY_PAID_MONTHLY=20',
                          f'FACTORY_GATEWAY_KEY={GATEWAY_KEY}', f'STUDIO_INSTANCE_ID={INSTANCE}']
+
+
+def test_production_sweeps_the_model_store_it_owns(server_env, bootstrap):
+    # The site's bucket is this server's alone, so a server.env without the setting sweeps it. One an operator set (off,
+    # after a sweep that took too much, say) stays through every deploy: earlier this rewrote it to on and the next
+    # deploy deleted again. Empty is off, as the server reads it.
+    for existing, sweep in ((None, 'on'), (EXISTING, 'on'), (EXISTING + 'MODEL_SWEEP=off\n', 'off'),
+                            (EXISTING + 'MODEL_SWEEP=on\n', 'on'), (EXISTING + 'MODEL_SWEEP=\n', 'off'),
+                            (EXISTING + 'MODEL_SWEEP="off"\n', 'off')):
+        _, lines = server_env(existing)
+        assert [line for line in lines if line.startswith('MODEL_SWEEP=')] == [f'MODEL_SWEEP={sweep}'], existing
+    # A value the server refuses would stop it, and the previous release on the same file: nothing is installed.
+    with pytest.raises(RuntimeError, match='MODEL_SWEEP'):
+        bootstrap.model_sweep({'MODEL_SWEEP': 'yes'})
+
+
+def test_the_deploy_log_names_the_model_sweep(bootstrap, deploy):
+    source = Path(bootstrap.__file__).read_text(encoding='utf-8')
+    assert "print(f'Model sweep: {sweep}')" in source
+    assert "line.startswith(('Studio gateway:', 'Model sweep:'))" in Path(deploy.__file__).read_text(encoding='utf-8')
 
 
 def test_the_gateway_key_is_refreshed_from_its_secret_when_one_is_named(server_env):
@@ -90,7 +113,7 @@ def test_an_empty_studio_instance_removes_only_that(server_env):
 
 def test_an_empty_factory_url_switches_the_gateway_off(server_env):
     found, lines = server_env(EXISTING, '--factory-url', '')
-    assert found == {} and len(lines) == 8
+    assert found == {} and len(lines) == 9
 
 
 def test_a_first_deploy_with_a_url_gets_the_defaults(server_env):
@@ -453,31 +476,105 @@ def test_a_database_newer_than_the_template_stops_the_change(deploy):
         deploy.check_engine_version('17.10', '17.9')
 
 
+@pytest.mark.parametrize('name, action, replacement', [('ApiInstance', 'Remove', None), ('Database', 'Remove', None),
+                                                       ('RealtimeTicketSecret', 'Remove', None)])
+def test_yes_never_removes_a_kept_resource(deploy, cloudformation, name, action, replacement):
+    # A logical id renamed in the template: the old resource goes (Remove) and a new one comes (Add).
+    cloudformation.changes = [{'ResourceChange': {'Action': action, 'LogicalResourceId': name, 'ResourceType': 'X'}},
+                              {'ResourceChange': {'Action': 'Add', 'LogicalResourceId': name + 'Renamed', 'ResourceType': 'X'}}]
+    with pytest.raises(SystemExit) as stopped:
+        deploy.provision(yes=True)
+    assert name in str(stopped.value) and 'removes' in str(stopped.value)
+    assert cloudformation_calls(cloudformation) == ['describe-change-set', 'delete-change-set']
+
+
+def test_yes_may_remove_what_is_not_kept(deploy):
+    description = {'Changes': [{'ResourceChange': {'Action': 'Remove', 'LogicalResourceId': 'DatabaseStorageAlarm'}},
+                               {'ResourceChange': {'Action': 'Modify', 'LogicalResourceId': 'Database',
+                                                   'Replacement': 'False'}}]}
+    assert deploy.replacements(description) == []
+
+
 def test_a_manual_release_must_be_committed_and_built_after_the_last_server_commit(deploy, monkeypatch, tmp_path):
     binary = tmp_path / 'mogaesup-server'
     binary.write_bytes(b'\x7fELF')
-    answers = {'status': ' M server/src/main.rs\n', 'rev-parse': 'a' * 40 + '\n', 'log': '4000000000\n'}
-
-    pushed = {'code': 1}
+    answers = {'status': ' M server/src/main.rs\n', 'rev-parse': 'a' * 40 + '\n', 'log': '4000000000\n',
+               'ls-remote': 'c' * 40 + '\trefs/heads/main\n'}
 
     def git(*args):
-        if args[0] == 'merge-base':
-            return subprocess.CompletedProcess(args, pushed['code'], stdout='', stderr='')
         return subprocess.CompletedProcess(args, 0, stdout=answers[args[0]], stderr='')
     monkeypatch.setattr(deploy, 'git', git)
     monkeypatch.setattr(deploy, 'pipeline_running', lambda: None)
     with pytest.raises(RuntimeError, match='Uncommitted server files'):
         deploy.release_commit(binary, environ={})
     answers['status'] = ''
-    with pytest.raises(RuntimeError, match='not on origin/main'):
+    # Not main's newest: a commit not pushed yet, or one main has moved past (an ancestor is refused too).
+    with pytest.raises(RuntimeError, match="not origin's main"):
         deploy.release_commit(binary, environ={})
-    pushed['code'] = 0
+    answers['ls-remote'] = ''
+    with pytest.raises(RuntimeError, match="origin's main could not be read"):
+        deploy.release_commit(binary, environ={})
+    answers['ls-remote'] = 'a' * 40 + '\trefs/heads/main\n'
     with pytest.raises(RuntimeError, match='older than the last commit'):
         deploy.release_commit(binary, environ={})
     answers['log'] = '1000000000\n'
     assert deploy.release_commit(binary, environ={}) == 'a' * 40
     # The pipeline names the commit it checked out.
     assert deploy.release_commit(binary, environ={'GITHUB_ACTIONS': 'true', 'GITHUB_SHA': 'b' * 40}) == 'b' * 40
+
+
+def test_a_pipeline_run_that_may_deploy_stops_a_manual_one_and_an_unknown_one_is_said(deploy, capsys):
+    def gh(stdout, code=0):
+        def run(command, **kwargs):
+            assert command[:3] == ['gh', 'run', 'list'] and '--jq' not in command
+            return subprocess.CompletedProcess(command, code, stdout=stdout, stderr='')
+        return run
+    deploy.pipeline_running(gh('[{"status": "completed"}, {"status": "completed"}]'))
+    assert capsys.readouterr().out == ''
+    for status in ('in_progress', 'queued', 'waiting', 'pending'):
+        with pytest.raises(RuntimeError, match='queued or in progress'):
+            deploy.pipeline_running(gh(f'[{{"status": "{status}"}}, {{"status": "completed"}}]'))
+
+    def missing(command, **kwargs):
+        raise FileNotFoundError('gh')
+    for run in (missing, gh('', code=4), gh('not json')):
+        deploy.pipeline_running(run)
+        assert 'cannot be ruled out' in capsys.readouterr().out
+
+
+def test_applying_the_stack_waits_for_a_pipeline_run_and_listing_it_does_not(deploy, monkeypatch):
+    calls = []
+    monkeypatch.setattr(deploy, 'aws', lambda *args: {'Account': deploy.ACCOUNT})
+    monkeypatch.setattr(deploy, 'provision', lambda instance, yes: calls.append(('provision', yes)))
+
+    def running(run=None, refusal=None):
+        calls.append(('pipeline', refusal))
+        raise RuntimeError(refusal)
+    monkeypatch.setattr(deploy, 'pipeline_running', running)
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    monkeypatch.setattr(sys, 'argv', ['deploy-rust-server.py', '--provision-only', '--yes'])
+    with pytest.raises(RuntimeError, match='before changing the stack'):
+        deploy.main()
+    assert calls == [('pipeline', deploy.STACK_REFUSAL)]
+    calls.clear()
+    # Listing the change set changes nothing, so it goes on.
+    monkeypatch.setattr(sys, 'argv', ['deploy-rust-server.py', '--provision-only'])
+    deploy.main()
+    assert calls == [('provision', False)]
+
+
+def test_the_stack_refusal_names_what_waits(deploy):
+    def run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout='[{"status": "in_progress"}]', stderr='')
+    with pytest.raises(RuntimeError, match='before changing the stack'):
+        deploy.pipeline_running(run, refusal=deploy.STACK_REFUSAL)
+
+
+def test_where_cloudfront_sends_the_api_is_checked_before_anything_is_installed(deploy):
+    source = Path(deploy.__file__).read_text(encoding='utf-8')
+    main = source[source.index('def main():'):]
+    assert main.index('check_web_origin(outputs)') < main.index("'s3', 'cp'") < main.index("'send-command'")
+    assert main.count('check_web_origin(') == 1
 
 
 def test_cloudfront_must_send_the_api_to_this_stack(deploy, monkeypatch):

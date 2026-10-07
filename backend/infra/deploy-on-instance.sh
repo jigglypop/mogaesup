@@ -4,6 +4,9 @@ set -Eeuo pipefail
 release_key="${1:?release key is required}"
 release_sha="${2:?release sha256 is required}"
 source_root="${3:?extracted release directory is required}"
+# `build` builds the release's image and touches nothing else: deploy-aws.ps1 runs it as an SSM command of its own before
+# the deployment, so a Dockerfile change that rebuilds the whole image does not use up the deployment's time limit.
+mode="${4:-deploy}"
 config_file=/etc/asset-studio.env
 service_name=gaesup-asset-studio
 rollback_name=gaesup-asset-studio-rollback
@@ -15,6 +18,7 @@ token_file=/opt/asset-studio/drain-token
 [[ "$release_sha" =~ ^[0-9a-f]{64}$ ]] || { echo 'invalid release sha256' >&2; exit 2; }
 [[ "$release_key" == "releases/studio/$release_sha.tar.gz" ]] || { echo 'release key and sha256 do not match' >&2; exit 2; }
 [[ "$source_root" == "$expected_source" ]] || { echo 'unexpected release source path' >&2; exit 2; }
+[[ "$mode" == deploy || "$mode" == build ]] || { echo 'invalid mode' >&2; exit 2; }
 [[ -f "$config_file" ]] || { echo "$config_file is missing" >&2; exit 2; }
 [[ -f "$source_root/infra/Dockerfile" ]] || { echo 'release is missing infra/Dockerfile' >&2; exit 2; }
 grep -qx "$release_sha" "$source_root/.release-sha256" || { echo 'release archive hash was not verified' >&2; exit 2; }
@@ -37,11 +41,30 @@ budget_left() { if [[ -n "$deploy_deadline" ]]; then echo $(( deploy_deadline - 
 # rollback alone needs (restore and reopen the previous runtime).
 replace_seconds=240
 rollback_seconds=120
+# The new image's worker check, before anything is stopped, and the least the data root's share before it is given.
+worker_check_seconds=90
+share_seconds_min=30
 
 exec 9>/var/lock/asset-studio-deploy.lock
 flock -n 9 || { echo 'another deployment is active' >&2; exit 3; }
 
-install -d -m 700 /opt/asset-studio /opt/asset-studio/releases /opt/asset-studio/scratch
+image="gaesup-asset-studio:${release_sha}"
+build_image() {
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    docker build --pull -t "$image" -f "$source_root/infra/Dockerfile" "$source_root"
+  fi
+}
+if [[ "$mode" == build ]]; then
+  build_image
+  echo "image built: $image"
+  exit 0
+fi
+
+install -d -m 700 /opt/asset-studio /opt/asset-studio/releases
+# The data root, every container's /app/data, belongs to the Blender workers' group as well (gid 10001, entrypoint.py
+# share_with_workers). It is made once and its mode never set again here: `install -d -m` also resets the mode of a folder
+# that exists, which would shut the running release's workers out of it until the next share.
+[[ -d /opt/asset-studio/scratch ]] || install -d -m 2770 -g 10001 /opt/asset-studio/scratch
 # nginx's logs, on the host so infra/idle-stop.sh sees the last request even while no container runs.
 install -d -m 755 /var/log/asset-studio
 secret_tmp="$(mktemp /opt/asset-studio/provider.json.XXXXXX)"
@@ -102,17 +125,21 @@ value["CHARACTER_DATABASE_URL"] = "postgresql://%s:%s@%s:5432/%s?sslmode=require
 json.dump(value, open(path, "w"))' "$secret_tmp" "$CHARACTER_DB_HOST"
 fi
 
-image="gaesup-asset-studio:${release_sha}"
 candidate="gaesup-asset-studio-candidate-${release_sha:0:12}"
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-  docker build --pull -t "$image" -f "$source_root/infra/Dockerfile" "$source_root"
-fi
+build_image
 if docker inspect -f '{{.State.Running}}' "$candidate" 2>/dev/null | grep -qx true || \
    docker ps --filter 'name=^gaesup-asset-studio-candidate-' --format '{{.Names}}' 2>/dev/null | grep -q .; then
   echo 'a previous candidate is still running; inspect and recover that deployment before submitting another' >&2
   exit 5
 fi
 docker rm "$candidate" >/dev/null 2>&1 || true
+
+# The release's Blender workers run as uid 10001 (infra/blender-worker.py); the host keeps that uid away from the
+# instance metadata service, now and at every boot (infra/worker-guard.sh). A host where that cannot be done still
+# deploys, with a warning: its workers then reach the role's credentials, as every release's did before.
+if ! bash "$source_root/infra/worker-guard.sh" install; then
+  echo 'warning: the Blender workers are not kept from the instance metadata service (infra/worker-guard.sh failed)' >&2
+fi
 
 service_running() { docker inspect -f '{{.State.Running}}' "$service_name" 2>/dev/null | grep -qx true; }
 
@@ -278,9 +305,43 @@ runpy.run_module("src.records", run_name="__main__")' > "$migration_log" 2>&1; t
   fi
 fi
 
-if (( $(budget_left) < replace_seconds + 30 )); then
-  echo "only $(budget_left) s of the deployment time limit are left, too few to drain, replace and roll back; nothing was stopped. The image is built: deploy again" >&2
+if (( $(budget_left) < replace_seconds + 30 + worker_check_seconds + share_seconds_min )); then
+  echo "only $(budget_left) s of the deployment time limit are left, too few to drain, replace and roll back after the data root's share and the worker check; nothing was stopped. The image is built: deploy again" >&2
   exit 7
+fi
+
+# The data root shared with the new image's Blender workers (entrypoint.py --share-data), the running release still
+# serving: the first time every entry changes group and mode, later only what the running release made since. It gets
+# what the time limit leaves beyond the steps after it; what it changed stays changed, so a share the limit cut short is
+# carried on by the next deployment.
+share_seconds=$(( $(budget_left) - replace_seconds - 30 - worker_check_seconds ))
+(( share_seconds <= 1800 )) || share_seconds=1800
+# A deployment the SSM time limit killed may have left its share or worker check container behind under these names.
+share_name="gaesup-asset-studio-share-${release_sha:0:12}"
+workers_name="gaesup-asset-studio-workers-${release_sha:0:12}"
+docker rm -f "$share_name" "$workers_name" >/dev/null 2>&1 || true
+share_status=0
+timeout --kill-after=10 "$share_seconds" docker run --rm --name "$share_name" --network none \
+  -v /opt/asset-studio/scratch:/app/data "$image" python /app/entrypoint.py --share-data || share_status=$?
+if (( share_status != 0 )); then
+  docker rm -f "$share_name" >/dev/null 2>&1 || true
+  if (( share_status == 124 || share_status == 137 )); then
+    echo "the data root was still being shared with the Blender workers after $share_seconds s; what was shared stays so and nothing was stopped. The image is built: deploy again to go on" >&2
+    exit 7
+  fi
+  echo "the new release could not share the data root with its Blender workers; nothing was changed and the running release keeps serving" >&2
+  exit 9
+fi
+
+# The new image's Blender, in a container of its own beside the running release (nothing is stopped yet): it must run
+# as its worker user and write where the API leaves work, on this host's data root (entrypoint.py --check-workers). It
+# also says whether that user still reaches the instance metadata service (a warning only).
+if ! timeout --kill-after=10 "$worker_check_seconds" docker run --rm --name "$workers_name" \
+     --network host -v /opt/asset-studio/scratch:/app/data "$image" \
+     python /app/entrypoint.py --check-workers --metadata-guard; then
+  docker rm -f "$workers_name" >/dev/null 2>&1 || true
+  echo "the new release's Blender workers failed their check; nothing was changed and the running release keeps serving" >&2
+  exit 9
 fi
 
 # Close admission atomically before observing work. Old releases without the control endpoint remain running:
@@ -397,7 +458,8 @@ start_id="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 # file goes once the candidate has applied it; the folder stays while a container that mounts it exists.
 # Host networking stays: the instance's metadata service answers one network hop only (ec2.yaml HttpPutResponseHopLimit
 # 1), so a bridged container would get no role credentials for S3 and the secrets, and nginx serves CloudFront on port
-# 80. The container runs as root for nginx's port 80 and the rules entrypoint.py writes under /etc/nginx.
+# 80. The container runs as root for nginx's port 80 and the rules entrypoint.py writes under /etc/nginx; its Blender
+# workers run as uid 10001, which the host's firewall keeps from the metadata service (worker-guard.sh above).
 start_dir="/opt/asset-studio/start-tokens/$start_id"
 install -d -m 700 /opt/asset-studio/start-tokens "$start_dir"
 (umask 077; printf '%s\n' "$drain_token" > "$start_dir/token")

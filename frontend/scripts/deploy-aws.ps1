@@ -35,22 +35,44 @@ function Invoke-Native {
 
 $repoRoot = Split-Path -Parent $projectRoot
 # The pipeline (.github/workflows/pipeline.yml) deploys main one run at a time and ships the build its checks made. Run
-# by hand, this script builds a release only from committed files, and not while a pipeline run could upload too.
+# by hand, this script builds a release only from committed files of origin's main as the remote has it now (one only
+# this PC has would go live unseen, an older one would take back what main has changed since), and not while a pipeline
+# run could upload too.
 $inPipeline = $env:GITHUB_ACTIONS -eq 'true'
 if (-not $inPipeline -and -not $ProvisionOnly -and -not $Preview) {
   if ($SkipBuild) { throw '-SkipBuild is for the pipeline, which ships the build it checked; run by hand, this script builds the release itself.' }
   $dirty = Invoke-Native git -C $repoRoot status --porcelain --untracked-files=all -- frontend package.json package-lock.json .nvmrc
   if ($dirty) { throw "Uncommitted web files would go live unreviewed; commit them first: $($dirty -join '; ')" }
+  # Native stderr and exit codes read the same in Windows PowerShell 5.1 and PowerShell 7: stderr is dropped and the
+  # exit code decides, and gh's JSON is read here rather than through a --jq argument whose quotes 5.1 would strip.
   $ErrorActionPreference = 'Continue'
-  & git -C $repoRoot merge-base --is-ancestor HEAD origin/main 2>$null
-  $pushed = $LASTEXITCODE -eq 0
+  $head = @(& git -C $repoRoot rev-parse HEAD 2>$null)
+  $remote = @(& git -C $repoRoot ls-remote --exit-code origin refs/heads/main 2>$null)
+  $remoteCode = $LASTEXITCODE
   $ErrorActionPreference = 'Stop'
-  if (-not $pushed) { throw 'HEAD is not on origin/main; push it first (git fetch if origin/main is stale).' }
+  $tip = if ($remoteCode -eq 0 -and $remote.Count -gt 0 -and "$($remote[0])" -match '^([0-9a-f]{40})\s') { $Matches[1] } else { $null }
+  if (-not $tip) { throw "origin's main could not be read (git ls-remote origin refs/heads/main)." }
+  if ($head.Count -eq 0 -or "$($head[0])".Trim() -ne $tip) { throw "HEAD is not origin's main ($($tip.Substring(0, 12))); pull it, or push this commit first." }
+  $listed = $false
+  $active = 0
   if (Get-Command gh -ErrorAction SilentlyContinue) {
-    $active = Invoke-Native gh run list --workflow pipeline.yml --branch main --limit 20 --json status --jq '[.[] | select(.status != "completed")] | length'
-    if ([int]$active -gt 0) { throw 'A pipeline run on main is queued or in progress and may deploy the web as well; wait for it, or use its Run workflow (target web) instead.' }
-  } else {
-    Write-Warning 'gh is not installed, so a pipeline run that deploys at the same time cannot be ruled out.'
+    $ErrorActionPreference = 'Continue'
+    Push-Location $repoRoot
+    try { $json = (& gh run list --workflow pipeline.yml --branch main --limit 20 --json status 2>$null) -join "`n"; $listCode = $LASTEXITCODE }
+    finally { Pop-Location }
+    $ErrorActionPreference = 'Stop'
+    if ($listCode -eq 0) {
+      try {
+        $runs = ConvertFrom-Json -InputObject $json
+        $active = @($runs | Where-Object { $null -ne $_ -and $_.status -ne 'completed' }).Count
+        $listed = $true
+      } catch { $listed = $false }
+    }
+  }
+  if (-not $listed) {
+    Write-Warning 'gh could not list the pipeline runs (install it and run gh auth login), so a pipeline run that deploys at the same time cannot be ruled out.'
+  } elseif ($active -gt 0) {
+    throw 'A pipeline run on main is queued or in progress and may deploy the web as well; wait for it, or use its Run workflow (target web) instead.'
   }
 }
 $releaseCommit = if ($inPipeline) { $env:GITHUB_SHA } else { (Invoke-Native git -C $repoRoot rev-parse HEAD | Select-Object -First 1).Trim() }
@@ -134,37 +156,58 @@ try {
     @{ Pattern = '*.glb'; Type = 'model/gltf-binary'; Cache = 'public,max-age=3600' },
     @{ Pattern = '*.woff2'; Type = 'font/woff2'; Cache = 'public,max-age=3600' }
   )
-  # Patterns are written as one `--option=value` token: PowerShell on Linux expands a lone '*' or '/*' argument into file names.
-  $excludes = @('--exclude=index.html', '--exclude=assets/*', '--exclude=*.map', '--exclude=wasm/*')
-  foreach ($entry in $typed) { $excludes += "--exclude=$($entry.Pattern)" }
-  Invoke-Native aws s3 sync $dist $bucket --region $Region @excludes --cache-control 'public,max-age=3600' --no-progress --only-show-errors
-  foreach ($entry in $typed) {
-    Invoke-Native aws s3 cp $dist $bucket --recursive --region $Region '--exclude=*' "--include=$($entry.Pattern)" '--exclude=assets/*' '--exclude=wasm/*' --content-type $entry.Type --cache-control $entry.Cache --no-progress --only-show-errors
+  # The files without a hash in their names, from a folder laid out as the site (the build, or the copy of what was live
+  # before it), with the types and cache lifetimes they are served with: models, fonts and the rest, then the engine's
+  # WebAssembly and index.html back to back. A release and its rollback go up the same way.
+  function Send-Unhashed([string]$From) {
+    # Patterns are written as one `--option=value` token: PowerShell on Linux expands a lone '*' or '/*' argument into file names.
+    $excludes = @('--exclude=index.html', '--exclude=release.json', '--exclude=assets/*', '--exclude=*.map', '--exclude=wasm/*')
+    foreach ($entry in $typed) { $excludes += "--exclude=$($entry.Pattern)" }
+    Invoke-Native aws s3 cp $From $bucket --recursive --region $Region @excludes --cache-control 'public,max-age=3600' --no-progress --only-show-errors
+    foreach ($entry in $typed) {
+      Invoke-Native aws s3 cp $From $bucket --recursive --region $Region '--exclude=*' "--include=$($entry.Pattern)" '--exclude=assets/*' '--exclude=wasm/*' '--exclude=*.map' --content-type $entry.Type --cache-control $entry.Cache --no-progress --only-show-errors
+    }
+    # The WebAssembly keeps its name across engine releases. It goes up without a cache lifetime, so browsers and (with
+    # the stack's StaticRevalidateCachePolicy) the edges ask whether it changed; unchanged bytes change nothing.
+    $wasm = Join-Path $From 'wasm'
+    if (Test-Path -LiteralPath $wasm) {
+      Invoke-Native aws s3 cp $wasm "$bucket/wasm" --recursive --region $Region --content-type application/wasm --cache-control no-cache --no-progress --only-show-errors
+    }
+    Invoke-Native aws s3 cp (Join-Path $From 'index.html') "$bucket/index.html" --region $Region --cache-control 'no-cache,max-age=0,must-revalidate' --content-type 'text/html; charset=utf-8' --no-progress --only-show-errors
   }
 
-  # What is live now, to put back if the published release fails its checks below.
+  # What is live now under every name the release overwrites (all but the hashed bundles, about as large as those files
+  # in the build), to put back if the published release fails its checks below. A file the release adds stays: nothing
+  # the previous index.html loads names it.
   $previous = Join-Path ([IO.Path]::GetTempPath()) "mogaesup-web-previous-$([guid]::NewGuid().ToString('N'))"
-  New-Item -ItemType Directory -Path (Join-Path $previous 'wasm') -Force | Out-Null
-  $previousIndex = Join-Path $previous 'index.html'
+  $previousLive = Join-Path $previous 'live'
+  New-Item -ItemType Directory -Path $previousLive -Force | Out-Null
+  $previousIndex = Join-Path $previousLive 'index.html'
   $previousRelease = Join-Path $previous 'previous-release.json'
-  $previousWasm = Join-Path $previous 'wasm'
-  # None on the first deploy. Windows PowerShell turns redirected stderr into errors under 'Stop'.
-  $ErrorActionPreference = 'Continue'
-  foreach ($pair in @(@('index.html', $previousIndex), @('release.json', $previousRelease))) {
-    & aws s3 cp "$bucket/$($pair[0])" $pair[1] --region $Region --only-show-errors 2>$null
-    if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $pair[1] -Force -ErrorAction SilentlyContinue }
+  foreach ($item in (Get-ChildItem -LiteralPath $dist -Force | Where-Object { $_.Name -ne 'assets' })) {
+    if ($item.PSIsContainer) {
+      # A prefix that holds nothing yet copies nothing.
+      Invoke-Native aws s3 cp "$bucket/$($item.Name)" (Join-Path $previousLive $item.Name) --recursive --region $Region '--exclude=*.map' --only-show-errors
+    } else {
+      # None on the first deploy, or for a file this release adds. Windows PowerShell turns redirected stderr into errors
+      # under 'Stop'.
+      $ErrorActionPreference = 'Continue'
+      & aws s3 cp "$bucket/$($item.Name)" (Join-Path $previousLive $item.Name) --region $Region --only-show-errors 2>$null
+      $copied = $LASTEXITCODE -eq 0
+      $ErrorActionPreference = 'Stop'
+      if (-not $copied) { Remove-Item -LiteralPath (Join-Path $previousLive $item.Name) -Force -ErrorAction SilentlyContinue }
+    }
   }
+  $ErrorActionPreference = 'Continue'
+  & aws s3 cp "$bucket/release.json" $previousRelease --region $Region --only-show-errors 2>$null
+  if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $previousRelease -Force -ErrorAction SilentlyContinue }
   $ErrorActionPreference = 'Stop'
-  Invoke-Native aws s3 cp "$bucket/wasm" $previousWasm --recursive --region $Region --only-show-errors
   $published = $false
   function Restore-Previous {
     if (-not $published) { return }
-    Write-Warning 'The published release failed its checks; putting the previous index.html and WebAssembly back.'
+    Write-Warning 'The published release failed its checks; putting the previous files without a hash, WebAssembly and index.html back.'
     if (Test-Path -LiteralPath $previousIndex) {
-      if (Get-ChildItem -LiteralPath $previousWasm -File) {
-        Invoke-Native aws s3 cp $previousWasm "$bucket/wasm" --recursive --region $Region --content-type application/wasm --cache-control no-cache --no-progress --only-show-errors
-      }
-      Invoke-Native aws s3 cp $previousIndex "$bucket/index.html" --region $Region --cache-control 'no-cache,max-age=0,must-revalidate' --content-type 'text/html; charset=utf-8' --no-progress --only-show-errors
+      Send-Unhashed $previousLive
       if (-not (Test-Path -LiteralPath $previousRelease)) {
         [IO.File]::WriteAllText($previousRelease, '{"git_commit":null}', (New-Object System.Text.UTF8Encoding $false))
       }
@@ -176,10 +219,7 @@ try {
   }
   try {
     $published = $true
-    # The WebAssembly keeps its name across engine releases. It goes up without a cache lifetime, so browsers and (with
-    # the stack's StaticRevalidateCachePolicy) the edges ask whether it changed; unchanged bytes change nothing.
-    Invoke-Native aws s3 cp (Join-Path $dist 'wasm') "$bucket/wasm" --recursive --region $Region --content-type application/wasm --cache-control no-cache --no-progress --only-show-errors
-    Invoke-Native aws s3 cp (Join-Path $dist 'index.html') "$bucket/index.html" --region $Region --cache-control 'no-cache,max-age=0,must-revalidate' --content-type 'text/html; charset=utf-8' --no-progress --only-show-errors
+    Send-Unhashed $dist
     # Which commit the site runs (also for a deploy made by hand).
     $releaseFile = Join-Path $previous 'release.json'
     $utf8 = New-Object System.Text.UTF8Encoding $false
@@ -243,6 +283,8 @@ try {
     Remove-Item -LiteralPath $previous -Recurse -Force -ErrorAction SilentlyContinue
   }
   Write-Host "Deployed and verified: $site $releaseCommit (invalidation $($invalidation.Invalidation.Id))"
+  # release.json says `by: manual`; .github/scripts/deploy_bases.py has the next run deploy the build its checks made.
+  if (-not $inPipeline) { Write-Host 'Built on this PC: the next pipeline run on main deploys the web again from its checked build.' }
 } finally {
   Pop-Location
 }

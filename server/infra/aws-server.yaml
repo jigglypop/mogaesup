@@ -258,9 +258,16 @@ Resources:
               - Effect: Allow
                 Action: s3:ListBucket
                 Resource: !GetAtt RuntimeBucket.Arn
+              # The model store (MODEL_STORE, server/src/models.rs): stored under models/, and the sweep lists that prefix
+              # and deletes what nothing refers to (the bucket is versioned: a deleted model stays a noncurrent version
+              # for the web stack's 30 days).
               - Effect: Allow
-                Action: [s3:GetObject, s3:PutObject]
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
                 Resource: !Sub 'arn:${AWS::Partition}:s3:::${ModelBucketName}/models/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ModelBucketName}'
+                Condition: {StringLike: {'s3:prefix': ['models/*']}}
               # What every install reads (bootstrap-rust-server.py writes them into server.env).
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue

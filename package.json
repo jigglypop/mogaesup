@@ -13,6 +13,8 @@
     "test": "npm test --workspace frontend",
     "build": "npm run build --workspace frontend",
     "smoke": "npm run smoke --workspace frontend",
-    "test:character": "npm run test:character --workspace frontend"
+    "test:character": "npm run test:character --workspace frontend",
+    "test:games": "npm run test:games --workspace frontend",
+    "test:islands": "npm run test:islands --workspace frontend"
   }
 }
