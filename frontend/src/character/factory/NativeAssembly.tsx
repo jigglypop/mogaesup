@@ -111,7 +111,7 @@ function NativeCharacter({ jobId, state, paid }: { jobId: string; state: NativeP
     setReadyViewer(null); setModelError(''); applied.current = [];
     if (!bodyAsset) { setModelError('조립 몸의 파일이 없습니다.'); return; }
     let active = true;
-    const instance = new ModelViewer(mount.current!, mode); viewer.current = instance;
+    const instance = new ModelViewer(mount.current!, mode, { onFailure: e => { if (active) setModelError(e.message); } }); viewer.current = instance;
     void instance.load(bodyAsset.url, { sha256: bodyAsset.sha256, wardrobe: true }).then(value => {
       if (!active) return;
       setClips(value);

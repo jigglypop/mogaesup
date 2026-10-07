@@ -8,6 +8,7 @@ import { baseBodiesApi, readBaseBodyDraft, saveBaseBodyDraft, type BaseBodyDraft
 import './base-bodies.css';
 import { GlbBodyForm } from './GlbBodyForm';
 import { WardrobeBodies } from './WardrobeBodies';
+import { useSavedRequests } from '../use-saved-requests';
 
 type Props = { jobs: FactoryJob[]; selectedJobId?: string; onJob: (job: FactoryJob) => void; refreshJobs: () => Promise<unknown> };
 type RigOption = { jobId: string; version: string; label: string };
@@ -69,6 +70,7 @@ export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: 
   const [motionOpen, setMotionOpen] = useState(false);
   const locked = useRef(false);
   const draft = drafts[bodyType];
+  const gone = useSavedRequests();
   const recovery = baseBodiesApi.recovery(bodyType), pending = recovery.pending;
   const input = pending?.input;
   const shownViews = input?.views || draft.views;
@@ -135,10 +137,14 @@ export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: 
     if (!request) return;
     locked.current = true; setBusy(true); setError(''); setNotice('');
     try {
-      const job = await baseBodiesApi.create(request);
+      // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+      const job = pending ? await baseBodiesApi.recover(bodyType, pending.key) : await baseBodiesApi.create(request);
       onJob(job); setSelected(current => ({ ...current, [bodyType]: job.id }));
       await refreshJobs(); setNotice('기본 몸 생성 작업을 접수했습니다.');
-    } catch (reason) { setError((reason as Error).message); }
+    } catch (reason) {
+      if (gone(reason)) void refreshJobs();
+      else setError((reason as Error).message);
+    }
     finally { locked.current = false; setBusy(false); }
   }
   const complete = bodyViews.every(view => !!draft.views[view]);

@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { factoryApi, type FactoryJob } from './api';
 import { partLabels as labels, variantSlots } from './parts';
 import { studioHref } from '../../studio/screens';
+import { useSavedRequests } from '../use-saved-requests';
 
 const viewLabels: Record<string, string> = { front: '정면', side: '좌측면', back: '후면', opposite: '우측면' };
 
@@ -11,6 +12,7 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
   const refitLock = useRef(false), retryLock = useRef(false);
   // The saved refit is read from storage on every render; a refit that settles it draws the screen again.
   const [, settled] = useState(0);
+  const gone = useSavedRequests();
   async function retry(slot: string, view: string, failureId: string) {
     if (retryLock.current) return;
     retryLock.current = true; setRetrying(true); setRetryError('');
@@ -25,8 +27,8 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
     const version = job.assembly_version;
     if (refitLock.current || (!resume && !version)) return;
     refitLock.current = true; setRefitting(slot); setRefitError('');
-    try { await (resume ? factoryApi.resumeRefit(job.id) : factoryApi.refitPart(job.id, version!, slot, undefined, method)); }
-    catch (error) { setRefitError((error as Error).message); }
+    try { await (resume ? factoryApi.resumeRefit(job.id, pending?.key) : factoryApi.refitPart(job.id, version!, slot, undefined, method)); }
+    catch (error) { if (!gone(error)) setRefitError((error as Error).message); }
     finally { refitLock.current = false; setRefitting(''); settled(value => value + 1); }
   }
   const parts = job.parts || [];

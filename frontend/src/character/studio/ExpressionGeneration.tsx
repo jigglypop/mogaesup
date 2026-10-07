@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { studioHref } from '../../studio/screens';
 import { expressionNames, type ExpressionName } from '../texture-expressions';
 import {
@@ -11,6 +12,10 @@ import {
 const statusLabels: Record<ExpressionGenerationRecord['status'], string> = {
   accepted: '접수됨', running: '생성 중', paused: '일시 중단', blocked: '중단됨', complete: '완료',
 };
+const underWay = (item: { status: string }) => ['accepted', 'running'].includes(item.status);
+/** Whether a texture or a batch of them is being made; the list is read every 5 s only then, every 30 s otherwise. */
+const generatingIn = (value?: { items: ExpressionGenerationRecord[]; batches?: ExpressionBatch[] }) =>
+  !!value?.batches?.some(underWay) || !!value?.items.some(underWay);
 function upsert(items: ExpressionGenerationRecord[] | undefined, item: ExpressionGenerationRecord) {
   return [item, ...(items || []).filter(current => current.id !== item.id)];
 }
@@ -25,7 +30,8 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
   onApply: (item: ExpressionGenerationRecord) => Promise<void>;
 }) {
   const read = useCallback((signal: AbortSignal) => expressionGenerationApi.list(job, version, signal), [job, version]);
-  const listing = usePolling(read, 5000);
+  const listing = usePolling(read, value => generatingIn(value) ? 5000 : 30000);
+  const gone = useSavedRequests();
   const [name, setName] = useState<ExpressionName>('neutral');
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const locked = useRef(false), alive = useRef(true), scope = useRef(`${job}:${version}`);
@@ -36,8 +42,7 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
   const capability = listing.value?.capabilities;
   const reference = listing.value?.reference, referenceAssets = reference?.assets || [];
   const referenceIds = referenceAssets.map(asset => asset.id);
-  const generating = !!listing.value?.batches?.some(item => ['accepted', 'running'].includes(item.status))
-    || !!listing.value?.items.some(item => ['accepted', 'running'].includes(item.status));
+  const generating = generatingIn(listing.value);
   const inputLocked = busy || generating || !!pending || !!batchPending || !!recovery.error || !!batchRecovery.error;
   const currentScope = () => alive.current && scope.current === `${job}:${version}`;
 
@@ -56,7 +61,10 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
     const requestedScope = scope.current;
     locked.current = true; setBusy(true); setError('');
     try { await action(); }
-    catch (cause) { if (alive.current && scope.current === requestedScope) setError((cause as Error).message); }
+    catch (cause) {
+      if (gone(cause)) void listing.refresh();
+      else if (alive.current && scope.current === requestedScope) setError((cause as Error).message);
+    }
     finally { if (alive.current && scope.current === requestedScope) { locked.current = false; setBusy(false); } }
   }
   async function saveReference(assets: string[]) {
@@ -89,7 +97,6 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
           <button type="button" disabled={inputLocked} onClick={() => void perform(() => saveReference(referenceIds.filter(id => id !== asset.id)))}>삭제</button>
         </figure>)}</div>
         <label className="expression-reference-upload">PNG 추가<input type="file" accept="image/png" multiple disabled={inputLocked || !reference || referenceAssets.length >= 3} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ''; void perform(() => uploadReferences(files)); }} /></label>
-        <small>눈·코·입을 담은 PNG 1장, 기존 눈·입 순서 PNG 2장, 또는 눈·코·입 순서 PNG 3장 · 파일당 최대 32MB</small>
       </div>
       <label>표정<select value={pending?.input.name || name} disabled={!ready || inputLocked} onChange={event => setName(event.target.value as ExpressionName)}>
         {Object.entries(expressionNames).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
@@ -97,13 +104,14 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
       <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'expression' })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
       <div className="meshy-buttons">
         <button type="button" disabled={!canSubmit} onClick={() => void perform(async () => {
-          const input = pending?.input || { name, prompt: defaultPrompt.trim(), reference_assets: referenceIds };
-          const result = await expressionGenerationApi.create(job, version, input);
+          // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+          const result = pending ? await expressionGenerationApi.recover(job, version, pending.key)
+            : await expressionGenerationApi.create(job, version, { name, prompt: defaultPrompt.trim(), reference_assets: referenceIds });
           if (currentScope()) listing.setValue(previous => previous && ({ ...previous, items: upsert(previous.items, result) }));
         })}>{busy ? '요청 확인 중' : pending ? '같은 요청 복구' : '표정 텍스처 생성 · 이미지 1회'}</button>
         <button type="button" disabled={!canSubmitBatch} onClick={() => void perform(async () => {
-          const input = batchPending?.input || { reference_assets: referenceIds };
-          const result = await expressionGenerationApi.createBatch(job, version, input);
+          const result = batchPending ? await expressionGenerationApi.recoverBatch(job, version, batchPending.key)
+            : await expressionGenerationApi.createBatch(job, version, { reference_assets: referenceIds });
           if (currentScope()) listing.setValue(previous => previous && ({ ...previous, batches: upsertBatch(previous.batches, result) }));
         })}>{busy ? '요청 확인 중' : batchPending ? '기본 5종 같은 요청 복구' : '기본 5종 생성 · 이미지 5회'}</button>
       </div>

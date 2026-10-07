@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, PendingRequestConflict, savedRequest, type Pending } from '../api';
+import { ApiError, PendingRequestConflict, SavedRequestGone, savedRequest, type Pending } from '../api';
 
 type Input = { name: string; options?: { size: number; tone: string } };
 const STORAGE = 'test.saved-request';
@@ -106,6 +106,29 @@ describe('saved request', () => {
     await expect(saved().send(input, async () => Promise.reject(rejected))).rejects.toBe(rejected);
     expect(stored()).toBeNull();
     expect(saved().read()).toEqual({ pending: null, error: '' });
+  });
+
+  it('복구는 저장된 요청을 그 키와 입력 그대로 보낸다', async () => {
+    localStorage.setItem(STORAGE, JSON.stringify({ key: 'saved-key', input: { name: 'a' } }));
+    const post = vi.fn(async (pending: Pending<Input>) => pending);
+    await expect(saved().resume('saved-key', post)).resolves.toEqual({ key: 'saved-key', input: { name: 'a' } });
+    expect(stored()).toBeNull();
+  });
+
+  it('복구할 요청이 다른 탭에서 이미 처리돼 지워졌으면 아무것도 보내지 않는다', async () => {
+    const post = vi.fn(async (pending: Pending<Input>) => pending);
+    await expect(saved().resume('settled-key', post)).rejects.toBeInstanceOf(SavedRequestGone);
+    // Another request saved since is not the one the screen showed either.
+    localStorage.setItem(STORAGE, JSON.stringify({ key: 'newer-key', input: { name: 'b' } }));
+    await expect(saved().resume('settled-key', post)).rejects.toBeInstanceOf(SavedRequestGone);
+    expect(post).not.toHaveBeenCalled();
+    expect(stored()?.key).toBe('newer-key');
+  });
+
+  it('캐릭터 서버가 제때 답하지 않았다는 504는 시작됐을 수 있으니 저장된 키를 남긴다', async () => {
+    const timedOut = new ApiError('factory_timeout', '캐릭터 서버가 제때 답하지 않았습니다.', 504);
+    await expect(saved().send({ name: 'a' }, async () => Promise.reject(timedOut), { key: 'kept' })).rejects.toBe(timedOut);
+    expect(stored()?.key).toBe('kept');
   });
 
   it('읽을 수 없는 기록은 새 요청을 막는다', async () => {

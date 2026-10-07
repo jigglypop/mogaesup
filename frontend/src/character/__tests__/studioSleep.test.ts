@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { currentStudioSleep, reportStudio } from '../../api/studioSleep';
+import { onSessionLapse, setSessionOwner } from '../../auth/sessionWork';
 import { ApiError, isDefinitiveRejection, request, savedRequest } from '../api';
 
 const json = (status: number, body: unknown) =>
@@ -35,6 +36,13 @@ describe('잠든 스튜디오', () => {
     fetchMock.mockResolvedValueOnce(json(503, { code: 'studio_stopping', message: '꺼지는 중' }));
     const error = await request('/api/studio/generations', { method: 'POST' }).catch((problem: unknown) => problem);
     expect(error).toMatchObject({ code: 'studio_stopping' });
+    expect(isDefinitiveRejection(error)).toBe(false);
+  });
+
+  it('캐릭터 서버가 제때 답하지 않은 504는 시작됐을 수 있어 확정 거절로 세지 않는다', async () => {
+    fetchMock.mockResolvedValueOnce(json(504, { code: 'factory_timeout', message: '캐릭터 서버가 제때 답하지 않았습니다.' }));
+    const error = await request('/api/studio/generations', { method: 'POST' }).catch((problem: unknown) => problem);
+    expect(error).toMatchObject({ status: 504, code: 'factory_timeout' });
     expect(isDefinitiveRejection(error)).toBe(false);
   });
 
@@ -74,5 +82,44 @@ describe('잠든 스튜디오', () => {
     await expect(saved.send({ name: 'a' }, post)).rejects.toMatchObject({ code: 'factory_budget' });
     expect(localStorage.getItem(storage)).toBeNull();
     expect(saved.read()).toEqual({ pending: null, error: '' });
+  });
+});
+
+describe('앱 서버가 스튜디오 앞에서 답한 거절', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const lapses = vi.fn();
+  let stop = () => {};
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+    setSessionOwner('u1');
+    stop = onSessionLapse(lapses);
+  });
+  afterEach(() => {
+    stop();
+    lapses.mockReset();
+    setSessionOwner(null);
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+    reportStudio();
+  });
+
+  it.each([
+    ['wardrobe_busy', '지금 옷장을 여는 사람이 많아요. 잠시 뒤에 다시 시도해 주세요.'],
+    ['factory_member_scope', '이 서버에는 회원용 옷장 인증이 설정되지 않았습니다.'],
+  ])('스튜디오에 보내지 않은 503 %s는 그 말을 보이고 확정 거절로 세며 세션을 풀지 않는다', async (code, message) => {
+    fetchMock.mockResolvedValueOnce(json(503, { code, message }));
+    const error = await request('/api/avatar-factory/wardrobe/bodies').catch((problem: unknown) => problem);
+    expect(error).toMatchObject({ status: 503, code, message });
+    expect(isDefinitiveRejection(error)).toBe(true);
+    expect(lapses).not.toHaveBeenCalled();
+    expect(currentStudioSleep()).toBeNull();
+  });
+
+  it('앱 서버가 제때 끝내지 못한 503 timeout은 시작됐을 수 있어 확정 거절로 세지 않는다', async () => {
+    fetchMock.mockResolvedValueOnce(json(503, { code: 'timeout', message: '요청을 제때 처리하지 못했어요. 잠시 뒤에 다시 시도해 주세요.' }));
+    const error = await request('/api/studio/generations', { method: 'POST' }).catch((problem: unknown) => problem);
+    expect(error).toMatchObject({ status: 503, code: 'timeout' });
+    expect(isDefinitiveRejection(error)).toBe(false);
+    expect(lapses).not.toHaveBeenCalled();
   });
 });

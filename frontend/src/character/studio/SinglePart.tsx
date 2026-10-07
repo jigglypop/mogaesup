@@ -15,6 +15,7 @@ import { GlbAssetLibrary } from './GlbAssetLibrary';
 import garmentStyles from './garment-styles.json';
 import { request } from '../api';
 import { AssetModelPreview } from './AssetModelPreview';
+import { useSavedRequests } from '../use-saved-requests';
 
 type GarmentStyle = { slot: string; name: string; brief: string; bottom_kind?: string; hair_length?: string; reference?: string; model?: { url: string; sha256: string } };
 
@@ -57,6 +58,7 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
   const locked = useRef(false);
   const referenceController = useRef<AbortController | null>(null), referenceAssets = useRef(new Map<string, string>());
   const [referenceApplied, setReferenceApplied] = useState('');
+  const gone = useSavedRequests();
   const recovery = studioApi.singlePartRecovery();
   const pending = recovery.pending;
   const differentPending = !!pending && pending.input.slot !== slot;
@@ -146,11 +148,13 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
     setError('');
     try {
       if (input.meshy_options && meshyOptionsError(input.meshy_options)) throw new Error(meshyOptionsError(input.meshy_options));
-      const result = await studioApi.singlePart(input);
+      // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+      const result = pending ? await studioApi.recoverSinglePart(pending.key) : await studioApi.singlePart(input);
       onBaseChange(input.base_job_id);
       onJob(result);
     } catch (reason) {
-      setError((reason as Error).message);
+      if (gone(reason)) void refreshJobs();
+      else setError((reason as Error).message);
     } finally {
       locked.current = false;
       setBusy(false);

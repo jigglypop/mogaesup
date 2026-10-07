@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { meshyDefaultsFor } from './meshy-options';
 import { hairBatchesApi, type HairBatch as HairBatchRecord, type HairSheetItem, type HairView } from './hair-batches-api';
 import './hair-batch.css';
@@ -18,6 +19,8 @@ const attachedViewEdges = [
 const equalEdges = (count: number) => Array.from({length:count+1},(_,index)=>index/count);
 const viewLabels: Record<HairView, string> = { front: '정면', back: '후면', side: '측면' };
 const stateLabels: Record<string,string> = {accepted:'접수됨',queued:'대기',running:'처리 중',complete:'저장 완료',paused:'이어가기 필요'};
+/** Batch states the server is still working through: read every 5 s while one is, every 30 s otherwise. */
+const working = new Set(['accepted','queued','running']);
 const fourViewLabels: Record<string,string> = {front:'정면',side:'좌측면',back:'후면',opposite:'우측면'};
 const imageStateLabels: Record<string,string> = {pending:'대기',submitting:'응답 대기',received:'배경 처리 중'};
 const assetUrl = (id: string) => `/api/avatar-blueprints/assets/${encodeURIComponent(id)}`;
@@ -49,7 +52,8 @@ function readDraft(): Draft {
 
 export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: string; version?: string; disabled: boolean; setup?: ReactNode; onJob: (job: FactoryJob) => void}) {
   const readBatches = useCallback((signal: AbortSignal) => hairBatchesApi.list(signal), []);
-  const batches = usePolling(readBatches, 5000);
+  const batches = usePolling(readBatches, value => value?.items.some(batch => working.has(batch.status)) ? 5000 : 30000);
+  const gone = useSavedRequests();
   // The saved batch request as storage holds it now (another tab or a lost answer may have saved one).
   const recovery = hairBatchesApi.recovery(), pending = recovery.pending, recoveryError = recovery.error;
   const [, setDiscarded] = useState(0);
@@ -127,14 +131,14 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       if (!pending) {
         if(!baseId || !version || !selected.length)throw new Error('기준 몸과 생성할 스타일을 선택하세요.');
       }
-      // With a saved request this resumes it as it was saved; a request saved since this render is refused by `create`.
-      const input = pending?.input || {base_job_id:baseId!,base_version:version!,items:selected.flatMap(i=>items[i]?[{name:items[i].name.trim(),views:items[i].views}]:[]),concurrency:4,meshy_options:meshyDefaultsFor('hair'),
-        redraw:{notes:redrawNotes.trim(),source_side_facing:sourceSideFacing,...(worn ? {worn:true} : {})}};
-      const created = await hairBatchesApi.create(input);
+      // With a saved request this resumes it as it was saved, under its key, and sends nothing once another tab has
+      // settled it; a request saved since this render is refused by `create`.
+      const created = pending ? await hairBatchesApi.recover(pending.key) : await hairBatchesApi.create({base_job_id:baseId!,base_version:version!,items:selected.flatMap(i=>items[i]?[{name:items[i].name.trim(),views:items[i].views}]:[]),concurrency:4,meshy_options:meshyDefaultsFor('hair'),
+        redraw:{notes:redrawNotes.trim(),source_side_facing:sourceSideFacing,...(worn ? {worn:true} : {})}});
       setPanel('saved');setExpandedBatch(created.id);
       batches.setValue(current => ({items:[created, ...(current?.items || []).filter(batch => batch.id !== created.id)]}));
       void batches.refresh();
-    }catch(e){setError((e as Error).message);}finally{submitLock.current=false;setBusy(false);}
+    }catch(e){if(gone(e))void batches.refresh();else setError((e as Error).message);}finally{submitLock.current=false;setBusy(false);}
   }
   function discard(key: string) {
     hairBatchesApi.discard(key);

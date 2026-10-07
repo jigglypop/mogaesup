@@ -28,6 +28,9 @@ const START = new THREE.Vector3(0, .12, 0);
 /** Clip names for each motion of the walking preview, matched once per model rather than every frame. */
 const MOTIONS = { jump: /^jump$/i, fall: /^fall$/i, run: /run|running/i, walk: /walk|walking/i, idle: /idle|standing/i };
 const AIRBORNE = /^jump$|^fall$/i;
+/** How many times a viewer brings its renderer back after the GPU lost it (a phone reclaiming memory, a driver reset)
+ * before it stops and reports the failure. */
+const DEVICE_RECOVERIES = 2;
 
 class PreviewBoundary extends Component<{ children: ReactNode; onError(error: Error): void }, { failed: boolean }> {
   override state = { failed: false };
@@ -307,6 +310,11 @@ export class ModelViewer {
   private store?: ReturnType<ReturnType<typeof createRoot>['render']>;
   private mount = document.createElement('div');
   private canvas = document.createElement('canvas');
+  private losses = 0;
+  /** Why the viewer stopped once its GPU device was lost and could not be brought back; every load fails with it. */
+  private stopped?: Error;
+  /** The load under way, until its first frame (0 when none). */
+  private loading = 0;
   private observer: ResizeObserver;
   private visibilityObserver: IntersectionObserver;
   private inViewport = true;
@@ -322,7 +330,10 @@ export class ModelViewer {
   private renderers = new Set<WebGPURenderer>();
   private finish?: () => void;
   private fail?: (error: Error) => void;
-  constructor(private container: HTMLElement, private presentation: 'world' | 'studio' | 'card' = 'world') {
+  /** `onFailure` hears of a renderer that failed after the model was shown (its device lost for good); a failure while
+   * loading rejects `load` instead. */
+  constructor(private container: HTMLElement, private presentation: 'world' | 'studio' | 'card' = 'world',
+    private options: { onFailure?: (error: Error) => void } = {}) {
     this.mount.className = 'r3f-viewport'; this.badge.className = 'renderer-badge';
     this.badge.textContent = 'WebGPU 초기화 중';
     container.append(this.mount, this.badge);
@@ -353,6 +364,7 @@ export class ModelViewer {
         await renderer.init();
         if (this.disposed) { renderer.dispose(); return; }
         this.renderers.add(renderer);
+        renderer.onDeviceLost = info => this.deviceLost(renderer, info);
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.toneMapping = THREE.NeutralToneMapping;
         renderer.setClearColor(0x000000, 0);
@@ -378,6 +390,41 @@ export class ModelViewer {
     void pending.catch(() => { if (this.initializing === pending) this.initializing = undefined; });
     return pending;
   }
+  /**
+   * The GPU took the renderer's device away. A lost canvas is not drawn on again: the root and renderer go, a new
+   * canvas takes the old one's place, and a new renderer draws the same model, parts and expression on it; a model
+   * still on its way is drawn by the new one when it comes. After `DEVICE_RECOVERIES` losses, or when no new renderer
+   * starts, the viewer stops and says so, as a failed load does.
+   */
+  private deviceLost(renderer: WebGPURenderer, info: { message?: string }) {
+    if (this.disposed || !this.renderers.has(renderer)) return;
+    renderer.onDeviceLost = () => {};
+    this.renderers.delete(renderer);
+    try { this.root?.unmount(); } catch { /* the lost context may refuse its own cleanup */ }
+    this.root = undefined; this.store = undefined; this.initializing = undefined;
+    setTimeout(() => { try { renderer.dispose(); } catch { /* already gone with its device */ } }, 600);
+    const canvas = document.createElement('canvas'), label = this.canvas.getAttribute('aria-label');
+    if (label) canvas.setAttribute('aria-label', label);
+    this.canvas.replaceWith(canvas); this.canvas = canvas;
+    if (++this.losses > DEVICE_RECOVERIES) {
+      this.container.dataset.renderer = 'error'; this.badge.textContent = '렌더러 오류';
+      this.stop(new Error(`GPU 장치를 잃었어요 (${info.message || '원인 불명'}).`));
+      return;
+    }
+    void this.initialize().then(() => this.render(), (error: Error) => this.stop(error));
+  }
+  /** A renderer failure: the load waiting for its first frame fails with it; after that, `onFailure` hears of it. */
+  private report(error: Error) {
+    const failure = new Error(`3D 렌더러 오류: ${error.message}`);
+    if (this.fail) { this.fail(failure); this.fail = undefined; this.finish = undefined; }
+    else this.options.onFailure?.(failure);
+    return failure;
+  }
+  /** No renderer can draw any more: the viewer stops. A load still on its way fails with the reason once its model is
+   * read, as does every later one; otherwise the failure is reported. */
+  private stop(error: Error) {
+    this.stopped = this.loading && !this.fail ? new Error(`3D 렌더러 오류: ${error.message}`) : this.report(error);
+  }
   private onBackend = (value: string) => {
     if (this.disposed) return;
     this.container.dataset.renderer = value;
@@ -397,7 +444,7 @@ export class ModelViewer {
   };
   private onError = (error: Error) => {
     this.container.dataset.renderer = 'error'; this.badge.textContent = '렌더러 오류';
-    this.fail?.(new Error(`3D 렌더러 오류: ${error.message}`)); this.fail = undefined; this.finish = undefined;
+    this.report(error);
   };
   private render() {
     if (!this.model || this.disposed || !this.root) return;
@@ -421,7 +468,13 @@ export class ModelViewer {
     return { src: this.canvas.toDataURL(type, .92), renderer: this.container.dataset.renderer || '' };
   }
   async load(url: string, options: { sha256?: string; wardrobe?: boolean } = {}) {
+    if (this.stopped) throw this.stopped;
     const token = ++this.generation;
+    this.loading = token;
+    try { return await this.loadModel(url, options, token); }
+    finally { if (this.loading === token) this.loading = 0; }
+  }
+  private async loadModel(url: string, options: { sha256?: string; wardrobe?: boolean }, token: number) {
     // The renderer starts while the file downloads and parses, not after; a failure is reported where it is awaited.
     const ready = this.initialize();
     ready.catch(() => {});
@@ -459,6 +512,8 @@ export class ModelViewer {
     this.container.dataset.modelSha256 = digest;
     await ready;
     if (this.disposed || token !== this.generation) return [];
+    // A device lost on the way: the renderer starting in its place draws the model once it is up, unless none could.
+    if (this.stopped) throw this.stopped;
     await new Promise<void>((resolve, reject) => { this.finish = resolve; this.fail = reject; this.render(); });
     return gltf.animations.map((clip, index) => ({ index, name: clip.name || `Animation ${index + 1}` }));
   }
@@ -506,7 +561,9 @@ export class ModelViewer {
     this.observer.disconnect(); this.visibilityObserver.disconnect();
     document.removeEventListener('visibilitychange', this.updateVisibility); this.root?.unmount();
     // R3F completes its canvas cleanup on a deferred callback; release the WebGPU device afterwards.
+    // Disposing gives the device up on purpose, which is no loss to recover from.
     const renderers = this.renderers;
+    renderers.forEach(renderer => { renderer.onDeviceLost = () => {}; });
     setTimeout(() => { renderers.forEach(renderer => renderer.dispose()); renderers.clear(); }, 600);
     if (this.model) release(this.model.gltf);
     this.retired.forEach(release); this.retired = [];

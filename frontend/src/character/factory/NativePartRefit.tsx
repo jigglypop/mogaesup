@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { factoryApi, type LimbFitCheck, type NativePartsState } from './api';
 import { partLabels } from './parts';
+import { useSavedRequests } from '../use-saved-requests';
 
 /** Measured sleeve / trouser-leg clearance of a worn part, or what failed. */
 function LimbFit({ slot, check }: { slot: string; check?: LimbFitCheck }) {
@@ -19,6 +20,7 @@ export function NativePartRefit({ jobId, state, slot, disabled = false, onChange
 }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const submitting = useRef(false), alive = useRef(true);
+  const gone = useSavedRequests();
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, [jobId]);
   let pending: ReturnType<typeof factoryApi.pendingRefit> = null, recoveryError = '';
   try { pending = factoryApi.pendingRefit(jobId); }
@@ -35,7 +37,7 @@ export function NativePartRefit({ jobId, state, slot, disabled = false, onChange
     try {
       const value = await request();
       if (alive.current) onChange(value);
-    } catch (reason) { if (alive.current) setError((reason as Error).message); }
+    } catch (reason) { if (!gone(reason) && alive.current) setError((reason as Error).message); }
     finally { submitting.current = false; if (alive.current) setBusy(false); }
   }
   function refit(selected: string, method?: 'isolated' | 'body_shell') {
@@ -58,7 +60,7 @@ export function NativePartRefit({ jobId, state, slot, disabled = false, onChange
       </button>}
       <LimbFit slot={part.slot} check={part.limb_fit?.check} />
     </span>)}
-    {pending && <button disabled={busy || !!recoveryError} onClick={() => void send(() => factoryApi.resumeRefit(jobId))}>같은 피팅 요청 복구</button>}</div>
+    {pending && <button disabled={busy || !!recoveryError} onClick={() => void send(() => factoryApi.resumeRefit(jobId, pending!.key))}>같은 피팅 요청 복구</button>}</div>
     {resumable && !pending && <button disabled={busy || disabled} onClick={() => void resume()}>피팅·최적화 이어가기</button>}
     {(busy || working) && <p role="status">{busy ? '처리 요청 중…' : '파츠 피팅·저장 중…'}</p>}
     {(error || recoveryError) && <p role="alert">{error || recoveryError}</p>}

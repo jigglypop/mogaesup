@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ModelViewer } from '../viewer';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { studioHref } from '../../studio/screens';
-import { generationsApi, type Generation, type GenerationSize } from './generations-api';
+import { generationsApi, generationsInterval, type Generation, type GenerationSize } from './generations-api';
 import './generations.css';
 
 // The props screen: one image and one Meshy model per object.
@@ -41,7 +42,8 @@ function upsert(items: Generation[] | undefined, generation: Generation) {
 
 export default function Generations() {
   const readList = useCallback((signal: AbortSignal) => generationsApi.list(kind, signal), []);
-  const listing = usePolling(readList, 5000);
+  const listing = usePolling(readList, generationsInterval);
+  const gone = useSavedRequests();
   const initialDraft = useRef(readDraft());
   const [category, setCategory] = useState<string>(initialDraft.current.category);
   const [name, setName] = useState(initialDraft.current.name);
@@ -76,7 +78,7 @@ export default function Generations() {
   useEffect(() => {
     if (!glb || !viewerMount.current) return;
     let active = true;
-    const viewer = new ModelViewer(viewerMount.current, 'studio');
+    const viewer = new ModelViewer(viewerMount.current, 'studio', { onFailure: cause => { if (active) setError(cause.message); } });
     void viewer.load(glb.url).catch(cause => { if (active) setError((cause as Error).message); });
     return () => { active = false; viewer.dispose(); };
   }, [glb?.url]);
@@ -84,7 +86,10 @@ export default function Generations() {
   async function perform(action: () => Promise<void>) {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError('');
-    try { await action(); } catch (cause) { setError((cause as Error).message); }
+    try { await action(); } catch (cause) {
+      if (gone(cause)) void listing.refresh();
+      else setError((cause as Error).message);
+    }
     finally { locked.current = false; setBusy(false); }
   }
   function selectCategory(next: string) {
@@ -103,8 +108,9 @@ export default function Generations() {
         <label className="generation-prompt">프롬프트<textarea value={pending?.input.prompt ?? prompt} maxLength={8000} disabled={inputLocked} onChange={event => { setPrompt(event.target.value); setPromptEdited(true); }} /></label>
         <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: kind })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
         <div className="generation-form-actions"><button type="button" disabled={inputLocked || !currentDefault} onClick={() => { setPrompt(currentDefault); setPromptEdited(false); }}>기본값 복원</button><button className="generation-submit is-primary" disabled={!canCreate && !pending} onClick={() => void perform(async () => {
-          const input = pending?.input || { kind, category, name: name.trim(), prompt: prompt.trim(), size };
-          const result = await generationsApi.create(input);
+          // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+          const result = pending ? await generationsApi.recover(kind, pending.key)
+            : await generationsApi.create({ kind, category, name: name.trim(), prompt: prompt.trim(), size });
           setSelected(result.id);
           listing.setValue(previous => ({ ...(previous || { capabilities: capability || { ready: true }, defaults: listing.value?.defaults || {} }), items: upsert(previous?.items, result) }));
         })}>{busy ? '요청 확인 중' : pending ? '같은 요청 복구' : '유료 생성 · 이미지 1장 + Meshy 1회'}</button></div>

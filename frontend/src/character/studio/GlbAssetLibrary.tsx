@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { partLabels } from '../factory/parts';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { studioHref } from '../../studio/screens';
 import { usePaidWork } from '../../studio/usage';
 import { AssetModelPreview } from './AssetModelPreview';
@@ -22,6 +23,7 @@ export function GlbAssetLibrary({ slot, bases, defaultBaseId, onJob }: Props) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [baseId, setBaseId] = useState(defaultBaseId || ''), [bodyType, setBodyType] = useState<'male' | 'female'>('female');
   const lock = useRef(false);
+  const gone = useSavedRequests();
   const effectiveSlot = slot || kind;
   const recovery = glbAssetRecovery();
   const visibleItems = (listing.value?.items || []).filter(item => !slot || item.slot === slot);
@@ -53,21 +55,22 @@ export function GlbAssetLibrary({ slot, bases, defaultBaseId, onJob }: Props) {
   async function recoverRegistration() {
     if (lock.current || !recovery.pending) return;
     lock.current = true; setBusy(true); setError('');
-    try { accept(await glbAssetsApi.create(recovery.pending.input)); }
-    catch (reason) { setError((reason as Error).message); }
+    try { accept(await glbAssetsApi.recoverCreate(recovery.pending.key)); }
+    catch (reason) { if (gone(reason)) void listing.refresh(); else setError((reason as Error).message); }
     finally { lock.current = false; setBusy(false); }
   }
   async function prepare(action: 'fit' | 'rig') {
     if (lock.current || !selected) return;
     lock.current = true; setBusy(true); setError(''); setNotice('');
     try {
-      const input = preparing.pending?.input || (action === 'fit'
-        ? { action, base_job_id: selectedBase?.id, base_version: baseState?.version }
-        : { action, body_type: bodyType });
-      const job = await glbAssetsApi.prepare(selected.id, input);
+      // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+      const job = preparing.pending ? await glbAssetsApi.recoverPrepare(selected.id, preparing.pending.key)
+        : await glbAssetsApi.prepare(selected.id, action === 'fit'
+          ? { action, base_job_id: selectedBase?.id, base_version: baseState?.version }
+          : { action, body_type: bodyType });
       setNotice(action === 'fit' ? '몸 맞추기·골격 연결 접수 완료' : '새 리깅 접수 완료');
       onJob(job); void listing.refresh();
-    } catch (reason) { setError((reason as Error).message); }
+    } catch (reason) { if (gone(reason)) void listing.refresh(); else setError((reason as Error).message); }
     finally { lock.current = false; setBusy(false); }
   }
   async function openOperation(id: string) {

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { studioHref } from '../../studio/screens';
-import { generationsApi, type Generation, type VectorColors } from './generations-api';
+import { generationsApi, generationsInterval, type Generation, type VectorColors } from './generations-api';
 import { EmoticonRig } from './EmoticonRig';
 import './generations.css';
 import './emoticons.css';
@@ -23,7 +24,8 @@ function readDraft() {
 
 export default function Emoticons() {
   const read = useCallback((signal: AbortSignal) => generationsApi.list('illustration', signal), []);
-  const listing = usePolling(read, 5000);
+  const listing = usePolling(read, generationsInterval);
+  const gone = useSavedRequests();
   const selection = usePolling(generationsApi.illustrationSelection, 10000);
   const [draft, setDraft] = useState(readDraft);
   const [currentId, setCurrentId] = useState('');
@@ -58,7 +60,10 @@ export default function Emoticons() {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError('');
     try { await action(); }
-    catch (cause) { if (alive.current) setError((cause as Error).message); }
+    catch (cause) {
+      if (gone(cause)) void listing.refresh();
+      else if (alive.current) setError((cause as Error).message);
+    }
     finally { locked.current = false; if (alive.current) setBusy(false); }
   }
   function remember(item: Generation) {
@@ -77,9 +82,10 @@ export default function Emoticons() {
     <section className="generation-compose">
       <h1>2D 이모티콘</h1>
       <form onSubmit={event => { event.preventDefault(); void perform(async () => {
-        const input = pending?.input || { kind: 'illustration' as const, category: 'character', size: 1024 as const,
-          name: draft.name.trim(), prompt: draft.prompt.trim(), ...(draft.useReference && base ? { reference_id: base.id } : {}) };
-        remember(await generationsApi.create(input));
+        // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+        remember(pending ? await generationsApi.recover('illustration', pending.key) : await generationsApi.create({
+          kind: 'illustration', category: 'character', size: 1024,
+          name: draft.name.trim(), prompt: draft.prompt.trim(), ...(draft.useReference && base ? { reference_id: base.id } : {}) }));
         await listing.refresh();
       }); }}>
         <label>원화 이름<input required maxLength={80} value={pending?.input.name ?? draft.name} disabled={inputLocked}

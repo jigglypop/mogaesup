@@ -22,12 +22,22 @@ export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () =
   const [sending, setSending] = useState(false), [error, setError] = useState('');
   const locked = useRef(false), alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  // Another tab may answer or clear the saved stage request: show what storage holds now.
+  useEffect(() => {
+    const sync = (event: StorageEvent) => { if (event.key === null || event.key === storage) setPending(readPending(storage)); };
+    window.addEventListener('storage', sync);
+    return () => window.removeEventListener('storage', sync);
+  }, [storage]);
   function clearPending(intent: Pending) {
     if (readPending(storage)?.key === intent.key) localStorage.removeItem(storage);
   }
-  async function start(stage: FactoryStage) {
+  /** Starts `stage`, or (`recovering`) sends the saved request shown again under its key: nothing once another tab has
+   * settled it. */
+  async function start(stage: FactoryStage, recovering = false) {
     if (locked.current) return;
-    const intent = readPending(storage) || pending || { stage, key: crypto.randomUUID() };
+    const saved = readPending(storage);
+    if (recovering && (!saved || saved.key !== pending?.key)) { setPending(saved); void polling.refresh(); return; }
+    const intent = saved || { stage, key: crypto.randomUUID() };
     locked.current = true; setSending(true); setError('');
     try {
       localStorage.setItem(storage, JSON.stringify(intent));
@@ -54,7 +64,7 @@ export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () =
       <small>{action.reason || action.warning || (action.paid ? '미완료 유료 작업 포함' : '저장된 결과 재사용')}</small>
     </div>)}</div>
     {!state && !polling.error && <p role="status">저장된 단계 불러오는 중…</p>}
-    {pending && <button disabled={sending} onClick={() => void start(pending.stage)}>{sending ? '접수 중…' : `${labels[pending.stage]} 실행 응답 복구`}</button>}
+    {pending && <button disabled={sending} onClick={() => void start(pending.stage, true)}>{sending ? '접수 중…' : `${labels[pending.stage]} 실행 응답 복구`}</button>}
     {state?.busy && <p role="status">{labels[state.operation?.stage || state.recommended_stage || 'assemble']} 단계에서 이어서 실행 중…</p>}
     {(error || polling.error || state?.operation?.error) && <p role="alert">{error || polling.error || state?.operation?.error}</p>}
   </section>;

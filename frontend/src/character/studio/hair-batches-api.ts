@@ -1,4 +1,4 @@
-import { request, savedRequest } from '../api';
+import { request, savedRequest, type Pending } from '../api';
 import type { MeshyOptions } from './meshy-options';
 
 export type HairView = 'front' | 'side' | 'back';
@@ -65,6 +65,11 @@ function validPending(value: unknown): value is PendingHairBatch {
 const hairBatches = savedRequest<HairBatchInput>('gaesup.hair-batch.pending.v1', validPending,
   '저장된 헤어 배치 요청을 읽을 수 없습니다. 요청 기록을 확인해야 새 배치를 접수할 수 있습니다.');
 
+const postBatch = (pending: Pending<HairBatchInput>) => request<HairBatch>(endpoint, {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+  body: JSON.stringify(pending.input), timeoutMs: 60000,
+});
+
 export const hairBatchesApi = {
   recovery: hairBatches.read,
   /** Forgets the saved batch request under `key`, so a new one can be sent. */
@@ -76,10 +81,9 @@ export const hairBatchesApi = {
     request<{ id: string; items: HairSheetItem[] }>(`${endpoint}/split-sheet`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), timeoutMs: 60000,
     }),
-  list: (signal: AbortSignal) => request<{ items: HairBatch[] }>(endpoint, { signal, timeoutMs: 30000 }),
-  resume: (id: string) => request<HairBatch>(`${endpoint}/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 30000 }),
-  create: (input: HairBatchInput) => hairBatches.send(input, pending => request<HairBatch>(endpoint, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-    body: JSON.stringify(pending.input), timeoutMs: 60000,
-  })),
+  list: (signal: AbortSignal) => request<{ items: HairBatch[] }>(endpoint, { signal }),
+  resume: (id: string) => request<HairBatch>(`${endpoint}/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
+  create: (input: HairBatchInput) => hairBatches.send(input, postBatch),
+  /** Sends the saved batch under `key` again as itself; nothing when it is no longer saved (SavedRequestGone). */
+  recover: (key: string) => hairBatches.resume(key, postBatch),
 };

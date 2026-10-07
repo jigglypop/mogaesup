@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ApiError, isRevisionConflict } from '../api';
 import type { WardrobePart, WardrobeUnavailable } from '../factory/api';
-import { fitReason, reshapable, unfittedParts, wearableParts } from '../studio/wardrobe-view';
+import { fitFailures, fitReason, onBody, partsOf, reshapable, unfittedParts } from '../studio/wardrobe-view';
 
 const part = (slot: string, changes: Partial<WardrobePart> = {}): WardrobePart => ({
   job_id: 'job',
@@ -13,14 +13,48 @@ const part = (slot: string, changes: Partial<WardrobePart> = {}): WardrobePart =
   ...changes,
 });
 
-describe('입을 수 있는 파츠', () => {
-  const failed = part('top', { name: '뚫는 옷', fit_check: { status: 'fail', failures: ['소매가 몸을 뚫습니다.'] } });
+describe('핏 검사 결과', () => {
+  const failed = part('top', { name: '뚫는 옷', fit_check: { status: 'fail', failures: ['소매가 몸을 뚫습니다.', '밑단이 뜹니다.'] } });
   const passed = part('top', { name: '맞는 옷', fit_check: { status: 'pass', failures: [] } });
-  const unchecked = part('bottom');
 
-  it('핏 검사에서 떨어진 파츠는 운영자만 입어 본다', () => {
-    expect(wearableParts([failed, passed, unchecked], true)).toEqual([failed, passed, unchecked]);
-    expect(wearableParts([failed, passed, unchecked], false)).toEqual([passed, unchecked]);
+  it('떨어진 이유는 운영자에게만 보인다', () => {
+    expect(fitFailures(failed, true)).toEqual(['소매가 몸을 뚫습니다.', '밑단이 뜹니다.']);
+    expect(fitFailures(failed, false)).toEqual([]);
+    expect(fitFailures(passed, true)).toEqual([]);
+    expect(fitFailures(part('bottom'), true)).toEqual([]);
+  });
+});
+
+describe('저장된 조합의 파츠', () => {
+  const ref = (job: string, version = 'v1') => ({ job_id: job, version, sha256: `${job}-${version}` });
+  const listed = (job: string, slot: string, version = 'v1') => part(slot, { job_id: job, version, sha256: `${job}-${version}` });
+
+  it('옷장에 있는 파츠는 입히고, 없는 파츠는 슬롯으로 알린다', () => {
+    const hair = listed('hair-job', 'hair'), shoes = listed('shoes-job', 'shoes');
+    const { worn, missing } = partsOf({ hair: ref('hair-job'), top: ref('gone-job'), shoes: ref('shoes-job') }, ['hair', 'top', 'shoes'], [hair, shoes]);
+    expect(worn).toEqual({ hair, shoes });
+    expect(missing).toEqual(['top']);
+  });
+
+  it('다시 맞춰 버전이 바뀐 파츠는 같은 작업의 지금 파츠로 입힌다', () => {
+    const refitted = listed('top-job', 'top', 'v2');
+    expect(partsOf({ top: ref('top-job') }, ['top'], [refitted])).toEqual({ worn: { top: refitted }, missing: [] });
+  });
+
+  it('고른 슬롯 밖의 파츠는 입히지도 없다고 알리지도 않는다', () => {
+    expect(partsOf({ hairFront: ref('front-job') }, [], [listed('front-job', 'hairFront')])).toEqual({ worn: {}, missing: [] });
+  });
+});
+
+describe('저장된 몸 버전', () => {
+  const body = { job_id: 'body-job', version: 'v3', aliases: ['v1', 'v2'] };
+
+  it('지금 버전과 같은 모양의 이전 버전은 같은 몸이다', () => {
+    expect(onBody(body, { job_id: 'body-job', version: 'v3' })).toBe(true);
+    expect(onBody(body, { job_id: 'body-job', version: 'v1' })).toBe(true);
+    expect(onBody(body, { job_id: 'body-job', version: 'v0' })).toBe(false);
+    expect(onBody(body, { job_id: 'other-job', version: 'v1' })).toBe(false);
+    expect(onBody({ job_id: 'body-job', version: 'v3' }, { job_id: 'body-job', version: 'v1' })).toBe(false);
   });
 });
 
@@ -44,6 +78,14 @@ describe('피팅하지 못한 파츠', () => {
       '피팅 실패',
       '피팅 실패',
       '피팅 실패',
+    ]);
+  });
+
+  it('봉인 품질 검사가 거절한 이유도 한글로 보인다', () => {
+    expect(['shoes_incomplete', 'shoes_toes_exposed', 'shoes_broken', 'hat_covers_eyes', 'hair_covers_eyes',
+      'hair_backing_overhang', 'torn_surface', 'holes', 'stray_geometry'].map(fitReason)).toEqual([
+      '신발 일부 없음', '발가락 드러남', '신발 조각남', '모자가 눈을 가림', '머리카락이 눈을 가림', '뒷머리 판이 늘어짐',
+      '표면 찢김', '구멍', '튀어나온 조각',
     ]);
   });
 });

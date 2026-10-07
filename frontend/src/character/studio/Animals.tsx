@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { ModelViewer } from '../viewer';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { studioApi, type Animal, type AnimalProgress, type AnimalRegenerateInput, type AnimalStep, type AnimalView } from './api';
 import { AssetDetailDialog } from './AssetDetailDialog';
 import { AssetModelPreview } from './AssetModelPreview';
@@ -9,7 +10,9 @@ import './animals.css';
 
 const speciesLabels: Record<Animal['species'], string> = { dog: '강아지' };
 const models = [['motions-standard.glb', '표준 골격'], ['walk.glb', 'Tripo 걷기'], ['rigged.glb', 'Tripo 리깅'], ['model.glb', '3D 모델']] as const;
-const clipLabels: Record<string, string> = { walk: '걷기', run: '달리기', idle: '대기', bark: '짖기', sit: '앉기', lie: '엎드리기', jump: '점프' };
+const clipLabels: Record<string, string> = {
+  walk: '걷기', run: '달리기', idle: '대기', bark: '짖기', sit: '앉기', lie: '엎드리기', jump: '점프', sit_hold: '앉아 있기', lie_hold: '엎드려 있기',
+};
 const clipOrder = Object.keys(clipLabels);
 const views = [['reference.png', '원본'], ['front.png', '정면'], ['left.png', '좌측면'], ['back.png', '후면'], ['right.png', '우측면']] as const;
 const viewChoices: [AnimalView, string][] = [['front', '정면'], ['left', '좌측면'], ['back', '후면'], ['right', '우측면']];
@@ -66,6 +69,7 @@ function CreateAnimal({ onCreated }: { onCreated(animal: Animal): void }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [dragging, setDragging] = useState(false);
   const [, setSettled] = useState(0);
   const locked = useRef(false), dragDepth = useRef(0);
+  const gone = useSavedRequests();
   const recovery = studioApi.animalCreateRecovery(), pending = recovery.pending;
   const unavailable = busy || !!pending || !!recovery.error;
 
@@ -94,16 +98,17 @@ function CreateAnimal({ onCreated }: { onCreated(animal: Animal): void }) {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError('');
     try {
-      let input = studioApi.animalCreateRecovery().pending?.input;
-      if (!input) {
+      let animal: Animal;
+      // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+      if (pending) animal = await studioApi.recoverAnimalCreate(pending.key);
+      else {
         if (!file || !name.trim()) return;
         const reference = await studioApi.uploadAnimalReference(file);
-        input = { name: name.trim(), species, reference: reference.id };
+        animal = await studioApi.createAnimal({ name: name.trim(), species, reference: reference.id });
       }
-      const animal = await studioApi.createAnimal(input);
       setName(''); setFile(undefined);
       onCreated(animal);
-    } catch (cause) { setError((cause as Error).message); }
+    } catch (cause) { if (!gone(cause)) setError((cause as Error).message); }
     finally { locked.current = false; setBusy(false); setSettled(count => count + 1); }
   }
 
@@ -145,6 +150,7 @@ function Regenerate({ animal, onChange }: { animal: Animal; onChange(animal: Ani
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [, setSettled] = useState(0);
   const locked = useRef(false);
+  const gone = useSavedRequests();
   // A saved request whose job the server already shows is settled; it must not hold the actions.
   useEffect(() => { if (studioApi.settleAnimalRecovery(animal)) setSettled(count => count + 1); }, [animal]);
   const recovery = studioApi.animalRecovery(animal.id), pending = recovery.pending;
@@ -157,13 +163,14 @@ function Regenerate({ animal, onChange }: { animal: Animal; onChange(animal: Ani
   const credits = animal.stages.model?.credits;
   const meshy = typeof credits === 'number' && credits > 0 ? credits : MESHY_CREDITS;
 
-  async function submit(input: AnimalRegenerateInput, key?: string) {
+  async function run(send: () => Promise<Animal>) {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError('');
-    try { onChange(await studioApi.regenerateAnimal(animal.id, input, key)); setRedraw([]); setNote(''); }
-    catch (cause) { setError((cause as Error).message); }
+    try { onChange(await send()); setRedraw([]); setNote(''); }
+    catch (cause) { if (!gone(cause)) setError((cause as Error).message); }
     finally { locked.current = false; setBusy(false); setSettled(count => count + 1); }
   }
+  const submit = (input: AnimalRegenerateInput, key?: string) => run(() => studioApi.regenerateAnimal(animal.id, input, key));
   function resume() {
     if (!job) return;
     void submit({ views: job.views, note: job.note, model: job.steps.includes('model'), rig: job.steps.includes('rig') }, job.request_key);
@@ -183,7 +190,7 @@ function Regenerate({ animal, onChange }: { animal: Animal; onChange(animal: Ani
         선택한 면 다시 그리기 · 유료 이미지 {redraw.length}장 + Meshy {meshy}크레딧</button>
       <button disabled={disabled || missing.length > 0} onClick={() => void submit({ views: [], note: '', model: true, rig: true })}>3D 다시 만들기 · 유료 Meshy {meshy}크레딧</button>
       <button disabled={disabled || !hasModel} onClick={() => void submit({ views: [], note: '', model: false, rig: true })}>표준 골격 다시 씌우기</button>
-      {pending && <button disabled={busy} onClick={() => void submit(pending.input, pending.key)}>같은 요청 복구</button>}
+      {pending && <button disabled={busy} onClick={() => void run(() => studioApi.recoverAnimalRegeneration(animal.id, pending.key))}>같은 요청 복구</button>}
       {job?.status === 'paused' && !pending && <button disabled={busy} onClick={resume}>이어서 실행</button>}
     </div>
     {job && <p className="animal-production">{job.steps.map(step => stepLabels[step]).join(' → ')} · {statusLabels[job.status]}
@@ -206,7 +213,7 @@ export default function Animals() {
     if (!model || !viewerMount.current) return;
     let active = true;
     setError(''); setClips([]);
-    const instance = new ModelViewer(viewerMount.current, 'studio');
+    const instance = new ModelViewer(viewerMount.current, 'studio', { onFailure: cause => { if (active) setError(cause.message); } });
     viewer.current = instance;
     void instance.load(model.url).then(loaded => {
       if (!active || !loaded.length) return;

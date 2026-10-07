@@ -64,7 +64,7 @@ export function MeshyMotion({ jobId, visibleSlots = allSlots, showRigRecovery = 
     setReady(false); setClips([]); setMotion(-1); setPreviewError('');
     if (!url) return;
     let alive = true;
-    const instance = new ModelViewer(mount.current!, 'studio'); viewer.current = instance;
+    const instance = new ModelViewer(mount.current!, 'studio', { onFailure: e => { if (alive) setPreviewError(e.message); } }); viewer.current = instance;
     void instance.load(url).then(value => { if (alive) { setClips(value); setReady(true); } }).catch(e => { if (alive) setPreviewError(e.message); });
     return () => { alive = false; instance.dispose(); viewer.current = null; };
   }, [url]);

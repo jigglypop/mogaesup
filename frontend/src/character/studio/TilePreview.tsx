@@ -7,6 +7,9 @@ import type { Tile } from './api';
 
 extend(THREE as unknown as Parameters<typeof extend>[0]);
 
+/** How many times the preview starts a new renderer after the GPU lost the last one, before it shows the error. */
+export const TILE_DEVICE_RECOVERIES = 2;
+
 export type TileShape = 'plane' | 'cube' | 'sphere';
 export type TilePreviewProps = { tile: Tile; shape?: TileShape; repeat?: number; autoOrbit?: boolean };
 type Props = { tile: Tile; shape: TileShape; repeat: number; autoOrbit: boolean };
@@ -98,9 +101,9 @@ function PreviewMaterial({ tile, shape, repeat, onError }: Pick<Props, 'tile' | 
   return <mesh>{material}<boxGeometry args={[2.2, 2.2, 2.2]} /></mesh>;
 }
 
+// No background of its own: the canvas is transparent over the viewport's well, in either theme.
 function Scene(props: Props & { onTextureError(error: Error): void }) {
   return <>
-    <color attach="background" args={['#ebe8f2']} />
     <hemisphereLight args={['#ffffff', '#505767', 2.2]} />
     <directionalLight position={[3, 4, 3]} intensity={3} />
     <directionalLight position={[-3, 1, -2]} intensity={1.1} />
@@ -117,6 +120,8 @@ function ActivePreview(props: Props) {
   latest.current = props;
   const [backend, setBackend] = useState<'loading' | 'webgpu' | 'webgl-fallback' | 'error'>('loading');
   const [loadError, setLoadError] = useState('');
+  // A lost GPU device leaves the canvas blank: the renderer, root and canvas are made again, a few times at most.
+  const [losses, setLosses] = useState(0);
   const onTextureError = useCallback((error: Error) => setLoadError(`텍스처를 불러오지 못했습니다: ${error.message}`), []);
   const tileMapsKey = ['albedo.webp', 'normal.webp', 'orm.webp'].map(name => artifact(props.tile, name) || '').join('|');
   useEffect(() => {
@@ -126,7 +131,7 @@ function ActivePreview(props: Props) {
     container.append(canvas);
     let disposed = false, configured = false, inViewport = true;
     let root: ReturnType<typeof createRoot> | undefined;
-    const renderer = new WebGPURenderer({ canvas, antialias: true, alpha: false });
+    const renderer = new WebGPURenderer({ canvas, antialias: true, alpha: true });
     const size = () => ({ width: container.clientWidth, height: container.clientHeight, top: 0, left: 0 });
     const active = () => inViewport && !document.hidden;
     const resize = new ResizeObserver(() => {
@@ -151,6 +156,13 @@ function ActivePreview(props: Props) {
       if (disposed) { renderer.dispose(); return; }
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.NeutralToneMapping;
+      renderer.setClearColor(0x000000, 0);
+      renderer.onDeviceLost = () => {
+        if (disposed) return;
+        renderer.onDeviceLost = () => {};
+        if (losses >= TILE_DEVICE_RECOVERIES) { container.dataset.renderer = 'error'; setBackend('error'); }
+        else { setBackend('loading'); setLosses(count => count + 1); }
+      };
       const mode = (renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'webgpu' : 'webgl-fallback';
       container.dataset.renderer = mode;
       setBackend(mode);
@@ -172,11 +184,13 @@ function ActivePreview(props: Props) {
       document.removeEventListener('visibilitychange', documentVisibility);
       rootRef.current = undefined;
       invalidateRef.current = () => {};
-      root?.unmount();
-      setTimeout(() => renderer.dispose(), 600);
+      // Disposing gives the device up on purpose, which is no loss to recover from.
+      renderer.onDeviceLost = () => {};
+      try { root?.unmount(); } catch { /* a lost context may refuse its own cleanup */ }
+      setTimeout(() => { try { renderer.dispose(); } catch { /* already gone with its device */ } }, 600);
       canvas.remove();
     };
-  }, [onTextureError]);
+  }, [onTextureError, losses]);
   useEffect(() => {
     setLoadError('');
     const root = rootRef.current;

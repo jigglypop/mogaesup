@@ -115,7 +115,7 @@ describe('옷 모양 다시 만들기', () => {
     await rebuild(container);
     await act(async () => find(container, '저장된 요청 이어서 보내기')!.click());
     await wait(2000);
-    expect(resume).toHaveBeenCalledWith('top-job');
+    expect(resume).toHaveBeenCalledWith('top-job', 'lost-key');
     expect(replace).toHaveBeenCalledExactlyOnceWith(next);
     await unmount();
   });
@@ -182,7 +182,7 @@ describe('옷 모양 다시 만들기', () => {
       reload.mockResolvedValue([next]);
       await act(async () => [...container.querySelectorAll('button')].find((item) => item.textContent === '저장된 요청 이어서 보내기')!.click());
       await wait(2000);
-      expect(resume).toHaveBeenCalledWith('top-job');
+      expect(resume).toHaveBeenCalledWith('top-job', 'lost-key');
       expect(replace).toHaveBeenCalledExactlyOnceWith(next);
       await unmount();
     });

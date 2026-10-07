@@ -1,6 +1,6 @@
-import { deadline } from '../api/client';
+import { deadline, DEFAULT_TIMEOUT_MS } from '../api/client';
 import { reportStudio } from '../api/studioSleep';
-import { expireSession, sessionEpoch } from '../auth/sessionWork';
+import { cookieReplaced, expireSession, sessionEpoch } from '../auth/sessionWork';
 
 type Part = { node_index: number; role: string; name?: string };
 type Operation = { id: string; action_id: string; status: string; error: { code: string; message: string } | null };
@@ -27,7 +27,8 @@ export class ApiError extends Error {
 // A sleeping studio is answered by the app server before or instead of reaching it; a saved request stays pending
 // and is replayed under the same key once the studio is up. The app server's other refusals (a spent budget, a paid
 // action it does not allow, who may ask) keep their own code: the request never reached the studio, so it is settled.
-const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled', 'studio_waking', 'studio_stopping']);
+// `factory_timeout` (504) is the character server taking the request and not answering in time: it may have started it.
+const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled', 'studio_waking', 'studio_stopping', 'factory_timeout']);
 
 // A coded server error (including 409 conflicts and 503 configuration errors) means the
 // request was not accepted, so its saved identity can be discarded. Connection losses,
@@ -42,7 +43,7 @@ export function isDefinitiveRejection(error: unknown): error is ApiError {
 export const isRevisionConflict = (error: unknown) => error instanceof ApiError && error.code === 'revision_conflict';
 
 export async function request<T>(url: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
-  const { timeoutMs = 15000, signal, ...init } = options;
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal, ...init } = options;
   const wait = deadline(timeoutMs, signal);
   const sentAt = sessionEpoch();
   try {
@@ -57,14 +58,18 @@ export async function request<T>(url: string, options: RequestInit & { timeoutMs
   const gateway = !response.ok && typeof body?.code === 'string' && typeof body?.message === 'string' ? body as { code: string; message: string } : null;
   reportStudio(gateway?.code, gateway?.message);
   // The app server refused the session cookie: the session ran out, as anywhere else in the app (the header offers a
-  // new sign-in). A 401 the studio itself sends stays this request's own failure.
-  if (response.status === 401 && gateway?.code === 'login_required') expireSession(sentAt);
+  // new sign-in), unless this page has replaced the cookie since the request went (the session goes on, and the request
+  // may go again). A 401 the studio itself sends stays this request's own failure.
+  const refused = response.status === 401 && gateway?.code === 'login_required';
+  const stale = refused && cookieReplaced(sentAt);
+  if (refused) expireSession(sentAt);
   if (!response.ok) {
     const validation = Array.isArray(body.detail) ? body.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join('.') || '입력'}: ${item.msg || '값 확인 필요'}`).join(' / ') : typeof body.detail === 'string' && body.detail !== 'Not Found' ? body.detail : '';
     // Only when the server sent no message of its own: what happened, in words for whoever is on the screen.
     const fallback = response.status === 401 ? '로그인이 필요합니다. 다시 로그인해 주세요.' : response.status === 404 ? '요청한 자료를 찾을 수 없습니다.' : response.status >= 500 ? '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.' : '요청을 처리하지 못했습니다. 입력을 확인해 주세요.';
     const gatewayCode = gateway && gateway.code !== 'factory_unavailable' ? gateway.code : undefined;
-    throw new ApiError(body.error?.code || gatewayCode || 'request_failed', body.error?.message || gateway?.message || validation || fallback, response.status);
+    throw new ApiError(body.error?.code || gatewayCode || 'request_failed',
+      stale ? '잠시 후 다시 시도해 주세요.' : body.error?.message || gateway?.message || validation || fallback, response.status);
   }
   return body as T;
   } catch (error) {
@@ -82,6 +87,12 @@ export type Pending<T> = { key: string; input: T };
  * (sends `pending.input` again) or clears it (`settle(pending.key)`) before anything new goes out. */
 export class PendingRequestConflict<T = unknown> extends Error {
   constructor(public pending: Pending<T>) { super('응답을 확인하지 못한 다른 요청이 남아 있습니다.'); }
+}
+
+/** A recovery found its saved request gone: another tab had its answer, or someone cleared it. Nothing was sent; the
+ * screen reads storage again (see useSavedRequests). */
+export class SavedRequestGone extends Error {
+  constructor() { super('저장된 요청이 이미 처리됐습니다.'); }
 }
 
 /** JSON with object keys in a fixed order, so two inputs compare by what they hold, not how they were built. */
@@ -130,7 +141,17 @@ export function savedRequest<T>(storage: string, valid: (pending: Pending<T>) =>
       throw error;
     }
   }
-  return { read, settle, send };
+  // Sends the saved request under `key` again as itself: its own input under its own key. A recovery button holds the
+  // key it showed; when storage no longer has that request (another tab had its answer or cleared it, or saved another
+  // since), nothing is sent, so a stale screen never starts new paid work under a new key.
+  async function resume<R>(key: string, post: (pending: Pending<T>) => Promise<R>,
+    options: { answered?: (result: R, key: string) => boolean } = {}): Promise<R> {
+    const saved = read();
+    if (saved.error) throw new Error(saved.error);
+    if (!saved.pending || saved.pending.key !== key) throw new SavedRequestGone();
+    return send(saved.pending.input, post, { ...options, key });
+  }
+  return { read, settle, send, resume };
 }
 
 const endpoint = (id: string) => `/api/characters/${encodeURIComponent(id)}`;

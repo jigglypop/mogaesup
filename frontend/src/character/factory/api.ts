@@ -1,4 +1,4 @@
-import { isDefinitiveRejection, request, savedRequest, type Pending } from '../api';
+import { isDefinitiveRejection, request, SavedRequestGone, savedRequest, type Pending } from '../api';
 import type { MeshyOptions } from '../studio/meshy-options';
 
 export type ImageRetry = { slot: string; view: string; failure_id: string };
@@ -98,10 +98,12 @@ export function nativeArtifact(state: NativePartsState, slot: string) {
 }
 export type NativeOutfit = { version: string; body_sha256: string; revision: string; slots: string[]; hair_color?: string | null; saved_at?: string };
 export type BodyProfileState = { revision: string; body: null | { job_id: string; version: string; profile_id: string; body_sha256: string } };
-export type WardrobeBody = { job_id: string; version: string; profile_id: string; body_sha256: string; geometry_sha256: string; name: string; body_type?: 'male' | 'female' | null; registered_at: string; is_default: boolean; part_jobs: number | null };
+/** `aliases`: earlier versions of the body's job with the same geometry; what was saved on one of them is on this body. */
+export type WardrobeBody = { job_id: string; version: string; aliases?: string[]; profile_id: string; body_sha256: string; geometry_sha256: string; name: string; body_type?: 'male' | 'female' | null; registered_at: string; is_default: boolean; part_jobs: number | null };
 type WardrobeBodiesState = { revision: string; bodies: WardrobeBody[]; default: null | { job_id: string; version: string } };
 /** Body-shell garment shape: sleeve 0 (none)..1 (wrist); hem top waist..crotch, bottom shorts..ankle. */
 export type GarmentShape = { sleeve?: number; hem?: number; fit?: 'tight' | 'normal' | 'loose' };
+/** `fit_check`: the limb check, a warning for operators; a part that failed it is offered to members all the same. */
 export type WardrobePart = { job_id: string; version: string; slot: string; name: string; character_name?: string | null; fit_method?: string | null;
   shape?: GarmentShape | null;
   runtime_name?: string | null; runtime_sha256?: string | null;
@@ -139,10 +141,12 @@ type FactoryStages = {
   operation: { id: string; stage: FactoryStage; status: string; error: string | null; created_at: string; updated_at: string } | null;
 };
 export type RigTransferInput = { source_job_id: string; source_version: string };
+/** `paid`: whether starting the recovery spends money (the assembly after it makes the default expressions); a server
+ * that does not say is taken as paid. */
 type RigTransferState = {
   status: 'not_started' | 'accepted' | 'running' | 'paused' | 'complete'; can_start: boolean; error?: string;
   source_job_id?: string; source_version?: string; id?: string; request_key?: string;
-  recommended_source?: RigTransferSource | null;
+  recommended_source?: RigTransferSource | null; paid?: boolean;
 };
 export type RigTransferSource = { job_id: string; version: string; name: string };
 const imagePendingKey = (id: string) => `gaesup.image-production:${id}`;
@@ -250,17 +254,18 @@ export const factoryApi = {
    * refuses with PendingRequestConflict rather than send the saved one in place of this one; see `resumeRefit`. */
   refitPart: (id: string, source_version: string, slot: string, fit_profile?: FitProfile, part_method?: 'isolated' | 'body_shell', shape?: GarmentShape) =>
     refits(id).send({ source_version, slot, ...(fit_profile ? { fit_profile } : {}), ...(part_method ? { part_method } : {}), ...(shape ? { shape } : {}) }, postRefit(id)),
-  /** Sends the saved refit again, its own input under its own key. */
-  resumeRefit(id: string) {
+  /** Sends the saved refit again, its own input under its own key: the one under `key` (the one a recovery button
+   * showed), or whatever is saved. Nothing is sent when it is no longer saved (SavedRequestGone). */
+  async resumeRefit(id: string, key?: string) {
     const pending = factoryApi.pendingRefit(id);
-    if (!pending) throw new Error('저장된 피팅 요청이 없습니다.');
-    return refits(id).send(pending.input, postRefit(id));
+    if (!pending) throw new SavedRequestGone();
+    return refits(id).resume(key ?? pending.key, postRefit(id));
   },
   resumeStage: (id: string, stage: FactoryStage, key: string) => request<FactoryStages>(`/api/avatar-factory/jobs/${id}/stages/${stage}/resume`, {
     method: 'POST', headers: { 'Idempotency-Key': key },
   }),
   rigTransfer: (id: string, signal?: AbortSignal) => request<RigTransferState>(`/api/avatar-factory/jobs/${id}/rig-transfer`, { signal }),
-  rigTransferSources: (signal?: AbortSignal) => request<{items: RigTransferSource[]}>('/api/avatar-factory/rig-transfer/sources', { signal, timeoutMs: 30000 }),
+  rigTransferSources: (signal?: AbortSignal) => request<{items: RigTransferSource[]}>('/api/avatar-factory/rig-transfer/sources', { signal }),
   startRigTransfer: (id: string, input: RigTransferInput, key: string) => request<RigTransferState>(`/api/avatar-factory/jobs/${id}/rig-transfer`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(input),
   }),
@@ -276,15 +281,17 @@ export const factoryApi = {
     } catch { /* Storage is closed; the saved request cannot be read either. */ }
     return imageRequests(id).read();
   },
-  /** Starts an image production. A saved request is replayed only as itself: pass its key as `replay` with its own input;
-   * with another one saved this refuses rather than send the saved one in place of `input`. */
+  /** Starts an image production. A saved request is replayed only as itself: pass its key as `replay`. It is sent under
+   * that key, and not at all once it is no longer saved (SavedRequestGone); with another one saved this refuses rather
+   * than send the saved one in place of `input`. */
   async produceImage(input: ImageProductionInput, replay?: string): Promise<FactoryJob> {
     const { pending, error } = factoryApi.imageRecovery(input.character_id);
     if (error) throw new Error(error);
     if (pending && pending.key !== replay) throw new Error('저장된 이미지 생성 요청이 있습니다. 같은 요청을 복구한 뒤 다시 시도해 주세요.');
-    return imageRequests(input.character_id).send(input, saved => request<FactoryJob>('/api/avatar-factory/image-jobs', {
+    const post = (saved: Pending<ImageProductionInput>) => request<FactoryJob>('/api/avatar-factory/image-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': saved.key }, body: JSON.stringify(saved.input),
-    }));
+    });
+    return replay ? imageRequests(input.character_id).resume(replay, post) : imageRequests(input.character_id).send(input, post);
   },
   detail: (id: string, signal?: AbortSignal) => request<FactoryJob>(`/api/avatar-factory/jobs/${id}`, { signal }),
   list: (signal?: AbortSignal) => request<{ jobs: FactoryJob[] }>('/api/avatar-factory/jobs', { signal, timeoutMs: 60000 }),

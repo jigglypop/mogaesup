@@ -66,6 +66,12 @@ const part = (job: string, slot: string, name: string, changes: Partial<Wardrobe
   ...changes,
 });
 const user = (...permissions: PermissionName[]): User => ({ id: 'u1', username: 'mogae', displayName: '모개', role: 'user', permissions });
+const operator = () => (auth.user as User | null)?.permissions?.includes('operator') ?? false;
+/** What the server sends whoever is signed in: operators get every part with its fit check and the parts that could not
+ * be fitted; members get every part too, without the findings, and nothing about the others. */
+const served = (list: WardrobePart[], missing: WardrobeUnavailable[]) => operator()
+  ? { parts: list, unavailable: missing }
+  : { parts: list.map((item) => ({ ...item, fit_check: null })), unavailable: [] };
 
 const settle = () =>
   act(async () => {
@@ -123,7 +129,7 @@ describe('옷장', () => {
     outfitList = vi.spyOn(factoryApi, 'wardrobeOutfits');
     loadMask = vi.spyOn(TextureLoader.prototype, 'loadAsync');
     vi.spyOn(factoryApi, 'wardrobeBodies').mockResolvedValue({ revision: '1', bodies: [body], default: { job_id: body.job_id, version: body.version } });
-    vi.spyOn(factoryApi, 'wardrobeParts').mockImplementation(async () => ({ body, parts, unavailable }));
+    vi.spyOn(factoryApi, 'wardrobeParts').mockImplementation(async () => ({ body, ...served(parts, unavailable) }));
     outfitList.mockImplementation(async () => ({ revision: '1', outfits }));
     colors.mockImplementation(async (item) => ({ slot: item.slot, material: 0, regions: [{ index: 0, color: '#ff0000', share: 1, light: 0.5 }] }));
     vi.spyOn(factoryApi, 'wardrobeCoverage').mockImplementation(async (_body, item) => ({ slot: item.slot, hidden: {}, triangles: {}, covers_bottom: false }));
@@ -344,8 +350,13 @@ describe('옷장', () => {
     await click(tab(container, '앞머리')); await click(card(container, '분리 앞머리')); await settle();
     await click(tab(container, '뒷머리')); await click(card(container, '분리 뒷머리')); await settle();
     expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('전체 머리');
+    // Split hair takes a colour as whole hair does.
+    const color = container.querySelector<HTMLInputElement>('.wardrobe-hair-color input');
+    expect(color).not.toBeNull();
+    await type(color!, '#f0d080'); await settle();
     await click(button(container, '내 캐릭터로 입기')); await settle();
     expect(Object.keys(save.mock.calls[0]![0].parts)).toEqual(['hairFront', 'hairBack']);
+    expect(save.mock.calls[0]![0].hairColor).toBe('#f0d080');
     await click(tab(container, '헤어')); await click(card(container, '전체 머리')); await settle();
     expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('분리 앞머리');
     expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('분리 뒷머리');
@@ -395,13 +406,137 @@ describe('옷장', () => {
     await unmount();
   });
 
+  describe('같은 모양의 이전 몸 버전', () => {
+    // The body was registered again as v2; v1 has the same geometry, so the server lists it as an alias.
+    const current: WardrobeBody = { ...body, version: 'v2', body_sha256: 'body-sha-v2', aliases: ['v1'] };
+    beforeEach(() => {
+      vi.mocked(factoryApi.wardrobeBodies).mockResolvedValue({ revision: '2', bodies: [current], default: { job_id: current.job_id, version: current.version } });
+      vi.mocked(factoryApi.wardrobeParts).mockImplementation(async () => ({ body: current, ...served(parts, unavailable) }));
+    });
+
+    it('이전 버전으로 저장한 내 캐릭터도 지금 몸에 복원하고, 다시 저장하면 지금 버전으로 저장한다', async () => {
+      const saved: Look = {
+        request: { body: { jobId: body.job_id, version: 'v1' }, parts: { top: { jobId: 'top-job', version: 'v1', sha256: 'top-job-sha' } }, hairColor: null, colors: {} },
+        status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '',
+      };
+      vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+      const save = vi.spyOn(lookApi, 'save').mockImplementation(async request => ({ look: { request, status: 'baking', worn: false, modelUrl: null, error: null, updatedAt: '' } }));
+      const { container, unmount } = await open(); await settle();
+      expect(container.textContent).not.toContain('저장된 몸 버전을 옷장에서 찾을 수 없어요.');
+      expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('후드');
+      await click(button(container, '내 캐릭터로 입기')); await settle();
+      expect(save.mock.calls[0]![0].body).toEqual({ jobId: body.job_id, version: 'v2' });
+      await unmount();
+    });
+
+    it('이전 버전으로 저장한 조합도 입힐 수 있다', async () => {
+      auth.user = user('operator');
+      outfits = { saved: { name: '이전 조합', body: { job_id: body.job_id, version: 'v1' }, parts: { top: { job_id: 'top-job', version: 'v1', sha256: 'top-job-sha' } }, saved_at: '2026-09-30T00:00:00Z' } };
+      const { container, unmount } = await open(); await settle();
+      await click(button(container, '입히기')); await settle();
+      expect(container.textContent).not.toContain('이 조합의 옷장 몸이 등록돼 있지 않거나 버전이 바뀌었어요.');
+      expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('후드');
+      await unmount();
+    });
+
+    it('별칭이 아닌 다른 버전으로 저장한 캐릭터는 여전히 찾을 수 없다고 알린다', async () => {
+      const saved: Look = {
+        request: { body: { jobId: body.job_id, version: 'v0' }, parts: { top: { jobId: 'top-job', version: 'v1', sha256: 'top-job-sha' } }, hairColor: null, colors: {} },
+        status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '',
+      };
+      vi.mocked(lookApi.mine).mockResolvedValue({ look: saved });
+      const { container, unmount } = await open(); await settle();
+      expect(container.textContent).toContain('저장된 몸 버전을 옷장에서 찾을 수 없어요.');
+      await unmount();
+    });
+  });
+
+  describe('옷장에 없는 파츠가 든 저장', () => {
+    const missingNotice = (container: HTMLElement) =>
+      [...container.querySelectorAll('[role=status]')].map((item) => item.textContent).find((text) => text?.includes('옷장에 없는 파츠'));
+
+    it('저장된 캐릭터는 남은 파츠를 색과 함께 입고 빠진 슬롯을 알리며, 다시 입으면 남은 파츠로 저장한다', async () => {
+      const hair = part('hair-job', 'hair', '단발'); parts = [hair, part('top-job', 'top', '후드')];
+      const request: Look['request'] = { body: { jobId: body.job_id, version: body.version }, parts: {
+        hair: { jobId: hair.job_id, version: hair.version, sha256: hair.sha256 },
+        top: { jobId: 'top-gone', version: 'v1', sha256: 'top-gone-sha' },
+        shoes: { jobId: 'shoes-gone', version: 'v1', sha256: 'shoes-gone-sha' },
+      }, hairColor: '#123456', colors: { top: { '0': '#abcdef' } } };
+      vi.mocked(lookApi.mine).mockResolvedValue({ look: { request, status: 'ready', worn: true, modelUrl: '/models/look.glb', error: null, updatedAt: '' } });
+      const save = vi.spyOn(lookApi, 'save').mockImplementation(async (sent) => ({ look: { request: sent, status: 'baking', worn: false, modelUrl: null, error: null, updatedAt: '' } }));
+      const { container, unmount } = await open(); await settle();
+      expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('단발');
+      expect(viewers[0]!.wear.mock.calls.at(-1)![0].map((value: { slot: string }) => value.slot)).toEqual(['hair']);
+      expect(container.querySelector<HTMLInputElement>('.wardrobe-hair-color input')?.value).toBe('#123456');
+      expect(missingNotice(container)).toBe('옷장에 없는 파츠는 빼고 입혔어요: 상의, 신발');
+      expect(container.querySelector('.wardrobe-stage [role=alert]')).toBeNull();
+      expect(button(container, '내 캐릭터로 입기')?.disabled).toBe(false);
+      await click(button(container, '내 캐릭터로 입기')); await settle();
+      expect(save).toHaveBeenCalledExactlyOnceWith({ body: request.body, parts: { hair: request.parts['hair'] }, hairColor: '#123456', colors: {} });
+      await unmount();
+    });
+
+    it('조합도 남은 파츠를 입히고 빠진 슬롯을 알린다', async () => {
+      outfits = { saved: { name: '겨울 조합', body: { job_id: body.job_id, version: body.version }, saved_at: '2026-09-30T00:00:00Z', parts: {
+        top: { job_id: 'top-job', version: 'v1', sha256: 'top-job-sha' }, hat: { job_id: 'hat-gone', version: 'v1', sha256: 'hat-gone-sha' },
+      } } };
+      const { container, unmount } = await open(); await settle();
+      await click(button(container, '입히기')); await settle();
+      expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('후드');
+      expect(missingNotice(container)).toBe('옷장에 없는 파츠는 빼고 입혔어요: 모자·머리 장식');
+      expect(container.querySelector('.wardrobe-stage [role=alert]')).toBeNull();
+      // Another card clears the notice like any other change of clothes.
+      await click(card(container, '맞지 않는 옷')); await settle();
+      expect(missingNotice(container)).toBeUndefined();
+      await unmount();
+    });
+
+    it('겹치는 머리 파츠와 없는 파츠를 함께 알린다', async () => {
+      parts = [part('full', 'hair', '전체 머리'), part('front', 'hairFront', '분리 앞머리')];
+      const request: Look['request'] = { body: { jobId: body.job_id, version: body.version }, parts: {
+        hair: { jobId: 'full', version: 'v1', sha256: 'full-sha' }, hairFront: { jobId: 'front', version: 'v1', sha256: 'front-sha' },
+        bottom: { jobId: 'pants-gone', version: 'v1', sha256: 'pants-gone-sha' },
+      }, hairColor: null, colors: {} };
+      vi.mocked(lookApi.mine).mockResolvedValue({ look: { request, status: 'ready', worn: true, modelUrl: '/models/old.glb', error: null, updatedAt: '' } });
+      const { container, unmount } = await open(); await settle();
+      expect(missingNotice(container)).toBe('겹치는 머리 파츠를 벗겼어요: 앞머리 · 옷장에 없는 파츠는 빼고 입혔어요: 하의');
+      expect(viewers[0]!.wear.mock.calls.at(-1)![0].map((value: { slot: string }) => value.slot)).toEqual(['hair']);
+      await unmount();
+    });
+
+    it('다시 맞춘 새 버전은 핏 검사 결과와 상관없이 그것으로 바꿔 입힌다', async () => {
+      const { container, unmount } = await open(); await settle();
+      await click(card(container, '후드')); await settle();
+      parts = [part('top-job', 'top', '후드', { version: 'v2', fit_check: { status: 'fail', failures: ['소매가 몸을 뚫습니다.'] } })];
+      await act(async () => { await vi.advanceTimersByTimeAsync(30000); }); await settle();
+      const worn = viewers[0]!.wear.mock.calls.at(-1)![0] as { url: string }[];
+      expect(worn.map((item) => item.url)).toEqual(['/api/avatar-factory/jobs/top-job/native-parts/v2/top.glb']);
+      await unmount();
+    });
+  });
+
   describe('누가 무엇을 보는가', () => {
-    it('운영자가 아니면 핏 검사에서 떨어진 파츠는 목록에 없어 입을 수 없다', async () => {
+    it('회원도 핏 검사에서 떨어진 파츠를 입을 수 있고, 떨어진 이유는 보지 않는다', async () => {
       const { container, unmount } = await open();
       await settle();
-      expect(cardNames(container)).toEqual(['후드']);
-      expect(tab(container, '상의')?.textContent).toContain('1');
+      expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
+      expect(tab(container, '상의')?.textContent).toContain('2');
+      await click(card(container, '맞지 않는 옷')); await settle();
+      expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('맞지 않는 옷');
       expect(container.textContent).not.toContain('소매가 몸을 뚫습니다.');
+      await unmount();
+    });
+
+    it('회원 범위로 서명하지 못하는 서버가 운영자 목록을 보내도 회원에게는 검사 결과와 피팅하지 못한 파츠가 보이지 않는다', async () => {
+      unavailable = [{ job_id: 'anchors', version: 'v1', slot: 'top', name: '긴 코트', reason: 'needs_anchors' }];
+      vi.mocked(factoryApi.wardrobeParts).mockImplementation(async () => ({ body, parts, unavailable }));
+      const { container, unmount } = await open();
+      await settle();
+      expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
+      expect(container.querySelector('.wardrobe-card-fit')).toBeNull();
+      expect(container.textContent).not.toContain('소매가 몸을 뚫습니다.');
+      expect(container.querySelector('.wardrobe-unfit')).toBeNull();
+      expect(container.textContent).not.toContain('긴 코트');
       await unmount();
     });
 
@@ -640,7 +775,7 @@ describe('옷장', () => {
       await settle();
       expect(factoryApi.wardrobeBodies).toHaveBeenCalledTimes(2);
       expect(container.textContent).not.toContain('몸 목록을 읽지 못했습니다.');
-      expect(cardNames(container)).toEqual(['후드']);
+      expect(cardNames(container)).toEqual(['후드', '맞지 않는 옷']);
       await unmount();
     });
 

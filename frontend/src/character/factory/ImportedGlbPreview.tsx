@@ -13,7 +13,7 @@ export function ImportedGlbPreview({ state }: { state: NativePartsState }) {
     if (!model || !mount.current) return;
     let active = true;
     setReady(false); setError(''); setClips([]); setMotion(-1);
-    const instance = new ModelViewer(mount.current, 'studio');
+    const instance = new ModelViewer(mount.current, 'studio', { onFailure: reason => { if (active) setError(reason.message); } });
     viewer.current = instance;
     void instance.load(model.url, { sha256: model.sha256 }).then(value => {
       if (!active) return;

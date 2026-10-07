@@ -31,7 +31,9 @@ export function Expressions({ job, version, bodySha, viewer, paid = true }: {
   const applied = useRef<{ viewer: ModelViewer; key: string } | null>(null);
   const locked = useRef(false), alive = useRef(true), operation = useRef(0);
   const read = useCallback((signal: AbortSignal) => studioApi.expressions(job, version, signal), [job, version]);
-  const saved = usePolling(read, 5000);
+  // The saved library changes through this screen's own actions (which store their answer); other tabs' changes arrive
+  // with the next read.
+  const saved = usePolling(read, 30000);
   const failed = useRef<{ viewer: ModelViewer; library: typeof saved.value } | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; operation.current++; }; }, []);
   useEffect(() => {

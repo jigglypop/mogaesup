@@ -74,4 +74,29 @@ describe('헤어 일괄 생성의 저장된 요청', () => {
     expect(localStorage.getItem(PENDING)).toBeNull();
     await unmount();
   });
+
+  it('다른 탭이 저장된 요청을 처리하면 저장소 알림으로 새 배치 화면으로 돌아간다', async () => {
+    localStorage.setItem(PENDING, JSON.stringify({ key: 'lost-key', input: input('단발') }));
+    const { container, unmount } = await open();
+    expect(button(container, '접수 복구')).toBeDefined();
+    localStorage.removeItem(PENDING);
+    await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: PENDING })));
+    expect(button(container, '접수 복구')).toBeUndefined();
+    expect(button(container, '1종 생성')?.disabled).toBe(false);
+    await unmount();
+  });
+
+  it('복구를 누르기 전에 다른 탭이 그 요청을 처리했으면 새 키로 다시 접수하지 않는다', async () => {
+    localStorage.setItem(PENDING, JSON.stringify({ key: 'lost-key', input: input('단발') }));
+    const { container, unmount } = await open();
+    // Settled elsewhere without this tab hearing of it.
+    localStorage.removeItem(PENDING);
+    await act(async () => button(container, '접수 복구')!.click());
+    await settle();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(localStorage.getItem(PENDING)).toBeNull();
+    expect(container.querySelector('[role=alert]')).toBeNull();
+    expect(button(container, '1종 생성')).toBeDefined();
+    await unmount();
+  });
 });

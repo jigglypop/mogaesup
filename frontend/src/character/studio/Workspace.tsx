@@ -23,6 +23,9 @@ const Generations = lazy(() => import('./Generations'));
 const Emoticons = lazy(() => import('./Emoticons'));
 const Prompts = lazy(() => import('./Prompts'));
 const tabs = { admin: '관리자페이지', animals: '동물', character: '캐릭터', props: '기물', textures: '기본 바닥 타일', emoticons: '2D 이모티콘', prompts: '프롬프트 관리' };
+/** The screens that show the job list, catalog and common body; the others read none of them. */
+const listingTabs: readonly string[] = ['admin', 'character'];
+const unread = () => Promise.resolve(undefined);
 
 export function Workspace() {
   const navigate = useNavigate();
@@ -42,8 +45,14 @@ export function Workspace() {
   const [showInfo, setShowInfo] = useState(false);
   const [deletedAsset, setDeletedAsset] = useState<{ id: string; slot: string; name: string }>();
   const [composeId, setComposeId] = useState('');
-  // The server refreshes its job snapshot every 10 seconds; child screens share these three reads.
-  const jobs = usePolling(factoryApi.list, 10000), catalog = usePolling(studioApi.catalog, 15000), bodyProfile = usePolling(factoryApi.bodyProfile, 15000);
+  // The server refreshes its job snapshot every 10 seconds; child screens share these three reads. The workspace opens
+  // on one screen (StudioPage mounts it per screen), so a screen that shows none of them never reads them.
+  const listed = listingTabs.includes(tab);
+  const jobs = usePolling<Awaited<ReturnType<typeof factoryApi.list>> | undefined>(listed ? factoryApi.list : unread, listed ? 10000 : null);
+  const catalog = usePolling<Awaited<ReturnType<typeof studioApi.catalog>> | undefined>(listed ? studioApi.catalog : unread, listed ? 15000 : null);
+  // The base body screen does not use the common body.
+  const profiled = listed && !(tab === 'character' && characterMode === 'body');
+  const bodyProfile = usePolling<Awaited<ReturnType<typeof factoryApi.bodyProfile>> | undefined>(profiled ? factoryApi.bodyProfile : unread, profiled ? 15000 : null);
   const candidates = (jobs.value?.jobs || []).filter(j => j.production_mode === 'character_parts').sort((a,b) => b.created_at.localeCompare(a.created_at));
   const baseCandidates = candidates.filter(j => !j.base_job_id);
   const composeJob = candidates.find(j => j.id === composeId && !isCatalogJobDeleted(j, catalog.value));

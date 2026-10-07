@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { PendingRequestConflict, type Pending } from '../api';
+import { PendingRequestConflict, SavedRequestGone, type Pending } from '../api';
 import { factoryApi, type GarmentShape, type WardrobePart } from '../factory/api';
 import { pollUntil } from './poll-until';
 
@@ -81,6 +81,8 @@ export function WardrobeShape({ part, label, reload, replace }: {
       replace(next);
     } catch (reason) {
       if (signal.aborted) return;
+      // The saved request was answered or cleared elsewhere: nothing was sent, and there is nothing left to resume.
+      if (reason instanceof SavedRequestGone) return;
       setError((reason as Error).message);
       if (reason instanceof PendingRequestConflict) setSaved(reason.pending as SavedRefit);
     } finally { clearInterval(tick); if (!signal.aborted) setBusy(false); }
@@ -113,7 +115,7 @@ export function WardrobeShape({ part, label, reload, replace }: {
     {saved && <>
       {!error && <p role="status">응답 확인 안 됨</p>}
       <div className="wardrobe-shape-actions">
-        <button type="button" disabled={busy} onClick={() => void rebuild(() => factoryApi.resumeRefit(part.job_id), saved.input.source_version)}>저장된 요청 이어서 보내기</button>
+        <button type="button" disabled={busy} onClick={() => void rebuild(() => factoryApi.resumeRefit(part.job_id, saved.key), saved.input.source_version)}>저장된 요청 이어서 보내기</button>
         <button type="button" disabled={busy} onClick={() => clearSaved(saved.key)}>저장된 요청 지우기</button>
       </div>
     </>}

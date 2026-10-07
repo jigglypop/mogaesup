@@ -353,6 +353,232 @@
       "slot": "hat",
       "name": "코코아 트래퍼 햇",
       "brief": "Cocoa brown padded trapper hat with a cream faux-fur lining showing at the front brim and on two ear flaps that hang beside the cheeks, leaving the face open, sitting over the hair. The fur is a soft matte rounded surface with no individual fibers."
+    },
+    {
+      "slot": "top",
+      "name": "페어아일 요크 스웨터",
+      "brief": "Original unbranded cream Fair Isle crew-neck sweater for a chibi character in T pose, hip length. A broad patterned yoke around the neck and shoulders drawn as a few simple bands of navy, red and mustard diamonds, plain cream body and long sleeves below it, ribbed neck, cuffs and hem, soft matte knit shown as a smooth surface, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "타탄 체크 셔켓",
+      "brief": "Original unbranded red and navy tartan flannel shirt-jacket for a chibi character in T pose, hip length and worn closed. Point collar, five large round buttons, two broad chest patch pockets, loose straight sleeves with simple cuffs, the check drawn as broad simple bands, soft matte brushed cotton, clear collar and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "윈도페인 체크 블레이저",
+      "brief": "Original unbranded light grey windowpane check blazer for a chibi character in T pose, hip length, single-breasted and worn closed with two large buttons. Notched lapels, two flap pockets, straight tailored sleeves, the check drawn as thin wide-spaced lines, soft matte wool, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "올리브 퀼팅 라이너 재킷",
+      "brief": "Original unbranded olive diamond-quilted liner jacket for a chibi character in T pose, hip length and closed with large snap buttons down the front. Collarless round neck edged with brown binding, flat quilting drawn as broad diamond lines, two side pockets, straight sleeves with bound cuffs, soft matte nylon, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "레트로 트랙 재킷",
+      "brief": "Original unbranded retro navy track jacket for a chibi character in T pose, hip length and zipped closed. Stand collar, a single wide cream stripe running down the outside of each sleeve and no other stripes, ribbed cuffs and hem, soft matte tricot fabric, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "라일락 셰기 모헤어 카디건",
+      "brief": "Original unbranded lilac shaggy mohair cardigan for a chibi character in T pose, hip length and buttoned closed. V neck, four large round buttons, relaxed body and long roomy sleeves, a fuzzy surface shown as soft rounded texture with no individual fibers, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "크로셰 니트 조끼",
+      "brief": "Original unbranded cream crochet knit vest for a chibi character in T pose, sleeveless and hip length. V neck, front made of large simple flower squares in mustard and sage, ribbed edges around the neck and armholes, soft matte yarn, clear neck and armhole openings."
+    },
+    {
+      "slot": "top",
+      "name": "버건디 봄버 재킷",
+      "brief": "Original unbranded burgundy bomber jacket for a chibi character in T pose, waist length and zipped closed. Ribbed collar, cuffs and hem in dark brown, two slanted side pockets, roomy rounded sleeves, soft matte twill, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "미드 블루 데님 트러커",
+      "brief": "Original unbranded mid-blue denim trucker jacket for a chibi character in T pose, hip length and buttoned closed. Point collar, two chest flap pockets, large metal-look buttons, cream contrast stitching drawn as simple lines, straight sleeves with buttoned cuffs, soft matte denim, clear collar and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "퍼 트림 후드 파카",
+      "brief": "Original unbranded olive hooded parka for a chibi character in T pose, hip length and zipped closed, the hood folded down behind the neck with a cream faux-fur trim around its edge. Two large flap pockets, long roomy sleeves with clean cuffs, matte cotton, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "시어링 에비에이터 재킷",
+      "brief": "Original unbranded chocolate brown aviator jacket for a chibi character in T pose, waist length and zipped closed, with a wide cream shearling collar and cream shearling cuffs. Two zip pockets, roomy sleeves, matte leather-look surface, the shearling a soft rounded texture with no individual fibers, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "레이스 칼라 블라우스",
+      "brief": "Original unbranded soft white blouse for a chibi character in T pose, hip length and buttoned closed. A wide rounded lace collar shown as simple scalloped edges, small round buttons, gently puffed long sleeves gathered at the cuffs, matte cotton, clear neck and cuff openings."
+    },
+    {
+      "slot": "top",
+      "name": "블랙 레더 라이더 재킷",
+      "brief": "Original unbranded black faux-leather biker jacket for a chibi character in T pose, waist length and zipped closed with an off-centre zip. Wide notched lapels, a belted hem with a plain square buckle, two zip pockets, straight sleeves with zipped cuffs, soft matte leather-look surface, clear neck and cuff openings."
+    },
+    {
+      "slot": "bottom",
+      "name": "라이트 카펜터 데님",
+      "brief": "Light wash carpenter jeans reaching the ankles, a flat waistband, a loop on the right thigh and a long side pocket, roomy straight legs, two separate leg openings, soft matte denim.",
+      "bottom_kind": "pants"
+    },
+    {
+      "slot": "bottom",
+      "name": "사이드 라인 트랙 팬츠",
+      "brief": "Black track pants with a single wide white stripe down the outside of each leg and no other stripes, an elastic waistband and elastic ankle cuffs, relaxed straight legs, two separate leg openings, soft matte nylon.",
+      "bottom_kind": "pants"
+    },
+    {
+      "slot": "bottom",
+      "name": "브라운 코듀로이 와이드 팬츠",
+      "brief": "Chestnut brown wide-leg corduroy trousers reaching the ankles, a neat flat waistband, broad soft wales shown as gentle vertical ribs, two separate leg openings, soft matte fabric.",
+      "bottom_kind": "pants"
+    },
+    {
+      "slot": "bottom",
+      "name": "차콜 핀스트라이프 슬랙스",
+      "brief": "Charcoal pinstripe wide slacks reaching the ankles, a flat waistband, one soft crease down each leg, thin pale stripes drawn widely spaced, two separate leg openings, soft matte wool.",
+      "bottom_kind": "pants"
+    },
+    {
+      "slot": "bottom",
+      "name": "타탄 체크 플리츠 스커트",
+      "brief": "Knee-length pleated skirt in a green and navy tartan, a flat waistband, broad even pleats all around, the check drawn as broad simple bands, soft matte wool.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "bottom",
+      "name": "가지색 니트 롱스커트",
+      "brief": "Ankle-length eggplant purple knit skirt, a ribbed waistband, a straight relaxed column that flares gently at the hem, soft matte yarn with a fine rib texture.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "bottom",
+      "name": "스웨이드 프린지 미니스커트",
+      "brief": "Camel suede mini skirt reaching mid-thigh, a flat waistband, a hem of short broad fringe tabs, slightly flared A-line shape, matte suede.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "bottom",
+      "name": "퀼팅 패딩 미디스커트",
+      "brief": "Mid-calf quilted puffer skirt in cream, a flat elastic waistband, wide horizontal quilted channels that puff softly, a straight A-line shape, matte nylon.",
+      "bottom_kind": "skirt"
+    },
+    {
+      "slot": "shoes",
+      "name": "시어링 앵클 부츠",
+      "brief": "Pair of chestnut suede ankle boots with folded cream shearling cuffs, rounded toes, thick soft soles, matte suede, the shearling a soft rounded texture, correct left and right foot openings."
+    },
+    {
+      "slot": "shoes",
+      "name": "블랙 청키 더비와 흰 양말",
+      "brief": "Pair of black chunky derby shoes with thick rounded soles, short laces and rounded toes, worn with white crew socks showing above them, matte leather, correct left and right foot openings."
+    },
+    {
+      "slot": "shoes",
+      "name": "라벤더 패딩 부츠",
+      "brief": "Pair of lavender quilted puffer boots reaching just above the ankles, wide horizontal puffy channels around the shaft, a drawstring cuff at the top, chunky rounded rubber soles and rounded toes, matte nylon, correct left and right foot openings."
+    },
+    {
+      "slot": "shoes",
+      "name": "탠 웨스턴 앵클 부츠",
+      "brief": "Pair of tan western ankle boots with rounded toes, low stacked heels and a simple stitched curve on each shaft, matte leather, correct left and right foot openings."
+    },
+    {
+      "slot": "shoes",
+      "name": "퍼 슬라이드와 양말",
+      "brief": "Pair of cream faux-fur slides with thick soft soles worn over light grey socks, the fur a soft rounded texture with no individual fibers, correct left and right foot openings."
+    },
+    {
+      "slot": "shoes",
+      "name": "스트랩 스니커즈",
+      "brief": "Pair of white leather low sneakers closed by two wide hook-and-loop straps across the instep instead of laces, rounded toes and thick flat cream soles, no logos, matte surface, correct left and right foot openings."
+    },
+    {
+      "slot": "shoes",
+      "name": "아웃도어 하이킹 부츠",
+      "brief": "Pair of brown 1990s style hiking boots with padded collars, red laces, chunky rubber soles and rounded toes, matte suede and leather, correct left and right foot openings."
+    },
+    {
+      "slot": "hat",
+      "name": "크림 퍼 버킷햇",
+      "brief": "Cream faux-fur bucket hat with a rounded crown and a soft short brim all around, the fur a soft rounded texture with no individual fibers, sitting over the hair."
+    },
+    {
+      "slot": "hat",
+      "name": "오트밀 니트 발라클라바",
+      "brief": "Oatmeal ribbed knit hood covering the top and back of the head and the ears, ending at the jaw line with no neck part, leaving the whole face open, a soft folded edge around the face, sitting over the hair."
+    },
+    {
+      "slot": "hat",
+      "name": "털 귀마개",
+      "brief": "Pair of fluffy pink faux-fur earmuffs on a thin curved band over the top of the head, two round puffs covering the ears, leaving the face open, sitting over the hair."
+    },
+    {
+      "slot": "hat",
+      "name": "버건디 울 베레모",
+      "brief": "Burgundy wool beret worn tilted slightly to one side, a soft flat round crown with a small stalk on top, sitting over the hair."
+    },
+    {
+      "slot": "hat",
+      "name": "트위드 뉴스보이 캡",
+      "brief": "Grey tweed newsboy cap with a full rounded crown gathered into eight soft panels, a small button on top and a short front brim, sitting over the hair."
+    },
+    {
+      "slot": "hat",
+      "name": "레드 방울 비니",
+      "brief": "Red ribbed knit beanie with a folded cuff and a large round pom-pom on top, sitting over the hair."
+    },
+    {
+      "slot": "hair",
+      "name": "허쉬컷",
+      "brief": "Short layered hush cut for a chibi character in T pose, soft feathery layers framing the face and falling just past the chin, light airy volume at the crown, wispy see-through bangs above the eyebrows, ash brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "히피펌 단발",
+      "brief": "Chin-length bob with bouncy hippie perm curls all around, big round volume at the sides, short curly fringe resting above the eyebrows, warm caramel brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "가르마펌",
+      "brief": "Short side-parted perm for a chibi character in T pose, soft S-shaped waves sweeping from a clear side part, the fringe split and curving away from the forehead, tidy short sides and nape, dark brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "리프컷",
+      "brief": "Short leaf cut with the fringe split in the middle and curving outward like two leaves over the forehead, soft volume on top, neat short sides and nape, natural black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "메시 하이번",
+      "brief": "Hair gathered up into a large loose bun high on the crown, a few soft face-framing locks at the temples, short wispy fringe above the eyebrows, the nape tidy, honey blonde. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "양갈래 땋은머리",
+      "brief": "Twin braids starting behind the ears and hanging straight down the back behind the shoulders, clear of the chest, each braid shown as broad rounded segments tied with a small band, straight fringe above the eyebrows, centre part, dark chestnut. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "시스루뱅 긴 생머리",
+      "brief": "Long straight hair falling past the shoulder blades, light see-through bangs resting above the eyebrows, a smooth glossy fall with gently curled-in tips, natural black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "히메컷",
+      "brief": "Long straight hime cut, blunt full fringe above the eyebrows, cheek-length side locks cut straight at the jaw, the rest falling smoothly past the shoulders, blue-black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
     }
   ]
 }

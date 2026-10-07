@@ -87,7 +87,7 @@ export default function Prompts() {
     </div></div>
     {(error || listing.error) && <p className="workspace-error" role="alert">{error || listing.error}</p>}
     {catalog && !catalog.can_save && <p className="workspace-error" role="alert">저장소가 연결되지 않아 저장할 수 없습니다.</p>}
-    {!!conflicts.length && <p className="workspace-error" role="alert">다른 화면에서 변경됨: {conflicts.map(item => item.title).join(', ')}. 해당 항목의 최신 저장값을 확인하고 편집을 다시 적용하세요.</p>}
+    {!!conflicts.length && <p className="workspace-error" role="alert">다른 화면에서 변경됨: {conflicts.map(item => item.title).join(', ')}</p>}
     {!catalog ? <p>{listing.loading ? '프롬프트 불러오는 중' : '프롬프트를 불러오지 못했습니다.'}</p> : <>
       <nav className="prompt-groups" aria-label="프롬프트 분류">{groups.map(item => <button key={item.id} aria-pressed={group?.id === item.id} onClick={() => { setGroupId(item.id); setSelectedId(''); setQuery(''); }}>
         {item.title}<span>{item.items.length}</span>{dirty.some(prompt => item.items.includes(prompt)) && <i aria-label="미저장 변경">●</i>}

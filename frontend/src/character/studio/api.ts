@@ -1,4 +1,4 @@
-import { request, savedRequest } from '../api';
+import { request, savedRequest, type Pending } from '../api';
 import type { FactoryJob, FitProfile } from '../factory/api';
 import { variantSlots } from '../factory/parts';
 import type { ExpressionName, FaceLayout } from '../texture-expressions';
@@ -46,17 +46,20 @@ function settleAnimalRecovery(animal: Animal) {
   return true;
 }
 
-// Any answer for a key settles it: its job is current, finished, or replaced by a newer request.
-const regenerateAnimal = (id: string, input: AnimalRegenerateInput, key?: string) => animalRegeneration(id).send(input, pending =>
-  request<Animal>(`/api/studio/animals/${id}/regenerate`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-    body: JSON.stringify(pending.input), timeoutMs: 60000,
-  }), key ? { key } : {});
-
-const createAnimal = (input: AnimalCreateInput) => animalCreation.send(input, pending => request<Animal>('/api/studio/animals', {
+const postRegeneration = (id: string) => (pending: Pending<AnimalRegenerateInput>) => request<Animal>(`/api/studio/animals/${id}/regenerate`, {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
   body: JSON.stringify(pending.input), timeoutMs: 60000,
-}));
+});
+// Any answer for a key settles it: its job is current, finished, or replaced by a newer request. `key` resumes a paused
+// job under the key it was made with.
+const regenerateAnimal = (id: string, input: AnimalRegenerateInput, key?: string) =>
+  animalRegeneration(id).send(input, postRegeneration(id), key ? { key } : {});
+
+const postAnimal = (pending: Pending<AnimalCreateInput>) => request<Animal>('/api/studio/animals', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+  body: JSON.stringify(pending.input), timeoutMs: 60000,
+});
+const createAnimal = (input: AnimalCreateInput) => animalCreation.send(input, postAnimal);
 export type HeadPartAsset = { name: string; sha256: string; url: string };
 export type Expression = { id: string; name: ExpressionName; layout: FaceLayout; materials: {material:number;file:string;base_file?:string}[]; artifacts:{name:string;url:string;sha256:string}[]; head?: HeadPartAsset };
 type ExpressionLibrary = { items: Expression[]; selected: string | null; revision: string };
@@ -68,6 +71,9 @@ const singleParts = savedRequest<SinglePartInput>('gaesup.studio.single-part.v1'
     && (input.fit_profile == null || typeof input.fit_profile === 'object')
     && (input.view_mode == null || ['front_side', 'front_side_back'].includes(input.view_mode)),
   '저장된 단일 파츠 요청을 읽을 수 없습니다. 기존 요청 기록을 확인해야 새 생성을 접수할 수 있습니다.');
+const postSinglePart = (pending: Pending<SinglePartInput>) => request<FactoryJob>('/api/avatar-factory/variants/single-part', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key }, body: JSON.stringify(pending.input),
+});
 export const studioApi = {
   expressions: (job: string, version: string, signal?: AbortSignal) => request<ExpressionLibrary>(`/api/studio/bodies/${job}/${version}/expressions`, {signal}),
   applyExpressionOverlay: (job: string, version: string, input: { asset_id: string; name: ExpressionName }) => request<Expression>(`/api/studio/bodies/${job}/${version}/expressions/overlay`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input),timeoutMs:60000}),
@@ -79,8 +85,11 @@ export const studioApi = {
   }),
   createAnimal,
   animalCreateRecovery: animalCreation.read,
+  /** Sends the saved request under `key` again as itself; nothing when it is no longer saved (SavedRequestGone). */
+  recoverAnimalCreate: (key: string) => animalCreation.resume(key, postAnimal),
   regenerateAnimal,
   animalRecovery: (id: string) => animalRegeneration(id).read(),
+  recoverAnimalRegeneration: (id: string, key: string) => animalRegeneration(id).resume(key, postRegeneration(id)),
   settleAnimalRecovery,
   catalog: (signal?: AbortSignal) => request<Catalog>('/api/studio/catalog', { signal }),
   setVisibility: (id: string, scope: 'character' | 'version', deleted: boolean, revision: string) => request<Catalog>(`/api/studio/catalog/${id}/visibility`, {
@@ -93,9 +102,8 @@ export const studioApi = {
     method: 'PATCH', headers: { 'Content-Type': 'application/json', 'If-Match': revision }, body: JSON.stringify(changes),
   }),
   singlePartRecovery: singleParts.read,
-  singlePart: (input: SinglePartInput) => singleParts.send(input, pending => request<FactoryJob>('/api/avatar-factory/variants/single-part', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key }, body: JSON.stringify(pending.input),
-  })),
+  singlePart: (input: SinglePartInput) => singleParts.send(input, postSinglePart),
+  recoverSinglePart: (key: string) => singleParts.resume(key, postSinglePart),
   textures: (signal?: AbortSignal) => request<{ items: Tile[] }>('/api/studio/textures', { signal }),
   texture: (input: { surface: string; size: number; seed: number }) => request<Tile>('/api/studio/textures', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),

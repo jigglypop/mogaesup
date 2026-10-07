@@ -3,6 +3,7 @@ import { api, request } from '../api';
 import { useLiveCharacters } from '../use-live-characters';
 import { rememberStudioQuery, studioHref } from '../../studio/screens';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { factoryApi, type BodyProfileState, type FactoryJob, type ImageRetry } from './api';
 import type { Blueprint } from './image-layers';
 import { NativeAssembly } from './NativeAssembly';
@@ -56,6 +57,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
   onJob, refreshJobs }: CharacterFactoryProps) {
   const characterQuery = 'photoCharacter', jobQuery = 'photoJob';
   const live = useLiveCharacters();
+  const gone = useSavedRequests();
   const [characterId, setCharacterId] = useState(new URLSearchParams(location.search).get(characterQuery) || '');
   const [jobId, setJobId] = useState(new URLSearchParams(location.search).get(jobQuery) || '');
   const readSelected = useCallback((signal: AbortSignal) => jobId ? factoryApi.detail(jobId, signal) : Promise.resolve(null), [jobId]);
@@ -245,6 +247,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
     locked.current = true; setBusy(true); setError('');
     try {
       let result: FactoryJob;
+      // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
       if (pending) result = await factoryApi.produceImage(pending.input, pending.key);
       else {
         if (meshyOptionsError(meshy.options)) throw new Error(meshyOptionsError(meshy.options));
@@ -257,7 +260,10 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
           slots: [...partSlots], hair_length: hairLength, body_purpose: 'wardrobe_base', rig_with_meshy: true });
       }
       if (alive.current) { onJob(result); remember(result.character_id, result.id); }
-    } catch (e) { if (alive.current) setError((e as Error).message); }
+    } catch (e) {
+      if (gone(e)) void refreshJobs();
+      else if (alive.current) setError((e as Error).message);
+    }
     finally { locked.current = false; if (alive.current) setBusy(false); }
   }
   async function retryImages(images: ImageRetry[]) {
@@ -307,7 +313,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
             : <p role="status">{job.reference_preparation.failure?.message || job.error || (job.reference_preparation.status === 'pending' ? '대기 중' : '규격 이미지 준비 중')}</p>}
           {normalizedSideReference && <a href={normalizedSideReference.url} target="_blank" rel="noreferrer"><img src={normalizedSideReference.url} alt={'공통 규격으로 맞추고 배경을 제거한 오른쪽 측면 캐릭터'} /></a>}
         </section>}
-        {job && <RigRecovery jobId={job.id} refreshKey={`${job.status}:${job.character_flow?.stage ?? ''}:${job.updated_at ?? ''}`} onComplete={() => { void refreshJobs(); }} />}
+        {job && <RigRecovery key={job.id} jobId={job.id} refreshKey={`${job.status}:${job.character_flow?.stage ?? ''}:${job.updated_at ?? ''}`} onComplete={() => { void refreshJobs(); }} />}
         {job && <StageRunner key={`stages:${job.id}`} jobId={job.id} onChange={() => { void refreshJobs(); void selectedJob.refresh(); }} />}
         {job ? <NativeAssembly key={`assembly:${job.id}`} jobId={job.id} simple flow={job.character_flow} /> : <div className="character-empty"><h2>캐릭터 미리보기</h2><p>{jobsLoading ? '작업 불러오는 중…' : '제작 결과 없음'}</p></div>}
       </section>

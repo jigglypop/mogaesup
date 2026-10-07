@@ -3,17 +3,23 @@
 // library, photo, body and parts screens, the members' wardrobe). Every /api/ request must carry the operator token,
 // API key and gateway key the Rust server signs with; anything unsigned, or a path it does not know, is noted in
 // `problems`. Nothing here costs money.
+// `tokenless` stands for a studio without JWT_SECRET behind its container's nginx, as production runs today: requests
+// come with the keys and no token, and each counts as the operator's (auth.py's loopback X-User-Id), so a member's
+// wardrobe read gets the operator's answer; a token, which such a studio cannot check, is refused.
 // The models come from a figure gaesup-world ships, rewritten the way the character server delivers them: plain
-// geometry and PNG maps, rigged, with idle, walk and run clips. The wardrobe has one part on that figure's bones: a red
-// hat on its head bone, the way the studio fits parts to a registered body.
-// Usage: node scripts/e2e/fake-character-server.mjs [port]   (prints the settings the Rust server needs; forked, it
-// talks to its parent instead)
+// geometry and PNG maps, rigged, with idle, walk and run clips. The wardrobe has parts on that figure's bones, red hats
+// on its head bone, the way the studio fits parts to a registered body. One failed its limb check, which operators see
+// and members do not: as the character server does, a member's wardrobe read (the gateway marks it MEMBER) lists it
+// and serves its file all the same. One is in the trash: nobody's listing has it, and a member is never served its
+// file. One could not be fitted: only operators are told so.
+// Usage: node scripts/e2e/fake-character-server.mjs [port] [tokenless]   (prints the settings the Rust server needs;
+// forked, it talks to its parent instead)
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { Logger, NodeIO } from '@gltf-transform/core';
+import { Logger, NodeIO, VertexLayout } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import { dequantize, prune, textureCompress, unpartition } from '@gltf-transform/functions';
 import { MeshoptDecoder } from 'meshoptimizer';
@@ -35,7 +41,12 @@ const hex = (seed) => sha256(`e2e:${seed}`).slice(0, 24);
  */
 async function models() {
   await MeshoptDecoder.ready;
-  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.decoder': MeshoptDecoder });
+  // Each vertex attribute in a buffer view of its own, as the studio's Blender export writes them: the wardrobe resizes
+  // and moves only parts whose positions are plain floats, never interleaved ones.
+  const io = new NodeIO()
+    .registerExtensions(ALL_EXTENSIONS)
+    .registerDependencies({ 'meshopt.decoder': MeshoptDecoder })
+    .setVertexLayout(VertexLayout.SEPARATE);
   const document = await io.read(FIGURE);
   await document.transform(
     dequantize(),
@@ -126,18 +137,18 @@ const picture = (color) =>
     .toBuffer();
 
 /**
- * Starts the fake on `port` (0 for any free one). `reseal(name)` seals that character's job again as a new assembly
- * version with its own face, as remaking it in the studio would.
+ * Starts the fake on `port` (0 for any free one); `tokenless` as in the header. `reseal(name)` seals that character's
+ * job again as a new assembly version with its own face, as remaking it in the studio would.
  */
-export async function startFakeCharacterServer({ port = 0 } = {}) {
+export async function startFakeCharacterServer({ port = 0, tokenless = false } = {}) {
   const { first, second, noWalk, face: faceMap, hat } = await models();
   const keys = {
     apiKey: randomBytes(18).toString('hex'),
     gatewayKey: randomBytes(18).toString('hex'),
-    // Base64 of 48 bytes: the Rust server and auth.py both sign with the decoded bytes.
-    jwtSecret: randomBytes(48).toString('base64'),
+    // Base64 of 48 bytes: the Rust server and auth.py both sign with the decoded bytes. None without a token.
+    jwtSecret: tokenless ? null : randomBytes(48).toString('base64'),
   };
-  const jwtKey = Buffer.from(keys.jwtSecret, 'base64');
+  const jwtKey = keys.jwtSecret && Buffer.from(keys.jwtSecret, 'base64');
   const problems = [];
   const created = (day) => `2026-09-${day}T09:00:00Z`;
   /** Each job's record and, per sealed version, its model, chosen face and front render. */
@@ -262,7 +273,15 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       artifacts,
     };
   };
-  /** Which production stages could run again: none here, since everything is saved or still running. */
+  /**
+   * Whether assembling `job` sends paid requests (assembly_paid): the assembly makes the default faces not made yet,
+   * which only the finished character has.
+   */
+  const assemblyPaid = (job) => job.stage !== 'complete';
+  /**
+   * Which production stages could run again: none here, since everything is saved or still running. With every file
+   * saved, a stage costs only what the assembly it leads to costs (avatar_stage_resume).
+   */
   const stages = (job) => {
     const busy = job.stage === 'assemble';
     const reason = busy ? '진행 중인 단계가 끝난 뒤 실행할 수 있습니다.' : '저장된 결과가 있습니다.';
@@ -274,7 +293,7 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
         stage,
         enabled: false,
         reason,
-        paid: stage !== 'assemble',
+        paid: assemblyPaid(job),
       })),
       saved: { images: 1, images_total: 1, models: 1, models_total: 1, rig: !busy },
     };
@@ -332,7 +351,7 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       reason: '서버 설정 필요: OpenAI 키, Meshy 키',
     })),
   };
-  /** The wardrobe's one part: a hat fitted to the hero's body in a job of its own. */
+  /** The wardrobe's first part: a hat fitted to the hero's body in a job of its own. */
   const hatPartEntry = {
     job_id: hex('hat'),
     version: hex('hat:v1'),
@@ -340,11 +359,33 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
     name: 'E2E 빨간 모자',
     character_name: null,
     fit_method: 'uniform-slot-v1',
-    fit_check: null,
+    fit_check: { status: 'pass', failures: [] },
     shape: null,
     sha256: sha256(hat),
     created_at: created(22),
   };
+  /** A hat whose limb check failed: operators see why; members wear it like any other. */
+  const unfitPartEntry = {
+    ...hatPartEntry,
+    job_id: hex('unfit-hat'),
+    version: hex('unfit-hat:v1'),
+    name: 'E2E 뚫는 모자',
+    fit_check: { status: 'fail', failures: ['모자가 머리를 뚫습니다.'] },
+    created_at: created(21),
+  };
+  /** A hat an operator put in the trash: listed for nobody, and its file is served to operators only. */
+  const trashedPartEntry = { ...hatPartEntry, job_id: hex('trashed-hat'), version: hex('trashed-hat:v1'), name: 'E2E 버린 모자' };
+  /** The parts on offer, and one that could not be fitted, which only operators are told of. */
+  const offered = [hatPartEntry, unfitPartEntry];
+  const unfitted = { job_id: hex('loose-hat'), version: hex('loose-hat:v1'), slot: 'hat', name: 'E2E 맞추지 못한 모자', reason: 'fit_exception' };
+  /** The wardrobe parts as `who` may see them (see the header). */
+  const wardrobeParts = (who) =>
+    who.member
+      ? { parts: offered.map((entry) => ({ ...entry, fit_check: null })), unavailable: [] }
+      : { parts: offered, unavailable: [unfitted] };
+  const onOffer = (part) => offered.some((entry) => entry.job_id === part);
+  /** A wardrobe hat's model below /api/. */
+  const partFile = (entry) => `avatar-factory/jobs/${entry.job_id}/native-parts/${entry.version}/hat.glb`;
   const hatPreview = await picture('#e5534b');
   /** The hat is one colour region: its whole surface, in the mask's red channel. */
   const hatMask = await sharp({ create: { width: 64, height: 64, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } })
@@ -365,10 +406,8 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
   const routes = [
     ['avatar-factory/jobs', () => [200, { jobs: jobs.map(record) }]],
     ['avatar-factory/jobs/:job', ({ job }) => job && [200, record(job)]],
-    [
-      `avatar-factory/jobs/${hatPartEntry.job_id}/native-parts/${hatPartEntry.version}/hat.glb`,
-      () => ({ file: hat, type: 'model/gltf-binary' }),
-    ],
+    ...offered.map((entry) => [partFile(entry), () => ({ file: hat, type: 'model/gltf-binary' })]),
+    [partFile(trashedPartEntry), (_params, _query, who) => !who.member && { file: hat, type: 'model/gltf-binary' }],
     [
       'avatar-factory/jobs/:job/artifacts/body-front.png',
       ({ job }) => job && { file: frontOf(job) ?? hero.versions[bodyVersion].front, type: 'image/png' },
@@ -391,9 +430,10 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
     ],
     ['avatar-factory/jobs/:job/native-parts', ({ job }) => job && [200, nativeParts(job)]],
     ['avatar-factory/jobs/:job/stages', ({ job }) => job && [200, stages(job)]],
+    // A recovery is local work; the assembly it hands the job to is what may cost money.
     [
       'avatar-factory/jobs/:job/rig-transfer',
-      ({ job }) => job && [200, { status: 'not_started', can_start: false, recommended_source: null }],
+      ({ job }) => job && [200, { status: 'not_started', can_start: false, recommended_source: null, paid: assemblyPaid(job) }],
     ],
     ['avatar-factory/rig-transfer/sources', () => [200, { items: [] }]],
     ['avatar-factory/capabilities', () => [200, capabilities]],
@@ -426,34 +466,28 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
         200,
         {
           revision: hex('bodies'),
-          bodies: [{ ...wardrobeBody, is_default: true, part_jobs: 0 }],
+          // Registered once: no earlier version of its geometry to answer to.
+          bodies: [{ ...wardrobeBody, is_default: true, part_jobs: offered.length, aliases: [] }],
           default: { job_id: hero.id, version: bodyVersion },
         },
       ],
     ],
     [
       'avatar-factory/wardrobe/bodies/:job/parts',
-      ({ job }) => job === hero && [200, { body: wardrobeBody, parts: [hatPartEntry] }],
+      ({ job }, _query, who) => job === hero && [200, { body: wardrobeBody, ...wardrobeParts(who) }],
     ],
     // A hat hides no skin; its colour is one region.
     [
       'avatar-factory/wardrobe/bodies/:job/coverage/:part/:slot',
-      ({ job, part, slot }) =>
-        job === hero && part === hatPartEntry.job_id && [200, { slot, hidden: {}, triangles: {}, covers_bottom: false }],
+      ({ job, part, slot }) => job === hero && onOffer(part) && [200, { slot, hidden: {}, triangles: {}, covers_bottom: false }],
     ],
     [
       'avatar-factory/wardrobe/colors/:part/:slot',
       ({ part, slot }) =>
-        part === hatPartEntry.job_id && [200, { slot, material: 0, regions: [{ index: 0, color: '#ed4238', share: 1, light: 0.4 }] }],
+        onOffer(part) && [200, { slot, material: 0, regions: [{ index: 0, color: '#ed4238', share: 1, light: 0.4 }] }],
     ],
-    [
-      'avatar-factory/wardrobe/colors/:part/:slot/mask',
-      ({ part }) => part === hatPartEntry.job_id && { file: hatMask, type: 'image/png' },
-    ],
-    [
-      'avatar-factory/wardrobe/previews/:part/:slot',
-      ({ part }) => part === hatPartEntry.job_id && { file: hatPreview, type: 'image/png' },
-    ],
+    ['avatar-factory/wardrobe/colors/:part/:slot/mask', ({ part }) => onOffer(part) && { file: hatMask, type: 'image/png' }],
+    ['avatar-factory/wardrobe/previews/:part/:slot', ({ part }) => onOffer(part) && { file: hatPreview, type: 'image/png' }],
     ['avatar-factory/wardrobe/outfits', () => [200, { revision: '0', outfits: {} }]],
     [
       'studio/catalog',
@@ -516,6 +550,7 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
     if (request.headers['x-api-key'] !== keys.apiKey) return 'no API key';
     if (request.headers['x-gateway-key'] !== keys.gatewayKey) return 'no gateway key';
     if (cookie) return 'a browser cookie';
+    if (tokenless) return authorization ? 'a token this studio cannot check' : null;
     const [header, payload, signature] = authorization.replace(/^Bearer /, '').split('.');
     if (!payload || createHmac('sha256', jwtKey).update(`${header}.${payload}`).digest('base64url') !== signature)
       return 'a bad operator token';
@@ -523,6 +558,14 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
     const valid =
       claims.iss === ISSUER && claims.aud === AUDIENCE && claims.roles?.includes('ADMIN') && claims.exp * 1000 > Date.now();
     return valid ? null : 'operator token claims auth.py would refuse';
+  }
+  /** Who the gateway signed the request for: a member's wardrobe read carries MEMBER next to ADMIN. Without a token
+   * every request is the operator's. */
+  function caller(request) {
+    if (tokenless) return { member: false };
+    const payload = (request.headers.authorization ?? '').replace(/^Bearer /, '').split('.')[1];
+    const roles = JSON.parse(Buffer.from(payload, 'base64url').toString()).roles ?? [];
+    return { member: roles.includes('MEMBER') };
   }
 
   function answer(request, response) {
@@ -556,7 +599,7 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
         return true;
       });
       if (!matches) continue;
-      const result = handle(params, url.searchParams);
+      const result = handle(params, url.searchParams, caller(request));
       if (!result) return send(404, { detail: 'Not Found' });
       if (Array.isArray(result)) return send(result[0], result[1]);
       if (result.redirect)
@@ -586,6 +629,10 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
     problems,
     /** The characters as the admin page names them. */
     names: { hero: hero.name, noWalk: jobs[1].name, unfinished: jobs[2].name },
+    /** The wardrobe parts the header describes: what a member sees of each, and where its file is. */
+    unfit: { name: unfitPartEntry.name, finding: unfitPartEntry.fit_check.failures[0], file: partFile(unfitPartEntry) },
+    trashed: { name: trashedPartEntry.name, file: partFile(trashedPartEntry) },
+    unfitted: { name: unfitted.name },
     reseal(name) {
       const job = jobs.find((candidate) => candidate.name === name);
       const version = hex(`${job.id}:${Object.keys(job.versions).length + 1}`);
@@ -601,12 +648,12 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  const fake = await startFakeCharacterServer({ port: Number(process.argv[2] ?? 0) });
+  const fake = await startFakeCharacterServer({ port: Number(process.argv[2] ?? 0), tokenless: process.argv[3] === 'tokenless' });
   if (process.send) {
     // Forked by scripts/character-e2e.mjs: each message may re-seal a character and is answered with the problems seen
     // so far. It ends with the test.
-    const { url, keys, jwt, names } = fake;
-    process.send({ ready: { url, keys, jwt, names } });
+    const { url, keys, jwt, names, unfit, trashed, unfitted } = fake;
+    process.send({ ready: { url, keys, jwt, names, unfit, trashed, unfitted } });
     process.on('message', ({ id, reseal }) => {
       if (reseal) fake.reseal(reseal);
       process.send({ id, problems: fake.problems });
@@ -616,8 +663,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     console.log(`fake character server at ${fake.url}; run the Rust server with
 FACTORY_URL=${fake.url}
 FACTORY_API_KEY=${fake.keys.apiKey}
-FACTORY_GATEWAY_KEY=${fake.keys.gatewayKey}
-FACTORY_JWT_SECRET=${fake.keys.jwtSecret}`);
+FACTORY_GATEWAY_KEY=${fake.keys.gatewayKey}${fake.keys.jwtSecret ? `
+FACTORY_JWT_SECRET=${fake.keys.jwtSecret}` : ''}`);
     setInterval(() => fake.problems.splice(0).forEach((problem) => console.warn(problem)), 1000);
   }
 }

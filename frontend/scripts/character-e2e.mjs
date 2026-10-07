@@ -6,8 +6,10 @@
 // public as a new version, and a character without a walk clip is refused with a readable reason. That character comes in
 // as a 주민 instead; the member stands it on their island with a greeting, and a visitor reads the greeting through the
 // interact button. The member dresses their character in the wardrobe, and their island (and its live room) wears the
-// look; an island that picked a packaged figure the site no longer ships walks as the fallback. Whatever happens, it
-// stops what it started and drops its database; what a run killed outright leaves, the next run removes.
+// look; an island that picked a packaged figure the site no longer ships walks as the fallback. Last, a second server
+// without FACTORY_JWT_SECRET, in front of a studio without one either (as production runs today), opens the same
+// member's wardrobe all the same. Whatever happens, it stops what it started and drops its database; what a run killed
+// outright leaves, the next run removes.
 // Usage: node scripts/character-e2e.mjs [screenshotDir]   (needs the local PostgreSQL at 127.0.0.1:55432, cargo and Chrome)
 import { fork, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -129,12 +131,20 @@ async function step(id, label, work, needs = []) {
   }
 }
 
-let serverLog = '';
+/** Where each Rust server writes its log. */
+const serverLogs = [];
 /** The throwaway database, for the steps that set up a state the app itself no longer makes. */
 let databaseUrl = '';
 let fake;
+/** The second fake character server, the one without a token (see 'unscoped'). */
+let tokenlessFake;
 let browser;
 let WEB = '';
+/** This run's own folder, and the name of the server binary copied into it. */
+let work = '';
+let exe = '';
+/** The Rust server with FACTORY_JWT_SECRET, which the steps use until 'unscoped'. */
+let keyedServer;
 /** Whether the run with process id `pid` is still going. */
 const running = (pid) => {
   try {
@@ -144,17 +154,24 @@ const running = (pid) => {
     return error.code === 'EPERM';
   }
 };
-/** Watches a helper process: when it dies before the end, that is a problem of its own. */
+/** Watches a helper process: when it dies before the end, that is a problem of its own, unless it was retired. */
 function watch(child, name) {
   cleanups.push(() => stop(child));
-  child.once('exit', (code) => cleaning || problems.push(`${name} exited (${code})`));
+  child.once('exit', (code) => cleaning || child.retired || problems.push(`${name} exited (${code})`));
   return child;
 }
-/** The fake character server in a process of its own, spoken to over IPC. */
-async function startFake() {
+/** Stops a helper process this run is done with. */
+const retire = (child) => {
+  child.retired = true;
+  return stop(child);
+};
+/** The fake character server in a process of its own, spoken to over IPC; `tokenless` as the fake's header says. */
+async function startFake(tokenless = false) {
   const child = watch(
-    fork(join(FRONTEND, 'scripts/e2e/fake-character-server.mjs'), [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] }),
-    'fake character server',
+    fork(join(FRONTEND, 'scripts/e2e/fake-character-server.mjs'), tokenless ? ['0', 'tokenless'] : [], {
+      stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+    }),
+    tokenless ? 'tokenless fake character server' : 'fake character server',
   );
   const replies = new Map();
   const ask = (message) =>
@@ -170,17 +187,81 @@ async function startFake() {
   });
   return { ...ready, reseal: (name) => ask({ reseal: name }), problems: () => ask({}).then((reply) => reply.problems) };
 }
+/** Waits for `url` to answer while `child` still runs. */
+const answers = (url, child, what) =>
+  until(
+    async () => {
+      if (child.exitCode !== null) throw new Error(`${what} exited (${child.exitCode})`);
+      return fetch(url).then(
+        (response) => response.ok,
+        () => false,
+      );
+    },
+    60_000,
+    what,
+  );
+/**
+ * Starts the Rust server built for this run on `port`, for the app at `origin`, with its studio gateway in front of the
+ * fake character server `studio`. A `scoped` server signs studio requests with FACTORY_JWT_SECRET, which narrows a
+ * member's wardrobe read to what members may see; one that is not has no such key, as production has none today.
+ * `admin` makes the test's admin account. Its logs go through this process, so it also stops when this one is killed.
+ */
+function startServer(port, origin, studio, { scoped, admin, log: path, name }) {
+  const env = { ...process.env };
+  for (const key of ['FACTORY_JWT_SECRET', 'FACTORY_JWT_ISSUER', 'FACTORY_JWT_AUDIENCE', 'FACTORY_OWNER_ID', 'BOOTSTRAP_ADMIN_USERNAME', 'BOOTSTRAP_ADMIN_PASSWORD'])
+    delete env[key];
+  Object.assign(env, {
+    DATABASE_URL: databaseUrl,
+    LISTEN_ADDR: `127.0.0.1:${port}`,
+    APP_ORIGIN: origin,
+    COOKIE_SECURE: 'false',
+    REALTIME_TICKET_SECRET: randomBytes(36).toString('base64'),
+    MODEL_STORE: join(work, `models-${port}`),
+    RUST_LOG: 'info',
+    NO_COLOR: '1',
+    FACTORY_URL: studio.url,
+    FACTORY_ACCESS: scoped ? 'write' : 'read',
+    FACTORY_PAID_MONTHLY: '0',
+    FACTORY_API_KEY: studio.keys.apiKey,
+    FACTORY_GATEWAY_KEY: studio.keys.gatewayKey,
+    ...(scoped && {
+      FACTORY_JWT_SECRET: studio.keys.jwtSecret,
+      FACTORY_JWT_ISSUER: studio.jwt.issuer,
+      FACTORY_JWT_AUDIENCE: studio.jwt.audience,
+      FACTORY_OWNER_ID: '1',
+    }),
+    ...(admin && { BOOTSTRAP_ADMIN_USERNAME: ADMIN.username, BOOTSTRAP_ADMIN_PASSWORD: ADMIN.password }),
+  });
+  serverLogs.push(path);
+  const log = createWriteStream(path);
+  cleanups.push(() => new Promise((done) => log.end(done)));
+  const server = spawn(join(work, exe), [], { cwd: work, stdio: ['ignore', 'pipe', 'pipe'], env });
+  server.stdout.pipe(log);
+  server.stderr.pipe(log);
+  return watch(server, name);
+}
+/** This app's dev server on `port` against the Rust server at `api`; `cache` names a dependency cache of its own. Its
+ * stdin is a pipe from here, so it stops when this process goes, however that happens. */
+const startWeb = (port, api, cache, name) =>
+  watch(
+    spawn(process.execPath, [join(FRONTEND, 'scripts/e2e/dev-server.mjs'), String(port), ...(cache ? [cache] : [])], {
+      cwd: FRONTEND,
+      stdio: ['pipe', 'inherit', 'inherit'],
+      env: { ...process.env, SERVER_URL: api },
+    }),
+    name,
+  );
 
 try {
   // Runs killed outright could not clean up: their files and databases carry their process id, and go now.
-  const work = mkdtempSync(join(tmpdir(), `mogaesup-character-e2e-${process.pid}-`));
+  work = mkdtempSync(join(tmpdir(), `mogaesup-character-e2e-${process.pid}-`));
   cleanups.push(() => rmSync(work, { recursive: true, force: true }));
   for (const name of readdirSync(tmpdir())) {
     const pid = Number(/^mogaesup-character-e2e-(\d+)-/.exec(name)?.[1]);
     if (pid && !running(pid)) rmSync(join(tmpdir(), name), { recursive: true, force: true, maxRetries: 2 });
   }
 
-  const exe = process.platform === 'win32' ? 'mogaesup-server.exe' : 'mogaesup-server';
+  exe = process.platform === 'win32' ? 'mogaesup-server.exe' : 'mogaesup-server';
   await setup('Rust server builds', () => run('cargo', ['build', '--quiet'], { cwd: SERVER_DIR }));
   // A copy runs, so cargo can build and test while this runs.
   const target = resolve(SERVER_DIR, process.env['CARGO_TARGET_DIR'] ?? 'target');
@@ -203,68 +284,15 @@ try {
   cleanups.push(() => sql(`${POSTGRES}/postgres`, `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`));
   databaseUrl = `${POSTGRES}/${database}`;
 
-  fake = await setup('fake character server', startFake);
+  fake = await setup('fake character server', () => startFake());
 
   const [apiPort, webPort] = [await freePort(), await freePort()];
   const API = `http://127.0.0.1:${apiPort}`;
   WEB = `http://127.0.0.1:${webPort}`;
-  serverLog = join(work, 'server.log');
-  const log = createWriteStream(serverLog);
-  cleanups.push(() => new Promise((done) => log.end(done)));
-  // Its logs go through this process, so it also stops when this one is killed.
-  const server = spawn(join(work, exe), [], {
-    cwd: work,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      DATABASE_URL: `${POSTGRES}/${database}`,
-      LISTEN_ADDR: `127.0.0.1:${apiPort}`,
-      APP_ORIGIN: WEB,
-      COOKIE_SECURE: 'false',
-      REALTIME_TICKET_SECRET: randomBytes(36).toString('base64'),
-      MODEL_STORE: join(work, 'models'),
-      RUST_LOG: 'info',
-      NO_COLOR: '1',
-      BOOTSTRAP_ADMIN_USERNAME: ADMIN.username,
-      BOOTSTRAP_ADMIN_PASSWORD: ADMIN.password,
-      FACTORY_URL: fake.url,
-      FACTORY_ACCESS: 'write',
-      FACTORY_PAID_MONTHLY: '0',
-      FACTORY_API_KEY: fake.keys.apiKey,
-      FACTORY_GATEWAY_KEY: fake.keys.gatewayKey,
-      FACTORY_JWT_SECRET: fake.keys.jwtSecret,
-      FACTORY_JWT_ISSUER: fake.jwt.issuer,
-      FACTORY_JWT_AUDIENCE: fake.jwt.audience,
-      FACTORY_OWNER_ID: '1',
-    },
-  });
-  server.stdout.pipe(log);
-  server.stderr.pipe(log);
-  watch(server, 'Rust server');
-  /** Waits for `url` to answer while `child` still runs. */
-  const answers = (url, child, what) =>
-    until(
-      async () => {
-        if (child.exitCode !== null) throw new Error(`${what} exited (${child.exitCode})`);
-        return fetch(url).then(
-          (response) => response.ok,
-          () => false,
-        );
-      },
-      60_000,
-      what,
-    );
-  await setup(`Rust server at ${API}`, () => answers(`${API}/api/health`, server, 'the Rust server'));
+  keyedServer = startServer(apiPort, WEB, fake, { scoped: true, admin: true, log: join(work, 'server.log'), name: 'Rust server' });
+  await setup(`Rust server at ${API}`, () => answers(`${API}/api/health`, keyedServer, 'the Rust server'));
 
-  // Its stdin is a pipe from here, so it stops when this process goes, however that happens.
-  const vite = watch(
-    spawn(process.execPath, [join(FRONTEND, 'scripts/e2e/dev-server.mjs'), String(webPort)], {
-      cwd: FRONTEND,
-      stdio: ['pipe', 'inherit', 'inherit'],
-      env: { ...process.env, SERVER_URL: API },
-    }),
-    'web dev server',
-  );
+  const vite = startWeb(webPort, API, '', 'web dev server');
   await setup(`web dev server at ${WEB}`, () => answers(WEB, vite, 'the web dev server'));
 
   browser = await chromium.launch({ channel: 'chrome', args: ['--enable-unsafe-webgpu', '--enable-gpu',
@@ -307,10 +335,21 @@ const worldReady = (page) =>
     timeout: WORLD_READY_MS,
     polling: 250,
   });
-const shoot = (page, name) => page.screenshot({ ...SCREENSHOT, path: join(SHOTS, `${name}.jpg`) });
-async function json(page, path) {
-  const response = await page.request.get(`${WEB}${path}`);
-  if (!response.ok()) throw new Error(`GET ${path} answered ${response.status()}`);
+/** A new member's first visit to their island opens 섬 고르기; closing it keeps (and saves) the forest island. */
+async function closeChooser(page) {
+  const chooser = page.getByRole('dialog', { name: '섬 고르기' });
+  try {
+    await chooser.waitFor({ timeout: 15_000 });
+  } catch {
+    return;
+  }
+  await chooser.getByRole('button', { name: '닫기', exact: true }).click();
+  await chooser.waitFor({ state: 'detached' });
+}
+const shoot =(page, name) => page.screenshot({ ...SCREENSHOT, path: join(SHOTS, `${name}.jpg`) });
+async function json(page, path, site = WEB) {
+  const response = await page.request.get(`${site}${path}`);
+  if (!response.ok()) throw new Error(`GET ${site}${path} answered ${response.status()}`);
   return response.json();
 }
 /** Whether a picture loads (the page swaps a broken one for an emoji); lazy ones are scrolled to first. */
@@ -352,6 +391,15 @@ async function importFrom(card, button) {
   );
 }
 const levels = (report, level) => (report?.checks ?? []).filter((check) => check.level === level);
+/** Fails when a member's wardrobe shows what only operators see: fit findings, or the parts that could not be fitted. */
+async function operatorOnly(page, studio) {
+  const shown = await Promise.all([
+    page.locator('.wardrobe-card-fit, .wardrobe-unfit').count(),
+    page.getByText(studio.unfit.finding).count(),
+    page.getByText(studio.unfitted.name).count(),
+  ]);
+  if (shown.some(Boolean)) throw new Error('a member sees what only operators see');
+}
 
 if (browser) {
   const { names } = fake;
@@ -479,6 +527,7 @@ if (browser) {
     await member.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
     await member.waitForURL(`**/@${MEMBER.username}`);
     await worldReady(member);
+    await closeChooser(member);
   });
 
   await step(
@@ -580,6 +629,16 @@ if (browser) {
       }
       const direct = await member.request.get(`${WEB}/api/avatar-factory/jobs`);
       if (direct.status() !== 403) throw new Error(`a member reading the studio jobs got ${direct.status()}`);
+      // Every part on offer reaches a member, one that failed its limb check too, without what only operators see; a
+      // part in the trash is neither offered to a member nor served to one.
+      await member.goto(`${WEB}/character`);
+      for (const name of [HAT, fake.unfit.name]) await member.locator('.wardrobe-card', { hasText: name }).waitFor({ timeout: 60_000 });
+      await operatorOnly(member, fake);
+      const unfit = await member.request.get(`${WEB}/api/${fake.unfit.file}`);
+      if (!unfit.ok()) throw new Error(`a member could not download a part on offer (${unfit.status()})`);
+      if (await member.locator('.wardrobe-card', { hasText: fake.trashed.name }).count()) throw new Error('a member is offered a part in the trash');
+      const trashed = await member.request.get(`${WEB}/api/${fake.trashed.file}`);
+      if (trashed.ok()) throw new Error(`a member downloaded a part in the trash (${trashed.status()})`);
       return `renderer ${renderer}`;
     },
     ['member'],
@@ -648,6 +707,7 @@ if (browser) {
     await page.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
     await page.waitForURL(`**/@${who.username}`);
     await worldReady(page);
+    await closeChooser(page);
   };
   /** Response statuses of every load of `path` on the page so far. */
   const loads = (page, path) =>
@@ -840,19 +900,66 @@ if (browser) {
     },
     ['member'],
   );
+
+  await step(
+    'unscoped',
+    'a server without FACTORY_JWT_SECRET still opens the wardrobe to a member, without what only operators see',
+    async () => {
+      // The site says whose view a member's wardrobe read gets: scoped with the key, the operator's without.
+      const keyed = await json(admin, '/api/catalog/admin/factory-usage');
+      if (keyed.memberScope !== true) throw new Error(`with the key, factory usage says memberScope ${keyed.memberScope}`);
+      // The same site on spare ports: a fake studio without JWT_SECRET, and a server without the key in front of it, on
+      // the same database, so the member's session (cookies are not kept apart by port) signs them in there too. A
+      // database takes one server at a time, so the keyed one, done with, steps aside, with no page left open on it.
+      await Promise.all([member.goto('about:blank'), admin.goto('about:blank')]);
+      await retire(keyedServer);
+      // The next server may start once the keyed one's session, and the lock it held on the database, are gone.
+      const locks = "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
+      await until(async () => (await sql(databaseUrl, locks))[0]?.[0] === '0', 30_000, 'the keyed server letting go of the database');
+      tokenlessFake = await startFake(true);
+      const [apiPort, webPort] = [await freePort(), await freePort()];
+      const api = `http://127.0.0.1:${apiPort}`;
+      const web = `http://127.0.0.1:${webPort}`;
+      const server = startServer(apiPort, web, tokenlessFake, {
+        scoped: false,
+        admin: false,
+        log: join(work, 'server-unscoped.log'),
+        name: 'Rust server without FACTORY_JWT_SECRET',
+      });
+      await answers(`${api}/api/health`, server, 'the Rust server without FACTORY_JWT_SECRET');
+      await answers(web, startWeb(webPort, api, 'unscoped', 'second web dev server'), 'the second web dev server');
+      // Its gateway sends a member's reads on as the operator's: the studio answers with every finding, and the page
+      // shows a member none of them.
+      await member.goto(`${web}/character`);
+      await member
+        .getByRole('button', { name: 'walk', exact: true })
+        .and(member.locator(':enabled'))
+        .waitFor({ timeout: 60_000 });
+      for (const name of [HAT, tokenlessFake.unfit.name])
+        await member.locator('.wardrobe-card', { hasText: name }).waitFor({ timeout: 60_000 });
+      const alerts = await member.locator('.wardrobe [role=alert]').allInnerTexts();
+      if (alerts.length) throw new Error(`the wardrobe shows ${alerts.join(' / ')}`);
+      await operatorOnly(member, tokenlessFake);
+      const unscoped = await json(admin, '/api/catalog/admin/factory-usage', web);
+      if (unscoped.memberScope !== false) throw new Error(`without the key, factory usage says memberScope ${unscoped.memberScope}`);
+      await shoot(member, 'member-wardrobe-unscoped');
+    },
+    ['wardrobe', 'admin'],
+  );
 }
 
-if (fake) problems.push(...(await fake.problems().catch((error) => [`fake character server: ${error.message}`])));
+for (const [name, studio] of [['fake character server', fake], ['tokenless fake character server', tokenlessFake]])
+  if (studio) problems.push(...(await studio.problems().catch((error) => [`${name}: ${error.message}`])));
 const unexpected = problems.filter((problem) => !/favicon|DevTools/.test(problem));
-if (unexpected.length && serverLog) {
+for (const path of unexpected.length ? serverLogs : []) {
   const tail = (() => {
     try {
-      return readFileSync(serverLog, 'utf8').trim().split('\n').slice(-25).join('\n');
+      return readFileSync(path, 'utf8').trim().split('\n').slice(-25).join('\n');
     } catch {
       return '';
     }
   })();
-  if (tail) console.log(`\nRust server log (last lines):\n${tail}`);
+  if (tail) console.log(`\nRust server log ${path} (last lines):\n${tail}`);
 }
 await cleanup();
 const seconds = Math.round((Date.now() - began) / 1000);

@@ -17,7 +17,7 @@ import { ModelViewer } from '../viewer';
 import type { Tuck } from '../native-wardrobe';
 import { createHeldLoads } from './held-loads';
 import { PartPreview } from './PartPreview';
-import { fitReason, reshapable, unfittedParts, wearableParts } from './wardrobe-view';
+import { fitFailures, fitReason, onBody, partsOf, reshapable, unfittedParts } from './wardrobe-view';
 import { WardrobeShape } from './WardrobeShape';
 import { EDITABLE_PARTS, isDefaultPartEdit, type PartEdit } from '../part-edit';
 import { PartEditControls } from './PartEditControls';
@@ -104,7 +104,7 @@ export default function Wardrobe() {
     library.setValue(value);
     return value.parts;
   }, [body?.job_id, body?.version, body?.body_sha256, library.setValue]);
-  const parts = libraryMatchesBody ? wearableParts(library.value!.parts, admin) : [];
+  const parts = libraryMatchesBody ? library.value!.parts : [];
   const unfitted = libraryMatchesBody ? unfittedParts(library.value!.unavailable, admin) : [];
   const slots = slotOrder.filter(slot => parts.some(part => part.slot === slot));
   const [slot, setSlot] = useState('hair');
@@ -193,7 +193,7 @@ export default function Wardrobe() {
     setViewer(null); setModelError(''); setClips([]); applied.current = {}; setWorn({}); setAppliedKey(''); setFixedSlots([]); setNotice(''); setPartEdits({}); setEditError('');
     if (!body || !mount.current) return;
     let active = true;
-    const instance = new ModelViewer(mount.current, 'studio');
+    const instance = new ModelViewer(mount.current, 'studio', { onFailure: reason => { if (active) setModelError(reason.message); } });
     void instance.load(wardrobeUrls.body(body), { sha256: body.body_sha256, wardrobe: true }).then(value => {
       if (!active) return;
       setClips(value); instance.play(-1); setMotion(-1); setViewer(instance);
@@ -291,24 +291,20 @@ export default function Wardrobe() {
     }
   }, [appliedKey, coverages, editedKey, viewer]);
 
+  /** Wears a saved look or outfit: each part the wardrobe offers, with its edit and colours. A part it no longer offers
+   * (put in the trash, or its job gone) is left off and named, and the rest is worn all the same. */
   function applyOutfit(outfit: PreviewOutfit, listed: WardrobePart[]) {
-    const next: Worn = {};
     const slots = compatiblePartSlots(Object.keys(outfit.parts));
-    for (const [slotName, ref] of Object.entries(outfit.parts)) {
-      if (!slots.includes(slotName)) continue;
-      const part = listed.find(item => item.slot === slotName && item.job_id === ref.job_id && item.version === ref.version && item.sha256 === ref.sha256)
-        // A refit gives the job a new version; its current part in that slot is the same part refitted.
-        || listed.find(item => item.slot === slotName && item.job_id === ref.job_id);
-      if (!part) { setWearError(`${labels[slotName] || slotName} 파츠를 옷장에서 찾을 수 없어요.`); return; }
-      next[slotName] = part;
-    }
+    const { worn: next, missing } = partsOf(outfit.parts, slots, listed);
     setWearError(''); setWorn(next); setHairColor(outfit.hair_color || null);
     setPartEdits(Object.fromEntries(Object.entries(next).flatMap(([slotName, part]) => {
       const edit = outfit.partEdits?.[slotName], ref = outfit.parts[slotName];
       return edit && ref && part.version === ref.version && part.sha256 === ref.sha256 ? [[keyOf(part, slotName), edit]] : [];
     })));
     const removed = Object.keys(outfit.parts).filter(slot => !slots.includes(slot));
-    setNotice(removed.length ? `겹치는 머리 파츠를 벗겼어요: ${removed.map(slot => labels[slot] || slot).join(', ')}` : '');
+    const named = (list: string[]) => list.map(slot => labels[slot] || slot).join(', ');
+    setNotice([removed.length ? `겹치는 머리 파츠를 벗겼어요: ${named(removed)}` : '',
+      missing.length ? `옷장에 없는 파츠는 빼고 입혔어요: ${named(missing)}` : ''].filter(Boolean).join(' · '));
     setColors(current => {
       const updated = { ...current };
       Object.entries(next).forEach(([slotName, part]) => {
@@ -356,18 +352,19 @@ export default function Wardrobe() {
   }, [appliedKey, partEdits, coverages, viewer]);
   // An outfit on another body is worn once that body and its parts have loaded. Restoring the saved look ends there, and
   // also when the bodies, the body's model or its parts fail to load: the screen opens and shows the error, and the
-  // saved look still goes on once a retry brings what was missing.
+  // saved look still goes on once a retry brings what was missing. One saved on an earlier version of the same geometry
+  // (an alias) is on the body as it is now.
   useEffect(() => {
     const outfit = pendingOutfit.current;
     const restored = () => { if (restoreLook.current) { restoreLook.current = false; setLookReady(true); } };
-    if (outfit && bodies.value && !registered.some(item => item.job_id === outfit.body.job_id && item.version === outfit.body.version)) {
+    if (outfit && bodies.value && !registered.some(item => onBody(item, outfit.body))) {
       pendingOutfit.current = null; restored();
       setWearError('저장된 몸 버전을 옷장에서 찾을 수 없어요.'); return;
     }
     if (modelError || (!libraryMatchesBody && library.error) || (!bodies.value && bodies.error)) restored();
-    if (!outfit || !viewer || !body || outfit.body.job_id !== body.job_id || outfit.body.version !== body.version || !libraryMatchesBody) return;
+    if (!outfit || !viewer || !body || !onBody(body, outfit.body) || !libraryMatchesBody) return;
     pendingOutfit.current = null;
-    applyOutfit(outfit, library.value!.parts);
+    applyOutfit(outfit, parts);
     restored();
   }, [viewer, library.value, libraryMatchesBody, body?.job_id, body?.version, bodies.value, look?.request, modelError, library.error, bodies.error]);
 
@@ -395,8 +392,8 @@ export default function Wardrobe() {
     const outfit = outfits.value?.outfits[id];
     if (!outfit) return;
     setLoadedId(id); setOutfitName(outfit.name);
-    if (body && outfit.body.job_id === body.job_id && outfit.body.version === body.version) applyOutfit(outfit, parts);
-    else if (registered.some(item => item.job_id === outfit.body.job_id && item.version === outfit.body.version)) { pendingOutfit.current = outfit; setBodyId(outfit.body.job_id); }
+    if (body && onBody(body, outfit.body)) applyOutfit(outfit, parts);
+    else if (registered.some(item => onBody(item, outfit.body))) { pendingOutfit.current = outfit; setBodyId(outfit.body.job_id); }
     else setWearError('이 조합의 옷장 몸이 등록돼 있지 않거나 버전이 바뀌었어요.');
   }
   async function saveOutfit() {
@@ -498,7 +495,7 @@ export default function Wardrobe() {
         <div className="meshy-scene wardrobe-scene" ref={mount} />
         <div className="meshy-clips"><button disabled={!viewer} aria-pressed={motion === -1} onClick={() => { viewer?.play(-1); setMotion(-1); }}>기본 자세</button>
           {clips.map(clip => <button key={clip.index} disabled={!viewer} aria-pressed={motion === clip.index} onClick={() => { viewer?.play(clip.index); setMotion(clip.index); }}>{clip.name}</button>)}</div>
-        {worn.hair && <div className="wardrobe-hair-color"><label>헤어 색상<input type="color" value={hairColor || '#8a7998'} onChange={event => setHairColor(event.target.value)} /></label>
+        {hairSlots.some(slotName => worn[slotName]) && <div className="wardrobe-hair-color"><label>헤어 색상<input type="color" value={hairColor || '#8a7998'} onChange={event => setHairColor(event.target.value)} /></label>
           <span>{hairColor || '원래 색'}</span><button type="button" onClick={() => setHairColor(null)}>원래 색</button></div>}
         {(!viewer || wearing) && !modelError && !(bodies.error && !body) && <p role="status">{viewer ? '파츠를 입히는 중…' : '옷장 몸을 불러오는 중…'}</p>}
         {bodies.error && <p role="alert">{bodies.error} <button type="button" onClick={() => void bodies.refresh()}>몸 목록 다시 불러오기</button></p>}
@@ -522,7 +519,7 @@ export default function Wardrobe() {
             <strong>{part.name}</strong>
             {/* Where a part came from and how it was fitted matter to operators, not to someone dressing up. */}
             {admin && <small>{[part.character_name !== part.name ? part.character_name : '', methodLabels[part.fit_method || ''] || ''].filter(Boolean).join(' · ')}</small>}
-            {admin && part.fit_check?.status === 'fail' && <small className="wardrobe-card-fit">{part.fit_check.failures.join(' · ')}</small>}
+            {fitFailures(part, admin).length > 0 && <small className="wardrobe-card-fit">{fitFailures(part, admin).join(' · ')}</small>}
           </button>;
         })}</div>
         {unfitted.length > 0 && <ul className="wardrobe-unfit">{unfitted.map(item => <li key={keyOf(item, item.slot)}>

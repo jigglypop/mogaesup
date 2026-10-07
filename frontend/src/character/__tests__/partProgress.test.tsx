@@ -43,4 +43,15 @@ describe('파츠 수신 현황의 피팅 복구', () => {
     expect(button(container, '기존 모델 위치·크기 맞추기')).toBeDefined();
     await unmount();
   });
+
+  it('복구를 누르기 전에 다른 탭이 그 피팅을 처리했으면 보내지 않고 화면만 다시 그린다', async () => {
+    localStorage.setItem(STORAGE, JSON.stringify({ key: 'lost-key', input: { source_version: 'v1', slot: 'top' } }));
+    const { container, unmount } = await mount(<PartProgress job={job} busy={false} retryImage={async () => undefined} />);
+    localStorage.removeItem(STORAGE);
+    await act(async () => button(container, '같은 피팅 요청 복구')!.click());
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(container.querySelector('[role=alert]')).toBeNull();
+    expect(button(container, '같은 피팅 요청 복구')).toBeUndefined();
+    await unmount();
+  });
 });

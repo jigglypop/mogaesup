@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { reportStudio } from '../../api/studioSleep';
-import { sessionLapsed, setSessionOwner } from '../../auth/sessionWork';
+import { renewedElsewhere, sessionLapsed, setSessionOwner } from '../../auth/sessionWork';
 import { request } from '../api';
 
 const answer = (status: number, body?: unknown) =>
@@ -39,6 +39,20 @@ describe('스튜디오 요청이 실패했을 때 화면에 닿는 문장', () =
       fetchMock.mockResolvedValueOnce(answer(401, { code: 'login_required', message: '로그인이 필요해요' }));
       expect(await messageOf(request('/api/avatar-factory/wardrobe/bodies'))).toBe('로그인이 필요해요');
       expect(sessionLapsed()).toBe(true);
+    } finally { setSessionOwner(null); }
+  });
+
+  it('세션을 새 쿠키로 바꾼 뒤 옛 쿠키로 간 요청이 거절되면 로그인이 풀렸다고 하지 않는다', async () => {
+    setSessionOwner('u1');
+    try {
+      let reply!: (response: Response) => void;
+      fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (reply = resolve)));
+      const sent = messageOf(request('/api/avatar-factory/wardrobe/bodies'));
+      // Another tab changed the password: this page sends the new cookie from now on.
+      renewedElsewhere();
+      reply(answer(401, { code: 'login_required', message: '로그인이 필요해요' }));
+      expect(await sent).toBe('잠시 후 다시 시도해 주세요.');
+      expect(sessionLapsed()).toBe(false);
     } finally { setSessionOwner(null); }
   });
 

@@ -3,6 +3,7 @@ import type { FactoryJob } from '../factory/api';
 import type { BodyType } from './base-bodies-api';
 import { GlbUpload } from './GlbUpload';
 import { glbBodiesApi, glbRecovery, readGlbDraft, type GlbBodyDraft } from './glb-bodies-api';
+import { useSavedRequests } from '../use-saved-requests';
 
 type Props = { bodyType: BodyType;
   onJob: (job: FactoryJob) => void; refreshJobs: () => Promise<unknown>; onBusy: (busy: boolean) => void };
@@ -12,6 +13,7 @@ export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
   const [busy, setBusy] = useState(false), [checking, setChecking] = useState(!!draft.asset);
   const [error, setError] = useState(''), [notice, setNotice] = useState('');
   const locked = useRef(false);
+  const gone = useSavedRequests();
   const recovery = glbRecovery(bodyType), pending = recovery.pending;
   const disabled = busy || checking || !!pending || !!recovery.error;
   const input = pending?.input;
@@ -46,14 +48,18 @@ export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
     if (locked.current || (!pending && !draft.asset)) return;
     locked.current = true; setBusy(true); setError(''); setNotice('');
     try {
-      const job = await glbBodiesApi.create(pending?.input || {
+      // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
+      const job = pending ? await glbBodiesApi.recover(bodyType, pending.key) : await glbBodiesApi.create({
         name: draft.name.trim(), body_type: bodyType, model_asset: draft.asset!.id,
         import_mode: draft.import_mode, generate_motions: mode === 'rig' && draft.generate_motions,
         prepare_expression_uv: mode === 'rig' && draft.prepare_expression_uv,
       });
       onJob(job); setNotice('GLB 등록 작업을 접수했습니다.');
       await refreshJobs();
-    } catch (reason) { setError((reason as Error).message); }
+    } catch (reason) {
+      if (gone(reason)) void refreshJobs();
+      else setError((reason as Error).message);
+    }
     finally { locked.current = false; setBusy(false); }
   }
   return <div className="base-body-glb">

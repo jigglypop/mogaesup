@@ -1,4 +1,4 @@
-import { request, savedRequest } from '../api';
+import { request, savedRequest, type Pending } from '../api';
 import type { FactoryJob } from '../factory/api';
 import type { BodyType } from './base-bodies-api';
 
@@ -26,14 +26,18 @@ export function readGlbDraft(type: BodyType): GlbBodyDraft {
   } catch { return fallback; }
 }
 
+const postGlbBody = (pending: Pending<GlbBodyInput>) => request<FactoryJob>('/api/avatar-factory/base-bodies/glb', {
+  method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+  body: JSON.stringify(pending.input), timeoutMs: 60000,
+});
+
 export const glbBodiesApi = {
   saveDraft: (type: BodyType, draft: GlbBodyDraft) => localStorage.setItem(draftKey(type), JSON.stringify(draft)),
   info: (id: string, signal?: AbortSignal) => request<BodyGlbAsset>(`/api/avatar-factory/base-bodies/glb-assets/${encodeURIComponent(id)}`, { signal }),
   upload: (file: File) => request<BodyGlbAsset>('/api/avatar-factory/base-bodies/glb-assets', {
     method: 'POST', headers: { 'Content-Type': 'model/gltf-binary' }, body: file, timeoutMs: 120000,
   }),
-  create: (input: GlbBodyInput) => glbBodies(input.body_type).send(input, pending => request<FactoryJob>('/api/avatar-factory/base-bodies/glb', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-    body: JSON.stringify(pending.input), timeoutMs: 60000,
-  })),
+  create: (input: GlbBodyInput) => glbBodies(input.body_type).send(input, postGlbBody),
+  /** Sends the saved request under `key` again as itself; nothing when it is no longer saved (SavedRequestGone). */
+  recover: (type: BodyType, key: string) => glbBodies(type).resume(key, postGlbBody),
 };

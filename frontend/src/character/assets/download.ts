@@ -1,5 +1,8 @@
-/** How long a model request waits for the server to answer, and then for each next piece of the file. */
-export const ANSWER_TIMEOUT_MS = 20_000;
+import { DEFAULT_TIMEOUT_MS } from '../../api/client';
+
+/** How long a model request waits for the server to answer (as long as any API request: the app server may hold a
+ * member's download for its turn and the character server's first byte), and then for each next piece of the file. */
+export const ANSWER_TIMEOUT_MS = DEFAULT_TIMEOUT_MS;
 export const STALL_TIMEOUT_MS = 20_000;
 
 const timeout = () => new DOMException('The download stopped arriving in time', 'TimeoutError');

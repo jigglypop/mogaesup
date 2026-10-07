@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError } from '../api';
+import { ApiError, SavedRequestGone } from '../api';
 import { factoryApi } from '../factory/api';
 
 const CHARACTER = 'char-1';
@@ -97,6 +97,18 @@ describe('이미지 생성 요청 기록', () => {
     await expect(factoryApi.produceImage(input({ slots: ['hat'] }), 'other-key')).rejects.toThrow('저장된 이미지 생성 요청이 있습니다');
     expect(fetchMock).not.toHaveBeenCalled();
     expect(stored()).toEqual(saved);
+  });
+
+  it('복구 버튼을 누르기 전에 다른 탭이 그 요청을 처리했으면 새 키로 다시 생산하지 않는다', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await factoryApi.produceImage(input()).catch(() => undefined);
+    const saved = stored()!;
+    // The other tab had the answer and settled it.
+    localStorage.removeItem(STORAGE);
+    fetchMock.mockClear();
+    await expect(factoryApi.produceImage(saved.input, saved.key)).rejects.toBeInstanceOf(SavedRequestGone);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stored()).toBeNull();
   });
 
   it('서버가 확실히 거절하면 기록을 지워 다음 요청을 막지 않는다', async () => {

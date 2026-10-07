@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isDefinitiveRejection } from '../api';
 import { usePolling } from '../use-polling';
+import { useSavedRequests } from '../use-saved-requests';
 import { factoryApi, type RigTransferInput, type RigTransferSource } from './api';
 import './meshy-motion.css';
 
@@ -24,12 +25,22 @@ function readPending(storage: string): { pending: Pending | null; error: string 
 export const RIG_TRANSFER_POLL_MS = 5000;
 const underWay = (status?: string) => status === 'accepted' || status === 'running';
 
+type Props = { jobId: string; onComplete?: () => void; refreshKey?: string };
+
 /**
  * Recovering a body's rig from a saved one. It asks every 5 s only while a transfer is under way and the tab is in view;
  * otherwise it reads again when the job it belongs to changes (`refreshKey`), the tab comes back or the connection does.
+ * Another job starts afresh: no skeleton chosen or completion told for the last one carries over.
  */
-export function RigRecovery({ jobId, onComplete, refreshKey }: { jobId: string; onComplete?: () => void; refreshKey?: string }) {
+export function RigRecovery(props: Props) {
+  return <JobRigRecovery key={props.jobId} {...props} />;
+}
+
+function JobRigRecovery({ jobId, onComplete, refreshKey }: Props) {
   const storage = `gaesup.rig-transfer:${jobId}`;
+  // Renders again when another tab saves or settles the request; the click reads storage again too.
+  useSavedRequests();
+  const [, rerender] = useState(0);
   const read = useCallback((signal: AbortSignal) => factoryApi.rigTransfer(jobId, signal), [jobId]);
   const polling = usePolling(read, value => underWay(value?.status) ? RIG_TRANSFER_POLL_MS : null), state = polling.value;
   const seenKey = useRef(refreshKey);
@@ -69,19 +80,25 @@ export function RigRecovery({ jobId, onComplete, refreshKey }: { jobId: string; 
     if (state.status === 'complete' && !notified.current) { notified.current = true; onComplete?.(); }
   }, [state?.status, state?.id, state?.request_key, storage, onComplete]);
 
+  /** Forgets the saved request only while it is still the one under `key` (another tab may have saved another). */
+  function settle(key: string) { if (readPending(storage).pending?.key === key) localStorage.removeItem(storage); }
   async function start() {
     if (submitted.current || recovered.error) return;
+    const saved = readPending(storage);
+    // A recovery sends the request it showed, under its key; once another tab has settled it nothing is sent.
+    if (saved.error || (pending && saved.pending?.key !== pending.key)) { rerender(count => count + 1); void polling.refresh(); return; }
+    // A request another tab saved since this one was drawn is sent under its own key, never written over by a new one.
     const selectedSource = sources?.find(item => `${item.job_id}:${item.version}` === selected);
-    const request = pending || (selectedSource ? { key: crypto.randomUUID(), input: { source_job_id: selectedSource.job_id, source_version: selectedSource.version } } : null);
+    const request = saved.pending || (selectedSource ? { key: crypto.randomUUID(), input: { source_job_id: selectedSource.job_id, source_version: selectedSource.version } } : null);
     if (!request) return;
     submitted.current = true; setBusy(true); setSubmitError('');
     try {
       localStorage.setItem(storage, JSON.stringify(request));
       const result = await factoryApi.startRigTransfer(jobId, request.input, request.key);
       polling.setValue(result);
-      if (result.request_key === request.key && ['running', 'paused', 'complete'].includes(result.status)) localStorage.removeItem(storage);
+      if (result.request_key === request.key && ['running', 'paused', 'complete'].includes(result.status)) settle(request.key);
     } catch (error) {
-      if (isDefinitiveRejection(error)) localStorage.removeItem(storage);
+      if (isDefinitiveRejection(error)) settle(request.key);
       setSubmitError((error as Error).message);
     } finally { submitted.current = false; setBusy(false); }
   }
@@ -93,6 +110,8 @@ export function RigRecovery({ jobId, onComplete, refreshKey }: { jobId: string; 
   const source = pending ? `${pending.input.source_job_id}:${pending.input.source_version}` : selected;
   const usingRecommended = !!recommendedKey && source === recommendedKey;
   const status = state.status === 'accepted' ? '복구 대기' : state.status === 'running' ? '골격·동작 이전 중' : state.status === 'paused' ? '복구 중단' : '';
+  // The assembly after a recovery makes the default expressions, which is paid work; a server that does not say is paid.
+  const cost = state.paid === false ? '' : ' · 유료 작업 포함';
   return <section className="rig-recovery" aria-label="저장된 골격 복구">
     <h3>저장된 골격으로 리깅 복구</h3>
     {state.can_start && !pending && <label>복구할 골격<select value={source} disabled={busy || !sources?.length} onChange={event => setSelected(event.target.value)}>{sources?.map(item => {
@@ -100,7 +119,7 @@ export function RigRecovery({ jobId, onComplete, refreshKey }: { jobId: string; 
       return <option key={key} value={key}>{item.name} · {item.job_id.slice(0, 8)}{key === recommendedKey ? ' · 권장' : ''}</option>;
     })}</select></label>}
     {pending && <p>{pending.input.source_job_id.slice(0, 8)} · 저장된 요청</p>}
-    {(state.can_start || pending) && <button disabled={busy || !!recovered.error || (!pending && !sources?.length)} onClick={() => void start()}>{busy ? '복구 접수 중…' : pending && state.status === 'accepted' ? '접수된 복구 이어가기' : pending ? '저장된 골격 복구 결과 확인' : usingRecommended ? '권장 골격으로 복구 · 유료 생성 없음' : '선택한 골격으로 복구 · 유료 생성 없음'}</button>}
+    {(state.can_start || pending) && <button disabled={busy || !!recovered.error || (!pending && !sources?.length)} onClick={() => void start()}>{busy ? '복구 접수 중…' : pending && state.status === 'accepted' ? '접수된 복구 이어가기' : pending ? '저장된 골격 복구 결과 확인' : usingRecommended ? `권장 골격으로 복구${cost}` : `선택한 골격으로 복구${cost}`}</button>}
     {state.status !== 'not_started' && <p role="status">{status}{state.source_job_id ? ` · ${state.source_job_id}` : ''}</p>}
     {sources === undefined && state.can_start && !sourceError && <p role="status">저장된 골격 불러오는 중…</p>}
     {sources?.length === 0 && state.can_start && <p>재사용할 저장 골격이 없습니다.</p>}

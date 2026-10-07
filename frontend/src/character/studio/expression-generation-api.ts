@@ -1,4 +1,4 @@
-import { request, savedRequest } from '../api';
+import { request, savedRequest, type Pending } from '../api';
 import { expressionNames, type ExpressionName } from '../texture-expressions';
 
 export type ExpressionGenerationName = ExpressionName;
@@ -63,6 +63,19 @@ const answered = (result: { request_key: string }, key: string) => result.reques
 const endpoint = (job: string, version: string) => `/api/studio/bodies/${encodeURIComponent(job)}/${encodeURIComponent(version)}/expression-generations`;
 const referenceEndpoint = (job: string, version: string) => `/api/studio/bodies/${encodeURIComponent(job)}/${encodeURIComponent(version)}/expression-reference`;
 
+const postGeneration = (job: string, version: string) => (pending: Pending<ExpressionGenerationInput>) =>
+  request<ExpressionGeneration>(endpoint(job, version), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+    body: JSON.stringify(pending.input),
+    timeoutMs: 60000,
+  });
+const postBatch = (job: string, version: string) => (pending: Pending<ExpressionBatchInput>) =>
+  request<ExpressionBatch>(`${endpoint(job, version)}/batch`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+    body: JSON.stringify(pending.input), timeoutMs: 60000,
+  });
+
 export const expressionGenerationApi = {
   async list(job: string, version: string, signal?: AbortSignal) {
     const result = await request<ExpressionGenerationList>(endpoint(job, version), { signal });
@@ -80,21 +93,18 @@ export const expressionGenerationApi = {
   saveReference: (job: string, version: string, assets: string[], revision: string) => request<ExpressionReference>(referenceEndpoint(job, version), {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assets, revision }),
   }),
-  create: (job: string, version: string, input: ExpressionGenerationInput) => expressionGenerations(job, version).send(input, pending =>
-    request<ExpressionGeneration>(endpoint(job, version), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-      body: JSON.stringify(pending.input),
-      timeoutMs: 60000,
-    }), { answered }),
+  create: (job: string, version: string, input: ExpressionGenerationInput) =>
+    expressionGenerations(job, version).send(input, postGeneration(job, version), { answered }),
+  /** Sends the saved request under `key` again as itself; nothing when it is no longer saved (SavedRequestGone). */
+  recover: (job: string, version: string, key: string) =>
+    expressionGenerations(job, version).resume(key, postGeneration(job, version), { answered }),
   resume: (job: string, version: string, id: string) => request<ExpressionGeneration>(
     `${endpoint(job, version)}/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 },
   ),
-  createBatch: (job: string, version: string, input: ExpressionBatchInput) => expressionBatches(job, version).send(input, pending =>
-    request<ExpressionBatch>(`${endpoint(job, version)}/batch`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-      body: JSON.stringify(pending.input), timeoutMs: 60000,
-    }), { answered }),
+  createBatch: (job: string, version: string, input: ExpressionBatchInput) =>
+    expressionBatches(job, version).send(input, postBatch(job, version), { answered }),
+  recoverBatch: (job: string, version: string, key: string) =>
+    expressionBatches(job, version).resume(key, postBatch(job, version), { answered }),
   resumeBatch: (job: string, version: string, id: string) => request<ExpressionBatch>(
     `${endpoint(job, version)}/batch/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 },
   ),

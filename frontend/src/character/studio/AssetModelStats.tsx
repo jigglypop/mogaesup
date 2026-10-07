@@ -27,7 +27,7 @@ function read(url: string, key: string, sha: string | undefined, signal: AbortSi
     queue.push(async () => {
       try {
         signal.throwIfAborted();
-        const result = cache.get(key) || await request<Stats>(url, { signal, timeoutMs: 30000 });
+        const result = cache.get(key) || await request<Stats>(url, { signal });
         if (sha && result.expected_sha256 !== sha) throw new Error('모델이 변경되었습니다. 목록을 새로 불러와 주세요.');
         if (cache.size >= 256) cache.delete(cache.keys().next().value!);
         cache.set(key, result);
