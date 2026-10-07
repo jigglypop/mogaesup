@@ -1,0 +1,14 @@
+[
+  { "id": "glass", "label": "기본", "accent": null },
+  { "id": "cloud", "label": "구름", "accent": "#4f9fd8" },
+  { "id": "candy", "label": "말랑", "accent": "#e8799c" },
+  { "id": "mint", "label": "민트", "accent": "#2f9e7a" },
+  { "id": "night", "label": "밤하늘", "accent": "#3a3f7a" },
+  { "id": "paper", "label": "쪽지", "accent": "#b88a4a" },
+  { "id": "shout", "label": "외침", "accent": "#e0a800" },
+  { "id": "heart", "label": "하트", "accent": "#d9466f" },
+  { "id": "pixel", "label": "도트", "accent": "#34303c" },
+  { "id": "leaf", "label": "나뭇잎", "accent": "#6aa84f" },
+  { "id": "ribbon", "label": "리본", "accent": "#6a4de0" },
+  { "id": "bubble", "label": "비눗방울", "accent": "#7cc6e0" }
+]

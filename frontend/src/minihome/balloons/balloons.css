@@ -1,0 +1,433 @@
+/* Speech balloons: over the island's canvas (BalloonLayer) and in the 소개 tab's picker (BalloonPicker). One balloon is
+   .mg-balloon[data-design] > .mg-balloon-pop > (.mg-balloon-body > b) + .mg-balloon-tail; its tail's tip is the
+   bottom middle of .mg-balloon. Colours are ui/tokens.css --mg-balloon-<design>-*. */
+
+.mg-balloon-layer { position: absolute; inset: 0; z-index: 2; overflow: hidden; pointer-events: none; }
+/* Moved every frame; only its transform is promoted (an opacity there would stop the glass designs' blur). */
+.mg-balloon-layer .mg-balloon { position: absolute; left: 0; top: 0; will-change: transform; }
+
+.mg-balloon { display: block; color: var(--b-ink, var(--mg-ink)); }
+.mg-balloon-pop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform-origin: 50% 100%;
+  /* Nothing held after it ends, so leaving's fade (opacity) is its own. */
+  animation: mg-balloon-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.15) backwards;
+}
+.mg-balloon.is-leaving .mg-balloon-pop { opacity: 0; transition: opacity 200ms ease; }
+@keyframes mg-balloon-in {
+  from { opacity: 0; transform: scale(0.86); }
+}
+.mg-balloon-body {
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  max-width: 220px;
+  padding: 7px 12px 8px;
+  font: 600 14px/1.35 var(--mg-font);
+  text-align: center;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+/* Chrome centres a cut last line without its ellipsis and lets the ellipsis run past the line's end by up to half its
+   width: the words' box reaches that far into the padding, so the ellipsis is not cut off and the lines break as before. */
+.mg-balloon-body b {
+  position: relative;
+  z-index: 1;
+  display: -webkit-box;
+  margin-inline: -0.6em;
+  padding-inline: 0.6em;
+  overflow: hidden;
+  font-weight: inherit;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+}
+.mg-balloon-tail { position: relative; z-index: 1; display: block; flex: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mg-balloon-pop { animation: none; }
+  .mg-balloon.is-leaving .mg-balloon-pop { transition: none; }
+}
+
+/* The glass ones: see-through and blurred, a rounded corner pointing down for a tail. The corner is a square turned
+   half a right angle, its upper half clipped away (no fill counted twice) but for a sliver over the body's edge. */
+.mg-balloon:is([data-design='glass'], [data-design='mint'], [data-design='night']) .mg-balloon-body {
+  border: 1px solid var(--b-line);
+  background: var(--b-fill);
+  -webkit-backdrop-filter: var(--mg-blur-menu);
+  backdrop-filter: var(--mg-blur-menu);
+}
+.mg-balloon:is([data-design='glass'], [data-design='mint'], [data-design='night']) .mg-balloon-tail {
+  box-sizing: border-box;
+  width: 13px;
+  height: 13px;
+  margin: -6.5px 0 2.7px;
+  border: 1px solid transparent;
+  border-right-color: var(--b-line);
+  border-bottom-color: var(--b-line);
+  border-bottom-right-radius: 3px;
+  background: var(--b-fill);
+  -webkit-backdrop-filter: var(--mg-blur-menu);
+  backdrop-filter: var(--mg-blur-menu);
+  clip-path: polygon(100% -22%, 100% 100%, -22% 100%);
+  transform: rotate(45deg);
+}
+
+.mg-balloon[data-design='glass'] {
+  --b-fill: var(--mg-balloon-glass-fill);
+  --b-line: var(--mg-balloon-glass-line);
+  --b-ink: var(--mg-balloon-glass-ink);
+}
+.mg-balloon[data-design='glass'] .mg-balloon-body { border-radius: 16px; box-shadow: var(--mg-shadow-soft); }
+
+/* 민트: the tail leans, a little left of the middle; the body sits to its right. */
+.mg-balloon[data-design='mint'] {
+  --b-fill: var(--mg-balloon-mint-fill);
+  --b-line: var(--mg-balloon-mint-line);
+  --b-ink: var(--mg-balloon-mint-ink);
+}
+.mg-balloon[data-design='mint'] .mg-balloon-body {
+  border-radius: 14px;
+  box-shadow: 0 6px 16px var(--mg-balloon-mint-shadow);
+  transform: translateX(min(22px, calc(50% - 18px)));
+}
+.mg-balloon[data-design='mint'] .mg-balloon-tail { margin-left: 7px; transform: skewX(-22deg) rotate(45deg); }
+
+/* 밤하늘: three small stars on a night fill. */
+.mg-balloon[data-design='night'] {
+  --b-fill: var(--mg-balloon-night-fill);
+  --b-line: var(--mg-balloon-night-line);
+  --b-ink: var(--mg-balloon-night-ink);
+}
+.mg-balloon[data-design='night'] .mg-balloon-body {
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 9px 8px, var(--mg-balloon-night-star) 0 1.2px, transparent 1.8px),
+    radial-gradient(circle at calc(100% - 10px) 7px, var(--mg-balloon-night-star) 0 1px, transparent 1.6px),
+    radial-gradient(circle at calc(100% - 17px) calc(100% - 7px), var(--mg-balloon-night-star) 0 0.8px, transparent 1.4px),
+    var(--b-fill);
+  box-shadow: 0 6px 18px var(--mg-balloon-night-shadow);
+}
+
+/* The drawn ones carry no blur, so one outline can go round body and tail together: copies of their shape in the line
+   colour, a step out each way, under them. */
+.mg-balloon:is([data-design='cloud'], [data-design='leaf']) .mg-balloon-pop {
+  filter: drop-shadow(1.2px 0 0 var(--b-line)) drop-shadow(-1.2px 0 0 var(--b-line)) drop-shadow(0 1.2px 0 var(--b-line))
+    drop-shadow(0 -1.2px 0 var(--b-line)) drop-shadow(0 4px 8px var(--b-shadow));
+}
+
+/* 구름: puffs over and under a round body, and two small ones trailing down to whoever speaks. */
+.mg-balloon[data-design='cloud'] {
+  --b-fill: var(--mg-balloon-cloud-fill);
+  --b-line: var(--mg-balloon-cloud-line);
+  --b-ink: var(--mg-balloon-cloud-ink);
+  --b-shadow: var(--mg-balloon-cloud-shadow);
+}
+.mg-balloon[data-design='cloud'] .mg-balloon-body {
+  min-width: 66px;
+  margin: 12px 3px 7px;
+  padding: 5px 15px 6px;
+  border-radius: 22px;
+  background: var(--b-fill);
+}
+.mg-balloon[data-design='cloud'] .mg-balloon-body::before,
+.mg-balloon[data-design='cloud'] .mg-balloon-body::after {
+  content: '';
+  position: absolute;
+  left: 5%;
+  right: 5%;
+}
+.mg-balloon[data-design='cloud'] .mg-balloon-body::before {
+  top: -14px;
+  height: 28px;
+  background:
+    radial-gradient(circle at 17% 64%, var(--b-fill) 0 10px, transparent 10.5px),
+    radial-gradient(circle at 41% 54%, var(--b-fill) 0 13px, transparent 13.5px),
+    radial-gradient(circle at 66% 58%, var(--b-fill) 0 12px, transparent 12.5px),
+    radial-gradient(circle at 88% 68%, var(--b-fill) 0 9px, transparent 9.5px);
+}
+.mg-balloon[data-design='cloud'] .mg-balloon-body::after {
+  bottom: -9px;
+  height: 22px;
+  background:
+    radial-gradient(circle at 26% 42%, var(--b-fill) 0 9px, transparent 9.5px),
+    radial-gradient(circle at 56% 36%, var(--b-fill) 0 11px, transparent 11.5px),
+    radial-gradient(circle at 82% 44%, var(--b-fill) 0 8px, transparent 8.5px);
+}
+.mg-balloon[data-design='cloud'] .mg-balloon-tail { width: 18px; height: 16px; margin: 1px 0 0 10px; }
+.mg-balloon[data-design='cloud'] .mg-balloon-tail::before,
+.mg-balloon[data-design='cloud'] .mg-balloon-tail::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  background: var(--b-fill);
+}
+.mg-balloon[data-design='cloud'] .mg-balloon-tail::before { top: 0; right: 0; width: 9px; height: 9px; }
+.mg-balloon[data-design='cloud'] .mg-balloon-tail::after { bottom: 0; left: 2px; width: 5px; height: 5px; }
+
+/* 나뭇잎: one sharp corner, drawn on into a tip over whoever speaks; a vein across. */
+.mg-balloon[data-design='leaf'] {
+  --b-fill: var(--mg-balloon-leaf-fill);
+  --b-line: var(--mg-balloon-leaf-line);
+  --b-ink: var(--mg-balloon-leaf-ink);
+  --b-shadow: var(--mg-balloon-leaf-shadow);
+}
+.mg-balloon[data-design='leaf'] .mg-balloon-body {
+  padding: 8px 14px 9px;
+  border-radius: 20px 20px 20px 3px;
+  background:
+    linear-gradient(to top right, transparent calc(50% - 0.7px), var(--mg-balloon-leaf-vein) 50%, transparent calc(50% + 0.7px)),
+    var(--b-fill);
+  transform: translateX(calc(50% - 14px));
+}
+.mg-balloon[data-design='leaf'] .mg-balloon-tail {
+  width: 18px;
+  height: 10px;
+  margin: -1px 0 0 -10px;
+  background: var(--mg-balloon-leaf-tip);
+  clip-path: polygon(0 0, 100% 0, 78% 100%);
+}
+
+/* 말랑: a soft pill with a light ring and a shine, a drop under it. A pill for one or two lines; more, and its round ends
+   would crowd the first and last lines, so the corners stop at the round of two. */
+.mg-balloon[data-design='candy'] { --b-ink: var(--mg-balloon-candy-ink); }
+.mg-balloon[data-design='candy'] .mg-balloon-pop { filter: drop-shadow(0 4px 8px var(--mg-balloon-candy-shadow)); }
+.mg-balloon[data-design='candy'] .mg-balloon-body {
+  z-index: 2;
+  padding: 7px 16px 8px;
+  border-radius: 28px;
+  background: var(--mg-balloon-candy-fill);
+  box-shadow: inset 0 0 0 2px var(--mg-balloon-candy-ring);
+}
+.mg-balloon[data-design='candy'] .mg-balloon-body::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  right: 18%;
+  width: 9px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--mg-balloon-candy-shine);
+  transform: rotate(-24deg);
+}
+.mg-balloon[data-design='candy'] .mg-balloon-tail {
+  width: 12px;
+  height: 12px;
+  margin: -7px 0 2.5px;
+  border-radius: 50% 50% 0 50%;
+  background: var(--mg-balloon-candy-tip);
+  transform: rotate(45deg);
+}
+
+/* 쪽지: a note stuck on with tape, a corner folded over; no tail. */
+.mg-balloon[data-design='paper'] { --b-ink: var(--mg-balloon-paper-ink); }
+.mg-balloon[data-design='paper'] .mg-balloon-pop { filter: drop-shadow(0 3px 5px var(--mg-balloon-paper-shadow)); }
+.mg-balloon[data-design='paper'] .mg-balloon-body {
+  padding: 9px 15px 10px;
+  border-radius: 4px;
+  background:
+    linear-gradient(transparent calc(100% - 1px), var(--mg-balloon-paper-rule) 0) 0 9px / 100% 18.9px,
+    var(--mg-balloon-paper-fill);
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 11px), calc(100% - 11px) 100%, 0 100%);
+  transform: rotate(-1.5deg);
+}
+.mg-balloon[data-design='paper'] .mg-balloon-body::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 11px;
+  height: 11px;
+  background: linear-gradient(to top left, transparent 50%, var(--mg-balloon-paper-fold) 50%);
+}
+.mg-balloon[data-design='paper'] .mg-balloon-tail {
+  order: -1;
+  width: 38px;
+  height: 11px;
+  margin-bottom: -6px;
+  z-index: 3;
+  background: var(--mg-balloon-paper-tape);
+  transform: rotate(-4deg);
+}
+
+/* 외침: a burst with a dark rim, its longest spike pointing down. */
+.mg-balloon[data-design='shout'] { --b-ink: var(--mg-balloon-shout-ink); --b-line: var(--mg-balloon-shout-line); }
+.mg-balloon[data-design='shout'] .mg-balloon-pop {
+  filter: drop-shadow(2px 0 0 var(--b-line)) drop-shadow(-2px 0 0 var(--b-line)) drop-shadow(0 2px 0 var(--b-line))
+    drop-shadow(0 -2px 0 var(--b-line));
+}
+.mg-balloon[data-design='shout'] .mg-balloon-body {
+  padding: 16px 24px 15px;
+  font-size: 15px;
+  font-weight: 800;
+  background: var(--mg-balloon-shout-fill);
+  clip-path: polygon(7% 7px, 21% 11px, 33% 0, 47% 10px, 61% 2px, 74% 11px, 91% 3px, calc(100% - 12px) 31%, 100% 47%,
+    calc(100% - 11px) 63%, 97% 95%, 76% calc(100% - 10px), 63% calc(100% - 6px), 37% calc(100% - 6px), 24% 100%,
+    13% calc(100% - 10px), 0 86%, 11px 66%, 0 43%, 12px 25%);
+}
+.mg-balloon[data-design='shout'] .mg-balloon-body b { rotate: 1deg; }
+.mg-balloon[data-design='shout'] .mg-balloon-tail {
+  width: 22px;
+  height: 16px;
+  margin-top: -8px;
+  background: var(--mg-balloon-shout-fill);
+  clip-path: polygon(0 0, 100% 0, 52% 100%);
+}
+
+/* 하트: a rimmed body and a small heart for a tail. */
+.mg-balloon[data-design='heart'] { --b-ink: var(--mg-balloon-heart-ink); }
+.mg-balloon[data-design='heart'] .mg-balloon-body {
+  border: 2px solid var(--mg-balloon-heart-line);
+  border-radius: 18px;
+  background: var(--mg-balloon-heart-fill);
+  box-shadow: 0 5px 14px var(--mg-balloon-heart-shadow);
+}
+.mg-balloon[data-design='heart'] .mg-balloon-tail {
+  width: 9px;
+  height: 9px;
+  margin: 7px 0 2px;
+  background: var(--mg-balloon-heart-line);
+  transform: rotate(45deg);
+}
+.mg-balloon[data-design='heart'] .mg-balloon-tail::before,
+.mg-balloon[data-design='heart'] .mg-balloon-tail::after {
+  content: '';
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: inherit;
+}
+.mg-balloon[data-design='heart'] .mg-balloon-tail::before { top: 0; left: -4.5px; }
+.mg-balloon[data-design='heart'] .mg-balloon-tail::after { top: -4.5px; left: 0; }
+
+/* 도트: stepped corners and a stepped tail, a 3px line in two layers: the line's shape, the fill's inside it. */
+.mg-balloon[data-design='pixel'] { --b-ink: var(--mg-balloon-pixel-ink); }
+.mg-balloon[data-design='pixel'] .mg-balloon-body {
+  padding: 8px 13px 9px;
+  font-weight: 700;
+  background: var(--mg-balloon-pixel-line);
+  clip-path: polygon(6px 0, calc(100% - 6px) 0, calc(100% - 6px) 3px, calc(100% - 3px) 3px, calc(100% - 3px) 6px, 100% 6px,
+    100% calc(100% - 6px), calc(100% - 3px) calc(100% - 6px), calc(100% - 3px) calc(100% - 3px), calc(100% - 6px) calc(100% - 3px),
+    calc(100% - 6px) 100%, 6px 100%, 6px calc(100% - 3px), 3px calc(100% - 3px), 3px calc(100% - 6px), 0 calc(100% - 6px), 0 6px,
+    3px 6px, 3px 3px, 6px 3px);
+}
+.mg-balloon[data-design='pixel'] .mg-balloon-body::before,
+.mg-balloon[data-design='pixel'] .mg-balloon-tail::before {
+  content: '';
+  position: absolute;
+  background: var(--mg-balloon-pixel-fill);
+}
+.mg-balloon[data-design='pixel'] .mg-balloon-body::before {
+  inset: 3px;
+  clip-path: polygon(3px 0, calc(100% - 3px) 0, calc(100% - 3px) 3px, 100% 3px, 100% calc(100% - 3px), calc(100% - 3px) calc(100% - 3px),
+    calc(100% - 3px) 100%, 3px 100%, 3px calc(100% - 3px), 0 calc(100% - 3px), 0 3px, 3px 3px);
+}
+.mg-balloon[data-design='pixel'] .mg-balloon-tail {
+  width: 21px;
+  height: 12px;
+  margin: -3px 0 0;
+  background: var(--mg-balloon-pixel-line);
+  clip-path: polygon(0 0, 21px 0, 21px 3px, 18px 3px, 18px 6px, 15px 6px, 15px 9px, 12px 9px, 12px 12px, 9px 12px, 9px 9px,
+    6px 9px, 6px 6px, 3px 6px, 3px 3px, 0 3px);
+}
+.mg-balloon[data-design='pixel'] .mg-balloon-tail::before {
+  inset: 0;
+  clip-path: polygon(3px 0, 18px 0, 18px 3px, 15px 3px, 15px 6px, 12px 6px, 12px 9px, 9px 9px, 9px 6px, 6px 6px, 6px 3px, 3px 3px);
+}
+
+/* 리본: a band with both ends cut in a V, in the app's own colour. */
+.mg-balloon[data-design='ribbon'] { --b-ink: var(--mg-balloon-ribbon-ink); }
+.mg-balloon[data-design='ribbon'] .mg-balloon-pop { filter: drop-shadow(0 3px 5px var(--mg-balloon-ribbon-shadow)); }
+.mg-balloon[data-design='ribbon'] .mg-balloon-body {
+  padding: 7px 24px 8px;
+  font-weight: 700;
+  background: var(--mg-balloon-ribbon-fill);
+  clip-path: polygon(0 0, 100% 0, calc(100% - 10px) 50%, 100% 100%, 0 100%, 10px 50%);
+}
+.mg-balloon[data-design='ribbon'] .mg-balloon-tail {
+  width: 14px;
+  height: 8px;
+  margin-top: -1px;
+  background: var(--mg-balloon-ribbon-fill);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+/* 비눗방울: a clear bubble with a rainbow rim and a shine, two small bubbles under it; round as 말랑. */
+.mg-balloon[data-design='bubble'] { --b-ink: var(--mg-balloon-bubble-ink); }
+.mg-balloon[data-design='bubble'] .mg-balloon-body,
+.mg-balloon[data-design='bubble'] .mg-balloon-tail::before,
+.mg-balloon[data-design='bubble'] .mg-balloon-tail::after {
+  background: var(--mg-balloon-bubble-fill);
+  -webkit-backdrop-filter: blur(10px) saturate(1.5);
+  backdrop-filter: blur(10px) saturate(1.5);
+}
+.mg-balloon[data-design='bubble'] .mg-balloon-body {
+  padding: 8px 17px 9px;
+  border-radius: 28px;
+  box-shadow: 0 6px 16px var(--mg-balloon-bubble-shadow);
+}
+.mg-balloon[data-design='bubble'] .mg-balloon-body::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: var(--mg-balloon-bubble-rim);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+/* The shine sits above the first line, clear of its letters (light ones in the dark theme). */
+.mg-balloon[data-design='bubble'] .mg-balloon-body::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 18%;
+  width: 15px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mg-balloon-bubble-shine);
+  transform: rotate(-14deg);
+}
+.mg-balloon[data-design='bubble'] .mg-balloon-tail { width: 16px; height: 15px; margin: 2px 0 0 6px; }
+.mg-balloon[data-design='bubble'] .mg-balloon-tail::before,
+.mg-balloon[data-design='bubble'] .mg-balloon-tail::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--mg-balloon-bubble-edge);
+}
+.mg-balloon[data-design='bubble'] .mg-balloon-tail::before { top: 0; right: 0; width: 8px; height: 8px; }
+.mg-balloon[data-design='bubble'] .mg-balloon-tail::after { bottom: 0; left: 1px; width: 5px; height: 5px; }
+
+/* The picker: every design as it looks over the island, in its sky. */
+.mg-balloons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.mg-balloons button {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  justify-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 6px 7px;
+  border: 1px solid var(--mg-hair);
+  border-radius: 14px;
+  background: var(--mg-card);
+  color: var(--mg-ink);
+}
+.mg-balloons button[aria-checked='true'] { border-color: var(--mg-primary); box-shadow: 0 0 0 2px var(--mg-primary-soft); }
+.mg-balloons small { font-size: 11px; font-weight: 700; color: var(--mg-ink); }
+.mg-balloon-sky {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 74px;
+  padding: 6px 2px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--mg-island-sky);
+}
+.mg-balloon.is-still .mg-balloon-pop { animation: none; }
