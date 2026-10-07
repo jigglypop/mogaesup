@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom';
 import { Icon } from '../ui/icons';
 import type { GameSession } from './protocol';
 import { GAMES, gameOf } from './registry';
-import { useActiveGame, useGameRoom, useGameState, type GameRoomValue } from './room';
+import { useActiveGame, useGameRoom, useGameStage, useGameState, type GameRoomValue } from './room';
 import { openSpots } from './spots';
 import { standing } from './teleport';
 
@@ -19,14 +19,15 @@ function layoutFor(room: GameRoomValue, session: GameSession, options: unknown):
 }
 
 /**
- * The 게임 button and its panel: the games to open; a lobby's players with 참가·나가기 and the host's 시작·닫기; the game's
- * own panel while it plays; its result once it ends, with the host's 다시 하기·닫기. Shown while the viewer is in the
- * island's live room.
+ * The 게임 button and its panel: the games to open; a lobby's players with 참가·나가기 and the host's 시작; the game's
+ * own panel while it plays; its result once it ends, with the host's 다시 하기. 닫기 for whoever may close the session
+ * (its host, and the island's owner). Shown while the viewer is in the island's live room.
  */
 export function GameDock() {
   const room = useGameRoom();
   const { session, connected, error } = useGameState();
   const active = useActiveGame();
+  const stage = useGameStage();
   const [open, setOpen] = useState(false);
   const [problem, setProblem] = useState('');
   // The host's lobby settings, for the kind they were made for.
@@ -37,11 +38,15 @@ export function GameDock() {
   const panelId = useId();
   const plays = !!session?.players.some((player) => player.id === session.you);
   const playing = session?.phase === 'playing' && plays;
+  const ended = session?.phase === 'ended' && plays;
+  // Whether its overlay is enough to play: then the panel stays folded as it starts, and comes up with the result.
+  const folded = !!gameOf(session?.kind)?.foldPanelOnStart;
   // A game the viewer plays brings its panel up as it starts, and again whenever it waits for an answer there.
   const attention = playing ? (gameOf(session?.kind)?.attention?.(session?.game) ?? null) : null;
   useEffect(() => {
-    if (playing) setOpen(true);
-  }, [playing]);
+    if (playing) setOpen(!folded);
+    else if (ended && folded) setOpen(true);
+  }, [playing, ended, folded]);
   useEffect(() => {
     if (attention) setOpen(true);
   }, [attention]);
@@ -57,6 +62,7 @@ export function GameDock() {
   const definition = gameOf(session?.kind);
   const count = session?.players.length ?? 0;
   const host = !!session && session.host === session.you;
+  const closer = !!session?.canClose;
   const fold = () => {
     setOpen(false);
     toggle.current?.focus();
@@ -78,7 +84,10 @@ export function GameDock() {
   };
   const said = error?.message ?? problem;
   const Lobby = definition?.Lobby;
-  const Overlay = session?.phase === 'playing' ? active?.definition.Overlay : undefined;
+  // Kept through a moment between game sockets, as the game's map is (see useActiveGame).
+  const Overlay = active?.props.session.phase === 'playing' ? active.definition.Overlay : undefined;
+  // On a game's map the panel comes over the page, above the game's own controls (which are over the page too).
+  const environment = stage === 'island' ? 'island' : 'game';
 
   let body;
   if (!connected) {
@@ -102,6 +111,7 @@ export function GameDock() {
   } else if (session.phase === 'lobby') {
     const minimum = definition?.minPlayers ?? 1;
     const full = count >= (definition?.maxPlayers ?? Infinity);
+    const ready = count >= minimum && (definition?.canStart?.(session, options) ?? true);
     body = (
       <>
         <ul className="mg-game-players" aria-label="참가한 사람">
@@ -126,11 +136,11 @@ export function GameDock() {
             </button>
           )}
           {host && (
-            <button type="button" className="mg-btn is-small is-primary" disabled={count < minimum} onClick={start}>
+            <button type="button" className="mg-btn is-small is-primary" disabled={!ready} onClick={start}>
               시작 {count < minimum ? `${count}/${minimum}` : `${count}명`}
             </button>
           )}
-          {host && (
+          {closer && (
             <button type="button" className="mg-btn is-small is-quiet" onClick={client.close}>
               닫기
             </button>
@@ -146,19 +156,19 @@ export function GameDock() {
       <>
         {active && Panel && <Panel {...active.props} />}
         {active && Result && <Result {...active.props} result={active.result} />}
-        {plays && (
+        {(plays || closer) && (
           <div className="mg-game-actions">
-            {ended && host && (
+            {plays && ended && host && (
               <button type="button" className="mg-btn is-small is-primary" onClick={() => client.open(session.kind)}>
                 다시 하기
               </button>
             )}
-            {(!ended || !host) && (
+            {plays && (!ended || !host) && (
               <button type="button" className="mg-btn is-small" onClick={client.leave}>
                 나가기
               </button>
             )}
-            {host && (
+            {closer && (
               <button type="button" className="mg-btn is-small is-quiet" onClick={client.close}>
                 닫기
               </button>
@@ -168,6 +178,31 @@ export function GameDock() {
       </>
     );
   }
+
+  const section = (
+    <section
+      ref={panel}
+      id={panelId}
+      className="mg-game mg-glass"
+      data-environment={environment}
+      aria-label={definition?.label ?? '게임'}
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+    >
+      <header className="mg-game-head">
+        <h2>{session ? (definition?.label ?? session.kind) : '게임'}</h2>
+        <button type="button" className="mg-icon-btn is-quiet" aria-label="게임 접기" onClick={fold}>
+          <Icon name="close" />
+        </button>
+      </header>
+      {body}
+      {said && (
+        <p className="mg-error" role="alert">
+          {said}
+        </p>
+      )}
+    </section>
+  );
 
   return (
     <>
@@ -187,29 +222,7 @@ export function GameDock() {
         <span className="mg-game-toggle-label">게임</span>
         {session && <span className="mg-count">{count}</span>}
       </button>
-      {open && (
-        <section
-          ref={panel}
-          id={panelId}
-          className="mg-game mg-glass"
-          aria-label={definition?.label ?? '게임'}
-          tabIndex={-1}
-          onKeyDown={onKeyDown}
-        >
-          <header className="mg-game-head">
-            <h2>{session ? (definition?.label ?? session.kind) : '게임'}</h2>
-            <button type="button" className="mg-icon-btn is-quiet" aria-label="게임 접기" onClick={fold}>
-              <Icon name="close" />
-            </button>
-          </header>
-          {body}
-          {said && (
-            <p className="mg-error" role="alert">
-              {said}
-            </p>
-          )}
-        </section>
-      )}
+      {open && (environment === 'game' ? createPortal(section, document.body) : section)}
       {active && Overlay && createPortal(<Overlay {...active.props} />, document.body)}
     </>
   );

@@ -183,6 +183,31 @@ describe('임포스터가 섬 위에 두는 것', () => {
     const shown = await overlay(game({ role: null, alive: null, tasks: [], emergencyLeft: 0 }), 'watcher');
     expect(shown.buttons()).toEqual([]);
   });
+
+  it('터치 화면에서는 걷기 패드를 두고, 회의·작업·환풍구 동안에는 끈다', async () => {
+    vi.stubGlobal('matchMedia', () => Object.assign(new EventTarget(), { matches: true }));
+    try {
+      const shown = await overlay(game());
+      const pad = () => shown.view.container.querySelector('.mg-walking-controls');
+      const off = () => [...shown.view.container.querySelectorAll<HTMLButtonElement>('.mg-walking-control')].every((key) => key.disabled);
+      expect(pad()?.getAttribute('data-placement')).toBe('game');
+      expect(off()).toBe(false);
+      await shown.show(game({ phase: 'discuss' }));
+      expect(off()).toBe(true);
+      await shown.show(game({ working: { station: 5, kind: 'swipe', readyAt: NOW + 3_000 } }));
+      expect(off()).toBe(true);
+      await shown.show(game({ role: 'impostor', venting: 0 }));
+      expect(off()).toBe(true);
+      // The dead walk too (their tasks are still theirs).
+      await shown.show(game({ alive: false }));
+      expect(off()).toBe(false);
+      // Someone watching gets the island's own pad, not the game's.
+      const watching = await overlay(game({ role: null, alive: null, tasks: [], emergencyLeft: 0 }), 'watcher');
+      expect(watching.view.container.querySelector('.mg-walking-controls')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('봇의 길', () => {

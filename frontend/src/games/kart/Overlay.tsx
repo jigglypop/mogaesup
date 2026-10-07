@@ -3,6 +3,8 @@ import './kart.css';
 import { useEffect, useRef, useState } from 'react';
 
 import type { GameProps } from '../game';
+import { useTouchScreen } from '../WalkingControls';
+import { kartTouchControls, useKartTouchControls, type KartControl } from './controls';
 import type { KartEvent, KartItem, KartView } from './index';
 import { lapOf } from './Panel';
 import { raceTime } from './route';
@@ -24,9 +26,109 @@ function useServerClock(serverNow: () => number, running: boolean, every = 100):
   return now;
 }
 
+type TouchButton = { control: KartControl; label: string };
+/** The left hand brakes and steers; the right drifts and drives. */
+const LEFT: readonly TouchButton[] = [
+  { control: 'back', label: '뒤로' },
+  { control: 'left', label: '왼쪽' },
+  { control: 'right', label: '오른쪽' },
+];
+const RIGHT: readonly TouchButton[] = [
+  { control: 'drift', label: '드리프트' },
+  { control: 'forward', label: '앞으로' },
+];
+const ORDER: readonly KartControl[] = ['forward', 'back', 'left', 'right', 'drift'];
+
+/** An arrow pointing the way of `control`. */
+function Arrow({ control }: { control: KartControl }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" data-way={control}>
+      <path d="M12 5l7.5 11h-15z" />
+    </svg>
+  );
+}
+
+/**
+ * The kart's buttons on a touch screen: every finger holds its own button (steering, the throttle and a drift at once),
+ * and lets go of it alone; everything is let go when the window or the tab loses focus, while `disabled` (the
+ * countdown) and when they go. Enter holds a focused button as a finger would.
+ */
+function TouchControls({ disabled }: { disabled: boolean }) {
+  const held = useKartTouchControls();
+  useEffect(() => {
+    const release = (event: PointerEvent) => kartTouchControls.release(event.pointerId);
+    const reset = () => kartTouchControls.reset();
+    const hidden = () => {
+      if (document.visibilityState !== 'visible') reset();
+    };
+    reset();
+    window.addEventListener('pointerup', release, true);
+    window.addEventListener('pointercancel', release, true);
+    window.addEventListener('blur', reset);
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      window.removeEventListener('pointerup', release, true);
+      window.removeEventListener('pointercancel', release, true);
+      window.removeEventListener('blur', reset);
+      document.removeEventListener('visibilitychange', hidden);
+      reset();
+    };
+  }, []);
+  useEffect(() => {
+    if (disabled) kartTouchControls.reset();
+  }, [disabled]);
+  const button = ({ control, label }: TouchButton) => {
+    const key = -ORDER.indexOf(control) - 1;
+    return (
+      <button
+        key={control}
+        type="button"
+        className="mg-kart-control mg-glass"
+        data-control={control}
+        aria-label={label}
+        aria-pressed={held[control]}
+        disabled={disabled}
+        onPointerDown={(event) => {
+          if (event.button !== 0 || disabled) return;
+          event.preventDefault();
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } catch {
+            // The window's listeners let go of a finger the button could not capture.
+          }
+          kartTouchControls.press(control, event.pointerId);
+        }}
+        onPointerUp={(event) => kartTouchControls.release(event.pointerId)}
+        onPointerCancel={(event) => kartTouchControls.release(event.pointerId)}
+        onLostPointerCapture={(event) => kartTouchControls.release(event.pointerId)}
+        onContextMenu={(event) => event.preventDefault()}
+        onKeyDown={(event) => {
+          if (disabled || event.key !== 'Enter') return;
+          event.preventDefault();
+          kartTouchControls.press(control, key);
+        }}
+        onKeyUp={(event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          kartTouchControls.release(key);
+        }}
+        onBlur={() => kartTouchControls.release(key)}
+      >
+        {control === 'drift' ? <span>{label}</span> : <Arrow control={control} />}
+      </button>
+    );
+  };
+  return (
+    <div className="mg-kart-touch" role="group" aria-label="카트 조작">
+      <div className="mg-kart-touch-pad">{LEFT.map(button)}</div>
+      <div className="mg-kart-touch-actions">{RIGHT.map(button)}</div>
+    </div>
+  );
+}
+
 /**
  * Over the page while 카트 runs: the countdown and 출발, the lap and place, the item slot (Space or Ctrl, or a press),
- * a word when a booster fires or a bubble catches the viewer, and the finish.
+ * a word when a booster fires or a bubble catches the viewer, the finish, and on a touch screen the kart's buttons.
  */
 export function KartOverlay({ view, session, act, onEvent, serverNow }: GameProps<KartView>) {
   const mine = view.racers.find((racer) => racer.id === session.you) ?? null;
@@ -34,6 +136,7 @@ export function KartOverlay({ view, session, act, onEvent, serverNow }: GameProp
   const [splash, setSplash] = useState<{ key: number; text: string; tone: 'boost' | 'trap' } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const now = useServerClock(serverNow, starting);
+  const touch = useTouchScreen();
   useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(
     () =>
@@ -50,6 +153,7 @@ export function KartOverlay({ view, session, act, onEvent, serverNow }: GameProp
   const count = Math.ceil((view.startsAt - now) / 1000);
   const item = view.me?.item ?? null;
   const finished = mine?.finishedAt ?? null;
+  const driving = !!mine && !!view.me && finished === null;
   return (
     <>
       {now < view.startsAt + GO && (
@@ -80,6 +184,7 @@ export function KartOverlay({ view, session, act, onEvent, serverNow }: GameProp
           <kbd>Space</kbd>
         </button>
       )}
+      {touch && driving && <TouchControls key={`${session.you}:${view.startsAt}`} disabled={view.phase !== 'race'} />}
       {finished !== null && mine && (
         <div className="mg-kart-finish" role="status">
           <b>{mine.rank}위</b>

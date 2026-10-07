@@ -29,7 +29,17 @@ export type GameProps<View = unknown> = {
   position: () => Vec3 | null;
   /** The viewer's own physics body, for a game that moves it itself (a kart); null before it exists. */
   body: () => RapierRigidBody | null;
+  /** The trip a game has taken the viewer on (see `useArenaTrip`), kept while the socket comes and goes. */
+  trip: () => Trip | null;
+  setTrip: (trip: Trip | null) => void;
 };
+
+/**
+ * A game's trip away from where the viewer stood: which game took them (`key`: its session and start), from where
+ * (`home`), to which place (`to`: their start, or the stand they watch from), where on its map they last stood
+ * (`at`), and in which physics body (`body`): a body made anew (its canvas set up again) is put back at `at`.
+ */
+export type Trip = { key: string; home: Vec3; at?: Vec3; to?: string; body?: object | null };
 
 export type GameResultProps<View = unknown, Result = unknown> = GameProps<View> & { result: Result };
 
@@ -61,6 +71,16 @@ export type GameDefinition<View = unknown, Result = unknown> = {
   /** As the server's `Kind` has them: the host's 시작 waits for `minPlayers`. */
   minPlayers: number;
   maxPlayers: number;
+  /**
+   * Its map takes the island's place while it plays: the island's scenery, colliders, residents and panels give way to
+   * the game's `World`, built at the island's ground level, and come back as they were once it is over. Whoever does
+   * not play watches from the server's `session.stand`.
+   */
+  replacesIsland?: boolean;
+  /** It moves its players' bodies itself (a kart): their walking, click-to-move and own figure are off while they play. */
+  controlsPlayer?: boolean;
+  /** Its overlay is all a player needs as it starts: the panel stays folded (the 게임 button opens it). */
+  foldPanelOnStart?: boolean;
   /** The `layout` the host's 시작 sends, from the island as the host's page has it loaded. May throw to refuse. */
   layout: (context: LayoutContext) => unknown;
   /** The HUD and controls in the game panel while the game plays. */
@@ -71,6 +91,8 @@ export type GameDefinition<View = unknown, Result = unknown> = {
   Result: ComponentType<GameResultProps<View, Result>>;
   /** The host's settings in the lobby, which `layout` gets as `options`. */
   Lobby?: ComponentType<LobbyProps>;
+  /** Whether the lobby may start with the host's settings (people and bots enough, say); always when left out. */
+  canStart?: (session: GameSession, options: unknown) => boolean;
   /** Over the whole page while the game plays, whether the panel is open or folded (an alarm, a task's screen). */
   Overlay?: ComponentType<GameProps<View>>;
   /**

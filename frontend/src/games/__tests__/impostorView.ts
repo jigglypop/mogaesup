@@ -19,9 +19,9 @@ export const game = (changes: Partial<ImpostorView> = {}): ImpostorView => ({
   working: null,
   progress: { done: 3, total: 12 },
   players: players.map(({ id, name }) => ({ id, name, alive: true, bot: false })),
-  hidden: [],
   bots: [],
   bodies: [],
+  endsAt: NOW + 10 * 60_000,
   table: [0, 0, 0],
   stations: Array.from({ length: 8 }, (_, index) => [index * 8, 0, 20]),
   stationKinds: ['wires', 'swipe', 'download', 'numbers', 'calibrate', 'fuel', 'wires', 'swipe'],
@@ -41,7 +41,10 @@ export const game = (changes: Partial<ImpostorView> = {}): ImpostorView => ({
 });
 
 export function props(shown: ImpostorView, you = me.id) {
-  const session: GameSession<ImpostorView> = { kind: 'impostor', phase: 'playing', host: me.id, players, you, game: shown, result: null, seq: 1, now: NOW };
+  const session: GameSession<ImpostorView> = {
+    id: 1, kind: 'impostor', phase: 'playing', startedAt: NOW - 60_000, canClose: you === me.id, host: me.id, players, you,
+    home: null, stand: null, game: shown, result: null, seq: 1, now: NOW,
+  };
   return {
     session,
     view: shown,
@@ -52,6 +55,8 @@ export function props(shown: ImpostorView, you = me.id) {
     teleport: vi.fn(() => true),
     position: () => null,
     body: () => null,
+    trip: () => null,
+    setTrip: vi.fn(),
   } satisfies GameProps<ImpostorView>;
 }
 

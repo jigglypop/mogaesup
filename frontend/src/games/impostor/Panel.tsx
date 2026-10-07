@@ -16,6 +16,7 @@ const REASON: Record<ImpostorOutcome['reason'], string> = {
   impostorsOut: '임포스터가 모두 사라졌어요',
   parity: '임포스터가 크루만큼 남았어요',
   meltdown: '원자로가 녹아내렸어요',
+  time: '시간이 다 됐어요',
 };
 
 type Act = GameProps['act'];
@@ -164,12 +165,23 @@ function Talk({ lines, you, act, label, open }: { lines: ImpostorLine[]; you: st
   );
 }
 
-/** Between meetings: role, the last verdict, the sabotage underway, progress and tasks; the dead also talk among themselves. */
+/** The time left in the game, once the server says when it runs out. */
+function TimeLeft({ endsAt, serverNow }: { endsAt: number; serverNow: () => number }) {
+  const left = useRemaining(endsAt, serverNow, 1_000);
+  return (
+    <p className="mg-game-timer mg-impostor-left" role="timer" aria-label="남은 시간">
+      {clock(left)}
+    </p>
+  );
+}
+
+/** Between meetings: role, the time left, the last verdict, the sabotage underway, progress and tasks; the dead also talk among themselves. */
 function Roaming({ view, session, me, act, serverNow, names }: GameProps<ImpostorView> & { names: Names }) {
   const comms = view.progress === null;
   return (
     <div className="mg-game-hud mg-impostor">
       <Role view={view} names={names} you={session.you} />
+      {typeof view.endsAt === 'number' && Number.isFinite(view.endsAt) && <TimeLeft endsAt={view.endsAt} serverNow={serverNow} />}
       {view.lastMeeting && <Verdict last={view.lastMeeting} names={names} />}
       {view.sabotage && <p className="mg-impostor-broken">{SABOTAGE_NAMES[view.sabotage.kind]}</p>}
       {view.progress && <Progress {...view.progress} />}

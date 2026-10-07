@@ -3,10 +3,25 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import type { RapierRigidBody } from '@react-three/rapier';
 
 import { authApi } from '../api/endpoints';
+import type { Trip } from './game';
 import { readServerMessage, type ClientMessage, type GameEvent, type GameProblem, type GameSession, type Vec3 } from './protocol';
+import { PET_REFUSALS, type PetFrame } from './protocol';
+import { createServerClock } from './time';
 
 const RETRY_FIRST_MS = 1_000;
 const RETRY_LAST_MS = 30_000;
+
+/**
+ * The close code of a socket the server had no seat for (the island full, or too many sockets of this account, from
+ * this place or on the server): its reason is a sentence for the page. The same for the live room's socket.
+ */
+export const NO_SEAT = 4409;
+const NO_SEAT_TEXT = '지금은 들어갈 자리가 없어요.';
+
+/** Why a socket that closed was refused a seat, for the page; null when it closed for anything else. */
+export function noSeat(event: { code: number; reason?: string }): string | null {
+  return event.code === NO_SEAT ? event.reason || NO_SEAT_TEXT : null;
+}
 
 /** The island's game socket: like the live room's, with the room's `client_id` for this page as `peer`. */
 export const gameUrl = (username: string, ticket: string, peer: string | null) =>
@@ -17,9 +32,12 @@ export type GameState = {
   /** The island's session as the server last showed it; null when it has none, or while the socket is down. */
   session: GameSession | null;
   connected: boolean;
+  /** Whether this socket has shown the session yet: until it has, a null `session` says nothing. */
+  synced: boolean;
   /** The server's last refusal, until the next message goes out. */
   error: GameProblem | null;
 };
+
 
 /** One page's game socket and what came over it. Methods keep their identity for the client's life. */
 export type GameClient = {
@@ -44,6 +62,9 @@ export type GameClient = {
   position: () => Vec3 | null;
   /** The viewer's own physics body, once the island's world has lent it; null until then. */
   body: () => RapierRigidBody | null;
+  /** The trip a game has taken the viewer on, kept while the socket comes and goes; null when they are home. */
+  trip: () => Trip | null;
+  setTrip: (trip: Trip | null) => void;
   /** The island's world says how to teleport, where the character stands and which body is theirs; returns the way to
    * take it back. */
   setTeleporter: (
@@ -52,20 +73,36 @@ export type GameClient = {
     body?: () => RapierRigidBody | null,
   ) => () => void;
   clearError: () => void;
-  /** Opens a socket at `url` in place of any other; `closed` hears when it ends, and whether a session came first. */
-  connect: (url: string, closed: (welcomed: boolean) => void) => void;
+  /** The island owner's page relays where its pet is (null lets go of it); false while the socket is down. */
+  sendPet?: (pet: PetFrame | null) => boolean;
+  /** Pet frames from the owner's page (null: the pet rests at home), and refusals of this page's own frames. */
+  onPet?: (listener: (signal: PetSignal) => void) => () => void;
+  /**
+   * Opens a socket at `url` in place of any other; `closed` hears when it ends, whether a session came first, and
+   * whether the server had no seat for it (its reason is then the state's `error`).
+   */
+  connect: (url: string, closed: (welcomed: boolean, refused: boolean) => void) => void;
   /** Closes the socket and forgets the session. */
   disconnect: () => void;
 };
 
-const same = (a: GameState, b: GameState) => a.session === b.session && a.connected === b.connected && a.error === b.error;
+/** What the game socket says of the island's pet. */
+export type PetSignal = { type: 'frame'; pet: PetFrame | null } | { type: 'refused'; code: string; message: string };
+
+const same = (a: GameState, b: GameState) =>
+  a.session === b.session && a.connected === b.connected && a.synced === b.synced && a.error === b.error;
 
 export function createGameClient(): GameClient {
-  let state: GameState = { session: null, connected: false, error: null };
+  let state: GameState = { session: null, connected: false, synced: false, error: null };
   const listeners = new Set<() => void>();
   const eventListeners = new Set<(event: GameEvent) => void>();
+  const petListeners = new Set<(signal: PetSignal) => void>();
+  const tellPet = (signal: PetSignal) => {
+    for (const listener of [...petListeners]) listener(signal);
+  };
   let socket: WebSocket | null = null;
-  let offset = 0;
+  const clock = createServerClock();
+  let trip: Trip | null = null;
   let teleporter: ((ground: Vec3) => boolean) | null = null;
   let locator: (() => Vec3 | null) | null = null;
   let own: (() => RapierRigidBody | null) | null = null;
@@ -104,7 +141,11 @@ export function createGameClient(): GameClient {
       eventListeners.add(listener);
       return () => eventListeners.delete(listener);
     },
-    serverNow: () => Date.now() + offset,
+    serverNow: clock.now,
+    trip: () => trip,
+    setTrip(next) {
+      trip = next;
+    },
     teleport: (ground) => teleporter?.(ground) ?? false,
     position: () => locator?.() ?? null,
     body: () => own?.() ?? null,
@@ -121,8 +162,19 @@ export function createGameClient(): GameClient {
       };
     },
     clearError: () => set({ error: null }),
+    // Several a second, apart from the game: it leaves the game's last refusal on screen.
+    sendPet(pet) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+      socket.send(JSON.stringify({ type: 'Pet', pet } satisfies ClientMessage));
+      return true;
+    },
+    onPet(listener) {
+      petListeners.add(listener);
+      return () => petListeners.delete(listener);
+    },
     connect(url, closed) {
       drop();
+      set({ synced: false });
       const current = new WebSocket(url);
       socket = current;
       let welcomed = false;
@@ -132,25 +184,30 @@ export function createGameClient(): GameClient {
         if (!message) return;
         if (message.type === 'Session') {
           welcomed = true;
-          if (message.session) offset = message.session.now - Date.now();
-          set({ session: message.session });
+          if (message.session) clock.sample(message.session.now);
+          set({ session: message.session, synced: true });
         } else if (message.type === 'Event') {
           for (const listener of [...eventListeners]) listener({ kind: message.kind, event: message.event });
+        } else if (message.type === 'Pet') {
+          tellPet({ type: 'frame', pet: message.pet });
+        } else if (message.type === 'Error' && PET_REFUSALS.includes(message.code)) {
+          tellPet({ type: 'refused', code: message.code, message: message.message });
         } else if (message.type === 'Error') {
           set({ error: { code: message.code, message: message.message } });
         }
       };
-      current.onclose = () => {
+      current.onclose = (event: { code: number; reason?: string }) => {
         if (socket !== current) return;
         socket = null;
-        // What the session is now is unknown until the next socket says.
-        set({ connected: false, session: null });
-        closed(welcomed);
+        // What the session is now is unknown until the next socket says; a refusal says why until the next message.
+        const refused = noSeat(event);
+        set({ connected: false, synced: false, session: null, ...(refused ? { error: { code: 'no_seat', message: refused } } : {}) });
+        closed(welcomed, refused !== null);
       };
     },
     disconnect() {
       drop();
-      set({ connected: false, session: null, error: null });
+      set({ connected: false, synced: false, session: null, error: null });
     },
   };
 }
@@ -174,7 +231,8 @@ export type GameSessionApi = GameState &
 /**
  * The island page's game socket. While `enabled`, it asks for a realtime ticket and connects; when the socket drops it
  * connects again with a fresh ticket, waiting longer after each try that got no session (from a second up to half a
- * minute). Turned off or unmounted, it closes the socket and stops.
+ * minute), and the longest after one the server had no seat for. Turned off or unmounted, it closes the socket and
+ * stops.
  */
 export function useGameSession({ username, viewerId, peer, enabled }: GameSessionOptions): GameSessionApi {
   const [client] = useState(createGameClient);
@@ -197,8 +255,10 @@ export function useGameSession({ username, viewerId, peer, enabled }: GameSessio
         const { ticket, user } = await authApi.realtimeTicket();
         // Another account signed in meanwhile: its own page connects.
         if (stopped || user.id !== viewerId) return;
-        client.connect(gameUrl(username, ticket, peerRef.current), (welcomed) => {
+        client.connect(gameUrl(username, ticket, peerRef.current), (welcomed, refused) => {
           if (welcomed) delay = RETRY_FIRST_MS;
+          // No seat: not again for a while (each try takes a ticket).
+          if (refused) delay = RETRY_LAST_MS;
           retry();
         });
       } catch {

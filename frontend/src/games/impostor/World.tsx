@@ -168,10 +168,16 @@ function Crewmate({ bot, colors, serverNow }: { bot: ImpostorBot; colors: Colors
 /** How thick the ship's floor tiles are, and the gap between two, in meters. */
 const TILE = 0.3;
 const SEAM = 0.08;
+/** How far the hull reaches past the outermost rooms, and how deep it is under the floor. */
+const HULL_MARGIN = 3;
+const HULL_DEPTH = 1.6;
 
-/** The ship: its floor (rooms and halls in their own tones), walls, the colliders that hold everyone in, room names. */
+/**
+ * The ship in the island's place: its hull, its floor (rooms and halls in their own tones), walls, the colliders that
+ * hold everyone in, and the rooms' names.
+ */
 function Ship() {
-  const { floor, tiles, tones, walls, labels } = useMemo(() => {
+  const { floor, tiles, tones, walls, labels, hull } = useMemo(() => {
     const css = getComputedStyle(document.documentElement);
     const tone = (name: string) => css.getPropertyValue(name).trim();
     const [hall, room, cafeteria] = [tone('--mg-ship-hall'), tone('--mg-ship-room'), tone('--mg-ship-cafeteria')];
@@ -182,18 +188,27 @@ function Ship() {
       return { center: [x, y - TILE / 2, z], size: [size, TILE, size] };
     });
     const tones = open.map(({ mark }) => (mark === '.' ? hall : mark === 'C' ? cafeteria : room));
+    // One slab under every cell, the empty ones between the rooms too: the ship's hull.
+    const xs = tiles.map((tile) => tile.center[0]);
+    const zs = tiles.map((tile) => tile.center[2]);
+    const reach = SHIP.cell / 2 + HULL_MARGIN;
+    const [minX, maxX, minZ, maxZ] = [Math.min(...xs) - reach, Math.max(...xs) + reach, Math.min(...zs) - reach, Math.max(...zs) + reach];
+    const hull: Box = { center: [(minX + maxX) / 2, SHIP.origin[1] - TILE - HULL_DEPTH / 2, (minZ + maxZ) / 2], size: [maxX - minX, HULL_DEPTH, maxZ - minZ] };
     return {
       floor: [...floorBoxes(SHIP, walkable), ...wallBoxes(SHIP, walkable)],
       tiles,
       tones,
       walls: wallBoxes(SHIP, walkable),
       labels: roomLabels(),
+      hull,
     };
   }, []);
   const wall = useMemo(() => token('--mg-ship-wall'), []);
+  const hullColor = useMemo(() => token('--mg-ship-hull'), []);
   return (
     <group>
       <ArenaColliders boxes={floor} />
+      <ArenaBlocks boxes={[hull]} color={hullColor} roughness={0.8} />
       <ArenaBlocks boxes={tiles} colors={tones} roughness={0.9} />
       <ArenaBlocks boxes={walls} color={wall} roughness={0.7} />
       {labels.map((label) => (

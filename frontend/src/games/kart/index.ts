@@ -59,12 +59,18 @@ export type KartEvent = { type: 'boost'; until: number } | { type: 'trapped'; un
 /** The host's lobby settings. */
 export type KartOptions = { bots: number; laps: number };
 
-/** KartRider in the sky over the island: laps of a fixed circuit, item boxes, boosters and water bubbles, and bots. */
+/**
+ * KartRider on a racing island that takes the island's place while it runs: laps of a fixed circuit, item boxes,
+ * boosters and water bubbles, and bots. Each racer drives a kart of their own; whoever watches stands beside the start.
+ */
 export const kart = defineGame<KartView, KartOutcome>({
   kind: 'kart',
   label: '카트',
   minPlayers: 1,
   maxPlayers: 8,
+  replacesIsland: true,
+  controlsPlayer: true,
+  foldPanelOnStart: true,
   layout: kartLayout,
   Lobby: KartLobby,
   Panel: KartPanel,

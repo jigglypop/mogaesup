@@ -1,6 +1,6 @@
 import { defineGame } from '../game';
 import type { Vec3 } from '../protocol';
-import { impostorLayout } from './layout';
+import { impostorLayout, MAX_PLAYERS, MIN_PLAYERS, optionsFor } from './layout';
 import { ImpostorLobby } from './Lobby';
 import { ImpostorOverlay } from './Overlay';
 import { ImpostorPanel, ImpostorResult } from './Panel';
@@ -56,12 +56,14 @@ export type ImpostorView = {
   progress: { done: number; total: number } | null;
   /** As everyone knows it (deaths turn public when a meeting starts); the dead see it as it is. */
   players: { id: string; name: string; alive: boolean; bot: boolean }[];
-  /** People whose avatars the viewer does not see: the dead (to the living) and anyone in a vent. */
-  hidden: string[];
   /** The bots the viewer sees: the living, and to the dead the ghosts too. */
   bots: ImpostorBot[];
-  /** Where the dead lie; a bot's body keeps its colour. */
+  /** Where the dead lie, as far as the viewer sees (all of them to the dead); a bot's body keeps its colour. */
   bodies: { id: number; victim: string; color: number | null; name: string; position: Vec3; reported: boolean }[];
+  /** When the time runs out (the impostors' then), on the server's clock; a server from before says nothing of it. */
+  endsAt?: number;
+  /** People whose avatars the viewer does not see, as a server from before the live room hid them itself said; always empty now. */
+  hidden?: string[];
   table: Vec3;
   stations: Vec3[];
   stationKinds: TaskKind[];
@@ -97,7 +99,7 @@ export type ImpostorView = {
 
 export type ImpostorOutcome = {
   winner: ImpostorRole;
-  reason: 'tasks' | 'impostorsOut' | 'parity' | 'meltdown';
+  reason: 'tasks' | 'impostorsOut' | 'parity' | 'meltdown' | 'time';
   players: { id: string; name: string; role: ImpostorRole; alive: boolean; left: boolean; bot: boolean }[];
 };
 
@@ -112,14 +114,26 @@ export type ImpostorEvent =
 /** The host's lobby settings: bots to add, and (playing alone) their own side. */
 export type ImpostorOptions = { bots: number; role: 'random' | ImpostorRole };
 
-/** Among Us on the island: the crew do tasks at stations, impostors kill, vent and sabotage, and meetings at the table vote someone out. */
+/**
+ * Among Us on a ship that takes the island's place while it plays: the crew do tasks at stations, impostors kill, vent
+ * and sabotage, and meetings at the table vote someone out. Whoever watches stands in the cafeteria, out of the
+ * players' sight.
+ */
 export const impostor = defineGame<ImpostorView, ImpostorOutcome>({
   kind: 'impostor',
   label: '임포스터',
   minPlayers: 1,
   maxPlayers: 15,
+  replacesIsland: true,
+  foldPanelOnStart: true,
   layout: impostorLayout,
   Lobby: ImpostorLobby,
+  // People and bots together make the table.
+  canStart: (session, options) => {
+    const people = session.players.length;
+    const total = people + optionsFor(options, people).bots;
+    return total >= MIN_PLAYERS && total <= MAX_PLAYERS;
+  },
   Panel: ImpostorPanel,
   World: ImpostorWorld,
   Overlay: ImpostorOverlay,

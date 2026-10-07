@@ -1,7 +1,8 @@
 import { act } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// The dock over the real 임포스터 and a game for two or three (to see 시작 wait for players, settings and an overlay).
+// The dock over the real 임포스터, a game for two or three (to see 시작 wait for players, settings and an overlay), and
+// one like 카트 whose map takes the island's place and whose overlay is enough to play.
 vi.mock('../registry', async () => {
   const { impostor } = await import('../impostor');
   const pair = {
@@ -14,7 +15,8 @@ vi.mock('../registry', async () => {
     Overlay: () => <p className="pair-overlay">둘이서 위</p>,
     attention: (view: { ask?: number } | null) => (view?.ask ? `ask-${view.ask}` : null),
   };
-  const GAMES = [impostor, pair];
+  const race = { ...pair, kind: 'race', label: '경주', replacesIsland: true, controlsPlayer: true, foldPanelOnStart: true, attention: undefined };
+  const GAMES = [impostor, pair, race];
   return { GAMES, gameOf: (kind: string | null | undefined) => GAMES.find((game) => game.kind === kind) ?? null };
 });
 
@@ -30,7 +32,7 @@ const me = { id: 'me', name: '나', peer: 'peer-me' };
 const friend = { id: 'friend', name: '친구', peer: 'peer-friend' };
 
 function fakeClient(initial: Partial<GameState>) {
-  let state: GameState = { session: null, connected: true, error: null, ...initial };
+  let state: GameState = { session: null, connected: true, synced: true, error: null, ...initial };
   const listeners = new Set<() => void>();
   const client = {
     getState: () => state,
@@ -49,6 +51,8 @@ function fakeClient(initial: Partial<GameState>) {
     teleport: vi.fn(() => false),
     position: () => null,
     body: () => null,
+    trip: () => null,
+    setTrip: vi.fn(),
     setTeleporter: vi.fn(() => () => {}),
     clearError: vi.fn(),
     connect: vi.fn(),
@@ -62,9 +66,14 @@ function fakeClient(initial: Partial<GameState>) {
   return { client, set };
 }
 
-const session = (changes: Partial<GameSession> = {}): GameSession => ({
-  kind: 'pair', phase: 'lobby', host: me.id, players: [me], you: me.id, game: null, result: null, seq: 1, now: NOW, ...changes,
-});
+const session = (changes: Partial<GameSession> = {}): GameSession => {
+  const shown = {
+    id: 1, kind: 'pair', phase: 'lobby' as const, startedAt: null, host: me.id, players: [me], you: me.id, home: null,
+    stand: null, game: null, result: null, seq: 1, now: NOW, ...changes,
+  };
+  // Its host may close it, unless the case says otherwise (the island's owner may too).
+  return { canClose: shown.host === shown.you, ...shown };
+};
 
 const mounted: { unmount: () => Promise<void> }[] = [];
 
@@ -77,11 +86,14 @@ async function dock(initial: Partial<GameState>, live = true) {
     </GameContext.Provider>,
   );
   mounted.push(view);
+  // The panel is in the page's own tree, or over the page on a game's map.
   const button = (name: string) =>
-    [...view.container.querySelectorAll('button')].find((item) => item.textContent?.trim().startsWith(name) || item.getAttribute('aria-label') === name);
+    [...view.container.querySelectorAll('button'), ...document.body.querySelectorAll<HTMLButtonElement>('.mg-game button')].find(
+      (item) => item.textContent?.trim().startsWith(name) || item.getAttribute('aria-label') === name,
+    );
   const press = (name: string) => act(() => button(name)!.click());
   const toggle = () => view.container.querySelector<HTMLButtonElement>('.mg-game-toggle')!;
-  const panel = () => view.container.querySelector<HTMLElement>('.mg-game');
+  const panel = () => document.body.querySelector<HTMLElement>('.mg-game');
   return { view, client, set, button, press, toggle, panel };
 }
 
@@ -104,7 +116,7 @@ describe('섬의 게임 패널', () => {
     expect(toggle().getAttribute('aria-expanded')).toBe('true');
     expect(document.activeElement).toBe(panel());
     const names = [...panel()!.querySelectorAll('.mg-game-list button')].map((item) => item.textContent);
-    expect(names).toEqual(['임포스터', '둘이서']);
+    expect(names).toEqual(['임포스터', '둘이서', '경주']);
     await press('임포스터');
     expect(client.open).toHaveBeenCalledWith('impostor');
   });
@@ -196,6 +208,28 @@ describe('섬의 게임 패널', () => {
     expect(document.body.querySelector('.pair-overlay')).toBeNull();
   });
 
+  it('섬 자리를 차지하는 게임은 시작 때 패널을 접어 두고, 펼치면 게임 조작 위에 놓이며, 끝나면 결과를 연다', async () => {
+    const { toggle, panel, set, view } = await dock({ session: session({ kind: 'race', players: [me, friend] }) });
+    await act(() => toggle().click());
+    expect(view.container.contains(panel())).toBe(true);
+    set({ session: session({ kind: 'race', phase: 'playing', players: [me, friend], game: {} }) });
+    expect(panel()).toBeNull();
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    expect(document.body.querySelector('.pair-overlay')).not.toBeNull();
+    // Opened on the map: over the page, above the game's own controls.
+    await act(() => toggle().click());
+    expect(view.container.contains(panel())).toBe(false);
+    expect(panel()!.parentElement).toBe(document.body);
+    expect(panel()!.dataset.environment).toBe('game');
+    expect(panel()!.textContent).toContain('둘이서 진행');
+    await act(() => toggle().click());
+    // Over: the island again, and the result comes up by itself.
+    set({ session: session({ kind: 'race', phase: 'ended', players: [me, friend], game: {}, result: {} }) });
+    expect(panel()!.textContent).toContain('둘이서 결과');
+    expect(view.container.contains(panel())).toBe(true);
+    expect(document.body.querySelector('.pair-overlay')).toBeNull();
+  });
+
   it('접어 둔 패널은 게임이 답을 기다릴 때마다 한 번씩 다시 열린다', async () => {
     const { toggle, panel, set } = await dock({ session: session({ phase: 'playing', players: [me, friend], game: {} }) });
     expect(panel()).not.toBeNull();
@@ -211,6 +245,37 @@ describe('섬의 게임 패널', () => {
     expect(panel()).not.toBeNull();
   });
 
+  it('섬 주인은 남이 연 게임을 대기실에서도 진행 중에도 닫을 수 있다', async () => {
+    const owner = { id: 'owner', name: '주인', peer: 'peer-owner' };
+    const lobby = session({ host: friend.id, players: [friend], you: owner.id, canClose: true });
+    const { toggle, button, press, client, set } = await dock({ session: lobby });
+    await act(() => toggle().click());
+    expect(button('시작')).toBeUndefined();
+    await press('닫기');
+    expect(client.close).toHaveBeenCalledTimes(1);
+    // Watching a game others play: no way to leave it, but a way to close it.
+    set({ session: { ...lobby, phase: 'playing', players: [friend, me], game: {} } });
+    expect(button('나가기')).toBeUndefined();
+    await press('닫기');
+    expect(client.close).toHaveBeenCalledTimes(2);
+    // Someone else watching gets neither.
+    set({ session: { ...lobby, phase: 'playing', players: [friend, me], game: {}, canClose: false } });
+    expect(button('닫기')).toBeUndefined();
+  });
+
+  it('임포스터는 사람과 봇을 합쳐 넷이 되어야 시작할 수 있다', async () => {
+    const { toggle, press, button } = await dock({ session: session({ kind: 'impostor' }) });
+    await act(() => toggle().click());
+    // One person and five bots, then four, then three: four together still start.
+    await press('봇 빼기');
+    await press('봇 빼기');
+    expect(button('시작')!.disabled).toBe(false);
+    await press('봇 빼기');
+    expect(button('시작')!.disabled).toBe(true);
+    await press('봇 더하기');
+    expect(button('시작')!.disabled).toBe(false);
+  });
+
   it('끝나면 결과를 보여 주고, 방장은 다시 하거나 닫고 다른 사람은 나간다', async () => {
     const ended = session({ phase: 'ended', players: [me, friend], game: {}, result: {} });
     const host = await dock({ session: ended });
@@ -224,7 +289,7 @@ describe('섬의 게임 패널', () => {
     await host.view.unmount();
     mounted.splice(mounted.indexOf(host.view), 1);
 
-    const guest = await dock({ session: { ...ended, you: friend.id } });
+    const guest = await dock({ session: { ...ended, you: friend.id, canClose: false } });
     await act(() => guest.toggle().click());
     expect(guest.button('다시 하기')).toBeUndefined();
     expect(guest.button('닫기')).toBeUndefined();

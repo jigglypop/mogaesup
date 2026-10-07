@@ -60,6 +60,16 @@ describe('임포스터 패널', () => {
     expect(text('.mg-impostor-broken')).toEqual(['통신 방해']);
   });
 
+  it('남은 게임 시간은 서버가 끝나는 때를 알려 줄 때만 보인다', async () => {
+    const { view: shown, show } = await panel(game({ endsAt: NOW + 10 * 60_000 }));
+    const timer = () => shown.container.querySelector('[role="timer"][aria-label="남은 시간"]');
+    expect(timer()!.textContent).toBe('10:00');
+    // A server from before said nothing of it: no clock, rather than NaN:NaN.
+    await show(game({ endsAt: undefined }));
+    expect(timer()).toBeNull();
+    expect(shown.container.textContent).not.toContain('NaN');
+  });
+
   it('임포스터는 동료와 가짜 작업을 본다', async () => {
     const impostor = game({ role: 'impostor', impostors: ['me', 'c'], kill: { readyAt: NOW + 12_000, targets: ['b'] } });
     const { view: shown, text } = await panel(impostor);

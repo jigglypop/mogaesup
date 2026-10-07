@@ -16,6 +16,7 @@
 .mg-impostor-tally small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mg-muted); font-size: 12px; }
 
 .mg-impostor-head { font-size: 14px; font-weight: 800; letter-spacing: -0.02em; }
+.mg-impostor .mg-impostor-left { font-size: 16px; color: var(--mg-muted); }
 .mg-impostor-clock { display: flex; align-items: center; gap: 10px; }
 .mg-impostor-clock .mg-impostor-count { margin-left: auto; font-size: 14px; }
 .mg-impostor-seats li { gap: 6px; }
@@ -214,4 +215,16 @@ body:has(.mg-world.has-panel) .mg-impostor-actions { right: calc(var(--mg-edge) 
   .mg-impostor-actions { bottom: calc(var(--mg-edge) + 140px); }
   .mg-impostor-actions > .mg-btn { min-width: 72px; height: 44px; }
   .mg-impostor-alarm { top: calc(var(--mg-edge) + 58px); }
+}
+
+/* The ship in the island's place: the island's bars are gone, so the buttons keep to the screen's corner, clear of the
+   walking pad on a touch screen (three keys and their gaps, 168px). */
+body:has(.mg-world[data-environment='game']) .mg-impostor-actions {
+  right: max(var(--mg-edge), env(safe-area-inset-right));
+  bottom: max(var(--mg-edge), env(safe-area-inset-bottom));
+}
+@media (pointer: coarse), (max-width: 720px) {
+  body:has(.mg-walking-controls[data-placement='game']) .mg-impostor-actions { max-width: calc(100% - var(--mg-edge) * 3 - 168px); }
+  .mg-impostor-actions > .mg-btn { min-width: 72px; height: 48px; }
+  .mg-impostor-sabotage .mg-btn, .mg-impostor-vents .mg-btn { min-height: 44px; }
 }

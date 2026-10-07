@@ -18,6 +18,8 @@
   scrollbar-width: thin;
 }
 .mg-world.has-panel .mg-game { right: calc(var(--mg-edge) * 2 + var(--mg-side)); }
+/* On a game's map the panel is over the page (see GameDock), above the game's own controls, at the screen's edge. */
+.mg-game[data-environment='game'] { z-index: 36; }
 .mg-game-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 34px; }
 .mg-game-head h2 { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
 .mg-game-head .mg-icon-btn { margin-right: -6px; }

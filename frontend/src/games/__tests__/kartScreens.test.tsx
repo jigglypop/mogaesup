@@ -35,7 +35,7 @@ const game = (changes: Partial<KartView> = {}): KartView => ({
   gates: 54,
   racers: [racer('x', '도토리', 1, { bot: true, lap: 1 }), racer('b', '비', 2, { lap: 1 }), racer('me', '나', 3, { lap: 1 }), racer('y', '감자', 4, { bot: true })],
   me: { lap: 1, next: 7, item: null },
-  spawn: [-46, 80, 97.4],
+  spawn: [-46, 0, 97.4],
   boxes: [],
   boosts: [],
   bots: [],
@@ -43,7 +43,10 @@ const game = (changes: Partial<KartView> = {}): KartView => ({
 });
 
 function props(shown: KartView, clock = () => NOW) {
-  const session: GameSession<KartView> = { kind: 'kart', phase: 'playing', host: me.id, players, you: me.id, game: shown, result: null, seq: 1, now: NOW };
+  const session: GameSession<KartView> = {
+    id: 1, kind: 'kart', phase: 'playing', startedAt: NOW - 60_000, canClose: true, host: me.id, players, you: me.id,
+    home: null, stand: null, game: shown, result: null, seq: 1, now: NOW,
+  };
   return {
     session,
     view: shown,
@@ -54,6 +57,8 @@ function props(shown: KartView, clock = () => NOW) {
     teleport: vi.fn(() => true),
     position: () => null,
     body: () => null,
+    trip: () => null,
+    setTrip: vi.fn(),
   } satisfies GameProps<KartView>;
 }
 

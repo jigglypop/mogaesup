@@ -1,0 +1,58 @@
+/* The walking pad on touch screens: four arrows in a cross, bottom left, each held by its own finger. Glass tokens only. */
+.mg-walking-controls {
+  --mg-walk-key: 52px;
+  position: fixed;
+  z-index: 32;
+  left: calc(var(--mg-edge) * 2 + var(--mg-rail));
+  /* Over the island's chat bar. */
+  bottom: calc(var(--mg-edge) + 56px + 12px);
+  display: grid;
+  grid-template-columns: repeat(3, var(--mg-walk-key));
+  grid-template-rows: repeat(2, var(--mg-walk-key));
+  gap: 6px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+/* On a game's map the island's bars are gone: against the screen's edge. */
+.mg-walking-controls[data-placement='game'] {
+  left: max(var(--mg-edge), env(safe-area-inset-left));
+  bottom: max(var(--mg-edge), env(safe-area-inset-bottom));
+}
+.mg-walking-control {
+  display: grid;
+  place-items: center;
+  width: var(--mg-walk-key);
+  height: var(--mg-walk-key);
+  padding: 0;
+  border: 1px solid var(--mg-line);
+  border-radius: var(--mg-r-control);
+  color: var(--mg-ink);
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.mg-walking-control svg { width: 22px; height: 22px; fill: currentColor; }
+.mg-walking-control[data-direction='forward'] { grid-column: 2; grid-row: 1; }
+.mg-walking-control[data-direction='leftward'] { grid-column: 1; grid-row: 2; }
+.mg-walking-control[data-direction='backward'] { grid-column: 2; grid-row: 2; }
+.mg-walking-control[data-direction='rightward'] { grid-column: 3; grid-row: 2; }
+.mg-walking-control[data-direction='leftward'] svg { transform: rotate(-90deg); }
+.mg-walking-control[data-direction='backward'] svg { transform: rotate(180deg); }
+.mg-walking-control[data-direction='rightward'] svg { transform: rotate(90deg); }
+.mg-walking-control[aria-pressed='true'] { border-color: var(--mg-primary); background: var(--mg-primary-soft); color: var(--mg-primary); }
+.mg-walking-control:disabled { opacity: 0.45; cursor: default; }
+.mg-walking-control:focus-visible { outline: 3px solid var(--mg-primary); outline-offset: 2px; }
+
+/* What to use nearby moves to the right of the pad; while a resident's words are up over the chat bar, the pad waits. */
+.mg-world:has(.mg-walking-controls) .mg-interact { justify-self: end; }
+.mg-world:has(.mg-greeting) .mg-walking-controls[data-placement='island'] { display: none; }
+
+/* Phones: the tab bar runs along the bottom, the chat bar over it, the pad over that; under the open story sheet it waits. */
+@media (max-width: 720px) {
+  .mg-walking-controls { left: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px + 56px + 12px); }
+  .mg-world.has-panel .mg-walking-controls[data-placement='island'] { display: none; }
+  /* The folded story panel's button stays on the right of the pad (three keys and their gaps, 168px). */
+  .mg-world:has(.mg-walking-controls) .mg-side-open { max-width: calc(100% - var(--mg-edge) * 3 - 168px); }
+}

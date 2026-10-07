@@ -1,12 +1,13 @@
 import type { Vec3 } from './protocol';
 
 /**
- * The plain geometry of arenas (see arena.tsx): where they float, grid maps, their floor slabs and walls. Kept apart from
- * the components so a game's map module can use it without importing the game room.
+ * The plain geometry of arenas (see arena.tsx), a game's own map that takes the island's place while it plays: its
+ * ground level, grid maps, their floor slabs and walls. Kept apart from the components so a game's map module can use
+ * it without importing the game room.
  */
 
-/** How high over the island arenas float, in meters (layout points stay within the server's 200). */
-export const ARENA_Y = 80;
+/** The ground level of a game's map: the island's own, whose place it takes (layout points stay within the server's 200). */
+export const MAP_Y = 0;
 
 /** A box in the world: its centre and its full size along x, y and z. */
 export type Box = { center: Vec3; size: Vec3 };

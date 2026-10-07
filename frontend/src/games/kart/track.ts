@@ -1,15 +1,19 @@
-import { ARENA_Y } from '../arenaMap';
+import { MAP_Y } from '../arenaMap';
 import type { Vec3 } from '../protocol';
 
 /**
- * 카트's circuit, the same on every page: a closed loop in the sky over the island (see arenaMap.ts) with a long start
- * straight, two sweeping corners, a pair of hairpins, a chicane and a long back straight. Its middle line is made of
- * straight lines, circle arcs and one S; the gates the server counts are points on it, the first being the start line.
- * Points are on the ground of the track (`ARENA_Y`); x is east, z south.
+ * 카트's circuit, the same on every page: a closed loop on a racing island that takes the island's place while the
+ * race runs (see IslandScenery.tsx), with a long start straight, two sweeping corners, a pair of hairpins, a chicane and
+ * a long back straight. Its middle line is made of straight lines, circle arcs and one S; the gates the server counts
+ * are points on it, the first being the start line. Points are on the ground of the track (`TRACK_Y`, the island's
+ * own ground level); x is east, z south.
  */
 
 /** A point on the ground plan: x and z. */
 export type Flat = [number, number];
+
+/** The track's ground: where the island's is. */
+export const TRACK_Y = MAP_Y;
 
 /** Half the road's width, in meters. */
 export const HALF_WIDTH = 6;
@@ -17,6 +21,8 @@ export const HALF_WIDTH = 6;
 export const GATE_RADIUS = HALF_WIDTH + 2;
 /** Where the track starts and which way it runs there. */
 export const START: Flat = [-40, 100];
+/** Where whoever watches stands: on the grass south of the grid, behind the rail, in sight of the start. */
+export const STAND: Flat = [-56, 109.5];
 /** The heading karts start in: east (heading 0 faces south, +z; a quarter turn faces east, +x). */
 export const START_HEADING = Math.PI / 2;
 
@@ -105,7 +111,7 @@ const BUILT = build();
 
 /** Centimeters, as layouts carry points. */
 const cm = (value: number) => Math.round(value * 100) / 100;
-const ground = ([x, z]: Flat): Vec3 => [cm(x), ARENA_Y, cm(z)];
+const ground = ([x, z]: Flat): Vec3 => [cm(x), TRACK_Y, cm(z)];
 
 /** The gates in driving order, the start line first. */
 export const GATES: readonly Flat[] = BUILT.gates;
@@ -186,6 +192,7 @@ export function trackLayout(laps: number, bots: number) {
     grid: GRID.map(ground),
     boxes: BOXES.map(ground),
     boosts: BOOSTS.map(ground),
+    stand: ground(STAND),
     laps,
     bots,
   };

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 're
 
 import type { GameProps } from '../game';
 import { clock, useRemaining } from '../time';
+import { WalkingControls } from '../WalkingControls';
 import type { ImpostorEvent, ImpostorView, SabotageKind } from './index';
 import { TASK_NAMES, TaskGame } from './tasks';
 
@@ -157,7 +158,8 @@ function Actions({ view, act, serverNow }: Pick<GameProps<ImpostorView>, 'view' 
 
 /**
  * Over the whole page while 임포스터 plays: the side dealt at the start, splashes for a kill, a meeting and a verdict,
- * the dark of a lights-out for the crew, the sabotage alarm, the task being played, and the buttons in reach.
+ * the dark of a lights-out for the crew, the sabotage alarm, the task being played, the buttons in reach, and on a
+ * touch screen the walking pad (still at a meeting, at a task and in a vent).
  */
 export function ImpostorOverlay({ view, me, act, onEvent, serverNow }: GameProps<ImpostorView>) {
   const [splash, show] = useSplash();
@@ -199,6 +201,7 @@ export function ImpostorOverlay({ view, me, act, onEvent, serverNow }: GameProps
   return (
     <>
       {dark && <div className="mg-impostor-dark" aria-hidden="true" />}
+      {me && view.role && <WalkingControls placement="game" disabled={!playing || !!view.working || view.venting !== null} />}
       {playing && view.sabotage && <Alarm view={view} act={act} serverNow={serverNow} />}
       {playing && me && view.working && view.role === 'crew' && (
         <TaskScreen key={`${view.working.station}-${view.working.readyAt}`} view={view} act={act} serverNow={serverNow} />

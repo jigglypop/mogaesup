@@ -1,11 +1,12 @@
-import { ARENA_Y, cellPoint, cells, type GridMap } from '../arenaMap';
+import { cellPoint, cells, MAP_Y, type GridMap } from '../arenaMap';
 import type { Vec3 } from '../protocol';
 
 /**
- * 임포스터's map: a ship of fourteen rooms and the halls between them on 4 m cells, floating over the island (see
- * ../arenaMap.ts). The host's page sends its places as the game's layout: the stations (one task each, two at the
- * reactor), the cafeteria's table, the vents, which stations fix each sabotage, and every floor cell for the bots to
- * walk between (neighbours only, so they keep to the halls).
+ * 임포스터's map: a ship of fourteen rooms and the halls between them on 4 m cells, which takes the island's place
+ * while the game plays (at its ground level, see ../arenaMap.ts). The host's page sends its places as the game's
+ * layout: the stations (one task each, two at the reactor), the cafeteria's table, the vents, which stations fix each
+ * sabotage, every floor cell for the bots to walk between (neighbours only, so they keep to the halls), and where
+ * whoever watches stands.
  */
 
 export type ShipRoom = { mark: string; name: string; rect: [col: number, row: number, width: number, height: number] };
@@ -54,7 +55,7 @@ function draw(): string[] {
   return grid.map((line) => line.join(''));
 }
 
-export const SHIP: GridMap = { rows: draw(), cell: 4, origin: [0, ARENA_Y, 0] };
+export const SHIP: GridMap = { rows: draw(), cell: 4, origin: [0, MAP_Y, 0] };
 
 export const walkable = (mark: string) => mark !== ' ';
 
@@ -90,6 +91,8 @@ const VENTS: readonly [col: number, row: number][] = [
 
 /** The cafeteria's middle. */
 const TABLE: [col: number, row: number] = [11.5, 3];
+/** Where whoever watches stands: the cafeteria's south side, clear of the table's seats. */
+const STAND: [col: number, row: number] = [11.5, 5];
 
 const at = ([col, row]: readonly [number, number]): Vec3 => cellPoint(SHIP, col, row);
 
@@ -99,6 +102,7 @@ export type ShipPlaces = {
   vents: Vec3[];
   walk: Vec3[];
   panels: typeof SHIP_PANELS;
+  stand: Vec3;
 };
 
 /** The ship's places in world coordinates, as the layout carries them. */
@@ -109,6 +113,7 @@ export function shipPlaces(): ShipPlaces {
     vents: VENTS.map(at),
     walk: cells(SHIP, walkable).map(({ col, row }) => at([col, row])),
     panels: SHIP_PANELS,
+    stand: at(STAND),
   };
 }
 

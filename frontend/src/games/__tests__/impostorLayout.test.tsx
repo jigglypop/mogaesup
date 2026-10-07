@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ARENA_Y, cells, floorBoxes, wallBoxes } from '../arenaMap';
+import { cells, floorBoxes, MAP_Y, wallBoxes } from '../arenaMap';
 import { defaultOptions, flat, impostorLayout, optionsFor } from '../impostor/layout';
 import { SHIP, SHIP_ROOMS, roomLabels, shipPlaces, walkable } from '../impostor/ship';
 import type { GameSession, Vec3 } from '../protocol';
@@ -21,8 +21,9 @@ function markAt(point: Vec3): string {
 }
 
 describe('임포스터의 우주선', () => {
-  it('섬 위 하늘에 떠 있고, 방 열네 개와 복도가 모두 이어져 있다', () => {
-    expect(SHIP.origin[1]).toBe(ARENA_Y);
+  it('섬 자리의 땅 높이에 놓이고, 방 열네 개와 복도가 모두 이어져 있다', () => {
+    expect(SHIP.origin[1]).toBe(MAP_Y);
+    expect(MAP_Y).toBe(0);
     const open = cells(SHIP, walkable);
     const key = (col: number, row: number) => `${col},${row}`;
     const floor = new Set(open.map(({ col, row }) => key(col, row)));
@@ -74,6 +75,16 @@ describe('임포스터의 우주선', () => {
     expect(walk.length).toBeLessThanOrEqual(400);
   });
 
+  it('구경하는 사람은 식당에 서고, 1.5m 흩어져도 식당 바닥이며 탁자 둘레 자리와 겹치지 않는다', () => {
+    const { stand, table } = shipPlaces();
+    expect(stand[1]).toBe(MAP_Y);
+    for (const turn of [0, 1, 2, 3, 4, 5, 6, 7].map((step) => (step * Math.PI) / 4)) {
+      expect(markAt([stand[0] + Math.cos(turn) * 1.5, stand[1], stand[2] + Math.sin(turn) * 1.5])).toBe('C');
+    }
+    // The seats are at most 2.4 m from the table.
+    expect(flat(stand, table)).toBeGreaterThan(2.4 + 1.5 + 1);
+  });
+
   it('등록된 임포스터는 서버와 같은 kind와 인원이고, 시작하면 우주선의 자리와 방장 설정을 보낸다', () => {
     const game = gameOf('impostor')!;
     expect([game.kind, game.label, game.minPlayers, game.maxPlayers]).toEqual(['impostor', '임포스터', 1, 15]);
@@ -84,7 +95,7 @@ describe('임포스터의 우주선', () => {
     expect(layout).toMatchObject(shipPlaces());
     // The whole layout fits the game socket's 16 KiB frames, within the server's bounds.
     expect(JSON.stringify({ type: 'Start', layout }).length).toBeLessThan(16 * 1024);
-    for (const point of [layout.table, ...layout.stations, ...layout.vents, ...layout.walk]) {
+    for (const point of [layout.table, layout.stand, ...layout.stations, ...layout.vents, ...layout.walk]) {
       for (const value of point) expect(Math.abs(value)).toBeLessThanOrEqual(200);
     }
     const chosen = impostorLayout({ session, options: { bots: 3, role: 'impostor' } });

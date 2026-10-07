@@ -124,8 +124,83 @@
   box-shadow: var(--mg-shadow-soft);
 }
 
+/* The island's rail gives way to the race: the HUD keeps to the screen's edge. */
+:where(body:has(.mg-world[data-environment='game'])) :is(.mg-kart-hud, .mg-kart-item) { left: var(--mg-edge); }
+
+/* Touch screens: the left hand brakes and steers, the right drifts and drives, the item over the right hand. Each held
+   button keeps its own finger, so steering, the throttle and a drift stay down together. */
+.mg-kart-touch {
+  --mg-kart-key: clamp(56px, 15vw, 68px);
+  position: fixed;
+  z-index: 35;
+  left: max(var(--mg-edge), env(safe-area-inset-left));
+  right: max(var(--mg-edge), env(safe-area-inset-right));
+  bottom: max(var(--mg-edge), env(safe-area-inset-bottom));
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mg-kart-touch-pad {
+  display: grid;
+  grid-template-columns: repeat(2, var(--mg-kart-key));
+  grid-template-rows: calc(var(--mg-kart-key) * 0.8) var(--mg-kart-key);
+  gap: 8px;
+}
+.mg-kart-touch-actions { display: flex; align-items: flex-end; gap: 8px; }
+.mg-kart-control {
+  display: grid;
+  place-items: center;
+  width: var(--mg-kart-key);
+  height: var(--mg-kart-key);
+  padding: 0;
+  border: 1px solid var(--mg-line);
+  border-radius: var(--mg-r-control);
+  color: var(--mg-ink);
+  font: 850 13px var(--mg-font);
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.mg-kart-control svg { width: 26px; height: 26px; fill: currentColor; }
+.mg-kart-control svg[data-way='back'] { transform: rotate(180deg); }
+.mg-kart-control svg[data-way='left'] { transform: rotate(-90deg); }
+.mg-kart-control svg[data-way='right'] { transform: rotate(90deg); }
+.mg-kart-control[data-control='back'] { grid-column: 1 / span 2; grid-row: 1; justify-self: center; height: calc(var(--mg-kart-key) * 0.8); }
+.mg-kart-control[data-control='left'] { grid-column: 1; grid-row: 2; }
+.mg-kart-control[data-control='right'] { grid-column: 2; grid-row: 2; }
+.mg-kart-control[data-control='drift'] { width: calc(var(--mg-kart-key) * 1.2); }
+.mg-kart-control[data-control='forward'] { height: calc(var(--mg-kart-key) * 1.45); }
+.mg-kart-control[aria-pressed='true'] { border-color: var(--mg-primary); background: var(--mg-primary); color: var(--mg-primary-ink); }
+.mg-kart-control:disabled { opacity: 0.5; }
+.mg-kart-control:focus-visible { outline: 3px solid var(--mg-primary); outline-offset: 2px; }
+
 @media (max-width: 720px) {
   .mg-kart-hud { top: calc(var(--mg-edge) + 58px); left: var(--mg-edge); gap: 12px; padding: 6px 14px; }
   .mg-kart-item { top: calc(var(--mg-edge) + 106px); left: var(--mg-edge); }
   .mg-kart-hud b { font-size: 20px; }
+}
+
+/* A phone on its side: the bars are slim. */
+@media (max-height: 500px) and (min-width: 721px) {
+  .mg-kart-hud { top: calc(var(--mg-edge) + 58px); }
+}
+
+/* With the kart's buttons (touch screens), the item waits over the right hand. */
+@media (pointer: coarse), (max-width: 720px) {
+  body:has(.mg-kart-touch) .mg-kart-item {
+    top: auto;
+    left: auto;
+    right: max(var(--mg-edge), env(safe-area-inset-right));
+    bottom: calc(max(var(--mg-edge), env(safe-area-inset-bottom)) + clamp(56px, 15vw, 68px) * 1.45 + 12px);
+    min-width: 0;
+    width: calc(clamp(56px, 15vw, 68px) * 2.2 + 8px);
+    min-height: 56px;
+    touch-action: manipulation;
+  }
+  body:has(.mg-kart-touch) .mg-kart-item kbd { display: none; }
 }

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { ARENA_Y } from '../arenaMap';
+import { TREES } from '../kart/IslandScenery';
 import { kartLayout } from '../kart/layout';
-import { BOOSTS, BOXES, frame, GATES, GRID, HALF_WIDTH, lapLength, MIDDLE, nearest, START, type Flat } from '../kart/track';
+import { BOOSTS, BOXES, frame, GATES, GRID, HALF_WIDTH, lapLength, MIDDLE, nearest, STAND, START, TRACK_Y, type Flat } from '../kart/track';
 import type { GameSession } from '../protocol';
 
 const apart = (a: Flat, b: Flat) => Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -74,9 +74,11 @@ describe('카트 서킷', () => {
     expect(layout.radius).toBeGreaterThanOrEqual(2);
     expect(layout.radius).toBeLessThanOrEqual(15);
     expect(layout.grid).toHaveLength(8);
-    const points = [...layout.checkpoints, ...layout.grid, ...layout.boxes, ...layout.boosts];
+    const points = [...layout.checkpoints, ...layout.grid, ...layout.boxes, ...layout.boosts, layout.stand];
+    // On the island's own ground, which the racing island takes the place of.
+    expect(TRACK_Y).toBe(0);
     for (const point of points) {
-      expect(point[1]).toBe(ARENA_Y);
+      expect(point[1]).toBe(TRACK_Y);
       expect(Math.abs(point[0])).toBeLessThanOrEqual(200);
       expect(Math.abs(point[2])).toBeLessThanOrEqual(200);
     }
@@ -86,5 +88,18 @@ describe('카트 서킷', () => {
     expect(kartLayout({ session: session(2), options: { bots: 9, laps: 9 } })).toMatchObject({ bots: 6, laps: 5 });
     expect(kartLayout({ session: session(8), options: { bots: 2, laps: 0 } })).toMatchObject({ bots: 0, laps: 1 });
     expect(kartLayout({ session: session(5), options: undefined })).toMatchObject({ bots: 0, laps: 3 });
+  });
+
+  it('구경하는 자리는 길과 방호벽 밖 출발선 옆이고, 나무는 길·출발선·구경 자리를 비켜 선다', () => {
+    const layout = kartLayout({ session: session(1), options: undefined });
+    expect(layout.stand).toEqual([STAND[0], TRACK_Y, STAND[1]]);
+    // Off the road and its barrier (6.9 m from the middle) with room for the watchers spread 1.5 m around it.
+    expect(apart(STAND, MIDDLE[nearest(STAND)]!)).toBeGreaterThan(HALF_WIDTH + 1 + 1.5 + 1);
+    expect(apart(STAND, START)).toBeLessThan(25);
+    expect(TREES.length).toBeGreaterThan(40);
+    for (const { at } of TREES) {
+      expect(apart(at, MIDDLE[nearest(at)]!)).toBeGreaterThanOrEqual(16);
+      expect(apart(at, STAND)).toBeGreaterThanOrEqual(14);
+    }
   });
 });
