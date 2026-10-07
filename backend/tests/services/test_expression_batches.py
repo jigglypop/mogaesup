@@ -156,3 +156,31 @@ def test_a_child_whose_request_never_left_is_sent_once_more_by_a_resume(batch):
     service.execute(created['id'])
     assert generation.sent.count('cry') == 2 and len(generation.sent) == 6
     assert service.get(created['id'])['status'] == 'complete'
+
+
+def test_the_artwork_is_read_under_the_batch_locks_not_the_process_lock(batch, monkeypatch):
+    import threading
+    import time
+    from src.services.avatar_factory import _LOCK
+    service, _ = batch()
+    read = []
+
+    def sources(self, assets):
+        read.append(_LOCK._is_owned())
+        time.sleep(.2)  # Up to three PNGs of 32 MB: a second request with the same key arrives meanwhile.
+        return []
+    monkeypatch.setattr(AvatarExpressionReferences, 'sources', sources)
+    results, errors = [], []
+
+    def create():
+        try:
+            results.append(service.create('batch-key-1', {'reference_assets': ASSETS}))
+        except PipelineError as exc:
+            errors.append(exc.code)
+    threads = [threading.Thread(target=create) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    # The second waits for the first and finds its batch; neither is refused for the other.
+    assert errors == [] and read == [False] and len({record['id'] for record, _ in results}) == 1

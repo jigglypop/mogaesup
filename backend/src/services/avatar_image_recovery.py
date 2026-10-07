@@ -282,11 +282,34 @@ def retry_view(service, owner, job_id, slot, view, failure_id):
     return retry_views(service, owner, job_id, [{'slot': slot, 'view': view, 'failure_id': failure_id}])
 
 
+def _stopped(job, lock):
+    return job.get('status') in ('pipeline_paused', 'failed', 'recovery_required') and not (lock and lock.locked())
+
+
+def move_kept_answers(directory, images, run_locks):
+    """Moves each complete answer kept as a partial into place (a stored write of a whole image answer) for the images
+    a retry names and for the requests a stopped server cut off, while the job is stopped: under the process lock
+    retry_views then only finds them there. A running job's worker moves its own."""
+    if not _stopped(read_json(directory/'job.json'), run_locks.get(str(directory))):
+        return
+    state = read_json(directory/'pipeline.json')
+    named = {(request.get('slot'), request.get('view')) for request in images if isinstance(request, dict)}
+    receipts = [receipt_path(directory, part['slot'], view, image)
+                for part in state.get('parts', []) for view, image in (part.get('views') or {}).items()
+                if (part['slot'], view) in named or image.get('status') == 'submitting']
+    _, reference_views = _reference_views(state)
+    receipts += [reference_receipt(directory, view, image) for view, image in reference_views.items()
+                 if (REFERENCE, view) in named or image.get('status') == 'submitting']
+    for receipt in receipts:
+        saved_response(receipt)
+
+
 def retry_views(service, owner, job_id, images):
     """Accept an explicit set atomically; a replay never creates more attempts."""
     from src.services.avatar_image_pipeline import _LOCK, _RUN_LOCKS
     service.factory.get(owner, job_id)
     directory = service.factory.directory(owner, job_id)
+    move_kept_answers(directory, images, _RUN_LOCKS)
     with _LOCK:
         job = read_json(directory/'job.json')
         state = read_json(directory/'pipeline.json')
@@ -311,8 +334,7 @@ def retry_views(service, owner, job_id, images):
             return service.factory.get(owner, job_id), False
         if any(reused):
             raise PipelineError('failure_changed', '이미 접수한 이미지가 포함되어 있습니다.', 409)
-        lock = _RUN_LOCKS.get(str(directory))
-        if job['status'] not in ('pipeline_paused', 'failed', 'recovery_required') or (lock and lock.locked()):
+        if not _stopped(job, _RUN_LOCKS.get(str(directory))):
             raise PipelineError('worker_running', '진행 중인 작업입니다.', 409)
         for part, view, image, failure_id in selected:
             failure = image_failure(image)

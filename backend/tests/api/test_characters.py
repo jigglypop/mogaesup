@@ -261,6 +261,37 @@ def test_a_face_selection_is_bounded_in_total_before_it_is_stored(setup, monkeyp
     assert not (run / 'operations').exists()
 
 
+def test_an_oversized_action_body_is_refused_before_it_is_parsed(setup, monkeypatch):
+    # 300 000 faces are a few MB of JSON; a body near the proxy's 64 MiB limit is refused unread, not parsed into
+    # tens of millions of ints first.
+    from src.api import characters as api
+    client, pipeline, _ = setup
+    value = with_model(client)
+    url = f"/api/characters/{value['id']}/actions/separate_parts"
+    headers = {"If-Match": value['revision'], "Idempotency-Key": 'oversized-body-1', "Content-Type": "application/json"}
+    parsed = []
+    monkeypatch.setattr(api, '_accept_action', lambda *args: parsed.append(args))
+    monkeypatch.setattr(api, 'MAX_STORED_INPUT_BYTES', 1000)
+    body = b'{"source_sha256": "' + b'a' * 64 + b'", "selections": [{"faces": [' + b','.join([b'7'] * 2000) + b']}]}'
+    refused = client.post(url, content=body, headers=headers)
+    assert refused.status_code == 413 and refused.json()['error']['code'] == 'input_too_large'
+    # Streamed without a length too (chunked), the read stops at the limit.
+    streamed = client.post(url, content=iter([body[:1500], body[1500:]]), headers=headers)
+    assert streamed.status_code == 413 and parsed == []
+    _, run, _ = pipeline.entry(value['id'], 1)
+    assert not (run / 'operations').exists()
+
+
+def test_an_action_body_that_is_not_a_json_object_is_an_input_error(setup):
+    client, _, _ = setup
+    value = with_model(client)
+    url = f"/api/characters/{value['id']}/actions/inspect_model"
+    headers = {"If-Match": value['revision'], "Idempotency-Key": 'not-an-object-1', "Content-Type": "application/json"}
+    for body in (b'[1, 2]', b'{"unclosed": ', bytes([255, 254])):
+        answer = client.post(url, content=body, headers=headers)
+        assert answer.status_code == 422 and answer.json()['error']['code'] == 'invalid_input'
+
+
 def test_a_stored_model_rewritten_at_the_same_size_changes_the_revision(setup, monkeypatch):
     """The stat of an object in S3 or of a database record has its modification time in seconds but no st_mtime_ns;
     the If-Match revision still follows the file, from one stat() (one HEAD) per file."""

@@ -40,7 +40,11 @@ def start_blender(executable: Path, root: Path, port: int) -> dict:
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0
-    with log_path.open("ab") as log:
+    from src.services.avatar_factory import _QUEUE
+    from src.services.character_parts import slot_inheritance
+    # One of the data root's Blender slots, as every worker the API or a CLI starts: this Blender keeps it (on POSIX)
+    # until it is closed, after this command has returned.
+    with _QUEUE, log_path.open("ab") as log:
         process = subprocess.Popen(
             [str(executable.resolve()), "--factory-startup", "--disable-autoexec", "--python-exit-code", "1",
              '--python', str(Path(__file__).with_name('services') / 'runtime_blender_bootstrap.py'), '--python',
@@ -48,6 +52,7 @@ def start_blender(executable: Path, root: Path, port: int) -> dict:
             stdout=log, stderr=log, stdin=subprocess.DEVNULL, startupinfo=startupinfo,
             # .env is loaded in main(); provider keys must not reach a Blender that runs addon code.
             env=admitted_environment(worker_environment(DISABLE_TELEMETRY="true")),
+            **slot_inheritance(),
         )
     for _ in range(100):
         if process.poll() is not None:

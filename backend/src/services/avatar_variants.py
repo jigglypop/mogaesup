@@ -19,6 +19,7 @@ from src.services.avatar_openai_images import DEFAULT_BASE
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
 from src.services.character_parts import blender_executable, blender_process, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
+from src.services.keyed_lock import keyed_lock
 from src.services.model_providers import base_url
 from src.services.object_storage import StoredPath as Path, WorkspaceUploadError, copy_file, copy_tree, local_workspace
 from src.services.process_identity import identity, state as process_state
@@ -96,8 +97,8 @@ class AvatarVariants:
         return self.create(owner, key, variant, frozen_context=frozen_context)
 
     def _warm_body(self, owner, payload):
-        """Parse the base body before the process lock is taken, so the checks under it read the result from memory.
-        What is wrong with the base is reported by those checks; a failure here is not."""
+        """Parse the base body before the admission checks, so they read the result from memory. What is wrong with the
+        base is reported by those checks; a failure here is not."""
         try:
             body_file = self.factory.directory(owner, payload['base_job_id'])/'native-parts'/payload['base_version']/'body.glb'
             body_facts(body_file, digest(body_file))
@@ -137,10 +138,11 @@ class AvatarVariants:
                 require_credits(0 if payload.get('uploaded_model') else sum(needs_provider(m) for m in estimate.values()))
         if not read_json(target/'job.json'):
             self._warm_body(owner, payload)
-        # Copies of stored files (one request each in S3) are made after every check has passed and without the
-        # process lock; the lock is taken again only to accept the job.
+        # Every read, hash and copy of stored files is made without the process lock: one admission at a time per
+        # request key (keyed_lock), and the process lock only for the final check-and-write of the job. A request with this
+        # key accepted meanwhile is found there, and nothing of a job is visible before its job.json.
         staged = []
-        with _LOCK:
+        with keyed_lock(('variant-admission', str(target))):
             prior = read_json(target/'job.json')
             if prior:
                 if prior['fingerprint'] != fingerprint:
@@ -530,48 +532,49 @@ class AvatarVariants:
             version = body_hash[:24]
             rigdir = target/'meshy/versions'/version
             staged.append((copy_file, body_file, rigdir/'model.glb'))
-        for copy, origin, destination in staged:
-            copy(origin, destination)
-        with _LOCK:
-            prior = read_json(target/'job.json')
-            if prior:
-                # Another request with this key was accepted while the files were copied.
-                if prior['fingerprint'] != fingerprint:
-                    raise PipelineError('idempotency_conflict', '같은 요청의 입력이 변경되었습니다.', 409)
-                return self.factory.get(owner, job_id), False
-            # A minimal sealed rig delivery contains the actual chosen body and its
-            # clips. It never copies another job's active provider worker or intent.
-            rigdir.mkdir(parents=True, exist_ok=True)
-            receipt = {'version': version, 'files': {'model.glb': body_hash},
-                       'bone_count': native['bone_count'],
-                       'clips': [{'slot': name, 'source': 'frozen_body', 'action_id': None} for name in facts['clips']],
-                       'origin': 'frozen_body'}
-            _write_json(rigdir/'receipt.json', receipt)
-            _write_json(target/'meshy/delivery.json', receipt)
-            _write_json(target/'meshy/worker.json', {'status': 'complete', 'origin': 'frozen_body'})
-            _write_json(target/'pipeline.json', state)
-            _write_json(target/'job.json', {'id': job_id, 'fingerprint': fingerprint,
-                'executor': self.factory.instance, 'executor_process': identity(),
-                'character_id': character_id, 'character_name': character_name,
-                'source_sha256': source_hash, 'input_kind': 'image',
-                **({'input': photo_input} if photo_input is not None else {}),
-                'production_mode': 'character_parts', 'auto_assemble': True, 'profile': base['profile'],
-                'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
-                'base_job_id': base_id, 'base_version': native['version'], 'requested_slots': slots,
-                'meshy_options': ({} if uploaded_model else
-                                  {slot: frozen['options'] for slot, frozen in meshy_options.items()}),
-                **({'resume_stage': 'images' if redraw else 'models', 'part_name': payload.get('part_name', '')}
-                   if uploaded_views or uploaded_model else {}),
-                # A generated part keeps the name it was asked for, as the wardrobe lists it.
-                **({'part_name': payload['part_name']} if payload.get('part_name') else {}),
-                'limits': {'image_tasks': (0 if (uploaded_views and not redraw) or uploaded_model else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
-                           'reference_tasks': 2 if photo_input is not None and state.get('reference_preparation') else 0,
-                           'expression_tasks': (0 if payload.get('single_part') else 5 if state.get('default_expressions') else 0),
-                           'meshy_tasks': 0 if uploaded_model else sum(needs_provider(part_methods[s]) for s in slots),
-                           'meshy_rig_tasks': 0, 'meshy_animation_tasks': 0},
-                'review': {'decision': 'pending'}, 'files': {}})
-            AvatarImagePipeline(self.factory).publish(owner, job_id, state)
-            return self.factory.get(owner, job_id), True
+            for copy, origin, destination in staged:
+                copy(origin, destination)
+            with _LOCK:
+                prior = read_json(target/'job.json')
+                if prior:
+                    # Another request with this key was accepted while the files were copied.
+                    if prior['fingerprint'] != fingerprint:
+                        raise PipelineError('idempotency_conflict', '같은 요청의 입력이 변경되었습니다.', 409)
+                else:
+                    # A minimal sealed rig delivery contains the actual chosen body and its
+                    # clips. It never copies another job's active provider worker or intent.
+                    rigdir.mkdir(parents=True, exist_ok=True)
+                    receipt = {'version': version, 'files': {'model.glb': body_hash},
+                               'bone_count': native['bone_count'],
+                               'clips': [{'slot': name, 'source': 'frozen_body', 'action_id': None} for name in facts['clips']],
+                               'origin': 'frozen_body'}
+                    _write_json(rigdir/'receipt.json', receipt)
+                    _write_json(target/'meshy/delivery.json', receipt)
+                    _write_json(target/'meshy/worker.json', {'status': 'complete', 'origin': 'frozen_body'})
+                    _write_json(target/'pipeline.json', state)
+                    _write_json(target/'job.json', {'id': job_id, 'fingerprint': fingerprint,
+                        'executor': self.factory.instance, 'executor_process': identity(),
+                        'character_id': character_id, 'character_name': character_name,
+                        'source_sha256': source_hash, 'input_kind': 'image',
+                        **({'input': photo_input} if photo_input is not None else {}),
+                        'production_mode': 'character_parts', 'auto_assemble': True, 'profile': base['profile'],
+                        'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
+                        'base_job_id': base_id, 'base_version': native['version'], 'requested_slots': slots,
+                        'meshy_options': ({} if uploaded_model else
+                                          {slot: frozen['options'] for slot, frozen in meshy_options.items()}),
+                        **({'resume_stage': 'images' if redraw else 'models', 'part_name': payload.get('part_name', '')}
+                           if uploaded_views or uploaded_model else {}),
+                        # A generated part keeps the name it was asked for, as the wardrobe lists it.
+                        **({'part_name': payload['part_name']} if payload.get('part_name') else {}),
+                        'limits': {'image_tasks': (0 if (uploaded_views and not redraw) or uploaded_model else len(generated_views)*len(slots)) + (2 if photo_input is not None and state.get('reference_preparation') else 0),
+                                   'reference_tasks': 2 if photo_input is not None and state.get('reference_preparation') else 0,
+                                   'expression_tasks': (0 if payload.get('single_part') else 5 if state.get('default_expressions') else 0),
+                                   'meshy_tasks': 0 if uploaded_model else sum(needs_provider(part_methods[s]) for s in slots),
+                                   'meshy_rig_tasks': 0, 'meshy_animation_tasks': 0},
+                        'review': {'decision': 'pending'}, 'files': {}})
+                    AvatarImagePipeline(self.factory).publish(owner, job_id, state)
+        # The job is read back (a listing of its records) after the process lock.
+        return self.factory.get(owner, job_id), not prior
 
 
 def prepare_body(service, owner, job_id, state):
@@ -598,34 +601,38 @@ def prepare_body(service, owner, job_id, state):
     cache_key = hashlib.sha256(json.dumps({'body': body_hash, 'spec': state['production_spec'],
         'worker': digest(worker), 'legacy_side_i': legacy_side_i}, sort_keys=True).encode()).hexdigest()[:24]
     cache = service.factory.root/str(int(owner))/'body-reference-cache'/cache_key
-    shared = read_json(cache/'complete.json')
-    if (required <= shared.get('files', {}).keys()
-            and all((cache/name).is_file() and digest(cache/name) == shared['files'][name] for name in required)
-            and not read_json(output/'complete.json').get('input_sha256') == digest(output/'input.json')):
-        for name in required:
-            copy_file(cache/name, output/name)
-        _write_json(output/'complete.json', {'input_sha256': digest(output/'input.json'),
-            'files': {name: shared['files'][name] for name in required}, 'reused_from': cache_key})
-    try:
-        with local_workspace(output, inputs=[body]):
-            seal = read_json(output/'complete.json')
-            cached = (seal.get('input_sha256') == digest(output/'input.json')
-                      and required <= seal.get('files', {}).keys()
-                      and all((output/name).is_file() and digest(output/name) == seal['files'][name] for name in required))
-            if not cached:
-                render_body_reference(output, worker)
-            seal = read_json(output/'complete.json')
-            if (seal.get('input_sha256') != digest(output/'input.json') or not required <= seal.get('files', {}).keys()
-                    or any(not (output/name).is_file() or digest(output/name) != seal['files'][name] for name in required)):
-                raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 확인 실패', 409)
-    except WorkspaceUploadError:
-        # The render stays on disk and is stored when the next one ends. The job pauses with this message, not with
-        # an internal error, and a resume renders again.
-        raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 실패', 409) from None
-    if not shared.get('files'):
-        for name in required:
-            copy_file(output/name, cache/name)
-        _write_json(cache/'complete.json', {'files': {name: seal['files'][name] for name in required}})
+    # One render serves every job of this body and spec. The cache is read under its own lock, so jobs queued behind
+    # the same render (a hair batch on one body) wait for it and copy its sealed files instead of each taking a Blender
+    # slot to render the same views again.
+    with keyed_lock(('body-reference', str(cache))):
+        shared = read_json(cache/'complete.json')
+        reusable = (required <= shared.get('files', {}).keys()
+                    and all((cache/name).is_file() and digest(cache/name) == shared['files'][name] for name in required))
+        if reusable and not read_json(output/'complete.json').get('input_sha256') == digest(output/'input.json'):
+            for name in required:
+                copy_file(cache/name, output/name)
+            _write_json(output/'complete.json', {'input_sha256': digest(output/'input.json'),
+                'files': {name: shared['files'][name] for name in required}, 'reused_from': cache_key})
+        try:
+            with local_workspace(output, inputs=[body]):
+                seal = read_json(output/'complete.json')
+                cached = (seal.get('input_sha256') == digest(output/'input.json')
+                          and required <= seal.get('files', {}).keys()
+                          and all((output/name).is_file() and digest(output/name) == seal['files'][name] for name in required))
+                if not cached:
+                    render_body_reference(output, worker)
+                seal = read_json(output/'complete.json')
+                if (seal.get('input_sha256') != digest(output/'input.json') or not required <= seal.get('files', {}).keys()
+                        or any(not (output/name).is_file() or digest(output/name) != seal['files'][name] for name in required)):
+                    raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 확인 실패', 409)
+        except WorkspaceUploadError:
+            # The render stays on disk and is stored when the next one ends. The job pauses with this message, not with
+            # an internal error, and a resume renders again.
+            raise PipelineError('body_render_failed', '기본 몸 참조 렌더 저장 실패', 409) from None
+        if not reusable:
+            for name in required:
+                copy_file(output/name, cache/name)
+            _write_json(cache/'complete.json', {'files': {name: seal['files'][name] for name in required}})
     state['production_spec'] = read_json(output/'spec.json')
     state['body_height_m'] = state['production_spec']['body_height_m']
     part = next(p for p in state['parts'] if p['slot'] == 'body')

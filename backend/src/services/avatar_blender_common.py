@@ -5,6 +5,7 @@ the part, body and rig workers use one loader, one weight transfer and one camer
 """
 import hashlib
 from pathlib import Path
+import re
 import sys
 
 import bpy
@@ -14,10 +15,26 @@ from mathutils.bvhtree import BVHTree
 from mathutils.geometry import barycentric_transform
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.services.avatar_garment_weights import SKIRT_LEG_REACH, gated_weights, skirt_weights, top_regions, weld  # noqa: E402
 
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+# A skeleton may prefix its bone names: 'mixamorig:Head', or 'mixamorig_Head' / 'mixamorig1_Head' as some exporters
+# write a Mixamo rig. The wardrobe compares bones the same way (avatar_wardrobe_coverage.bone_keys).
+_RIG_PREFIX = re.compile(r'^(?:.*[:])?(?:mixamorig\d*_)?')
+
+
+def bone_key(name):
+    """A bone name as compared across skeletons: lower case, without its rig prefix ('mixamorig_Head' is 'head')."""
+    return _RIG_PREFIX.sub('', str(name).lower(), count=1)
+
+
+def find_bone(rig, *keys):
+    """The name of the first bone of `rig` whose bone_key is one of `keys` (lower case), or None."""
+    return next((bone.name for bone in rig.data.bones if bone_key(bone.name) in keys), None)
 
 
 def load(path):
@@ -117,9 +134,9 @@ def bind(meshes, body, rig, contract, *, transform=None):
         if not rigid_bone:
             raise ValueError('A rigid binding needs a bone')
         if rigid_bone not in rig.data.bones:
-            # A skeleton may prefix its bone names ('mixamorig:Head'); the worn parts already look them up this way.
-            wanted = rigid_bone.lower().split(':')[-1]
-            rigid_bone = next((b.name for b in rig.data.bones if b.name.lower().split(':')[-1] == wanted), None)
+            # A skeleton may prefix its bone names ('mixamorig:Head', 'mixamorig_Head'): look the bone up by its key.
+            wanted = bone_key(rigid_bone)
+            rigid_bone = find_bone(rig, wanted)
             if rigid_bone is None:
                 raise ValueError(f'The skeleton has no {wanted} bone for a rigid binding')
     for obj in meshes:
@@ -167,6 +184,87 @@ def bind(meshes, body, rig, contract, *, transform=None):
     report.update(binding=contract['binding'], max_surface_distance_m=max(distances),
                   possible_inside_vertices=inside, visual_review='required',
                   fitting=fitting, weights='body_surface_barycentric' if contract['binding'] == 'transfer' else 'single_canonical_bone')
+    return report
+
+
+def gate_top_weights(meshes, rig, head):
+    """Clean a bound top's transferred weights by region (top_regions, gated_weights), in place. head: (lowest,
+    highest) point of the head's skin. Returns the receipt."""
+    arms = {}
+    for side in ('left', 'right'):
+        shoulder, hand = find_bone(rig, side + 'arm'), find_bone(rig, side + 'hand')
+        if not shoulder or not hand:
+            return {'method': 'top_regions_v1', 'applied': False, 'reason': 'missing_arm_bones'}
+        arms[side] = tuple(rig.matrix_world @ rig.data.bones[name].head_local for name in (shoulder, hand))
+    report = {'method': 'top_regions_v1', 'applied': True, 'regions': [0, 0, 0, 0], 'changed_vertices': 0}
+    for obj in meshes:
+        mesh = obj.data
+        points = np.array([tuple(obj.matrix_world @ vertex.co) for vertex in mesh.vertices]).reshape(-1, 3)
+        edges = np.array([tuple(edge.vertices) for edge in mesh.edges], np.int64).reshape(-1, 2)
+        groups = list(obj.vertex_groups)
+        if not len(points) or not groups:
+            continue
+        weights = np.zeros((len(points), len(groups)))
+        position = {group.index: column for column, group in enumerate(groups)}
+        for vertex in mesh.vertices:
+            for entry in vertex.groups:
+                if entry.group in position:
+                    weights[vertex.index, position[entry.group]] = entry.weight
+        regions = top_regions(points, edges, arms, head)
+        # Vertices split at UV seams share a position and are gated and smoothed as one, so no seam opens.
+        same = weld(points)
+        first = np.zeros(int(same.max()) + 1, np.int64)
+        first[same[::-1]] = np.arange(len(same))[::-1]
+        node_edges = same[edges]
+        node_edges = node_edges[node_edges[:, 0] != node_edges[:, 1]]
+        gated, changed = gated_weights(weights[first], [bone_key(group.name) for group in groups], regions[first],
+                                       node_edges)
+        gated, changed = gated[same], changed[same]
+        rows = np.flatnonzero(np.abs(gated - weights).sum(axis=1) > 1e-6)
+        for column, group in enumerate(groups):
+            keep = rows[gated[rows, column] > 1e-6]
+            drop = rows[gated[rows, column] <= 1e-6]
+            for index in keep.tolist():
+                group.add([index], float(gated[index, column]), 'REPLACE')
+            if len(drop):
+                group.remove(drop.tolist())
+        for region in range(4):
+            report['regions'][region] += int((regions == region).sum())
+        report['changed_vertices'] += int(changed.sum())
+    return report
+
+
+def bind_skirt(meshes, body, rig, slot='bottom'):
+    """Bind a skirt to the pelvis and the upper legs (skirt_weights). A skeleton without upper and lower legs keeps
+    it on the pelvis alone, as before."""
+    pelvis = find_bone(rig, 'hips', 'pelvis')
+    if not pelvis:
+        raise ValueError('Missing pelvis for skirt attachment')
+    report = bind(meshes, body, rig, {'anchors': [], 'max_anchor_error_m': .0001, 'binding': 'rigid',
+                                      'bone': pelvis, 'slot': slot, 'max_transfer_distance_m': None},
+                  transform=Matrix.Identity(4))
+    legs = [find_bone(rig, name) for name in ('leftupleg', 'rightupleg', 'leftleg', 'rightleg')]
+    if not all(legs):
+        report['skirt_legs'] = 'missing_leg_bones'
+        return report
+    joints = [rig.matrix_world @ rig.data.bones[name].head_local for name in legs]
+    names = (pelvis, legs[0], legs[1])
+    for obj in meshes:
+        # bind() left the skirt in world coordinates with an identity matrix.
+        points = np.array([tuple(obj.matrix_world @ vertex.co) for vertex in obj.data.vertices]).reshape(-1, 3)
+        weights = skirt_weights(points, *joints)
+        weights[weights < 1e-4] = 0.
+        weights /= weights.sum(axis=1, keepdims=True)
+        groups = {group.name: group for group in obj.vertex_groups}
+        for column, name in enumerate(names):
+            group = groups[name]
+            for index in np.flatnonzero(weights[:, column] > 0).tolist():
+                group.add([index], float(weights[index, column]), 'REPLACE')
+            empty = np.flatnonzero(weights[:, column] == 0).tolist()
+            if empty:
+                group.remove(empty)
+    report.update(binding='skirt_legs', weights='pelvis_to_upper_legs', bones=list(names),
+                  skirt_leg_reach=SKIRT_LEG_REACH)
     return report
 
 

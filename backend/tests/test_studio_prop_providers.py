@@ -412,3 +412,46 @@ def test_a_generation_whose_image_answer_is_kept_on_this_host_can_be_resumed(stu
     stopped = service.get(record['id'])
     assert stopped['status'] == 'paused' and stopped['can_resume'] and receipt.with_suffix('.response.json').is_file()
     assert calls['images'] == 0
+
+
+def test_a_generation_is_admitted_and_resumed_with_its_reads_outside_the_process_lock(studio, monkeypatch):
+    # Every admission of every job waits for the process lock: the receipts and the stored picture are read without it.
+    from src.services.avatar_factory import _LOCK
+    service, calls, _, _ = studio
+    checked, real_capabilities = [], service.capabilities
+    monkeypatch.setattr(service, 'capabilities', lambda kind: (checked.append(_LOCK._is_owned()), real_capabilities(kind))[1])
+    public = run(service)
+    assert checked == [False] and public['status'] == 'blocked'
+    read, real_reason = [], module.StudioGenerations._image_reason
+    monkeypatch.setattr(module.StudioGenerations, '_image_reason',
+                        staticmethod(lambda *args, **kwargs: (read.append(_LOCK._is_owned()), real_reason(*args, **kwargs))[1]))
+    resumed, dispatch = service.resume(public['id'], 'tripo')
+    assert dispatch and resumed['provider'] == 'tripo' and resumed['status'] == 'accepted'
+    assert read and not any(read)
+
+
+def test_a_new_provider_is_saved_with_the_resume_it_came_with(studio, monkeypatch):
+    service, _, _, _ = studio
+    public = run(service)
+    job = public['id']; directory = service.directory(job)
+    assert public['status'] == 'blocked' and public['provider'] == 'meshy'
+    real_public, reads, quiet = module.StudioGenerations._public, [], [0]
+
+    def another_tab_writes(self, job_id, record, held, task=None):
+        # Another tab writes the record after every read of it but the quiet ones.
+        answer = real_public(self, job_id, record, held, task)
+        reads.append(job_id)
+        if len(reads) > quiet[0]:
+            _write_json(directory/'record.json', {**read_json(directory/'record.json'), 'touched': len(reads)})
+        return answer
+    monkeypatch.setattr(module.StudioGenerations, '_public', another_tab_writes)
+    with pytest.raises(PipelineError) as error:
+        service.resume(job, 'tripo')
+    assert error.value.code == 'job_changed'
+    record = read_json(directory/'record.json')
+    # Refused: the job keeps the provider it had, and nothing of a switch was written.
+    assert record['provider'] == 'meshy' and record['status'] != 'accepted' and 'model_attempts' not in record
+    # The record holds still for one read: the new provider and the resume are written together.
+    quiet[0] = len(reads) + 1
+    resumed, dispatch = service.resume(job, 'tripo')
+    assert dispatch and resumed['provider'] == 'tripo' and resumed['status'] == 'accepted'

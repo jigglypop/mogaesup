@@ -331,3 +331,29 @@ def test_the_provider_failure_is_raised_when_its_outcome_cannot_be_recorded(tmp_
     with pytest.raises(PipelineError) as again:
         edit(source, receipt)
     assert again.value.code == 'image_response_uncertain' and len(posts) == 1
+
+
+# --- a receipt write that fails once the answer arrived never drops the paid answer ------------------------------------
+
+@pytest.mark.parametrize('phase', ['response_headers', 'response_saved'])
+def test_a_receipt_write_after_the_answer_arrived_keeps_the_paid_image(tmp_path, storage, phase):
+    receipt = tmp_path / 'body-provider'
+    network = Network()
+    storage['failing'] = lambda value: value.get('phase') == phase
+    assert send(network, receipt) == answer()
+    # The body was read and kept: the next call returns it instead of sending (and paying for) the request again.
+    assert json.loads(receipt.with_suffix('.response.json').read_text()) == answer()
+    sent = len(network.written)
+    assert send(network, receipt) == answer() and len(network.written) == sent
+
+
+def test_a_server_error_answer_stays_unconfirmed_when_its_receipt_cannot_be_written(tmp_path, source, monkeypatch,
+                                                                                     storage):
+    receipt = tmp_path / 'body-provider'
+    serve(monkeypatch, lambda request: httpx.Response(502, json={'error': {}}))
+    storage['failing'] = lambda value: ('submission' not in value
+                                        and value.get('phase') in ('response_headers', 'response_unconfirmed'))
+    with pytest.raises(images.OpenAIImageUnconfirmed) as unconfirmed:
+        edit(source, receipt)
+    assert saved(receipt)['submission'] == 'unknown'
+    assert classify_image_failure(unconfirmed.value, receipt)[0] == 'submission_uncertain'

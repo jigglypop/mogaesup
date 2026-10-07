@@ -1,12 +1,14 @@
 """Owner-scoped, resumable local avatar production. No provider submissions."""
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+import errno
 import json
 import logging
 import os
 from src.services.object_storage import StoredPath as Path
 import re
 import time
+import threading
 from threading import RLock, Semaphore
 import uuid
 
@@ -19,21 +21,126 @@ from src.services.run_lock import WorkerLocks, worker_alive
 LOGGER = logging.getLogger(__name__)
 
 
+# The memory limits of a cgroup v2 container and of cgroup v1, read before the machine's physical memory.
+CGROUP_LIMITS = ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes')
+
+
+def machine_memory():
+    """Bytes this process may use: the machine's physical memory, held to its container's cgroup limit when one is set
+    (in a container sysconf reports the host's memory, and a worker past the cgroup's limit is killed). None when
+    neither can be read."""
+    try:
+        memory = os.sysconf('SC_PAGE_SIZE')*os.sysconf('SC_PHYS_PAGES')
+    except (AttributeError, ValueError, OSError):
+        memory = None
+    for path in CGROUP_LIMITS:
+        try:
+            with open(path, encoding='ascii') as stream:
+                value = stream.read().strip()
+        except (OSError, ValueError):
+            continue
+        if value.isdigit():  # 'max' (v2) is no limit; v1 reports an unlimited one as a huge number.
+            memory = int(value) if memory is None else min(memory, int(value))
+        break
+    return memory
+
+
 def blender_slots(requested=None, memory=None):
     """Concurrent Blender workers: BLENDER_CONCURRENCY (default 2), but no more than one per 4 GiB of RAM after 1 GiB for
     the API. A frozen-body render or an assembly peaks at about 3.6 GB; two at once on the studio's 8 GB instance were
-    killed for memory and paused their garments (2026-10-05). `memory` is in bytes; None reads this machine's."""
+    killed for memory and paused their garments (2026-10-05). `memory` is in bytes; None reads this machine's, held to
+    its container's limit (machine_memory)."""
     wanted = max(1, int((os.getenv('BLENDER_CONCURRENCY', '2') if requested is None else requested) or 2))
     if memory is None:
-        try:
-            memory = os.sysconf('SC_PAGE_SIZE')*os.sysconf('SC_PHYS_PAGES')
-        except (AttributeError, ValueError, OSError):
+        memory = machine_memory()
+        if memory is None:
             return wanted
     return max(1, min(wanted, int((memory/2**30-1)//4)))
 
 
+class BlenderSlots:
+    """The Blender workers that run at once on this data root, in every process: the API, a CLI, and a deployment's
+    candidate container beside the running one. A thread takes one of this process's `count` slots, then one of the
+    slot files under the data root's .runtime (an OS lock, which the kernel lets go when its process ends), waiting
+    for both. Not reentrant: a holder that takes it again waits for itself.
+
+    A Blender started while the slot is held gets the slot file's descriptor (held_fds, on POSIX): the lock is the
+    open file's, so the slot stays taken while that Blender runs, also after the process that started it was killed.
+    Leaving the slot closes this process's descriptor without unlocking it for that reason; on Windows the lock is the
+    process's and is unlocked first."""
+
+    POLL_SECONDS = .5
+    # A wait this long is logged once: every slot is held by other work on this data root.
+    LOG_AFTER_SECONDS = 60
+    # What a non-blocking lock answers while another open file holds it (flock: EWOULDBLOCK; msvcrt: EACCES). Any other
+    # error (a data root that cannot lock, ENOLCK on NFS; a bad descriptor) is raised: waiting would never end.
+    HELD = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK})
+
+    def __init__(self, count):
+        self.count = count
+        self._local = Semaphore(count)
+        self._held = threading.local()
+
+    def __enter__(self):
+        self._local.acquire()
+        try:
+            stream = self._take()
+        except BaseException:
+            self._local.release()
+            raise
+        self._held.streams = [*getattr(self._held, 'streams', []), stream]
+        return self
+
+    def __exit__(self, *exc):
+        stream = self._held.streams.pop()
+        try:
+            if os.name == 'nt':
+                from src.services.runtime_activity import _unlock
+                _unlock(stream)
+        except OSError:
+            pass  # Closing the file lets go of the lock as well.
+        finally:
+            stream.close()
+            self._local.release()
+
+    def held_fds(self):
+        """The descriptors of the slot files this thread holds, for the Blender it starts to keep (POSIX only)."""
+        if os.name == 'nt':
+            return ()
+        return tuple(stream.fileno() for stream in getattr(self._held, 'streams', ()))
+
+    def _take(self):
+        from src.services.runtime_activity import _open_lock, _root, _take_lock
+        root = _root()
+        started, logged = time.monotonic(), False
+        while True:
+            for index in range(self.count):
+                try:
+                    stream = _open_lock(root/f'blender-slot-{index}.lock')
+                except OSError as exc:
+                    if exc.errno not in self.HELD:
+                        raise
+                    # Windows: a new slot file whose first byte another thread has just locked.
+                    continue
+                try:
+                    _take_lock(stream, blocking=False)
+                    if logged:
+                        LOGGER.info('Blender slot taken after %d s', time.monotonic()-started)
+                    return stream
+                except OSError as exc:
+                    stream.close()
+                    if exc.errno not in self.HELD:
+                        raise
+                    # Held by another process (or a thread of this one, through its own handle).
+            if not logged and time.monotonic()-started >= self.LOG_AFTER_SECONDS:
+                LOGGER.warning('Waiting for a Blender slot: all %d on this data root are held by other work',
+                               self.count)
+                logged = True
+            time.sleep(self.POLL_SECONDS)
+
+
 # Concurrent Blender workers. Each one uses 1-2 CPU threads and up to about 3.6 GB of RAM.
-_QUEUE = Semaphore(blender_slots())
+_QUEUE = BlenderSlots(blender_slots())
 _LOCK = RLock()
 # The production worker of each job directory (AvatarImagePipeline.execute) while it runs in this process.
 _RUN_LOCKS = WorkerLocks()

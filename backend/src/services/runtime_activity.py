@@ -1,5 +1,5 @@
 """Atomic admission and OS-held work leases shared by the single API worker and local CLIs."""
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar, copy_context
 from concurrent.futures import ThreadPoolExecutor
 import errno
@@ -59,10 +59,16 @@ def _unlock(stream):
 def _open_lock(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     stream = path.open('a+b')
-    stream.seek(0, 2)
-    if not stream.tell():
-        stream.write(b'0')
-        stream.flush()
+    try:
+        stream.seek(0, 2)
+        if not stream.tell():
+            stream.write(b'0')
+            stream.flush()
+    except OSError:
+        # The file handle goes with the error (closing retries the flush, which fails the same way).
+        with suppress(OSError):
+            stream.close()
+        raise
     return stream
 
 

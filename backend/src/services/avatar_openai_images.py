@@ -340,6 +340,13 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
     def record():
         if receipt:
             _write_json(receipt.with_suffix('.request.json'), metadata)
+    def note(step):
+        # A receipt update inside an answered request: the start is on record, so a failed write only leaves the
+        # receipt behind. Raising here would drop an answer already billed (the image body is still unread).
+        try:
+            record()
+        except Exception as exc:
+            LOGGER.warning('Image request receipt not updated at %s: type=%s', step, type(exc).__name__)
     def elapsed():
         return round(time.monotonic()-clock['started'], 3)
     def trace(event, info):
@@ -416,7 +423,7 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                 with closing(client.send(request, stream=True)) as response:
                     metadata.update(phase='response_headers', http_status=response.status_code,
                                     request_id=response.headers.get('x-request-id'))
-                    record()
+                    note('response_headers')
                     if response.is_error:
                         provider_error, body = _read_error_response(response)
                         diagnostic_id = uuid.uuid4().hex[:12]
@@ -432,7 +439,7 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                             metadata.update(phase='response_unconfirmed', diagnostic_id=diagnostic_id,
                                             provider_error=provider_error, provider_error_category=category,
                                             response_bytes=body['body_bytes'], response_sha256=body['body_sha256'])
-                            record()
+                            note('response_unconfirmed')
                             raise OpenAIImageUnconfirmed(response.status_code, category, diagnostic_id, provider_error)
                         error_record = {
                             'diagnostic_id': diagnostic_id,
@@ -447,7 +454,7 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                                         response_bytes=body['body_bytes'], response_sha256=body['body_sha256'])
                         if error_path:
                             _write_json(error_path, error_record)
-                        record()
+                        note('response_rejected')
                         raise OpenAIImageHTTPError(response.status_code, category, diagnostic_id,
                                                    provider_error)
                     if response_path and is_remote(response_path):
@@ -478,7 +485,8 @@ def edit_response(client, base, key, payload, receipt=None, *, multipart=False, 
                     else:
                         raw = response.read()
                 metadata.update(phase='response_saved', response_bytes=len(raw), elapsed_seconds=elapsed())
-                record()
+                # The answer is kept (response_path) and the next call returns it: the receipt's last step is a note.
+                note('response_saved')
                 return json.loads(raw)
         except Exception as exc:
             metadata.update(error_type=type(exc).__name__, elapsed_seconds=elapsed())

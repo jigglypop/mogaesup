@@ -11,6 +11,7 @@ from src.services.avatar_production_spec import production_spec, seal_production
 from src.services.character_parts import blender_executable
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.glb import parse_glb
+from src.services.keyed_lock import keyed_lock
 from src.services.model_providers import base_url
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity
@@ -102,7 +103,10 @@ class AvatarBaseBodies:
         job_id = request_job_id(owner, 'base-body', key)
         directory = self.factory.directory(owner, job_id)
         receipt_path = self._receipt(owner, key)
-        with _LOCK:
+        # The sources are hashed, the rig source parsed, Meshy's action list fetched (HTTP, up to 120 s) and the
+        # character and files staged without the process lock, which every admission waits for: one request per key
+        # at a time (keyed_lock), and the process lock only for the job.json that accepts it.
+        with keyed_lock(('base-body-admission', str(directory))):
             saved_job = read_json(directory/'job.json')
             if saved_job:
                 if _submitted_fingerprint(saved_job.get('input', {})) != submitted_fingerprint:
@@ -230,8 +234,16 @@ class AvatarBaseBodies:
                                        ('id', 'revision', 'sha256', 'body_height_m', 'axes', 'canvas',
                                         'generated_views', 'release_requires')},
                    'files': {f'body-{view}.png': canonical['views'][view] for view in VIEWS}}
-            _write_json(directory/'job.json', job)
+            with _LOCK:
+                # Accepted meanwhile only by another process (a CLI) on the same data root: that job stands.
+                saved_job = read_json(directory/'job.json')
+                if not saved_job:
+                    _write_json(directory/'job.json', job)
+            if saved_job:
+                if _submitted_fingerprint(saved_job.get('input', {})) != submitted_fingerprint:
+                    raise PipelineError('idempotency_conflict', '같은 요청 식별자에 다른 기본 몸 입력이 사용되었습니다.', 409)
+                return self.factory.get(owner, job_id), False
             _write_json(receipt_path, {**receipt, 'status': 'accepted', 'character_id': character['id'],
                                        'accepted_at': now(), 'updated_at': now()})
             self.factory._listings.pop(int(owner), None)
-            return self.factory.get(owner, job_id), True
+        return self.factory.get(owner, job_id), True

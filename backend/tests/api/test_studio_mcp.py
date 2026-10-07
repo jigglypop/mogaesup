@@ -159,7 +159,11 @@ def test_rust_gateway_top_level_error_code_is_preserved():
         transport=httpx.MockTransport(lambda request: httpx.Response(401,
             json={'code': 'login_required', 'message': 'private message'})))
     try:
-        assert client.read('get_my_permissions')['error']['code'] == 'login_required'
+        error = client.read('get_my_permissions')['error']
+        assert error['code'] == 'login_required' and 'private message' not in error['message']
+        # A session copied from a browser also ends with that browser's "log out other devices": the runner is told to
+        # sign in again rather than to retry.
+        assert 'MOGA_STUDIO_SESSION' in error['message']
     finally:
         client.close()
 

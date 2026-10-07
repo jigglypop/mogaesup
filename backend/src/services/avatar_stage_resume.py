@@ -51,9 +51,34 @@ def stage_run_active(directory):
     return record, worker_alive(record, held or _WORKERS.busy(str(directory)))
 
 
+def admission_token(directory):
+    """The records a stage admission is decided on, with whether their workers run: the job, its stage run, assembly,
+    rig and expression reuse. Read before the stages are computed and again under the process lock."""
+    return ([read_json(directory/name) for name in ('job.json', 'meshy/delivery.json', 'expression-reuse.json')],
+            stage_run_active(directory), assembly_state(directory), rig_state(directory))
+
+
+def assembly_paid(directory, job):
+    """Whether assembling the job (`job`: its public record, factory.get) sends paid requests: the assembly makes the
+    default expressions not made yet, five image edits at most. A job that reuses saved faces, an expression already
+    made, and one whose request was refused or left unconfirmed (an assembly never sends those again) cost nothing."""
+    from src.services.avatar_expression_reuse import expression_reuse_state
+    expressions = job.get('default_expressions')
+    if expression_reuse_state(directory) or not expressions or expressions.get('status') == 'complete':
+        return False
+    return any(not item.get('applied') and item.get('status') in ('pending', 'accepted', 'running', 'paused')
+               for item in expressions.get('items', []))
+
+
 def ensure_stage_idle(factory, owner, job_id):
     factory.get(owner, job_id)
-    if stage_run_active(factory.directory(owner, job_id))[1]:
+    require_stage_idle(factory.directory(owner, job_id))
+
+
+def require_stage_idle(directory):
+    """ensure_stage_idle without reading the job: the check an admission repeats under the process lock, once the job
+    and its ownership were read before it."""
+    if stage_run_active(directory)[1]:
         raise PipelineError('stage_running', '선택한 단계가 실행 중입니다. 저장된 실행 결과를 기다려 주세요.', 409)
 
 
@@ -204,12 +229,15 @@ class AvatarStageResume:
             reasons['models'] = '3D 파츠가 모두 저장됐습니다. 리깅 오류를 확인해 주세요.'
             if image_count == len(images):
                 reasons['images'] = '이미지가 모두 저장됐습니다. 리깅 오류를 확인해 주세요.'
+        # Each earlier stage runs on through the assembly, which makes the default expressions not made yet.
+        assembling_paid = assembly_paid(directory, job)
         stages_paid = {
-            'assemble': bool(not reused_expressions and expressions and expressions['status'] != 'complete'),
+            'assemble': assembling_paid,
             'expressions': bool(expressions and any(item['status'] != 'complete' for item in expressions['items'])),
-            'rig': not (rig_ready and rig_worker.get('status') == 'complete') and not bool((pipeline.get('base_body_setup') or {}).get('rig_source')),
-            'models': not models_ready or not (rig_ready and rig_worker.get('status') == 'complete'),
-            'images': any(i.get('status') != 'succeeded' for i in images) or not models_ready
+            'rig': assembling_paid or (not (rig_ready and rig_worker.get('status') == 'complete')
+                                       and not bool((pipeline.get('base_body_setup') or {}).get('rig_source'))),
+            'models': assembling_paid or not models_ready or not (rig_ready and rig_worker.get('status') == 'complete'),
+            'images': assembling_paid or any(i.get('status') != 'succeeded' for i in images) or not models_ready
                       or not (rig_ready and rig_worker.get('status') == 'complete'),
         }
         actions = [{'stage': stage, 'enabled': valid and not busy and not reasons[stage],
@@ -252,7 +280,12 @@ class AvatarStageResume:
         path = directory/'stage-runs'/f'{request_id}.json'
         if explicit and stage in ('images', 'models', 'rig') and not read_json(path):
             self._require_credits(directory, stage)
-        with _LOCK:
+        # The stages are computed (the job, its parts and receipts: many stored reads) without the process lock, which
+        # every admission of every job waits for. Under it only the records they were computed from are read again: the
+        # same records mean no run started, ended or was admitted meanwhile, and the run is written; changed ones mean
+        # the stages are computed again.
+        for _ in range(3):
+            seen = admission_token(directory)
             state = self.get(owner, job_id)  # Also enforces ownership.
             previous = read_json(path)
             if previous:
@@ -263,13 +296,17 @@ class AvatarStageResume:
             action = next((a for a in state['actions'] if a['stage'] == stage), None)
             if action is None or not action['enabled']:
                 raise PipelineError('stage_unavailable', (action or {}).get('reason') or '현재 실행할 수 없는 단계입니다.', 409)
-            # The warning shown when the run was admitted: what an explicit run confirmed it may send again.
-            record = {'id': request_id, 'stage': stage, 'status': 'accepted', 'process': identity(),
-                      'explicit': explicit, 'warning': action.get('warning'), 'created_at': now(), 'updated_at': now(),
-                      'error': None}
-            _write_json(path, record)
-            _write_json(directory/'stage-runs/current.json', {'id': request_id})
-        return self.get(owner, job_id), request_id
+            with _LOCK:
+                if read_json(path) or admission_token(directory) != seen:
+                    continue  # Admitted under this key, or the job changed, meanwhile: read it again.
+                # The warning shown when the run was admitted: what an explicit run confirmed it may send again.
+                record = {'id': request_id, 'stage': stage, 'status': 'accepted', 'process': identity(),
+                          'explicit': explicit, 'warning': action.get('warning'), 'created_at': now(), 'updated_at': now(),
+                          'error': None}
+                _write_json(path, record)
+                _write_json(directory/'stage-runs/current.json', {'id': request_id})
+            return self.get(owner, job_id), request_id
+        raise PipelineError('stage_changed', '작업 상태가 바뀌는 중입니다. 잠시 후 다시 실행해 주세요.', 409)
 
     @staticmethod
     def _require_credits(directory, stage):

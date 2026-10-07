@@ -1,5 +1,6 @@
 """Standard chibi-dog rig for a static animal GLB: centreline-fitted skeleton, region-limited bone-heat
-weights and seven in-place clips (walk, run, idle, bark, sit, lie, jump) solved with two-bone leg IK.
+weights and seven in-place clips (walk, run, idle, bark, sit, lie, jump) solved with two-bone leg IK, plus
+two looping holds (sit_hold, lie_hold) a page keeps a dog sitting or lying in.
 
 Blender axes after glTF import: +X = the dog's left, -Y = front, +Z = up.
 Input: a JSON file with `source` (GLB), `output` (directory) and `attempt` (the caller's nonce).
@@ -512,10 +513,9 @@ def bark(t):
     move_ears(8 * snap)
 
 
-def sit(t):
+def sit_pose(t, k):
     # Hips drop onto the ground; the body pitches nose-up about the rump so the chest keeps its height,
-    # the fore legs stay straight and the head stays level. Down, hold (tail sweeps), up.
-    k = hold(t, .25, .75)
+    # the fore legs stay straight and the head stays level. Every sway runs whole cycles over t in [0, 1].
     drop = .6 * hind_reach * k
     tilt = -math.degrees(math.asin(min(.9, drop / max(body_span, 1e-4))))
     set_body(lift=-drop, tilt=tilt)
@@ -525,17 +525,38 @@ def sit(t):
     move_ears(4 * math.sin(4 * math.pi * t) * k)
 
 
-def lie(t):
+def sit(t):
+    # Down, hold (tail sweeps), up.
+    sit_pose(t, hold(t, .25, .75))
+
+
+def sit_hold(t):
+    # Sitting, looped: sit's held pose from the middle of its hold (where a page playing sit cuts over to this
+    # clip), so the two meet; the sways run whole cycles, so the last frame is the first.
+    sit_pose((t + .5) % 1, 1.0)
+
+
+def lie_pose(t, k, breath=0.0):
     # Belly down: the body lowers, fore paws slide forward along the ground, hind legs fold under.
-    k = hold(t, .3, .8)
     drop = .7 * reach * k
     set_body(lift=-drop)
+    turn('chest', 'X', breath)  # before the legs, so the fore paws stay where the IK puts them
     forward_fore, forward_hind = -.4 * reach * k, -.1 * reach * k
     set_legs(planted({'fore_L': Vector((0, forward_fore, 0)), 'fore_R': Vector((0, forward_fore, 0)),
                       'hind_L': Vector((0, forward_hind, 0)), 'hind_R': Vector((0, forward_hind, 0))}))
     level_head(6 * k, roll=5 * math.sin(2 * math.pi * t) * k)
     wag(8 * k, 1, t, lift=12 * k)
     move_ears(-6 * k)
+
+
+def lie(t):
+    lie_pose(t, hold(t, .3, .8))
+
+
+def lie_hold(t):
+    # Lying, looped over three seconds: lie's held pose from where a page cuts over to it, with a slow breath
+    # that swells the chest once a loop.
+    lie_pose((t + .55) % 1, 1.0, breath=1.6 * math.sin(math.pi * t) ** 2)
 
 
 def jump(t):
@@ -572,6 +593,8 @@ record('lie', 48, lie)
 record('run', 12, gait({'fore_L': 0, 'hind_R': 0, 'fore_R': .5, 'hind_L': .5}, duty=.45, stride=.45 * reach,
                        lift=.25 * reach, bob=.03 * reach, head=4, tail=14, ear=8, spine=1.5))
 record('sit', 48, sit)
+record('sit_hold', 48, sit_hold)
+record('lie_hold', 72, lie_hold)
 walk = record('walk', 24, gait({'hind_L': 0, 'fore_L': .25, 'hind_R': .5, 'fore_R': .75}, duty=.65, stride=.35 * reach,
                                lift=.16 * reach, bob=.012 * reach, head=3, tail=8, ear=3))
 rig.animation_data.action = walk

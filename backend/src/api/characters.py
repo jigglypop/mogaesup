@@ -5,7 +5,7 @@ import os
 from functools import lru_cache
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from src.services.object_storage import artifact_response as FileResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -173,23 +173,52 @@ def artifact(character_id: str, artifact_id: str, user: UserContext = Depends(ge
     return FileResponse(path, media_type=mime, headers={"Cache-Control": "private, no-cache", "X-Content-Type-Options": "nosniff"})
 
 
+def _input_too_large():
+    return PipelineError("input_too_large", "작업 입력이 너무 큽니다. 선택한 면을 줄여 주세요.", 413)
+
+
 @router.post("/{character_id}/actions/{action_id}", status_code=202)
-def action(character_id: str, action_id: str, background: BackgroundTasks,
-           body: dict = Body(default={}), if_match: str = Header(), idempotency_key: str = Header(),
-           user: UserContext = Depends(get_current_user), pipeline=Depends(get_pipeline)):
-    from pydantic import ValidationError
+async def action(character_id: str, action_id: str, request: Request, background: BackgroundTasks,
+                 if_match: str = Header(), idempotency_key: str = Header(),
+                 user: UserContext = Depends(get_current_user), pipeline=Depends(get_pipeline)):
     if action_id not in ACTION_INPUTS:
         raise PipelineError("unknown_action", "지원하지 않는 작업입니다.", 400)
+    # The body is bounded before it is parsed: what is stored is at most MAX_STORED_INPUT_BYTES of compact JSON, and a
+    # body near the proxy's 64 MiB limit would be tens of millions of Python ints before any count of them was checked.
+    limit = 2 * MAX_STORED_INPUT_BYTES
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > limit:
+        raise _input_too_large()
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > limit:
+            raise _input_too_large()
+    operation, created = await run_in_threadpool(
+        _accept_action, pipeline, character_id, user.user_id, action_id, bytes(content), if_match, idempotency_key)
+    if created:
+        background.add_task(execute, pipeline, character_id, user.user_id, operation["id"])
+    return {"operation": operation}
+
+
+def _accept_action(pipeline, character_id, owner, action_id, content, if_match, idempotency_key):
+    from pydantic import ValidationError
+    try:
+        body = json.loads(content) if content.strip() else {}
+    except ValueError as exc:  # Not JSON, or not UTF-8.
+        raise PipelineError("invalid_input", "작업 입력을 확인해 주세요.", 422) from exc
+    if not isinstance(body, dict):
+        raise PipelineError("invalid_input", "작업 입력을 확인해 주세요.", 422)
     try:
         payload = ACTION_INPUTS[action_id].model_validate(body).model_dump()
     except ValidationError as exc:
         raise PipelineError("invalid_input", "작업 입력을 확인해 주세요.", 422) from exc
     if len(json.dumps(payload, separators=(",", ":"))) > MAX_STORED_INPUT_BYTES:
-        raise PipelineError("input_too_large", "작업 입력이 너무 큽니다. 선택한 면을 줄여 주세요.", 413)
-    operation, created = pipeline.accept(character_id, user.user_id, action_id, idempotency_key, if_match.strip('"'), payload)
-    if created:
-        background.add_task(execute, pipeline, character_id, user.user_id, operation["id"])
-    return {"operation": operation}
+        raise _input_too_large()
+    return pipeline.accept(character_id, owner, action_id, idempotency_key, if_match.strip('"'), payload)
 
 
 @router.get("/{character_id}/operations/{operation_id}")

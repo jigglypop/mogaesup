@@ -316,9 +316,18 @@ def _mark_write(key):
 
 
 def scope_of(path):
-    """The job-sized directory of a path (<namespace>/<owner>/<item>/), or None for shallow paths."""
+    """The job-sized directory of a path (<namespace>/<owner>/<item>/), or None for shallow paths.
+
+    An owner's library holds collections of items (library/<collection>/<item>/), so there the scope is one item, and
+    a record directly in the library or in a collection is a scope of its own, as in object_storage._scope: reading
+    catalog.json or wardrobe-bodies.json does not select every record of the library, and writing one does not copy
+    an index of them all."""
     parts = path.split('/')
-    return '/'.join(parts[:3]) + '/' if len(parts) > 3 else None
+    if len(parts) <= 3:
+        return None
+    if parts[2] == 'library':
+        return '/'.join(parts[:5]) + '/' if len(parts) > 5 else path
+    return '/'.join(parts[:3]) + '/'
 
 
 def _upper(prefix_path):

@@ -42,9 +42,11 @@ def refit(client, key='refit-request-0001'):
 
 
 def checks(monkeypatch):
-    """Whether the process lock was held at each stage check the endpoints make."""
-    held, real = [], api.ensure_stage_idle
-    monkeypatch.setattr(api, 'ensure_stage_idle', lambda *args: (held.append(_LOCK._is_owned()), real(*args))[1])
+    """Whether the process lock was held at each stage check the endpoints make: the job read with the stage before
+    the lock, and the stage alone again under it (the job read there would stall every other admission)."""
+    held, real, again = [], api.ensure_stage_idle, api.require_stage_idle
+    monkeypatch.setattr(api, 'ensure_stage_idle', lambda *args: (held.append(('job', _LOCK._is_owned())), real(*args))[1])
+    monkeypatch.setattr(api, 'require_stage_idle', lambda *args: (held.append(('stage', _LOCK._is_owned())), again(*args))[1])
     return held
 
 
@@ -55,7 +57,7 @@ def test_a_refit_checks_the_stage_first_and_again_under_the_lock(client, monkeyp
     assert response.status_code == 202, response.text
     assert response.json()['status'] == 'accepted'
     # Once before the reads, then once when the request is written and once when its version is.
-    assert held == [False, True, True]
+    assert held == [('job', False), ('stage', True), ('stage', True)]
 
 
 def test_an_assembly_request_checks_the_stage_again_under_the_lock(client, monkeypatch):
@@ -64,7 +66,7 @@ def test_an_assembly_request_checks_the_stage_again_under_the_lock(client, monke
     held = checks(monkeypatch)
     response = test_client.post(f'/api/avatar-factory/jobs/{JOB}/native-parts')
     assert response.status_code == 202, response.text
-    assert response.json()['version'] == VERSION and held == [False, True]
+    assert response.json()['version'] == VERSION and held == [('job', False), ('stage', True)]
 
 
 def test_a_running_stage_refuses_a_refit_before_anything_is_written(client):

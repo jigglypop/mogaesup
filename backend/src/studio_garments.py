@@ -5,8 +5,10 @@ A garment is the request the studio's SinglePart screen (frontend/src/character/
 slot with every other choice left as the screen opens: POST /api/avatar-factory/variants/single-part with an
 Idempotency-Key, on a body registered in the wardrobe at the version its sealed assembly offers. It passes the Rust gateway
 as the browser's request does (paid_operator, FACTORY_ACCESS=paid, FACTORY_PAID_MONTHLY; a replayed key is counted once).
-The job assembles itself and the wardrobe lists the part once that assembly is sealed, so there is no publish step.
-Designed garments come from the studio's own garment-styles.json in this checkout, read and validated, never written.
+The job assembles itself and the wardrobe lists the part once that assembly is sealed, so there is no publish step. A
+garment is done while the wardrobe lists its part, as it does for members: sealed, passed the seal's quality gate and
+not in the studio's trash. Designed garments come from the studio's own garment-styles.json in this checkout, read and
+validated, never written.
 
 The queue is one JSON file per API origin under .data/studio-mcp/ at the repository root, changed under an OS file lock.
 An item's request and key are written (fsynced) before its POST. A POST without a definite answer leaves the item
@@ -158,6 +160,13 @@ class _Catalog(BaseModel):
     garments: list[_Design] = Field(min_length=1, max_length=200)
 
 
+class _Stop(Exception):
+    """Ends an advance's reads with `answer` (_read_stop)."""
+    def __init__(self, answer):
+        super().__init__(answer.get('code'))
+        self.answer = answer
+
+
 class GarmentError(Exception):
     def __init__(self, code, message=None):
         super().__init__(code)
@@ -268,9 +277,43 @@ def _code(value, fallback):
     return text if _CODE.fullmatch(text) else fallback
 
 
-def garment_state(job: dict, slot: str, listing: dict | None) -> tuple[str, Any]:
+def in_trash(catalog: dict | None, job_id, slot: str, character_id=None) -> bool:
+    """Whether the studio library's catalog (GET /api/studio/catalog) has this part, its job's version or its character
+    in the trash, or the version archived: the wardrobe lists none of those, to an operator or a member."""
+    if not isinstance(catalog, dict):
+        return False
+    def entry(section, key):
+        value = catalog.get(section)
+        found = value.get(key) if isinstance(value, dict) and isinstance(key, str) else None
+        return found if isinstance(found, dict) else {}
+    item = entry('items', job_id)
+    return bool(entry('parts', f'{job_id}:{slot}').get('deleted') or item.get('deleted') or item.get('archived')
+                or entry('characters', character_id or job_id).get('deleted'))
+
+
+def wardrobe_state(job_id, slot: str, listing: dict, catalog: dict | None = None, character_id=None) -> tuple[str, Any]:
+    """('done' | 'stalled' | 'running', detail) of a sealed garment's part in its body's wardrobe listing (operator's).
+    The wardrobe lists a member exactly the parts it lists an operator under `parts` (sealed, fitted, passed the seal's
+    quality gate, not in the trash), so done is a part members can wear. Stalled names why it is not: `unavailable`
+    gives the fit or quality code, and with `catalog` a part not listed at all is `trashed` when the studio's trash
+    holds it. Otherwise it is not listed yet ('running', 'wardrobe')."""
+    if listing.get('missing'):
+        return 'stalled', 'wardrobe_body_not_found'
+    for part in listing.get('parts') or []:
+        if isinstance(part, dict) and part.get('job_id') == job_id and part.get('slot') == slot:
+            return 'done', {key: part.get(key) for key in ('version', 'sha256', 'name')}
+    for part in listing.get('unavailable') or []:
+        if isinstance(part, dict) and part.get('job_id') == job_id and part.get('slot') == slot:
+            return 'stalled', _code(part.get('reason'), 'fit_incomplete')
+    if in_trash(catalog, job_id, slot, character_id):
+        return 'stalled', 'trashed'
+    return 'running', 'wardrobe'
+
+
+def garment_state(job: dict, slot: str, listing: dict | None, catalog: dict | None = None) -> tuple[str, Any]:
     """('running' | 'done' | 'stalled', detail) for an accepted garment job. Done once the wardrobe of its body lists
-    the part; stalled while the job waits for someone in the studio (its own receipts decide; nothing is resumed here)."""
+    the part, which is when members see it (wardrobe_state); stalled while the job waits for someone in the studio
+    (its own receipts decide; nothing is resumed here), or with the reason its sealed part is not listed."""
     flow = job.get('character_flow') if isinstance(job.get('character_flow'), dict) else {}
     if job.get('status') in _BUSY or flow.get('busy'):
         return 'running', None
@@ -278,15 +321,7 @@ def garment_state(job: dict, slot: str, listing: dict | None) -> tuple[str, Any]
         return 'stalled', _code(f"{flow.get('status') or job.get('status')}_{flow.get('stage')}", 'stopped')
     if listing is None:
         return 'running', 'wardrobe'
-    if listing.get('missing'):
-        return 'stalled', 'wardrobe_body_not_found'
-    for part in listing.get('parts') or []:
-        if isinstance(part, dict) and part.get('job_id') == job.get('id') and part.get('slot') == slot:
-            return 'done', {key: part.get(key) for key in ('version', 'sha256', 'name')}
-    for part in listing.get('unavailable') or []:
-        if isinstance(part, dict) and part.get('job_id') == job.get('id') and part.get('slot') == slot:
-            return 'stalled', _code(part.get('reason'), 'fit_incomplete')
-    return 'running', 'wardrobe'
+    return wardrobe_state(job.get('id'), slot, listing, catalog, job.get('character_id'))
 
 
 def job_summary(job: dict) -> dict:
@@ -315,7 +350,7 @@ def _require_key(key):
 def _move(item, state, **fields):
     item['state'] = state
     item['updated_at'] = _now()
-    for field in ('code', 'status'):
+    for field in ('code', 'status', 'wardrobe'):
         item.pop(field, None)
     item.update({key: value for key, value in fields.items() if value is not None})
 
@@ -628,13 +663,18 @@ class GarmentStudio:
         return answer
 
     def _started_job(self, record):
-        """The job an earlier call with this key started, read again; nothing is sent."""
+        """The job an earlier call with this key started, read again; nothing is sent. The job is named even when it
+        cannot be read now (`status` None, `status_error` says why): it was accepted, and a caller that saw only a
+        failure would start, and pay for, the same garment again under a new key."""
         response = self._get(f"/api/avatar-factory/jobs/{record['job_id']}")
-        if not response['ok']:
-            return response
-        job = response['data'] if isinstance(response['data'], dict) else {}
-        return {'ok': True, 'replayed': True, 'data': {'job_id': record['job_id'], 'status': job.get('status'),
-                                                       **_start_view(record['request'])}}
+        data = {'job_id': record['job_id'], 'status': None, **_start_view(record['request'])}
+        if response['ok']:
+            job = response['data'] if isinstance(response['data'], dict) else {}
+            data['status'] = job.get('status')
+        else:
+            data['status_error'] = {'code': response.get('error', {}).get('code', 'invalid_response'),
+                                    **({'status': response['status']} if response.get('status') else {})}
+        return {'ok': True, 'replayed': True, 'data': data}
 
     def status(self, job_id: str) -> dict:
         if not isinstance(job_id, str) or not _ID.fullmatch(job_id):
@@ -656,7 +696,16 @@ class GarmentStudio:
                 summary['wardrobe_error'] = {'code': answer['error']['code'],
                                              **({'status': answer['status']} if answer.get('status') else {})}
         state, detail = garment_state(job, summary['slot'], listing)
+        if (state, detail) == ('running', 'wardrobe') and listing is not None:
+            # Sealed and not listed: in the studio's trash, or not listed yet.
+            catalog = self._get('/api/studio/catalog')
+            if catalog['ok']:
+                state, detail = garment_state(job, summary['slot'], listing, catalog['data'])
+            else:
+                summary['catalog_error'] = {'code': catalog['error']['code'],
+                                            **({'status': catalog['status']} if catalog.get('status') else {})}
         summary['state'] = state
+        summary['member_visible'] = state == 'done'
         if state == 'done':
             summary['wardrobe'] = detail
         elif detail is not None:
@@ -754,10 +803,33 @@ class GarmentStudio:
         return result
 
     def _poll(self, state, result):
-        """Reads every running garment's job, and a few stalled ones: done once the wardrobe lists its part."""
+        """Reads every running garment's job, and a few stalled ones: done once the wardrobe lists its part. Done ones
+        are looked up again in their bodies' listings: a part the seal's quality gate refused since (a newer version of
+        its job), one put in the studio's trash or one no longer listed is stalled with its reason, so whoever runs the
+        queue can make it again (drop the item and enqueue the garment once more)."""
         items = state['items']
         stalled = sorted((item for item in items if item['state'] == 'stalled'), key=lambda item: item.get('checked_at', ''))
-        listings = {}
+        listings, catalog = {}, []
+
+        def listing(body):
+            # Each body's listing and the catalog are read once per advance.
+            if body not in listings:
+                answer = self._get(f'/api/avatar-factory/wardrobe/bodies/{body}/parts')
+                if answer['ok'] and isinstance(answer['data'], dict):
+                    listings[body] = answer['data']
+                elif answer.get('status') == 404:
+                    listings[body] = {'missing': True}
+                else:
+                    raise _Stop(_read_stop(answer))
+            return listings[body]
+
+        def trash():
+            if not catalog:
+                answer = self._get('/api/studio/catalog')
+                if not answer['ok']:
+                    raise _Stop(_read_stop(answer))
+                catalog.append(answer['data'] if isinstance(answer['data'], dict) else {})
+            return catalog[0]
         try:
             for item in [item for item in items if item['state'] == 'running'] + stalled[:STALLED_CHECKS]:
                 response = self._get(f"/api/avatar-factory/jobs/{item['job_id']}")
@@ -769,38 +841,51 @@ class GarmentStudio:
                     return _read_stop(response)
                 job = response['data'] if isinstance(response['data'], dict) else {}
                 item['checked_at'] = _now()
-                listing = None
-                if _sealed(job):
-                    body = item['body_job_id']
-                    if body not in listings:
-                        answer = self._get(f'/api/avatar-factory/wardrobe/bodies/{body}/parts')
-                        if answer['ok'] and isinstance(answer['data'], dict):
-                            listings[body] = answer['data']
-                        elif answer.get('status') == 404:
-                            listings[body] = {'missing': True}
-                        else:
-                            return _read_stop(answer)
-                    listing = listings[body]
-                found, detail = garment_state(job, item['slot'], listing)
-                if found == 'running' and detail == 'wardrobe':
-                    # Sealed, not listed yet: the wardrobe's job listing is refreshed every few seconds.
-                    item['unlisted'] = item.get('unlisted', 0)+1
-                    if item['unlisted'] > UNLISTED_CHECKS:
-                        found, detail = 'stalled', 'not_in_wardrobe'
-                elif found == 'running':
-                    item['unlisted'] = 0
-                if found == 'done':
-                    _move(item, 'done', wardrobe=detail)
-                    result['finished'].append(_view(item))
-                elif found == 'running':
-                    if item['state'] != 'running':
-                        _move(item, 'running')
-                elif item['state'] != 'stalled' or item.get('code') != detail:
-                    _move(item, 'stalled', code=detail)
-                    result['attention'].append(_view(item))
+                if isinstance(job.get('character_id'), str):
+                    item['character_id'] = job['character_id']
+                parts = listing(item['body_job_id']) if _sealed(job) else None
+                found, detail = garment_state(job, item['slot'], parts)
+                if (found, detail) == ('running', 'wardrobe') and parts is not None:
+                    found, detail = garment_state(job, item['slot'], parts, trash())
+                self._settle(item, found, detail, result)
+            for item in [item for item in items if item['state'] == 'done']:
+                parts = listing(item['body_job_id'])
+                found, detail = wardrobe_state(item['job_id'], item['slot'], parts)
+                if (found, detail) == ('running', 'wardrobe'):
+                    found, detail = wardrobe_state(item['job_id'], item['slot'], parts, trash(),
+                                                   item.get('character_id'))
+                self._settle(item, found, detail, result)
             return None
+        except _Stop as stop:
+            return stop.answer
         finally:
             self._save(state)
+
+    @staticmethod
+    def _settle(item, found, detail, result):
+        """Moves a garment to what its job and its wardrobe listing say (garment_state, wardrobe_state)."""
+        if (found, detail) == ('running', 'wardrobe'):
+            # Sealed, not listed: the wardrobe's job listing is refreshed every few seconds, so a part is reported
+            # after a few polls; a done one stays done meanwhile.
+            item['unlisted'] = item.get('unlisted', 0)+1
+            if item['unlisted'] > UNLISTED_CHECKS:
+                found, detail = 'stalled', 'not_in_wardrobe'
+            elif item['state'] == 'done':
+                return
+        else:
+            item['unlisted'] = 0
+        if found == 'done':
+            if item['state'] != 'done':
+                _move(item, 'done', wardrobe=detail)
+                result['finished'].append(_view(item))
+            elif item.get('wardrobe') != detail:
+                _move(item, 'done', wardrobe=detail)  # A newer sealed version of the part.
+        elif found == 'running':
+            if item['state'] != 'running':
+                _move(item, 'running')
+        elif item['state'] != 'stalled' or item.get('code') != detail:
+            _move(item, 'stalled', code=detail)
+            result['attention'].append(_view(item))
 
     def _submit(self, state, result, capacity):
         """Sends up to `capacity` pending garments, each request and key saved first; stops at the first answer that is
@@ -934,12 +1019,17 @@ def register_tools(server, studio: GarmentStudio):
     def start_garment(garment: GarmentRequest, idempotency_key: RequestKey) -> dict[str, Any]:
         """Paid: one garment on a wardrobe body, as the studio's single-part screen makes it (3 images and 1 3D model).
         After a lost answer call again with the same garment and idempotency_key: the request saved under that key is
-        sent again, as it was. A new key starts another paid garment."""
+        sent again, as it was. A new key starts another paid garment.
+        A key whose job was accepted already answers ok with replayed: true and that job_id, nothing sent. Its status
+        is null, with status_error ({code, status?}), when the job could not be read just then: the garment was still
+        accepted, so this is not a failure; read it with get_garment_job instead of starting it again."""
         return studio.start(garment, idempotency_key)
 
     @server.tool(annotations=read_only)
     def get_garment_job(job_id: FactoryId) -> dict[str, Any]:
-        """A garment job's progress, and its wardrobe entry once the wardrobe lists it."""
+        """A garment job's progress. state done: the wardrobe lists the part, as members see it (member_visible), with
+        its wardrobe entry; stalled: reason says why not, the job waiting in the studio, or its sealed part refused
+        (the fit's or the seal's quality code) or trashed in the studio."""
         return studio.status(job_id)
 
     @server.tool(annotations=local)
@@ -950,13 +1040,16 @@ def register_tools(server, studio: GarmentStudio):
 
     @server.tool(annotations=read_only)
     def get_garment_queue() -> dict[str, Any]:
-        """The local garment queue: every item's state, job and wardrobe entry."""
+        """The local garment queue: every item's state, job and wardrobe entry (done: listed for members; stalled: code
+        says why not)."""
         return studio.queue()
 
     @server.tool(annotations=paid)
     def advance_garment_queue(idempotency_key: RequestKey, max_new: MaxNew = MAX_NEW) -> dict[str, Any]:
         """Paid: reads the queue's running garments, then sends at most max_new pending ones (3 in flight at most).
-        Stops at the first refusal. A garment without a definite answer stays uncertain and is not sent again."""
+        Stops at the first refusal. A garment without a definite answer stays uncertain and is not sent again.
+        Done garments are checked again: one whose part was refused, trashed or is no longer listed for members becomes
+        stalled with its code (attention). To make such a garment again, drop it and enqueue it once more."""
         return studio.advance(max_new, idempotency_key)
 
     @server.tool(annotations=paid)

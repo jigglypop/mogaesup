@@ -3,7 +3,7 @@ import numpy as np
 import bpy
 from mathutils import Vector
 
-from src.services.avatar_blender_common import MATTE_ROUGHNESS
+from src.services.avatar_blender_common import MATTE_ROUGHNESS, bone_key
 
 
 UV_NAME = 'FactoryExpressionBaseColorUV'
@@ -37,7 +37,7 @@ def _front_faces(body):
     samples = []
     bounds = []
     for obj in body:
-        head_groups = {group.index for group in obj.vertex_groups if group.name.lower().split(':')[-1] == 'head'}
+        head_groups = {group.index for group in obj.vertex_groups if bone_key(group.name) == 'head'}
         if not head_groups:
             continue
         matrix = obj.matrix_world

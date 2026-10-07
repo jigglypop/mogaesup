@@ -10,8 +10,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from src.studio_garments import (MAX_IN_FLIGHT, SINGLE_PART, STATE_DIR, GarmentRequest, GarmentStudio, cli, design_id,
-                                 garment_spec, load_catalog, plain_text, single_part_request)
+from src.studio_garments import (MAX_IN_FLIGHT, SINGLE_PART, STATE_DIR, UNLISTED_CHECKS, GarmentRequest, GarmentStudio,
+                                 cli, design_id, garment_spec, in_trash, load_catalog, plain_text, single_part_request)
 from src.studio_mcp import StudioClient, build_server, main
 
 SESSION = 'a'*64
@@ -64,6 +64,8 @@ class FakeGateway:
         self.ready_version = VERSION
         self.body_version = VERSION  # The version the wardrobe has the body registered at.
         self.listed = {}
+        self.reasons = {}  # job ID -> the code an `unavailable` row gives
+        self.catalog = {'revision': '1', 'items': {}, 'parts': {}, 'characters': {}}
         self.post_answers = []
 
     def handler(self, request):
@@ -81,10 +83,13 @@ class FakeGateway:
         if path == f'/api/avatar-factory/wardrobe/bodies/{BODY}/parts':
             def rows(kind):
                 return [{'job_id': job_id, 'version': job['ready_version'], 'slot': job['requested_slots'][0],
-                         'name': job['part_name'], **({'sha256': 'e'*64} if kind == 'parts' else {'reason': 'needs_anchors'})}
+                         'name': job['part_name'], **({'sha256': 'e'*64} if kind == 'parts'
+                                                      else {'reason': self.reasons.get(job_id, 'needs_anchors')})}
                         for job_id, job in self.jobs.items() if self.listed.get(job_id) == kind]
             return httpx.Response(200, json={'body': {'job_id': BODY, 'version': VERSION}, 'parts': rows('parts'),
                                              'unavailable': rows('unavailable')})
+        if path == '/api/studio/catalog':
+            return httpx.Response(200, json=self.catalog)
         found = re.fullmatch(r'/api/avatar-factory/jobs/([a-f0-9]{24})', path)
         if found and found.group(1) in self.jobs:
             return httpx.Response(200, json=self.jobs[found.group(1)])
@@ -121,6 +126,12 @@ class FakeGateway:
         self.jobs[job_id].update(status='review_required', ready_version=SEALED, character_flow={
             'status': 'review_required', 'stage': 'complete', 'busy': False, 'message': '조립 완료'})
         self.listed[job_id] = listed
+
+    def trash(self, job_id, deleted=True):
+        """The studio's per-part trash: the wardrobe lists the part to no one, and the catalog says so."""
+        slot = self.jobs[job_id]['requested_slots'][0]
+        self.catalog['parts'][f'{job_id}:{slot}'] = {'deleted': deleted}
+        self.listed[job_id] = None if deleted else 'parts'
 
     def finish_all(self):
         for job_id, job in self.jobs.items():
@@ -312,6 +323,29 @@ def test_start_forwards_the_key_and_a_replay_gets_the_same_job(studio, gateway):
     assert studio.start(designed(BLOUSON)[0], 'garment-key-0002')['data']['job_id'] != first['data']['job_id']
     assert gateway.created == 2
     assert SESSION not in json.dumps([first, again])
+
+
+@pytest.mark.parametrize('answer', [httpx.Response(503, json={'error': {'code': 'listing_pending', 'message': '잠시 후'}}),
+                                    httpx.ConnectError('studio unreachable')])
+def test_a_replay_of_an_accepted_start_names_its_job_when_the_job_cannot_be_read(studio, gateway, answer):
+    first = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    real = gateway.handler
+
+    def unreadable(request):
+        if request.method == 'GET' and request.url.path == f"/api/avatar-factory/jobs/{first['data']['job_id']}":
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return real(request)
+    gateway.handler = unreadable
+    studio.client.close()
+    studio.client = StudioClient('http://127.0.0.1:8080', SESSION, app_origin='http://localhost:5173', writable=True,
+                                 paid=True, transport=httpx.MockTransport(lambda request: gateway.handler(request)))
+    again = studio.start(designed(BLOUSON)[0], 'garment-key-0001')
+    # Accepted under this key: the job is named, so the caller polls it instead of paying again under a new key.
+    assert again['ok'] and again['replayed'] and again['data']['job_id'] == first['data']['job_id']
+    assert again['data']['status'] is None and again['data']['status_error']['code']
+    assert len(gateway.posts()) == 1
 
 
 def test_start_through_the_sdk_tool(studio, gateway):
@@ -557,6 +591,93 @@ def test_garment_job_status_reports_the_wardrobe_entry(studio, gateway):
     stalled = studio.status(other)['data']
     assert stalled['state'] == 'stalled' and stalled['reason'] == 'needs_anchors' and 'wardrobe' not in stalled
     assert studio.status('0'*24)['error']['code'] == 'not_found'
+
+
+def test_garment_job_status_says_whether_members_see_the_part(studio, gateway):
+    started = studio.start(designed(BLOUSON)[0], 'garment-key-0001')['data']['job_id']
+    assert studio.status(started)['data']['member_visible'] is False
+    gateway.finish(started)
+    done = studio.status(started)['data']
+    assert done['state'] == 'done' and done['member_visible'] is True
+    gateway.trash(started)
+    trashed = studio.status(started)['data']
+    assert (trashed['state'], trashed['reason'], trashed['member_visible']) == ('stalled', 'trashed', False)
+    assert 'wardrobe' not in trashed
+
+
+def test_done_is_listed_for_members_and_a_refused_or_trashed_part_is_stalled_with_its_reason(studio, gateway):
+    studio.enqueue(designed(BLOUSON, SKIRT), 'enqueue-key-01')
+    jobs = [item['job_id'] for item in studio.advance(3, 'advance-key-01')['started']]
+    gateway.finish_all()
+    assert len(studio.advance(3, 'advance-key-02')['finished']) == 2
+    # In the studio an operator trashes the blouson, and a newer seal of the skirt's job refuses its part.
+    gateway.trash(jobs[0])
+    gateway.listed[jobs[1]], gateway.reasons[jobs[1]] = 'unavailable', 'quality_refused'
+    step = studio.advance(0, 'advance-key-03')
+    assert {item['job_id']: item['code'] for item in step['attention']} == {jobs[0]: 'trashed', jobs[1]: 'quality_refused'}
+    assert step['counts']['done'] == 0 and step['counts']['stalled'] == 2 and step['paid_submissions'] == 0
+    assert all('wardrobe' not in item for item in items(studio).values())
+    # Taken out of the trash, the blouson is listed and done again.
+    gateway.trash(jobs[0], deleted=False)
+    assert [item['job_id'] for item in studio.advance(0, 'advance-key-04')['finished']] == [jobs[0]]
+    # The refused skirt is made again: dropped, and enqueued once more.
+    skirt = next(item for item in items(studio).values() if item['job_id'] == jobs[1])
+    assert studio.resolve(skirt['item'], 'drop', 'resolve-key-01')['ok']
+    assert [item['design_id'] for item in studio.enqueue(designed(SKIRT), 'enqueue-key-02')['queued']] == [SKIRT]
+    assert len(gateway.posts()) == 2
+
+
+def test_a_part_trashed_before_it_was_listed_is_reported_at_once(studio, gateway):
+    studio.enqueue(designed(BLOUSON), 'enqueue-key-01')
+    job = studio.advance(3, 'advance-key-01')['started'][0]['job_id']
+    gateway.finish(job)
+    gateway.trash(job)
+    assert [(item['job_id'], item['code']) for item in studio.advance(0, 'advance-key-02')['attention']] == [(job, 'trashed')]
+
+
+def test_a_done_part_the_wardrobe_stops_listing_is_reported_after_a_few_polls(studio, gateway):
+    studio.enqueue(designed(BLOUSON), 'enqueue-key-01')
+    job = studio.advance(3, 'advance-key-01')['started'][0]['job_id']
+    gateway.finish(job)
+    assert studio.advance(0, 'advance-key-02')['counts']['done'] == 1
+    gateway.listed[job] = None  # Off the listing without being trashed (its body registered again, say).
+    states = []
+    for index in range(UNLISTED_CHECKS+1):
+        studio.advance(0, f'advance-key-1{index}')
+        item = next(iter(items(studio).values()))
+        states.append((item['state'], item.get('code')))
+    assert states == [('done', None)]*UNLISTED_CHECKS + [('stalled', 'not_in_wardrobe')]
+
+
+def test_a_catalog_that_cannot_be_read_stops_the_advance_before_it_pays(studio, gateway):
+    studio.enqueue(designed(BLOUSON, SKIRT), 'enqueue-key-01')
+    job = studio.advance(1, 'advance-key-01')['started'][0]['job_id']
+    gateway.finish(job, listed=None)
+    handler = gateway.handler
+
+    def refuse_catalog(request):
+        if request.url.path == '/api/studio/catalog':
+            return httpx.Response(502, json={'code': 'factory_unavailable', 'message': '캐릭터 서버에 연결하지 못했습니다.'})
+        return handler(request)
+    studio.client._client._transport = httpx.MockTransport(refuse_catalog)
+    step = studio.advance(1, 'advance-key-02')
+    assert step['stopped'] == {'kind': 'transient', 'code': 'factory_unavailable', 'status': 502}
+    assert step['paid_submissions'] == 0 and len(gateway.posts()) == 1
+
+
+def test_trash_follows_the_studio_library():
+    catalog = {'items': {'j': {'archived': True}}, 'parts': {'k:top': {'deleted': True}}, 'characters': {'c': {'deleted': True}}}
+    assert in_trash(catalog, 'j', 'top') and in_trash(catalog, 'k', 'top') and not in_trash(catalog, 'k', 'bottom')
+    assert in_trash(catalog, 'x', 'top', 'c') and not in_trash(catalog, 'x', 'top') and not in_trash(None, 'k', 'top')
+    assert not in_trash({'parts': {'k:top': {'deleted': False}}, 'items': [], 'characters': 'x'}, 'k', 'top')
+
+
+def test_the_start_tool_says_a_replay_without_its_status_is_not_a_failure(studio):
+    pytest.importorskip('mcp')
+    tools = {tool.name: tool for tool in asyncio.run(build_server(studio.client, studio).list_tools())}
+    start, job = tools['start_garment'].description, tools['get_garment_job'].description
+    assert 'replayed' in start and 'status_error' in start and 'not a failure' in start
+    assert 'member_visible' in job and 'trashed' in job
 
 
 # The terminal loop ---------------------------------------------------------------

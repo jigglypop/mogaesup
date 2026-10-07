@@ -14,6 +14,7 @@ import logging
 import math
 import re
 from threading import RLock, Semaphore
+import time
 import uuid
 
 from src.services.asset_editor import _retry_file_io, _write_json
@@ -21,7 +22,7 @@ from src.services.avatar_factory import _LOCK
 from src.services.avatar_equipment import conflicting_head_parts
 from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 from src.services.keyed_lock import keyed_lock
-from src.services.object_storage import is_remote, mark_changed
+from src.services.object_storage import ArtifactChanged, immutable, is_remote, mark_changed
 from src.services.studio_library import StudioLibrary
 
 LOGGER = logging.getLogger(__name__)
@@ -47,8 +48,26 @@ _GEOMETRIES = 4
 _READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='wardrobe-records')
 # Colour and coverage work holds hundreds of MB of arrays: only a few run at once, however many members open the wardrobe.
 _COMPUTING = Semaphore(2)
-# (body job, version, registered geometry) already compared by _adopt_versions: each body version is parsed once.
-_COMPARED = set()
+# The geometry of a body version (geometry_sha256 of its body.glb) by (owner, job, version), or None for a version with
+# no body a wardrobe body answers for. A sealed version's body never changes, so only a definitive answer is kept; one
+# that failed for a moment (storage, network, the record database) is read again by the next request. Which versions a
+# registered body answers to is decided from this on every call, so a body registered again finds its versions again.
+_shapes = OrderedDict()
+_SHAPES = 4096
+# (owner, job, version) -> (number of the last read of that body version that failed for a moment, when it may be read
+# again, the pause before that); the numbers count up across all versions (_failures[0] is the last one given).
+_shape_failures = OrderedDict()
+_failures = [0]
+# A body version that failed for a moment is read again only after a pause, doubled with each failure in a row up to the
+# longest: one whose stored body is gone or damaged (artifact_changed) or whose job was archived would otherwise be read
+# again, and logged, by every wardrobe request.
+_RETRY_S = (15., 900.)
+_clock = time.monotonic
+# The refusals of body_entry that hold for good: the version is not sealed, it does not exist, or it is an unprepared
+# GLB. A deleted body (body_deleted) is not one of them: an archived job, a deleted version and a trashed body can all be
+# restored.
+_NO_BODY = frozenset({'body_incomplete', 'not_found', 'body_preparation_required'})
+_UNKNOWN = object()
 
 
 def _write_file(path, content):
@@ -140,6 +159,17 @@ def _reason(part):
     return 'fit_incomplete'
 
 
+def wearable(record, part, slot):
+    """Whether the sealed assembly `record` offers its `slot` to wear (`part` its receipt there), whoever asks: the
+    version is sealed, the part was fitted and passed the seal's quality gate (available is not False), and its file is
+    sealed with it. The limb check (limb_fit) is an operator's warning and hides nothing. A trashed slot (the library's
+    per-part tombstone) and a job outside the body's lineage are left out by the callers. The listing (parts), the files,
+    previews, colours and coverage a member is served, and the looks and outfits saved on a body all follow this, so the
+    operator's `parts` list is the member's."""
+    return (record.get('status') == 'review_required' and isinstance(part, dict) and part.get('available') is not False
+            and f'{slot}.glb' in record.get('files', {}))
+
+
 def _runtime_delivery(record, slot):
     """A sealed derivative bound to this slot's original file, or None for legacy/invalid receipts."""
     if record.get('status') != 'review_required' or not isinstance(slot, str) or not _SLOT.fullmatch(slot):
@@ -186,13 +216,17 @@ class Wardrobe:
     def _stored(self):
         return read_json(self.path, {'revision': '0', 'bodies': []})
 
-    def _write(self, bodies):
+    def _write(self, bodies, revision=None):
+        """`revision` keeps the stored one: versions adopted as aliases change no body an operator registered, so a
+        register or unregister sent with the revision read before them still applies."""
         value = {'bodies': bodies, 'updated_at': now()}
-        value['revision'] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+        value['revision'] = revision or hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
         _write_json(self.path, value)
 
     def bodies(self):
-        """Registered bodies with the common body marked and how many part jobs build on each."""
+        """Registered bodies with the common body marked and how many part jobs build on each. A body's `aliases` are
+        the other versions of its job it answers to, which a look or outfit saved on one of them is worn on: the
+        verified ones it lists and those whose body is known to have its geometry, never an alias nobody compared."""
         from src.services.avatar_fitting_management import FittingManagement
         try:
             jobs = self.factory.listing(self.owner)
@@ -202,7 +236,7 @@ class Wardrobe:
             self._adopt_versions(jobs)
         value = self._stored()
         default = FittingManagement(self.factory, self.owner).body_default().get('body') or None
-        registered = registered_bodies(value['bodies'])
+        registered = self._registered(value['bodies'])
         counts = {}
         if jobs is not None:
             jobs_by_id = {job['id']: job for job in jobs}
@@ -212,9 +246,14 @@ class Wardrobe:
                 # The count is of jobs parts() lists parts of, not of every job that was ever built on the body.
                 if body and self._offered(job, metadata):
                     counts[body] = counts.get(body, 0) + 1
+        aliases = {}
+        for (job, version), current in registered.items():
+            if version != current[1]:
+                aliases.setdefault(current, []).append(version)
         return {'revision': value['revision'],
                 'bodies': [{**body, 'is_default': bool(default) and (default['job_id'], default['version']) == (body['job_id'], body['version']),
-                            'part_jobs': counts.get((body['job_id'], body['version']), 0) if jobs is not None else None}
+                            'part_jobs': counts.get((body['job_id'], body['version']), 0) if jobs is not None else None,
+                            'aliases': aliases.get((body['job_id'], body['version']), [])}
                            for body in value['bodies']],
                 'default': {'job_id': default['job_id'], 'version': default['version']} if default else None}
 
@@ -240,6 +279,7 @@ class Wardrobe:
             body, source_job = management.body_entry(job, version)
             if source_job.get('base_job_id'):
                 raise PipelineError('variant_body', '변형 작업의 몸은 옷장 몸으로 등록할 수 없습니다. 기준 몸을 등록하세요.', 422)
+            self._remember_shape(job, body['version'], body['geometry_sha256'])
             shapes = self._alias_geometries(management, job, previous, body['version'])
             with _LOCK:
                 previous = pending()
@@ -253,11 +293,11 @@ class Wardrobe:
                     # replaced version (its geometry is stored) and its aliases (each parsed above).
                     if replaced:
                         shapes[replaced['version']] = replaced.get('geometry_sha256')
+                        if isinstance(replaced.get('geometry_sha256'), str) and _SHA.fullmatch(replaced['geometry_sha256']):
+                            self._remember_shape(job, replaced['version'], replaced['geometry_sha256'])
                     candidates = [*(replaced or {}).get('aliases', []), *([replaced['version']] if replaced else [])]
                     aliases = [alias for alias in dict.fromkeys(candidates)
                                if alias != body['version'] and shapes.get(alias) == body['geometry_sha256']]
-                    # Compared here already: _adopt_versions does not parse them again.
-                    _COMPARED.update((job, version, body['geometry_sha256']) for version in shapes)
                     entry = {**{key: body[key] for key in _FIELDS},
                              'name': name or source_job.get('character_name') or job,
                              'body_type': (source_job.get('base_body') or {}).get('body_type'), 'registered_at': now(),
@@ -268,66 +308,168 @@ class Wardrobe:
     def _alias_geometries(self, management, job, stored, new_version):
         """{version: geometry} of the aliases the registered entry of `job` carries, each read from its own body: an
         alias kept across a geometry change before this check existed is found out here. A version whose body cannot
-        be read is left out, and its parts go with it. Parsed before the lock, like the body being registered."""
+        be read is left out, and its parts go with it (until _adopt_versions finds it again, when it was a passing
+        failure). Parsed before the lock, like the body being registered."""
         replaced = next((b for b in stored['bodies'] if b['job_id'] == job), None)
         shapes = {}
         for alias in (replaced or {}).get('aliases', []):
             if alias == new_version or not isinstance(alias, str) or not _ID.fullmatch(alias):
                 continue
-            try:
-                shapes[alias] = management.body_entry(job, alias)[0]['geometry_sha256']
-            except (PipelineError, OSError, ValueError, KeyError) as exc:
-                LOGGER.info('Wardrobe body %s drops alias %s: its body cannot be read (%s)', job, alias, type(exc).__name__)
+            geometry = self._read_shape(management, job, alias)
+            if geometry is not _UNKNOWN and geometry is not None:
+                shapes[alias] = geometry
+            else:
+                LOGGER.info('Wardrobe body %s drops alias %s: its body cannot be read', job, alias)
         return shapes
 
+    # What is known of each body version ------------------------------------------
+
+    def _known_shape(self, job, version):
+        """The remembered geometry of `job`'s body at `version`: a sha256, None for a version with no body, or _UNKNOWN."""
+        key = (int(self.owner), job, version)
+        with _records_lock:
+            if key not in _shapes:
+                return _UNKNOWN
+            _shapes.move_to_end(key)
+            return _shapes[key]
+
+    def _remember_shape(self, job, version, geometry):
+        key = (int(self.owner), job, version)
+        with _records_lock:
+            _shapes[key] = geometry
+            _shapes.move_to_end(key)
+            while len(_shapes) > _SHAPES:
+                _shapes.popitem(last=False)
+            _shape_failures.pop(key, None)
+
+    def _read_shape(self, management, job, version):
+        """Reads the geometry of `job`'s body at `version` and remembers a definitive answer: the geometry, or None for
+        a version body_entry refuses for good or whose sealed record or body cannot be parsed. _UNKNOWN when the read
+        failed for a moment (logged, not remembered, read again after a pause): storage, network, the record database,
+        a file changing under it or gone (artifact_changed), a body deleted for now."""
+        key = (int(self.owner), job, version)
+        try:
+            geometry = management.body_entry(job, version)[0]['geometry_sha256']
+        except PipelineError as exc:
+            if exc.code not in _NO_BODY:
+                return self._read_failed(key, exc)
+            geometry = None
+        except ArtifactChanged as exc:
+            return self._read_failed(key, exc)
+        except (ValueError, KeyError, TypeError) as exc:
+            LOGGER.warning('Wardrobe body %s version %s has no readable body (%s)', job, version, type(exc).__name__)
+            geometry = None
+        except Exception as exc:
+            return self._read_failed(key, exc)
+        self._remember_shape(job, version, geometry)
+        return geometry
+
+    @staticmethod
+    def _read_failed(key, exc):
+        code = getattr(exc, 'code', None)
+        with _records_lock:
+            _failures[0] += 1
+            previous = _shape_failures.pop(key, None)
+            pause = min(_RETRY_S[1], previous[2]*2) if previous else _RETRY_S[0]
+            _shape_failures[key] = (_failures[0], _clock() + pause, pause)
+            while len(_shape_failures) > _SHAPES:
+                _shape_failures.popitem(last=False)
+        LOGGER.warning('Wardrobe could not read body %s version %s for now (%s); next try in %d s', key[1], key[2],
+                       code if isinstance(code, str) else type(exc).__name__, pause)
+        return _UNKNOWN
+
+    @staticmethod
+    def _failure_mark():
+        """The number of the last failed read so far: a read that fails later gets a higher one."""
+        with _records_lock:
+            return _failures[0]
+
+    def _shape(self, management, job, version, since):
+        """The geometry of `job`'s body at `version` (see _read_shape), read once at a time: a request that waited for
+        another's read takes its answer, a read that failed after this request began (later than `since`, its
+        _failure_mark()) is not tried again by this request, and a failed one is tried again only once its pause is
+        over (_RETRY_S)."""
+        known = self._known_shape(job, version)
+        if known is not _UNKNOWN:
+            return known
+        key = (int(self.owner), job, version)
+        with keyed_lock(('wardrobe-shape', key)):
+            known = self._known_shape(job, version)
+            if known is not _UNKNOWN:
+                return known
+            with _records_lock:
+                failed = _shape_failures.get(key)
+                if failed and (failed[0] > since or _clock() < failed[1]):
+                    return _UNKNOWN
+            return self._read_shape(management, job, version)
+
+    def _registered(self, bodies):
+        """registered_bodies() of the stored list, and the versions of a registered body's job whose body is known to
+        have the registered geometry: their parts stay with it whether or not the list carries them yet."""
+        pairs = registered_bodies(bodies)
+        entries = {b['job_id']: b for b in bodies if not b.get('aliases') or b.get('aliases_verified') is True}
+        owner = int(self.owner)
+        with _records_lock:
+            known = [(job, version, geometry) for (holder, job, version), geometry in _shapes.items()
+                     if holder == owner and job in entries]
+        for job, version, geometry in known:
+            if geometry is not None and geometry == entries[job].get('geometry_sha256'):
+                pairs.setdefault((job, version), (job, entries[job]['version']))
+        return pairs
+
     def _adopt_versions(self, jobs):
-        """Adds to a registered body, as verified aliases, the other versions of its job that part jobs were made on and
-        whose body has the registered geometry, so their parts stay in the wardrobe. register() keeps such a version
-        only when it is the one being replaced; a body registered afresh at a later version of the same shape left the
-        parts made on the earlier one out. Each version is parsed once per process; a version that cannot be read or
-        has another shape is left out."""
+        """Keeps with a registered body the other versions of its job that part jobs were made on and whose body has
+        the registered geometry, so their parts stay in the wardrobe. register() keeps such a version only when it is
+        the one being replaced; a body registered afresh at a later version of the same shape left the parts made on
+        the earlier one out. Each version's body is parsed once per process (a read that fails for a moment is tried
+        again by the next request), and which versions a body answers to is decided from that on every call. The ones
+        found are written to the list as verified aliases for a restarted process and for a member's file request, which
+        reads no listing; that write keeps the revision. A body that cannot be read for now, or a list that cannot be
+        written, does not fail the wardrobe read that asked."""
+        since = self._failure_mark()
         stored = self._stored()
         entries = {b['job_id']: b for b in stored['bodies'] if not b.get('aliases') or b.get('aliases_verified') is True}
-        registered = registered_bodies(stored['bodies'])
+        listed = registered_bodies(stored['bodies'])
         wanted = sorted({(job.get('base_job_id'), job.get('base_version')) for job in jobs
                          if job.get('base_job_id') in entries and isinstance(job.get('base_version'), str)
-                         and _ID.fullmatch(job['base_version'])} - set(registered))
-        wanted = [(job, version) for job, version in wanted
-                  if (job, version, entries[job]['geometry_sha256']) not in _COMPARED]
+                         and _ID.fullmatch(job['base_version'])} - set(listed))
         if not wanted:
             return
-        try:
-            self.library.require_storage()
-        except PipelineError:
-            return
-        from src.services.avatar_fitting_management import FittingManagement
-        management = FittingManagement(self.factory, self.owner)
-        found = {}
-        for job, version in wanted:
-            geometry = entries[job]['geometry_sha256']
-            _COMPARED.add((job, version, geometry))
+        unread = [(job, version) for job, version in wanted if self._known_shape(job, version) is _UNKNOWN]
+        if unread:
             try:
-                shape = management.body_entry(job, version)[0]['geometry_sha256']
-            except (PipelineError, OSError, ValueError, KeyError) as exc:
-                LOGGER.info('Wardrobe body %s leaves version %s out: its body cannot be read (%s)', job, version,
-                            type(exc).__name__)
-                continue
-            if shape == geometry:
-                found.setdefault((job, geometry), []).append(version)
-        if not found:
+                self.library.require_storage()
+            except PipelineError:
+                unread = []
+            from src.services.avatar_fitting_management import FittingManagement
+            management = FittingManagement(self.factory, self.owner)
+            for job, version in unread:
+                self._shape(management, job, version, since)
+        adopted = {}
+        for job, version in wanted:
+            geometry = self._known_shape(job, version)
+            if geometry is not _UNKNOWN and geometry is not None and geometry == entries[job].get('geometry_sha256'):
+                adopted.setdefault(job, []).append(version)
+        if not adopted:
             return
-        with _LOCK:
-            current = self._stored()
-            bodies, changed = [], False
-            for body in current['bodies']:
-                extra = [version for version in found.get((body['job_id'], body['geometry_sha256']), [])
-                         if version != body['version'] and version not in body.get('aliases', [])]
-                if extra and (not body.get('aliases') or body.get('aliases_verified') is True):
-                    body = {**body, 'aliases': [*body.get('aliases', []), *extra], 'aliases_verified': True}
-                    changed = True
-                bodies.append(body)
-            if changed:
-                self._write(bodies)
+        try:
+            with _LOCK:
+                current = self._stored()
+                bodies, changed = [], False
+                for body in current['bodies']:
+                    # Against the body as it is now: it may have been registered again since the list was read.
+                    extra = [version for version in adopted.get(body['job_id'], [])
+                             if version != body['version'] and version not in body.get('aliases', [])
+                             and self._known_shape(body['job_id'], version) == body.get('geometry_sha256')]
+                    if extra and (not body.get('aliases') or body.get('aliases_verified') is True):
+                        body = {**body, 'aliases': [*body.get('aliases', []), *extra], 'aliases_verified': True}
+                        changed = True
+                    bodies.append(body)
+                if changed:
+                    self._write(bodies, revision=current['revision'])
+        except Exception as exc:
+            # The versions found still count in this process (_registered); the next request writes them again.
+            LOGGER.warning('Wardrobe could not store the versions its bodies answer to (%s)', type(exc).__name__)
 
     def unregister(self, job, expected_revision):
         if not _ID.fullmatch(job):
@@ -389,7 +531,7 @@ class Wardrobe:
         """404 unless parts() could list this job's part: the job is a registered body's own or built on one (on
         `body` when given), is not deleted or archived, and the slot is not tombstoned. It reads the few records
         that takes, not the listing of every job."""
-        registered = registered_bodies(self._stored()['bodies'])
+        registered = self._registered(self._stored()['bodies'])
         jobs = _JobRecords(self.factory, self.owner)
         job = jobs.get(job_id)
         if body:
@@ -404,8 +546,8 @@ class Wardrobe:
     def _member_record(self, job_id, version, slot, message):
         """The assembly record a wardrobe member may use `slot` of at `version`, else 404 (`not_found`): the body of a
         registered body at its registered version, or a part parts() lists: a job on a registered body's lineage (or the
-        body's own), the version that job offers, a slot it made, fitted and not tombstoned. Reads the few records that
-        takes, not the listing of every job, and no part file."""
+        body's own), the version that job offers, a slot it made, not tombstoned and wearable(). Reads the few records
+        that takes, not the listing of every job, and no part file."""
         from src.services.avatar_native_parts import AvatarNativeParts
         if not _ID.fullmatch(job_id) or not _ID.fullmatch(version) or not _SLOT.fullmatch(slot):
             raise PipelineError('not_found', message, 404)
@@ -418,7 +560,7 @@ class Wardrobe:
         jobs = _JobRecords(self.factory, self.owner)
         job = jobs.get(job_id)
         metadata = self.library.metadata()
-        if (not job or (not own and lineage_body(jobs, job_id, registered_bodies(bodies)) is None)
+        if (not job or (not own and lineage_body(jobs, job_id, self._registered(bodies)) is None)
                 or self.library.is_job_deleted(job, metadata)
                 or metadata['parts'].get(f'{job_id}:{slot}', {}).get('deleted')):
             raise PipelineError('not_found', message, 404)
@@ -429,8 +571,7 @@ class Wardrobe:
         requested = job.get('requested_slots')
         made_elsewhere = (slot not in requested if isinstance(requested, list)
                           else (part or {}).get('origin') == 'reused_fitted_native')
-        if (record.get('status') != 'review_required' or not part or part.get('available') is False
-                or made_elsewhere or f'{slot}.glb' not in record.get('files', {})):
+        if made_elsewhere or not wearable(record, part, slot):
             raise PipelineError('not_found', message, 404)
         return record
 
@@ -462,14 +603,17 @@ class Wardrobe:
         parts stay listed while a refit is running or after one failed, and switch when the new
         version is sealed. A job whose record cannot be read is left out (logged); the others are listed.
 
-        operator=False is a member's listing: the parts to wear, without the parts that could not be
-        fitted (`unavailable` is empty) or the messages of failed fit checks (`fit_check` is None).
+        `parts` are the wearable() ones, the same for an operator and a member; `unavailable` (an
+        operator's only) names each part that could not be fitted or that the seal's quality gate refused,
+        by its code. operator=False is a member's listing: without `unavailable` and without the limb
+        check's warnings (`fit_check` is None). A member is served the files of exactly these parts
+        (_member_record).
         """
         self._body(job_id)
         jobs = self.factory.listing(self.owner)
         self._adopt_versions(jobs)
         body = self._body(job_id)
-        registered = registered_bodies(self._stored()['bodies'])
+        registered = self._registered(self._stored()['bodies'])
         jobs_by_id = {job['id']: job for job in jobs}
         metadata = self.library.metadata()
         members = []
@@ -521,7 +665,7 @@ class Wardrobe:
                 missing.append((job.get('created_at') or '', {'job_id': job['id'], 'version': version, 'slot': slot,
                                                               'name': label, 'reason': _reason(part)}))
                 continue
-            if name not in record.get('files', {}):
+            if not wearable(record, part, slot):
                 continue
             check = (part.get('limb_fit') or {}).get('check') or {}
             delivery = _runtime_delivery(record, slot)
@@ -541,7 +685,11 @@ class Wardrobe:
     def preview(self, job_id, slot, version, *, member=False):
         """Front drawing of a part without the key-coloured mannequin, cropped; cached by drawing hash. A part with no
         drawing (one made from an uploaded GLB) is shown as it is worn: its region of the assembly's front render.
-        A member (member=True) sees only the version a job offers of a slot it made, as with its files."""
+        A member (member=True) sees only the version a job offers of a slot it made, as with its files. Only a sealed
+        version has a part to preview, and its preview is served as immutable."""
+        return immutable(self._preview(job_id, slot, version, member=member))
+
+    def _preview(self, job_id, slot, version, *, member=False):
         import numpy as np
         from PIL import Image
         from src.services.avatar_worn_images import _rgba, dilate, erode, key_mask
@@ -559,7 +707,7 @@ class Wardrobe:
         report = next((p for p in record.get('result', {}).get('parts', [])
                        if isinstance(p, dict) and p.get('slot') == slot), {})
         if not view and slot == 'hair' and report.get('fit_method') == 'uploaded-native-hair-v1':
-            return self._uploaded_native_preview(job_id, version, record, report)
+            return self._uploaded_native_preview(job_id, version, record, report, member=member)
         name, sha = view.get('file'), view.get('sha256')
         if not name or '/' in name or '\\' in name or not sha:
             return self._worn_preview(job_id, slot, version, record)
@@ -592,7 +740,7 @@ class Wardrobe:
                 _write_file(target, buffer.getvalue())
         return target
 
-    def _uploaded_native_preview(self, job_id, version, record, report):
+    def _uploaded_native_preview(self, job_id, version, record, report, *, member=False):
         """An uploaded hair's sealed own render, or the actual whole assembly front; no guessed crop or new render."""
         from PIL import Image, UnidentifiedImageError
         from src.services.avatar_native_parts import AvatarNativeParts
@@ -745,6 +893,7 @@ class Wardrobe:
             raise PipelineError('not_found', '파츠 파일을 찾을 수 없습니다.', 404)
         base = self.library.root/'wardrobe-colors'/f'{part_sha[:20]}-v3'
         info, mask = base.with_suffix('.json'), base.with_suffix('.png')
+        mask = immutable(mask)
         cached = read_json(info)
         if cached:
             return cached, mask

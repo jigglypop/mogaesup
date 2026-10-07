@@ -4,7 +4,9 @@ import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
+from src.services.avatar_blender_common import bone_key
 from src.services.avatar_fit_geometry import bounds, head_region, place, surface, target_box
+from src.services.avatar_part_gate import EYE_COLUMNS
 
 
 def face_samples(meshes):
@@ -155,12 +157,23 @@ def fit_reference_frame(meshes, reference_bounds, slot):
 def crown_width(meshes, *, brim=.8):
     """Width of a hat's crown. A brim (the hat much wider low down than over its upper 60%) never
     sets the size, or a straw hat shrinks until its crown perches on top of the head."""
+    width, brimmed, _ = crown_frame(meshes, brim=brim)
+    return width, brimmed
+
+
+def crown_frame(meshes, *, brim=.8):
+    """(width, brimmed, (x, y) centre) of a hat's crown: its upper 60%. A cap's peak reaches far forward of its
+    crown, so the crown's centre, not the whole hat's, goes over the head's (centred on its box, a cap sat behind
+    the head and the forehead came through its front)."""
     points = np.array([tuple(obj.matrix_world @ vertex.co) for obj in meshes for vertex in obj.data.vertices])
     low, height = points[:, 2].min(), np.ptp(points[:, 2])
     upper = points[points[:, 2] >= low + .4*height]
+    if len(upper) <= 10:
+        upper = points
     overall = np.ptp(points[:, 0])
-    crown = np.ptp(upper[:, 0]) if len(upper) > 10 else overall
-    return (crown, True) if crown < brim*overall else (overall, False)
+    crown = np.ptp(upper[:, 0])
+    centre = ((upper[:, 0].min() + upper[:, 0].max())/2, (upper[:, 1].min() + upper[:, 1].max())/2)
+    return (crown, True, centre) if crown < brim*overall else (overall, False, centre)
 
 
 def fit_hat(meshes, target, width_scale=1.0, reference_bounds=None):
@@ -170,9 +183,9 @@ def fit_hat(meshes, target, width_scale=1.0, reference_bounds=None):
         # of being expanded to the entire head width like a cap.
         return fit_reference_frame(meshes, reference_bounds, 'hat')
     lo, hi = bounds(meshes); a, b = target_box(target)
-    width, brimmed = crown_width(meshes)
+    width, brimmed, centre = crown_frame(meshes)
     scale = (b.x-a.x)/width*width_scale
-    source = Vector(((lo.x+hi.x)/2, (lo.y+hi.y)/2, hi.z))
+    source = Vector((centre[0], centre[1], hi.z))
     destination = Vector(((a.x+b.x)/2, (a.y+b.y)/2, b.z))
     transform = Matrix.Translation(destination) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-source)
     return transform, [], {'method': 'uniform_hat_scale_on_measured_body_head', 'scale': scale,
@@ -180,6 +193,135 @@ def fit_hat(meshes, target, width_scale=1.0, reference_bounds=None):
                            'target_head_width_m': b.x-a.x,
                            'fitted_width_m': (hi.x-lo.x)*scale,
                            'crown_height_m': b.z, 'source_proportions_preserved': True}
+
+
+# A hat's lowest point over the eyes (in front of the head's middle, out to the eyes' outer corners) stays above this
+# share of the head's height, its skin from chin to crown: the seal's quality gate refuses a hat under
+# avatar_part_gate.HAT_MIN_EYE_LINE (a beanie at .554 sat on the brows, a cap at .431 over the eyes), and the seat leaves
+# a little room above that.
+HAT_EYE_LINE = .62
+# A hat that comes lower is too deep for the SD head: sized to the head's width and hung from the crown, a generated
+# beanie or cap is as deep as a real one, and the SD head's dome above the brows is half its width. Its height is taken
+# in about its crown down to this share of it ...
+HAT_HEIGHT_LIMIT = .6
+# ... and what is still too low makes the whole hat smaller about its crown, down to this, so it stays on the head
+# instead of floating above it (a lifted crown stood off the skull, which clearance only pushes outward).
+HAT_MIN_SCALE = .75
+
+
+def head_skin(body):
+    """(lowest, highest) corners of the skin whose strongest bone is the head, as the quality gate measures the head,
+    or None when no skin follows a head bone."""
+    points = []
+    for obj in body:
+        heads = {group.index for group in obj.vertex_groups if bone_key(group.name) == 'head'}
+        if not heads:
+            continue
+        for vertex in obj.data.vertices:
+            if vertex.groups and max(vertex.groups, key=lambda entry: entry.weight).group in heads:
+                points.append(tuple(obj.matrix_world @ vertex.co))
+    if not points:
+        return None
+    points = np.array(points, dtype=float)
+    return Vector(points.min(axis=0)), Vector(points.max(axis=0))
+
+
+def _eye_low(meshes, lo, hi):
+    """The lowest Z of the hat over the eyes: in front of the head's middle (Blender -Y), within EYE_COLUMNS[1] of the
+    head's half width from its middle line. None when no part of the hat is there."""
+    points = np.array([tuple(obj.matrix_world @ vertex.co) for obj in meshes for vertex in obj.data.vertices],
+                      dtype=float).reshape(-1, 3)
+    over = ((points[:, 1] < (lo.y + hi.y)/2)
+            & (np.abs(points[:, 0] - (lo.x + hi.x)/2) <= EYE_COLUMNS[1]*(hi.x - lo.x)/2))
+    return float(points[over, 2].min()) if over.any() else None
+
+
+def seat_hat_above_brows(meshes, body, rig, spec, *, line_share=HAT_EYE_LINE, limit=HAT_HEIGHT_LIMIT,
+                         smallest=HAT_MIN_SCALE):
+    """Keep a fitted hat above the eyes, in place.
+
+    Its lowest point over the eyes (_eye_low, as the quality gate measures it) must stay above `line_share` of the
+    head's height (head_skin). A hat that comes lower first has its height taken in about its crown, width and depth
+    unchanged, down to `limit` of it; what is still too low makes the whole hat smaller about its crown, down to
+    `smallest`, so its crown still sits on the head. It is never lifted: a hat that still covers the eyes is left for the
+    gate to refuse. Returns the receipt."""
+    frame = head_skin(body)
+    lo, hi = frame if frame else head_region(body, rig, spec)[:2]
+    line = lo.z + line_share*(hi.z - lo.z)
+    report = {'method': 'hat_above_eyes_v2', 'eye_line_m': float(line), 'eye_line_share': line_share,
+              'height_scale': 1., 'scale': 1., 'lift_m': 0.}
+    low = _eye_low(meshes, lo, hi)
+    if low is None:
+        return {**report, 'reason': 'nothing_over_the_eyes'}
+    report['eye_low_before_m'] = low
+    if low >= line:
+        return report
+    _, _, (centre_x, centre_y) = crown_frame(meshes)
+    top = float(bounds(meshes)[1].z)
+    if top - low <= 1e-6:
+        return report
+    height = max(limit, (top - line)/(top - low))
+    pivot = Vector((centre_x, centre_y, top))
+    place(meshes, Matrix.Translation(pivot) @ Matrix.Diagonal((1., 1., height, 1.)) @ Matrix.Translation(-pivot))
+    report.update(height_scale=float(height), source_proportions_preserved=False)
+    low = _eye_low(meshes, lo, hi)
+    if low is not None and low < line and top - low > 1e-6:
+        scale = max(smallest, (top - line)/(top - low))
+        place(meshes, Matrix.Translation(pivot) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-pivot))
+        report['scale'] = float(scale)
+        low = _eye_low(meshes, lo, hi)
+    report.update(eye_low_after_m=low, clear=low is None or low >= line - 1e-6)
+    return report
+
+
+HAT_CAVITY_LIMIT = 1.25         # the most a hat is enlarged for the skull (as hair_cavity_scale_limit)
+# A hat surface this much nearer the head's centre than the skull, or farther, is not the inside the skull rests
+# against: a fold or lining reaching into the hat (a pinched beanie's crown), or the far side of a brim.
+HAT_CAVITY_RATIOS = (.75, 1.3)
+
+
+def fit_hat_cavity(meshes, body, rig, spec, *, limit=HAT_CAVITY_LIMIT, accepted=HAT_CAVITY_RATIOS):
+    """Enlarge a hat uniformly about the head's centre, in place, until its inside clears the skull.
+
+    As fit_hair_cavity seats a wig: rays from the head's centre through the skull (not low over the face) meet the
+    hat's inside, and the 90th percentile of (skin + clearance)/hat distance enlarges it, up to `limit`. Only hat
+    surfaces at a believable distance count (`accepted` bounds that ratio): the crease a pinched beanie folds into
+    its crown came within millimetres of the head's centre and enlarged the hat by the whole limit, far wider than
+    the head."""
+    lo, hi, collar = head_region(body, rig, spec)
+    centre = (lo + hi)/2
+    centre.z = (max(lo.z, collar) + hi.z)/2
+    clearance = spec['fitting'].get('scalp_clearance_m', .003)
+    skin, _, _ = surface(body)
+    hat, _, _ = surface(meshes)
+    ratios, sectors, rejected = [], set(), 0
+    for elevation in (.05, .3, .55, .8):
+        horizontal = float(np.sqrt(1 - elevation*elevation))
+        for step in range(24):
+            angle = step*np.pi/12
+            ray = Vector((float(np.sin(angle))*horizontal, float(np.cos(angle))*horizontal, elevation))
+            if ray.y < -.25 and elevation < .75:
+                continue
+            skin_hit, hat_hit = skin.ray_cast(centre, ray), hat.ray_cast(centre, ray)
+            if skin_hit[0] is None or hat_hit[0] is None or hat_hit[3] <= 1e-8:
+                continue
+            ratio = (skin_hit[3] + clearance)/hat_hit[3]
+            if accepted[0] <= ratio <= accepted[1]:
+                ratios.append(ratio)
+                sectors.add(step//6)
+            else:
+                rejected += 1
+    report = {'method': 'sampled_inner_hat_cavity_v1', 'samples': len(ratios), 'rejected_samples': rejected,
+              'sectors': len(sectors), 'scale': 1., 'center_blender': list(centre), 'accepted_ratios': list(accepted),
+              'source_proportions_preserved': True}
+    if len(ratios) < 12 or len(sectors) < 3:
+        return {**report, 'reason': 'insufficient_cavity_surface'}
+    requested = max(1., float(np.percentile(ratios, 90)))
+    scale = min(requested, limit)
+    report.update(requested_scale=requested, scale=scale, scale_limit=limit, limited=requested > limit)
+    if scale > 1.0001:
+        place(meshes, Matrix.Translation(centre) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-centre))
+    return report
 
 
 def hat_target_over_hair(target, hair, spec):

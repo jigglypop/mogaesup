@@ -302,6 +302,23 @@ def test_an_answer_kept_as_a_partial_is_resumed_and_never_offered_for_another_pa
     assert receipt.with_suffix('.response.json').is_file() and not receipt.with_suffix('.response.partial').exists()
 
 
+def test_a_retry_moves_a_kept_answer_into_place_before_the_process_lock_and_resumes_it_instead(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from src.services import avatar_image_recovery
+    from src.services.avatar_factory import _LOCK
+    _, _, receipt = unconfirmed_view(tmp_path, json.dumps(answer()).encode())
+    (tmp_path / 'job.json').write_text(json.dumps({'id': JOB, 'status': 'pipeline_paused'}))
+    factory = SimpleNamespace(get=lambda owner, job: {}, directory=lambda owner, job: StoredPath(tmp_path))
+    moved, real = [], images.promote_partial_response
+    monkeypatch.setattr(images, 'promote_partial_response', lambda path: (moved.append(_LOCK._is_owned()), real(path))[1])
+    with pytest.raises(PipelineError) as error:
+        avatar_image_recovery.retry_views(SimpleNamespace(factory=factory), 1, JOB,
+                                          [{'slot': 'body', 'view': 'front', 'failure_id': 'f00d'}])
+    # The whole answer is written into place while every other admission can go on; under the lock it is only found.
+    assert error.value.code == 'response_saved' and moved == [False]
+    assert receipt.with_suffix('.response.json').is_file() and not receipt.with_suffix('.response.partial').exists()
+
+
 def test_an_answer_lost_before_it_was_stored_can_only_be_requested_again_explicitly(tmp_path):
     state, public, receipt = unconfirmed_view(tmp_path, None)
     assert not can_resume(tmp_path, state)
@@ -502,3 +519,45 @@ def test_an_animal_view_continues_from_an_answer_kept_on_this_host(tmp_path):
     # Paid and kept: going on reads it, where an unconfirmed request would be blocked from any re-send.
     assert isinstance(AnimalProduction._image_failure(receipt, OSError('storage unavailable')), StepPaused)
     assert receipt.with_suffix('.response.json').is_file()
+
+
+# --- a receipt whose start was never recorded before a byte left is a request that never left ----------------------------
+
+NEVER_STARTED = {'durable_start': True, 'request_started': False, 'phase': 'prepared', 'events': []}
+# Written by a server that went on with the request when its start could not be recorded: it proves nothing.
+START_UNKNOWN = {'request_started': False, 'phase': 'prepared'}
+
+
+@pytest.mark.parametrize('request_record, resumable', [(NEVER_STARTED, True), ({'submission': 'not_sent'}, True),
+                                                        (START_UNKNOWN, False), ({'submission': 'unknown'}, False)])
+def test_studio_and_expression_generations_resume_a_request_that_never_left(tmp_path, request_record, resumable):
+    from src.services.avatar_expression_generation import AvatarExpressionGeneration
+    from src.services.studio_generations import StudioGenerations
+    (tmp_path / 'image-provider.request.json').write_text(json.dumps(request_record))
+    assert StudioGenerations._image_reason(tmp_path, {'files': {}})[0] is resumable
+    assert AvatarExpressionGeneration._resume_reason(tmp_path, {'status': 'paused'})[0] is resumable
+
+
+def test_an_expression_generation_copies_its_references_without_the_process_lock(tmp_path, monkeypatch,
+                                                                                  storage_configured):
+    import hashlib
+    from native_assembly_fixture import JOB, VERSION, seed_native_assembly
+    from src.services import avatar_expression_generation as module
+    from src.services.asset_editor import _write_json
+    from src.services.avatar_factory import _LOCK
+    from src.services.character_pipeline import read_json
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture-only')
+    factory, _ = seed_native_assembly(tmp_path, 'fixture')
+    job = factory.directory(1, JOB)
+    (job / 'source.png').write_bytes(png())
+    _write_json(job / 'job.json', {**read_json(job / 'job.json'), 'source_sha256': hashlib.sha256(png()).hexdigest()})
+    _write_json(job / 'pipeline.json', {})
+    copied, real = [], module.copy_file
+    monkeypatch.setattr(module, 'copy_file', lambda source, target: (copied.append(_LOCK._is_owned()),
+                                                                     real(source, target))[1])
+    service = module.AvatarExpressionGeneration(factory, 1, JOB, VERSION)
+    item, created = service.create('expression-key-0001', {'name': 'smile', 'prompt': '웃는 얼굴'})
+    assert created and item['status'] == 'accepted' and copied == [False]
+    # A replay of an accepted generation is dispatched again (its worker may have been lost), with nothing copied.
+    again, dispatch = service.create('expression-key-0001', {'name': 'smile', 'prompt': '웃는 얼굴'})
+    assert dispatch and again['id'] == item['id'] and copied == [False]

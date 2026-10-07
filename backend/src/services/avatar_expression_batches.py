@@ -1,12 +1,13 @@
 """Five frozen eyes/nose/mouth overlay requests with resumable per-image receipts."""
+from contextlib import contextmanager
 import hashlib
 import json
 import re
 
 from src.services.asset_editor import _write_json
-from src.services.avatar_factory import _LOCK
 from src.services.avatar_expression_generation import expression_lease
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
+from src.services.keyed_lock import keyed_lock
 from src.services.process_identity import identity
 from src.services.run_lock import WorkerLocks, final_write, worker_alive
 from src.services.studio_prompts import StudioPrompts
@@ -35,6 +36,12 @@ class AvatarExpressionBatches:
     def _save(self, record):
         record['updated_at'] = now()
         _write_json(self.directory(record['id'])/'record.json', record)
+
+    @contextmanager
+    def _locked(self, batch_id):
+        directory = self.directory(batch_id)
+        with keyed_lock(('expression-batch', str(directory))), expression_lease(directory):
+            yield
 
     def listing(self):
         items = [self.get(path.parent.name) for path in self.root.glob('*/record.json')]
@@ -69,7 +76,9 @@ class AvatarExpressionBatches:
         fingerprint = hashlib.sha256(json.dumps({'reference_assets': assets,
             'body_sha256': generation.body_sha256}, sort_keys=True).encode()).hexdigest()
         batch_id = request_job_id(generation.owner, f'{generation.job}:{generation.version}:expression-batch', key)
-        with _LOCK, expression_lease(self.directory(batch_id)):
+        # The artwork (up to three PNGs of 32 MB) is read and hashed under this batch's own locks (one request at a time
+        # in this process, then the lease every process takes), not the process lock that every admission waits for.
+        with self._locked(batch_id):
             previous = read_json(self.directory(batch_id)/'record.json')
             if previous:
                 if previous['fingerprint'] != fingerprint:
@@ -91,7 +100,7 @@ class AvatarExpressionBatches:
         return self.get(batch_id), True
 
     def resume(self, batch_id):
-        with _LOCK, expression_lease(self.directory(batch_id)):
+        with self._locked(batch_id):
             public = self.get(batch_id)
             if not public['can_resume']:
                 return public, False

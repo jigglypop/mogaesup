@@ -144,3 +144,16 @@ def test_a_part_is_made_on_the_sealed_version_the_wardrobe_offers_while_a_newer_
     with pytest.raises(PipelineError) as error:
         AvatarVariants(factory).create_single_part(1, 'variant-key-0002', {**payload, 'base_version': newer})
     assert error.value.code == 'base_changed'
+
+
+def test_the_checks_read_and_hash_stored_files_without_the_process_lock(base, monkeypatch):
+    # Every admission waits for the process lock: a stored file hashed or a job read under it stalls them all.
+    factory, _, payload = base
+    hashed, reads = [], []
+    real_digest, real_get = avatar_variants.digest, factory.get
+    monkeypatch.setattr(avatar_variants, 'digest', lambda path: (hashed.append(_LOCK._is_owned()), real_digest(path))[1])
+    monkeypatch.setattr(factory, 'get', lambda owner, job_id, *args: (reads.append(_LOCK._is_owned()),
+                                                                      real_get(owner, job_id, *args))[1])
+    job, created = AvatarVariants(factory).create_single_part(1, KEY, payload)
+    assert created and job['status'] == 'pipeline_queued'
+    assert hashed and not any(hashed) and reads and not any(reads)

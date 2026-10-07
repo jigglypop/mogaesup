@@ -176,22 +176,98 @@ def test_a_member_loads_only_the_version_a_job_offers(library):
     not_found(lambda: library.wardrobe.member_file(BODY, later, 'body.glb'))
 
 
-def test_a_members_listing_has_no_unfitted_parts_or_fit_messages(library):
+def check_fit(library, job, status, slot='hair', version=V1):
+    """The limb check of one slot of a job's sealed record ends with `status`."""
+    record = library.directory(job)/'native-parts'/version/'record.json'
+    value = read_json(record)
+    value['result']['parts'] = [{**part, 'limb_fit': {'check': {'status': status, 'failures': (
+                                    [{'message': 'sleeve 2 cm off'}] if status == 'fail' else [])}}}
+                                if part['slot'] == slot else part for part in value['result']['parts']]
+    put(record, value)
+    import src.services.avatar_wardrobe as wardrobe_module
+    wardrobe_module._records.clear()
+    library.refresh()
+
+
+def test_a_members_listing_has_no_unfitted_parts_and_no_fit_messages(library):
+    check_fit(library, MEMBER, 'fail')
     record = library.directory(MEMBER)/'native-parts'/V1/'record.json'
     value = read_json(record)
-    value['result']['parts'] = [{**part, 'limb_fit': {'check': {'status': 'fail', 'failures': [{'message': 'sleeve 2 cm off'}]}}}
-                                if part['slot'] == 'hair' else part for part in value['result']['parts']]
     value['result']['parts'].append({'slot': 'top', 'available': False, 'unavailable_reason': 'fit_exception'})
     put(record, value)
     library.job(MEMBER, base=(BODY, BODY_VERSION), requested=['hair', 'top'])
     library.refresh()
+    import src.services.avatar_wardrobe as wardrobe_module
+    wardrobe_module._records.clear()
     operator = library.wardrobe.parts(BODY)
     member = library.wardrobe.parts(BODY, operator=False)
     assert [row['slot'] for row in operator['unavailable'] if row['job_id'] == MEMBER] == ['top']
     assert next(part for part in operator['parts'] if part['job_id'] == MEMBER)['fit_check'] == {
         'status': 'fail', 'failures': ['sleeve 2 cm off']}
     assert member['unavailable'] == [] and all(part['fit_check'] is None for part in member['parts'])
-    assert [part['job_id'] for part in member['parts']] == [part['job_id'] for part in operator['parts']]
+    # The limb check is the operator's warning only: the member is listed every part the operator is.
+    assert ([(part['job_id'], part['slot'], part['sha256']) for part in member['parts']]
+            == [(part['job_id'], part['slot'], part['sha256']) for part in operator['parts']])
+    assert MEMBER in [part['job_id'] for part in member['parts']]
+
+
+@pytest.mark.parametrize('status', ['pass', 'fail'])
+def test_a_member_is_served_a_part_whatever_its_limb_check_says(library, status):
+    cached_color(library, MEMBER)
+    cached_preview(library, MEMBER)
+    cached_coverage(library, MEMBER)
+    check_fit(library, MEMBER, status)
+    assert library.wardrobe.colors(MEMBER, 'hair', V1, member=True)[0]['slot'] == 'hair'
+    assert library.wardrobe.preview(MEMBER, 'hair', V1, member=True).read_bytes() == b'png'
+    assert library.wardrobe.coverage(BODY, MEMBER, 'hair', V1, member=True)['slot'] == 'hair'
+    library.assembly(MEMBER, V1, contents={'hair': b'member hair'})
+    check_fit(library, MEMBER, status)
+    assert library.wardrobe.member_file(MEMBER, V1, 'hair.glb').read_bytes() == b'member hair'
+
+
+def refuse(library, job, code, slot='hair', version=V1):
+    """The seal's quality gate refused `slot` of a job's sealed version with `code`."""
+    record = library.directory(job)/'native-parts'/version/'record.json'
+    value = read_json(record)
+    value['result']['parts'] = [{**part, 'available': False, 'unavailable_reason': code, 'fit_status': 'failed'}
+                                if part['slot'] == slot else part for part in value['result']['parts']]
+    put(record, value)
+    import src.services.avatar_wardrobe as wardrobe_module
+    wardrobe_module._records.clear()
+    library.refresh()
+
+
+def test_a_part_the_quality_gate_refused_is_listed_to_operators_by_its_code_and_to_no_one_to_wear(library):
+    cached_color(library, MEMBER)
+    cached_preview(library, MEMBER)
+    cached_coverage(library, MEMBER)
+    refuse(library, MEMBER, 'shoes_incomplete')
+    operator = library.wardrobe.parts(BODY)
+    member = library.wardrobe.parts(BODY, operator=False)
+    assert MEMBER not in [part['job_id'] for part in operator['parts']] + [part['job_id'] for part in member['parts']]
+    assert [(row['job_id'], row['slot'], row['reason']) for row in operator['unavailable']] == [
+        (MEMBER, 'hair', 'shoes_incomplete')]
+    assert member['unavailable'] == []
+    not_found(lambda: library.wardrobe.member_file(MEMBER, V1, 'hair.glb'))
+    not_found(lambda: library.wardrobe.colors(MEMBER, 'hair', V1, member=True))
+    not_found(lambda: library.wardrobe.preview(MEMBER, 'hair', V1, member=True))
+    not_found(lambda: library.wardrobe.coverage(BODY, MEMBER, 'hair', V1, member=True))
+
+
+def test_a_trashed_part_stays_out_for_everyone(library):
+    cached_color(library, MEMBER)
+    cached_preview(library, MEMBER)
+    library.catalog(items={DELETED: {'deleted': True}, ARCHIVED: {'archived': True}},
+                    parts={f'{TOMBSTONED}:hair': {'deleted': True}, f'{MEMBER}:hair': {'deleted': True}},
+                    characters={'hidden': {'deleted': True}})
+    library.refresh()
+    for operator in (True, False):
+        value = library.wardrobe.parts(BODY, operator=operator)
+        assert MEMBER not in [part['job_id'] for part in value['parts']]
+        assert MEMBER not in [row['job_id'] for row in value['unavailable']]
+    not_found(lambda: library.wardrobe.member_file(MEMBER, V1, 'hair.glb'))
+    not_found(lambda: library.wardrobe.colors(MEMBER, 'hair', V1))
+    not_found(lambda: library.wardrobe.preview(MEMBER, 'hair', V1))
 
 
 def test_the_gateway_marks_a_members_wardrobe_reads_with_the_member_role():

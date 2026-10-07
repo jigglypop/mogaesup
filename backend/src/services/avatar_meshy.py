@@ -129,9 +129,21 @@ class AvatarMeshy:
         saved = self.defaults(owner)['selections']
         return {slot: saved.get(slot, action_id) for slot, action_id in character_motion.DEFAULT_ACTIONS.items()}
 
-    def start(self, owner, job_id):
+    def start(self, owner, job_id, *, admit=None):
+        """admit: the caller's own check (the API's idle stage), run under the process lock before anything is written."""
         run = self.directory(owner, job_id)
+        source_sha256 = unverified = None
+        if not (run/'input.json').exists():
+            # The body is hashed (a full read of a stored GLB) before the process lock; under it the job's record of
+            # the same file is compared instead. A body that cannot be verified is reported there, after the checks
+            # that come first.
+            try:
+                source_sha256 = digest(self.factory.artifact(owner, job_id, 'generated-body.glb'))
+            except PipelineError as exc:
+                unverified = exc
         with _LOCK:
+            if admit:
+                admit()
             job = run.parent
             contract = read_json(run/'input.json')
             pipeline = read_json(job/'pipeline.json')
@@ -156,7 +168,11 @@ class AvatarMeshy:
                     or len(set(accepted_actions.values())) > max_animation_tasks):
                 raise PipelineError('invalid_motion_contract', '수락된 Meshy 동작 범위와 작업 한도를 확인해 주세요.', 422)
             if not (run/'input.json').exists():
-                source = self.factory.artifact(owner, job_id, 'generated-body.glb')
+                if unverified:
+                    raise unverified
+                if (source_sha256 is None
+                        or read_json(job/'job.json').get('files', {}).get('generated-body.glb') != source_sha256):
+                    raise PipelineError('artifact_changed', '검증한 생산 파일과 현재 파일이 다릅니다.')
                 provider = read_json(job/'parts/body/character.json')
                 if not uploaded and (provider.get('stage') != 'generation' or provider.get('status') != 'SUCCEEDED'):
                     raise PipelineError('generation_required', '성공한 Meshy 전신 생성 작업이 필요합니다.', 422)
@@ -166,7 +182,7 @@ class AvatarMeshy:
                 with client(base):
                     pass
                 run.mkdir(exist_ok=True)
-                _write_json(run/'input.json', {'source_job_id': job_id, 'source_sha256': digest(source),
+                _write_json(run/'input.json', {'source_job_id': job_id, 'source_sha256': source_sha256,
                     'generation_task_id': provider.get('task_id'), 'input_kind': 'model' if uploaded else 'generation',
                     'height_meters': height, 'meshy_base': base,
                     'max_rig_tasks': 1, 'motion_actions': accepted_actions,
@@ -192,7 +208,7 @@ class AvatarMeshy:
         """
         run = self.directory(owner, job_id)
         with _LOCK:
-            if self.get(owner, job_id)['busy']:
+            if worker_busy(run)[1]:
                 return False
             if (read_json(run/'worker.json').get('origin') == 'rig_transfer'
                     or read_json(run/'delivery.json').get('origin') in ('transferred_meshy_rig', 'frozen_body', 'uploaded_glb')):
@@ -388,15 +404,20 @@ class AvatarMeshy:
                 'rig_task_id': rig_task_id, 'max_new_tasks': 1,
                 'submitted_tasks': 0, 'tasks': {}})
 
-    def request_action(self, owner, job_id, slot, action_id):
+    def request_action(self, owner, job_id, slot, action_id, *, admit=None):
+        """admit: the caller's own check (the API's idle stage), run under the process lock before anything is written."""
+        # Meshy's list (an HTTP request of up to 120 s when the 5-minute copy is old) and the job are read before the
+        # process lock, which every admission waits for; under it only the rig and worker records are checked.
         if slot not in SLOTS or action_id not in {i['action_id'] for i in self.library(owner)}:
             raise PipelineError('invalid_action', '현재 Meshy 목록에서 동작을 선택하세요.', 422)
         run = self.directory(owner, job_id)
         with _LOCK:
+            if admit:
+                admit()
             task = read_json(run/'character.json')
             if task.get('stage') != 'rigging' or task.get('status') != 'SUCCEEDED' or not (run/'delivery.json').is_file():
                 raise PipelineError('rig_not_ready', 'Meshy 리깅 결과를 먼저 가져와 주세요.', 422)
-            if self.get(owner, job_id)['busy']:
+            if worker_busy(run)[1]:
                 raise PipelineError('worker_busy', '기존 Meshy 작업을 마친 뒤 동작을 선택하세요.')
             directory = run/'actions'/str(action_id)
             if not (directory/'motion-pack.json').is_file():
@@ -503,31 +524,32 @@ class AvatarMeshy:
         finally:
             _WORKERS.release(str(run))
 
-    def _uncertain(self, owner, job_id, run, action_id):
-        """(contract, motion pack or None, receipt) of the submission an operator may recover; raises when there is none now."""
-        if self.get(owner, job_id)['busy']:
+    @staticmethod
+    def _uncertain(run, action_id):
+        """(motion pack or None, receipt) of the submission an operator may recover; raises when there is none now."""
+        if worker_busy(run)[1]:
             raise PipelineError('worker_busy', '기존 Meshy 조회가 실행 중입니다.')
-        contract = self._verify_source(run)
         pack = character_motion.read_pack(run/'actions'/str(action_id)) if action_id is not None else None
         task = pack.get('tasks', {}).get('clip', {}) if pack is not None else character_jobs.state(run)
         if task.get('status') != 'submission_uncertain':
             raise PipelineError('invalid_state', '응답이 불확실한 기존 작업만 복구할 수 있습니다.')
-        return contract, pack, task
+        return pack, task
 
     def recover(self, owner, job_id, task_id, action_id=None):
         import re
         if not re.fullmatch(r'[a-zA-Z0-9_-]{1,100}', task_id):
             raise PipelineError('invalid_task', '올바른 Meshy 작업 ID가 필요합니다.', 422)
         run = self.directory(owner, job_id)
+        # The preserved body is hashed, and Meshy asked, without the process lock, so neither a large read nor a slow
+        # answer stalls another admission; what Meshy said is applied below only if the submission still waits for it.
+        contract = self._verify_source(run)
         with _LOCK:
-            contract, _, task = self._uncertain(owner, job_id, run, action_id)
-        # Meshy is asked without the lock, so a slow answer stalls no other job action; what it said is applied
-        # below only if the submission is still waiting for this recovery.
+            _, task = self._uncertain(run, action_id)
         with client(contract['meshy_base']) as api:
             fetched = (character_jobs.fetch_task(api, task, task_id) if action_id is None
                        else get_with_retry(api, '/openapi/v1/animations/'+task_id).json())
         with _LOCK:
-            _, pack, task = self._uncertain(owner, job_id, run, action_id)
+            pack, task = self._uncertain(run, action_id)
             if action_id is None:
                 character_jobs.record_task(run, task, task_id, fetched)
             else:

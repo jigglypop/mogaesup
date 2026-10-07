@@ -13,7 +13,7 @@ import pytest
 
 from src.services import animal_production, character_jobs, run_lock
 from src.services.animal_library import JOBS, AnimalLibrary
-from src.services.animal_production import AnimalProduction, StepBlocked
+from src.services.animal_production import AnimalProduction, StepBlocked, StepPaused
 from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, read_json, request_job_id
 from src.services.object_storage import StoredPath
@@ -310,6 +310,23 @@ def test_an_unconfirmed_image_request_blocks_the_views_step(tmp_path):
     assert isinstance(AnimalProduction._image_failure(receipt, OSError('read timeout')), StepBlocked)
 
 
+@pytest.mark.parametrize('request_record', [
+    {'submission': 'not_sent'},
+    # Its start never on record before a byte was written (durable_start): nothing left this host.
+    {'durable_start': True, 'request_started': False, 'phase': 'prepared'},
+])
+def test_an_image_request_that_never_left_pauses_the_views_step(tmp_path, request_record):
+    receipt = StoredPath(tmp_path) / 'front-provider'
+    _write_json(receipt.with_suffix('.request.json'), request_record)
+    assert isinstance(AnimalProduction._image_failure(receipt, OSError('stopped')), StepPaused)
+
+
+def test_an_older_receipt_that_only_lacks_its_start_still_blocks_the_views_step(tmp_path):
+    receipt = StoredPath(tmp_path) / 'front-provider'
+    _write_json(receipt.with_suffix('.request.json'), {'request_started': False, 'phase': 'prepared'})
+    assert isinstance(AnimalProduction._image_failure(receipt, OSError('stopped')), StepBlocked)
+
+
 # --- publishing ------------------------------------------------------------------------------------------------------
 
 def test_publishing_again_stores_the_same_bytes_once_and_keeps_the_first_replaced_version(animal, monkeypatch):
@@ -348,3 +365,52 @@ def test_an_animal_is_created_once_per_request_key(animal):
     with pytest.raises(PipelineError) as conflict:
         library.create('animal-key-1', {**payload, 'name': '쿠키'})
     assert conflict.value.code == 'idempotency_conflict'
+
+
+# --- a new animal is admitted without the process lock ----------------------------------------------------------------
+
+def test_new_animals_copy_their_picture_without_the_process_lock_and_take_distinct_orders(tmp_path, monkeypatch,
+                                                                                         storage_configured):
+    import threading
+    from src.services import animal_library
+    from src.services.avatar_factory import _LOCK, AvatarFactory
+    library = AnimalLibrary(AvatarFactory(tmp_path), 1)
+    reference = library.upload_reference(png(40))['id']
+    copied, real_copy = [], animal_library.copy_file
+    monkeypatch.setattr(animal_library, 'copy_file', lambda source, target: (copied.append(_LOCK._is_owned()),
+                                                                            real_copy(source, target))[1])
+    created, errors = [], []
+
+    def create(index):
+        try:
+            created.append(library.create(f'animal-key-{index:04d}', {'name': f'동물 {index}', 'species': 'dog',
+                                                                       'reference': reference}))
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+    threads = [threading.Thread(target=create, args=(index,)) for index in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == [] and len(copied) == 4 and not any(copied)
+    assert sorted(item['order'] for item, _ in created) == [1, 2, 3, 4]
+    again, made = library.create('animal-key-0000', {'name': '동물 0', 'species': 'dog', 'reference': reference})
+    assert not made and again['id'] == next(item['id'] for item, _ in created if item['name'] == '동물 0')
+
+
+def test_the_standard_stage_keeps_the_looping_holds_the_rig_records():
+    report = {'clips': ['bark', 'idle', 'jump', 'lie', 'run', 'sit', 'sit_hold', 'lie_hold', 'walk', 'dance', 3]}
+    assert animal_production.standard_clips(report) == ['bark', 'idle', 'jump', 'lie', 'run', 'sit', 'sit_hold', 'lie_hold', 'walk']
+    assert animal_production.standard_clips({'clips': None}) == []
+    assert animal_production.standard_clips([]) == []
+
+
+def test_the_rig_script_records_every_clip_the_stage_keeps():
+    import re
+    from pathlib import Path
+
+    script = Path(animal_production.__file__).with_name('animal_standard_rig_blender.py').read_text(encoding='utf8')
+    recorded = dict(re.findall(r"record\('(\w+)', (\d+),", script))
+    assert set(recorded) == set(animal_production.CLIPS)
+    # Two seconds of sitting and three of lying at 24 fps, each looping back to its first frame.
+    assert (recorded['sit_hold'], recorded['lie_hold']) == ('48', '72')

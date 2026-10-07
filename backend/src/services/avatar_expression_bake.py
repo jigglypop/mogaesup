@@ -11,6 +11,7 @@ from PIL import Image
 
 from src.services.character_pipeline import PipelineError
 from src.services.glb import parse_glb
+from src.services.avatar_wardrobe_coverage import bone_keys
 
 
 MAX_EXPRESSION_TEXTURE_EDGE = 8192
@@ -83,8 +84,9 @@ def _head_joint_ids(doc, node):
     if "skin" not in node:
         return set()
     joints = doc.get("skins", [])[node["skin"]].get("joints", [])
-    return {local for local, joint in enumerate(joints)
-            if doc["nodes"][joint].get("name", "").lower().split(":")[-1] == "head"}
+    # As the Blender workers and the wardrobe compare bones: 'mixamorig:Head', 'mixamorig_Head' and 'Head' are one.
+    keys = bone_keys([doc["nodes"][joint].get("name", "") for joint in joints])
+    return {local for local, key in enumerate(keys.tolist()) if key == "head"}
 
 
 def _texture_image(doc, binary, material_index):

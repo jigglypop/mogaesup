@@ -383,14 +383,15 @@ class PartBatches:
         require_credits(len(payload['items']))
         if len(payload['items']) > 48:
             raise PipelineError('batch_too_large', '일괄 작업은 최대 48개입니다.', 422)
-        # Up to 144 images are read and decoded, and the base body is read and hashed: not under the process lock and
-        # the batch lease.
+        # Up to 144 images are read and decoded, the base body is read and hashed, and the texture images are read and
+        # hashed into the frozen settings: not under the process lock and the batch lease.
         _validate_batch_images(self.factory, owner, payload['items'])
         base_receipt = self._base_receipt(owner, payload)
+        frozen_context = self._frozen_context(owner, payload)
         with _LOCK, _batch_lease(self.root(owner, batch)):
             old = read_json(path)
             if not old:
-                record = self._accept(owner, batch, payload, fingerprint, base_receipt)
+                record = self._accept(owner, batch, payload, fingerprint, base_receipt, frozen_context)
         if old:
             # The same request was accepted meanwhile.
             if old['fingerprint'] != fingerprint:
@@ -398,9 +399,8 @@ class PartBatches:
             return self._public(owner, old), False
         return self._public(owner, record), True
 
-    def _accept(self, owner, batch, payload, fingerprint, base_receipt):
-        """Freeze and save a new batch record (under the process lock and the batch lease)."""
-        path = self._path(owner, batch)
+    def _frozen_context(self, owner, payload):
+        """The prompts, Meshy settings (their texture images read and hashed) and redraw contract a new batch keeps."""
         prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
         frozen_context = {'prompt_snapshot': prompt_snapshot,
             'meshy_options': {'hair': freeze_options(self.factory, owner, payload['meshy_options'],
@@ -414,6 +414,11 @@ class PartBatches:
                 raise PipelineError('image_provider_unavailable', '고화질 다시 그리기에는 이미지 서비스 연결이 필요합니다.', 503)
             frozen_context['image_settings'] = {'image_provider': 'openai', 'image_model': available['image_model'],
                 'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/')}
+        return frozen_context
+
+    def _accept(self, owner, batch, payload, fingerprint, base_receipt, frozen_context):
+        """Save a new batch record with its frozen context (under the process lock and the batch lease)."""
+        path = self._path(owner, batch)
         # Persist the full frozen batch before accepting any child. The worker uses
         # deterministic child keys, so a crash can resume without a second request.
         children = []

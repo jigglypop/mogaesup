@@ -93,3 +93,69 @@ def test_workers_whose_last_save_failed_do_not_keep_the_job_running(job):
             assert not any(action['enabled'] for action in actions)
         finally:
             workers.release(key)
+
+
+def admission(job, monkeypatch, changes):
+    """A stage service whose stages are computed without the process lock; the first `changes` computations see another
+    writer change the job meanwhile."""
+    from src.services.avatar_factory import _LOCK
+    directory, factory = job
+    (directory / 'stage-runs' / 'current.json').unlink()
+    (directory / 'job.json').write_text(json.dumps({'status': 'review_required'}))
+    service = stages.AvatarStageResume(factory)
+    computed = []
+
+    def get(owner, job_id):
+        computed.append(_LOCK._is_owned())
+        if len(computed) <= changes:
+            (directory / 'job.json').write_text(json.dumps({'status': 'review_required', 'updated_at': len(computed)}))
+        return {'actions': [{'stage': 'assemble', 'enabled': True, 'reason': None, 'paid': False}]}
+    monkeypatch.setattr(service, 'get', get)
+    return service, computed
+
+
+def test_a_stage_is_computed_without_the_process_lock_and_admitted_on_the_records_it_read(job, monkeypatch):
+    directory, _ = job
+    service, computed = admission(job, monkeypatch, changes=1)
+    state, request_id = service.start(1, 'a' * 24, 'assemble', 'stage-key-0001')
+    # Computed twice (the job changed under the first), then read back once admitted: never under the lock.
+    assert request_id and computed == [False, False, False]
+    assert read_json(directory / 'stage-runs' / f'{request_id}.json')['status'] == 'accepted'
+    assert read_json(directory / 'stage-runs' / 'current.json') == {'id': request_id}
+    # The same key again is a replay.
+    assert service.start(1, 'a' * 24, 'assemble', 'stage-key-0001')[1] is None
+
+
+def test_a_job_that_keeps_changing_is_refused_instead_of_admitted_on_old_reads(job, monkeypatch):
+    directory, _ = job
+    service, computed = admission(job, monkeypatch, changes=3)
+    with pytest.raises(stages.PipelineError) as error:
+        service.start(1, 'a' * 24, 'assemble', 'stage-key-0002')
+    assert error.value.code == 'stage_changed' and not any(computed)
+    assert not (directory / 'stage-runs' / 'current.json').exists()
+
+
+# --- what an assembly costs: the default expressions it makes ---------------------------------------------------------
+
+def expressions(*statuses):
+    items = [{'name': f'e{index}', 'status': status, 'applied': status == 'complete'} for index, status in enumerate(statuses)]
+    return {'status': 'complete' if all(item['applied'] for item in items) else 'pending', 'items': items}
+
+
+@pytest.mark.parametrize('made, paid', [
+    (expressions('pending', 'complete'), True),
+    (expressions('paused'), True),
+    (expressions('complete', 'complete'), False),
+    # A refused or unconfirmed request is never sent again by an assembly; only an explicit expressions run does.
+    (expressions('blocked'), False),
+    (None, False),
+])
+def test_a_rig_recovery_says_whether_the_assembly_it_hands_over_to_is_paid(tmp_path, monkeypatch, made, paid):
+    from src.services import avatar_rig_transfer
+    directory = StoredPath(tmp_path / 'job')
+    (directory / 'meshy').mkdir(parents=True)
+    job = {'production_mode': 'character_parts', 'default_expressions': made}
+    factory = SimpleNamespace(get=lambda owner, job_id: job, directory=lambda owner, job_id: directory)
+    monkeypatch.setattr(avatar_rig_transfer, 'blender_executable', lambda: 'blender')
+    assert stages.assembly_paid(directory, job) is paid
+    assert avatar_rig_transfer.AvatarRigTransfer(factory).get(1, 'a' * 24)['paid'] is paid

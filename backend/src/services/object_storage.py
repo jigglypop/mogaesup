@@ -870,14 +870,30 @@ def copy_tree(source, target):
     return target
 
 
+# A file named by its sealed version (a sealed assembly's part, the wardrobe's previews and masks of it) never changes
+# under its address: the browser keeps it. Anything else is fetched again each time.
+IMMUTABLE = 'private, max-age=31536000, immutable'
+NO_STORE = 'private, no-store'
+
+
+def immutable(path):
+    """`path` marked as never changing under the address it is served at: artifact_response answers it with IMMUTABLE."""
+    path = StoredPath(path)
+    path.cache_control = IMMUTABLE
+    return path
+
+
 def artifact_response(path, **kwargs):
+    """The response serving `path`: Cache-Control IMMUTABLE for a path marked immutable(), else private, no-store
+    (a caller's headers still decide)."""
     from fastapi.responses import FileResponse, Response
+    cache = getattr(path, 'cache_control', None) or NO_STORE
     path = StoredPath(path)
     location = _location(path)
     record = _record(path)
     found = record_store.fetch(*record) if record else None
     if found and found[1] is not None:
-        headers = {'Cache-Control': 'private, no-store'}
+        headers = {'Cache-Control': cache, **kwargs.get('headers', {})}
         if kwargs.get('filename'):
             from urllib.parse import quote
             headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{quote(kwargs['filename'])}"
@@ -899,7 +915,7 @@ def artifact_response(path, **kwargs):
     if head:
         # Studio viewers fetch bytes through the app's authenticated gateway. A redirect sends the browser
         # to another origin and makes every GLB/texture depend on an external bucket CORS configuration.
-        headers = {'Cache-Control': 'private, no-store', **kwargs.get('headers', {})}
+        headers = {'Cache-Control': cache, **kwargs.get('headers', {})}
         if kwargs.get('filename'):
             from urllib.parse import quote
             headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{quote(kwargs['filename'])}"
@@ -907,7 +923,7 @@ def artifact_response(path, **kwargs):
         from src.services.remote_artifact import RemoteArtifactResponse
         return RemoteArtifactResponse(_s3(), *location, head,
                                       media_type=kwargs.get('media_type') or _content_type(path), headers=headers)
-    return FileResponse(LocalPath(path), **kwargs)
+    return FileResponse(LocalPath(path), **{**kwargs, 'headers': {'Cache-Control': cache, **kwargs.get('headers', {})}})
 
 
 def provider_image(path, content, mime):

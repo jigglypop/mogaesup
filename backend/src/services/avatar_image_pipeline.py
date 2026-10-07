@@ -31,6 +31,7 @@ from src.services.model_providers import base_url, failure_text, uncertain_text
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
 from src.services.process_identity import identity, state as process_state
 from src.services.provider_http import transient
+from src.services.keyed_lock import KeyBusy, keyed_lock
 from src.services.run_lock import final_write
 from src.services.avatar_production_spec import (
     IMAGE_INTAKE_POLICY, production_spec, public_spec,
@@ -73,6 +74,9 @@ WARDROBE_BODY_PROMPT = (
 WHOLE_BODY_PROMPT += AXIS_LOCK
 WARDROBE_BODY_PROMPT += AXIS_LOCK
 AUTO_RESUBMIT_LIMIT = 3
+# How long a resume waits for another resume of the same job (which may be archiving a failed run's files): it answers
+# within the app's proxy deadline (CloudFront gives the API 30 seconds).
+RESUME_WAIT_SECONDS = 20
 
 
 def _auto_resubmit(task):
@@ -405,7 +409,9 @@ class AvatarImagePipeline:
                                                            shared=True)
         elif payload.get('meshy_options'):
             raise PipelineError('multiview_required', 'Meshy 7.1 파츠 설정은 다중 시점 파츠 생성에서 사용하세요.', 422)
-        with _LOCK:
+        # The source and the parts reused are copied and hashed with this request key held, not the process lock that
+        # every admission waits for; the lock is taken only for the records that accept the job, job.json last.
+        with keyed_lock(('image-admission', str(directory))):
             if replay():
                 return self.factory.get(owner, job_id), False
             directory.mkdir(parents=True, exist_ok=True)
@@ -420,49 +426,53 @@ class AvatarImagePipeline:
                 expression_contract = None
             frozen_production_spec = (production_spec(hair_length, generated_views, fit_profiles=fit_profiles)
                                       if multiview else None)
-            _write_json(directory/'pipeline.json', {'parts': parts, 'blueprint': blueprint,
-                'production_spec': frozen_production_spec,
-                'fit_profiles': fit_profiles,
-                'reference_preparation': reference_preparation,
-                'default_expressions': expression_contract,
-                'hair_length': hair_length,
-                'production_mode': production_mode, 'design_prompts': design_prompts,
-                'meshy_texture_prompts': prompt_snapshot['meshy_texture'],
-                'reuse': {'source_job_id': payload.get('reuse_job_id'), 'slots': reused},
-                'rig_with_meshy': True, 'motion_actions': motions,
-                'motion_actions_explicit': bool(submitted_motions),
-                'body_purpose': 'wardrobe_base', 'body_prompt': WARDROBE_BODY_PROMPT,
-                'body_height_m': 1.2,
-                'image_provider': 'openai', 'image_model': ready['image_model'],
-                'fit_profiles_revision': next(iter(fit_profiles.values()))['revision'],
-                'fit_profiles_sha256': (frozen_production_spec or {}).get('fit_profiles_sha256'),
-                'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
-                'meshy_base': base_url('meshy')})
-            # The rig budget and profile are in the one accepted record: a replay after a failed later write must
-            # still find the rig and motion stages it accepted.
-            _write_json(directory/'job.json', {'id': job_id, 'fingerprint': fingerprint, 'executor': self.factory.instance,
-                'executor_process': identity(), 'character_id': character['id'], 'character_name': character['name'],
-                'input_kind': 'image', 'input': {**payload, 'design_prompts': design_prompts},
-                'meshy_options': {p['slot']: p['meshy_options']['options'] for p in parts if p.get('meshy_options')},
-                'production_mode': production_mode, 'auto_assemble': True, 'source_sha256': source_hash,
-                'profile': {**PROFILE, 'name': '의상용 기준 몸 · 머리 포함', 'body_purpose': 'wardrobe_base',
-                            'body_origin': 'generated_whole_character', 'rig': 'meshy-native', 'bones': None,
-                            'head_height': None, 'head_ratio': None, 'height': 1.2,
-                            'base_outfit': 'opaque_training_bodysuit'},
-                'image_provider': 'openai', 'image_model': ready['image_model'],
-                'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
-                'limits': {'image_tasks': (sum(p['image']['status'] == 'pending' for p in parts) * (len(generated_views) if multiview else 1))
-                                          + 2 * int(prepare_reference),
-                           'reference_tasks': 2 * int(prepare_reference),
-                           'expression_tasks': 5 * int(default_expressions),
-                           'meshy_tasks': sum(p['model']['status'] == 'pending' for p in parts),
-                           'meshy_rig_tasks': 1, 'meshy_animation_tasks': len(set(motions.values()))},
-                'review': {'decision': 'pending'}, 'files': {p['image']['file']: p['image']['sha256'] for p in parts if p['image']['status'] == 'succeeded'}})
-            if prepare_reference:
-                _write_json(directory/'output/progress.json', {'stage': 'reference',
-                    'message': '공통 규격 정면 T자 · 오른쪽 측면 I자 이미지 생성 대기 중'})
-            self.publish(owner, job_id, read_json(directory/'pipeline.json'))
-            return self.factory.get(owner, job_id), True
+            with _LOCK:
+                # Accepted meanwhile only by another process on this data root (the key is held in this one).
+                existing = replay()
+                if not existing:
+                    _write_json(directory/'pipeline.json', {'parts': parts, 'blueprint': blueprint,
+                        'production_spec': frozen_production_spec,
+                        'fit_profiles': fit_profiles,
+                        'reference_preparation': reference_preparation,
+                        'default_expressions': expression_contract,
+                        'hair_length': hair_length,
+                        'production_mode': production_mode, 'design_prompts': design_prompts,
+                        'meshy_texture_prompts': prompt_snapshot['meshy_texture'],
+                        'reuse': {'source_job_id': payload.get('reuse_job_id'), 'slots': reused},
+                        'rig_with_meshy': True, 'motion_actions': motions,
+                        'motion_actions_explicit': bool(submitted_motions),
+                        'body_purpose': 'wardrobe_base', 'body_prompt': WARDROBE_BODY_PROMPT,
+                        'body_height_m': 1.2,
+                        'image_provider': 'openai', 'image_model': ready['image_model'],
+                        'fit_profiles_revision': next(iter(fit_profiles.values()))['revision'],
+                        'fit_profiles_sha256': (frozen_production_spec or {}).get('fit_profiles_sha256'),
+                        'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
+                        'meshy_base': base_url('meshy')})
+                    # The rig budget and profile are in the one accepted record: a replay after a failed later write must
+                    # still find the rig and motion stages it accepted.
+                    _write_json(directory/'job.json', {'id': job_id, 'fingerprint': fingerprint, 'executor': self.factory.instance,
+                        'executor_process': identity(), 'character_id': character['id'], 'character_name': character['name'],
+                        'input_kind': 'image', 'input': {**payload, 'design_prompts': design_prompts},
+                        'meshy_options': {p['slot']: p['meshy_options']['options'] for p in parts if p.get('meshy_options')},
+                        'production_mode': production_mode, 'auto_assemble': True, 'source_sha256': source_hash,
+                        'profile': {**PROFILE, 'name': '의상용 기준 몸 · 머리 포함', 'body_purpose': 'wardrobe_base',
+                                    'body_origin': 'generated_whole_character', 'rig': 'meshy-native', 'bones': None,
+                                    'head_height': None, 'head_ratio': None, 'height': 1.2,
+                                    'base_outfit': 'opaque_training_bodysuit'},
+                        'image_provider': 'openai', 'image_model': ready['image_model'],
+                        'status': 'pipeline_queued', 'created_at': now(), 'updated_at': now(), 'error': None,
+                        'limits': {'image_tasks': (sum(p['image']['status'] == 'pending' for p in parts) * (len(generated_views) if multiview else 1))
+                                                  + 2 * int(prepare_reference),
+                                   'reference_tasks': 2 * int(prepare_reference),
+                                   'expression_tasks': 5 * int(default_expressions),
+                                   'meshy_tasks': sum(p['model']['status'] == 'pending' for p in parts),
+                                   'meshy_rig_tasks': 1, 'meshy_animation_tasks': len(set(motions.values()))},
+                        'review': {'decision': 'pending'}, 'files': {p['image']['file']: p['image']['sha256'] for p in parts if p['image']['status'] == 'succeeded'}})
+                    if prepare_reference:
+                        _write_json(directory/'output/progress.json', {'stage': 'reference',
+                            'message': '공통 규격 정면 T자 · 오른쪽 측면 I자 이미지 생성 대기 중'})
+                    self.publish(owner, job_id, read_json(directory/'pipeline.json'))
+        return self.factory.get(owner, job_id), not existing
 
     def publish(self, owner, job_id, state):
         directory = self.factory.directory(owner, job_id)
@@ -564,22 +574,29 @@ class AvatarImagePipeline:
         self.publish(owner, job_id, state)
 
     def resume(self, owner, job_id, *, stage='images', retry_failed=False):
-        """retry_failed is an explicit user run: failed or unaccepted Meshy parts are sent again."""
+        """retry_failed is an explicit user run: failed or unaccepted Meshy parts are sent again.
+
+        The saved inputs are checked (every saved image and model hashed) and a failed run's files archived without the
+        process lock, which every admission of every job waits for. Under it the job record is read again: the job is
+        queued only if it is still the record that was checked, and checked again otherwise. Resumes of one job take
+        turns in this process, so the one that waited finds the job queued and archives nothing."""
         if stage not in ('images', 'models'):
             raise PipelineError('invalid_stage', '이미지 또는 3D 단계를 선택해 주세요.', 422)
         self.factory.get(owner, job_id)
         directory = self.factory.directory(owner, job_id)
-        with _LOCK:
-            job = read_json(directory/'job.json')
-            if job.get('input_kind') != 'image' or job['status'] not in ('pipeline_paused', 'failed', 'recovery_required', 'review_required'):
-                raise PipelineError('invalid_state', '현재 재개할 수 없는 작업입니다.')
-            if _RUN_LOCKS.busy(str(directory)):
-                # The worker still runs this job, also past its images (review_required through rig and assembly):
-                # queueing it again would leave it pipeline_queued with no worker to take it.
-                raise PipelineError('worker_running', '진행 중인 작업입니다.', 409)
-            runner = read_json(directory/'output/runner.json')
-            if job['status'] in ('failed', 'recovery_required') and runner and process_state(runner.get('process')) != 'exited':
-                raise PipelineError('worker_running', '이전 Blender 프로세스가 종료되었는지 확인이 필요합니다.')
+        try:
+            with keyed_lock(('image-resume', str(directory)), timeout=RESUME_WAIT_SECONDS):
+                return self._resume(owner, job_id, directory, stage, retry_failed)
+        except KeyBusy:
+            # Another resume of this job is still archiving its files: answered before the proxy's deadline.
+            raise PipelineError('job_changed', '작업 상태가 바뀌는 중입니다. 잠시 후 다시 실행해 주세요.', 409) from None
+
+    def _resume(self, owner, job_id, directory, stage, retry_failed):
+        archived = None
+        for _ in range(3):
+            seen = read_json(directory/'job.json')
+            job = deepcopy(seen)
+            self._require_stopped(directory, job)
             state = read_json(directory/'pipeline.json')
             if stage == 'models':
                 from src.services.avatar_stage_resume import validate_model_inputs
@@ -603,17 +620,41 @@ class AvatarImagePipeline:
                 if task.get('status') in ('FAILED', 'CANCELED'):
                     raise PipelineError('provider_failed', failure_text(part['slot'], task))
             if job['status'] in ('failed', 'recovery_required') and (directory/'output/input.json').is_file():
-                # Keep failed work files and their exact input/seal before rebuilding locally.
-                attempt = uuid.uuid4().hex
-                archive = directory/'attempts'/attempt
-                copy_tree(directory/'output', archive/'output')
-                _write_json(archive/'job.json', job)
-                job.setdefault('previous_attempts', []).append({'id': attempt, 'status': job['status'], 'archived_at': now()})
-            job.update(status='pipeline_queued', executor=self.factory.instance, executor_process=identity(),
-                       resume_stage=stage, model_retry=bool(retry_failed), error=None)
-            job.pop('interrupted', None)
-            _write_json(directory/'job.json', job)
-        return self.factory.get(owner, job_id)
+                # Keep failed work files and their exact input/seal before rebuilding locally: once per call (the
+                # job is stopped, so its files stay as they were while the record is read again), named by the record
+                # it keeps, so another process resuming the same record copies into the same archive and no copy is
+                # left that no record names. job.json is the archive's last file.
+                if archived is None:
+                    archived = hashlib.sha256(json.dumps(seen, sort_keys=True).encode()).hexdigest()[:32]
+                    archive = directory/'attempts'/archived
+                    if not (archive/'job.json').is_file():
+                        copy_tree(directory/'output', archive/'output')
+                        _write_json(archive/'job.json', job)
+                job.setdefault('previous_attempts', []).append({'id': archived, 'status': job['status'],
+                                                                 'archived_at': now()})
+            with _LOCK:
+                if read_json(directory/'job.json') != seen:
+                    continue  # Resumed, stopped or changed meanwhile: check the record as it is now.
+                self._require_stopped(directory, job)
+                job.update(status='pipeline_queued', executor=self.factory.instance, executor_process=identity(),
+                           resume_stage=stage, model_retry=bool(retry_failed), error=None)
+                job.pop('interrupted', None)
+                _write_json(directory/'job.json', job)
+            return self.factory.get(owner, job_id)
+        raise PipelineError('job_changed', '작업 상태가 바뀌는 중입니다. 잠시 후 다시 실행해 주세요.', 409)
+
+    @staticmethod
+    def _require_stopped(directory, job):
+        """Refuses a job that is not stopped where resume() takes it, or whose worker may still run."""
+        if job.get('input_kind') != 'image' or job['status'] not in ('pipeline_paused', 'failed', 'recovery_required', 'review_required'):
+            raise PipelineError('invalid_state', '현재 재개할 수 없는 작업입니다.')
+        if _RUN_LOCKS.busy(str(directory)):
+            # The worker still runs this job, also past its images (review_required through rig and assembly):
+            # queueing it again would leave it pipeline_queued with no worker to take it.
+            raise PipelineError('worker_running', '진행 중인 작업입니다.', 409)
+        runner = read_json(directory/'output/runner.json')
+        if job['status'] in ('failed', 'recovery_required') and runner and process_state(runner.get('process')) != 'exited':
+            raise PipelineError('worker_running', '이전 Blender 프로세스가 종료되었는지 확인이 필요합니다.')
 
     def _recoverable(self, directory, slot, task_id):
         """(state, run, receipt) of a part whose submission has no task ID yet; raises when it cannot be recovered now."""

@@ -276,3 +276,14 @@ def test_a_listing_reads_the_job_of_a_made_child_once(batches, monkeypatch):
     assert item['status'] == 'complete' and item['native_receipt']['version'] == VERSION
     # The assembly state is read from the child's records; the whole job is read once, for its own state.
     assert gets == [child]
+
+
+def test_the_settings_a_batch_keeps_are_frozen_while_the_process_lock_is_free(batches, monkeypatch):
+    factory, _, service = batches
+    frozen, real = [], avatar_part_batches.freeze_options
+    monkeypatch.setattr(avatar_part_batches, 'freeze_options',
+                        lambda *args, **kwargs: (frozen.append(_LOCK._is_owned()), real(*args, **kwargs))[1])
+    record, dispatch = service.create(1, 'part-batch-key-0020', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    assert dispatch and frozen == [False]
+    saved = read_json(service.root(1, record['id'])/'batch.json')
+    assert saved['frozen_context']['meshy_options']['hair']['options']['should_texture'] is not None

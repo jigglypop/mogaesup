@@ -134,3 +134,45 @@ def test_the_body_render_that_could_not_be_stored_pauses_the_job_with_a_message(
     assert error.value.__cause__ is None and str(directory) not in error.value.message
     # Nothing was published for a body that was never stored.
     assert published == [] and not state['base_body'].get('prepared')
+
+
+def test_jobs_of_one_body_waiting_for_its_reference_render_share_the_one_render(tmp_path, monkeypatch):
+    # Three hairs on the same body: the first renders, the others wait for it and copy its sealed files instead of
+    # each queueing the same render for the one Blender slot.
+    import threading
+    import time
+    factory = AvatarFactory(tmp_path)
+    renders, published = [], []
+
+    def render(output, worker):
+        renders.append(output)
+        time.sleep(.2)
+        for name in ('spec.json', 'body-front.png', 'body-side.png'):
+            (output / name).write_bytes(b'{"body_height_m": 1.2, "generated_views": ["front", "side"]}'
+                                        if name.endswith('.json') else b'png')
+        files = {name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in ('spec.json', 'body-front.png', 'body-side.png')}
+        _write_json(output / 'complete.json', {'input_sha256': hashlib.sha256((output / 'input.json').read_bytes()).hexdigest(), 'files': files})
+    monkeypatch.setattr(avatar_variants, 'render_body_reference', render)
+    service = SimpleNamespace(factory=factory, publish=lambda owner, job, state: published.append(job))
+    states, errors = {}, []
+
+    def prepare(job):
+        directory = factory.directory(1, job)
+        (directory / 'output').mkdir(parents=True)
+        states[job] = {'base_body': {'sha256': 'ab' * 32},
+                       'production_spec': {'generated_views': ['front', 'side'], 'body_height_m': 1.2},
+                       'parts': [{'slot': 'body', 'views': {}}], 'reference_preparation': None}
+        try:
+            avatar_variants.prepare_body(service, 1, job, states[job])
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+    jobs = [f'{index:x}' * 24 for index in (10, 11, 12)]
+    threads = [threading.Thread(target=prepare, args=(job,)) for job in jobs]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == [] and len(renders) == 1 and sorted(published) == sorted(jobs)
+    for job in jobs:
+        assert states[job]['base_body']['prepared'] is True
+        assert (factory.directory(1, job) / 'output' / 'body-front.png').read_bytes() == b'png'

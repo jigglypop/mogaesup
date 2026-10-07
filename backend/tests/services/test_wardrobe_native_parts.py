@@ -61,6 +61,27 @@ def test_accepting_a_refit_keeps_the_sealed_version_offered_until_the_refit_is_s
     assert offered(library) == [(state['version'], 'c' * 64)]
 
 
+def test_a_top_refit_carries_its_description_and_the_binding_it_was_fitted_with(refit):
+    # The description says whether the hood is raised: a changed one, or changed binding rules, make a new version.
+    _, native, root = refit
+    pipeline = read_json(root.parent/'pipeline.json')
+    top = next(part for part in pipeline['parts'] if part['slot'] == 'top')
+    top['description'] = 'hooded sweatshirt, hood up'
+    raw = root.parent/'output/generated-top.glb'
+    raw.write_bytes(b'raw raised hood')
+    job = read_json(root.parent/'job.json')
+    _write_json(root.parent/'job.json', {**job, 'files': {**job['files'], raw.name: digest(raw)}})
+    _write_json(root.parent/'pipeline.json', pipeline)
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'top', 'refit-hood-0001')
+    assert created
+    payload = read_json(root/state['version']/'input.json')
+    assert [(part['slot'], part['description']) for part in payload['parts']] == [('top', top['description'])]
+    assert payload['contract']['clothing_descriptions'] == {'top': top['description']}
+    assert payload['contract']['clothing_binding_sha256'] == digest(
+        avatar_native_parts.Path(avatar_native_parts.__file__).with_name('avatar_clothing_binding.py'))
+    assert payload['contract']['recipe'] == avatar_native_parts.RECIPE
+
+
 class FakeProcess:
     pid = os.getpid()
 

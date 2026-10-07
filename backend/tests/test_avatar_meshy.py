@@ -334,6 +334,18 @@ def test_recovering_a_lost_rig_asks_meshy_outside_the_lock(setup, monkeypatch):
     assert (run/'rigging-result.json').is_file()
 
 
+def test_recovering_a_lost_rig_hashes_the_body_and_reads_the_job_outside_the_lock(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    stopped_rig(service, jid, directory)
+    use_handler(monkeypatch, transport)
+    hashed, reads = [], []
+    real_digest, real_get = module.digest, service.get
+    monkeypatch.setattr(module, 'digest', lambda path: (hashed.append(lock_is_held_by_caller()), real_digest(path))[1])
+    monkeypatch.setattr(service, 'get', lambda owner, job_id: (reads.append(lock_is_held_by_caller()), real_get(owner, job_id))[1])
+    service.recover(1, jid, 'recovered-rig')
+    assert hashed and not any(hashed) and reads and not any(reads)
+
+
 def test_a_rig_recovery_is_dropped_when_the_submission_changed_meanwhile(setup, monkeypatch):
     service, jid, directory, calls, transport = setup
     run = stopped_rig(service, jid, directory)
@@ -513,3 +525,42 @@ def test_an_accepted_rig_or_clip_named_only_by_its_saved_answer_is_recoverable_w
     pack = read_json(action/'motion-pack.json')
     _write_json(action/'motion-pack.json', {**pack, 'previous_tasks': [{'task_id': 'clip-1', 'status': 'FAILED'}]})
     assert saved_problem(run)['status'] == 'submission_uncertain'
+
+
+def test_the_meshy_list_and_the_body_hash_are_read_outside_the_process_lock(setup, monkeypatch):
+    # Meshy's action list is an HTTP request of up to 120 s: under the process lock it stalled every admission (and
+    # the MCP garment queue's 30 s requests) while Meshy was slow.
+    from fastapi import BackgroundTasks
+    from src.api import avatar_factory as api
+    from src.auth import UserContext
+    from src.services.avatar_factory import _LOCK
+    service, jid, directory, calls, _ = setup
+    user = UserContext(1, 'tester', ['ADMIN'])
+    hashed, fetched = [], []
+    real_digest, real_library = module.digest, module.character_motion.library
+    monkeypatch.setattr(module, 'digest', lambda path: (hashed.append(_LOCK._is_owned()), real_digest(path))[1])
+    monkeypatch.setattr(module.character_motion, 'library',
+                        lambda client: (fetched.append(_LOCK._is_owned()), real_library(client))[1])
+    api.meshy_rig(jid, BackgroundTasks(), user=user, factory=service.factory)
+    assert hashed and not any(hashed)
+    service.execute(1, jid, poll_seconds=0)
+    api.meshy_action(jid, api.MeshyMotionInput(slot='walk', action_id=77), BackgroundTasks(), user=user,
+                     factory=service.factory)
+    assert fetched == [False]
+    assert read_json(directory/'meshy/selected.json')['walk'] == 77
+
+
+def test_a_rig_whose_body_changed_after_it_was_hashed_is_refused(setup, monkeypatch):
+    service, jid, directory, calls, _ = setup
+    real_artifact = service.factory.artifact
+
+    def artifact(owner, job_id, name):
+        path = real_artifact(owner, job_id, name)
+        # Another writer replaces the job's record of the body between the hash and the lock.
+        record = read_json(directory/'job.json')
+        _write_json(directory/'job.json', {**record, 'files': {name: '0'*64}})
+        return path
+    monkeypatch.setattr(service.factory, 'artifact', artifact)
+    with pytest.raises(PipelineError) as error:
+        service.start(1, jid)
+    assert error.value.code == 'artifact_changed' and not (directory/'meshy/input.json').exists()

@@ -28,6 +28,15 @@ def blender_executable() -> str | None:
     return None
 
 
+def slot_inheritance() -> dict:
+    """Popen arguments that hand the Blender slots this thread holds (avatar_factory.BlenderSlots) to the worker it
+    starts: the slot stays taken while that worker runs, also when this process is killed first and the worker goes
+    on. Nothing on Windows, where a slot is this process's alone."""
+    from src.services.avatar_factory import _QUEUE
+    fds = _QUEUE.held_fds()
+    return {'pass_fds': fds} if fds else {}
+
+
 def stop_process(process: subprocess.Popen, grace: float = 10) -> None:
     """Stop a timed-out worker: terminate, kill it if it ignores that, and reap it.
 
@@ -56,7 +65,8 @@ def blender_process(command, log_path, runner_path, *, env=None, write_json, rec
     with running_task(), log_path.open("wb") as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                    env=admitted_environment(worker_environment() if env is None else env),
-                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                                   **slot_inheritance())
         try:
             write_json(runner_path, {"process": identity(process.pid), **(receipt() if receipt else {})})
             if checkpoint:

@@ -97,15 +97,21 @@ def register(factory, uploads, key='glb-body-key-0001', **changes):
 
 def test_registering_a_body_copies_and_parses_without_the_process_lock_and_accepts_under_it(factory, monkeypatch):
     uploads = AvatarGlbBodies(factory)
-    copies, accepted = [], []
+    copies, accepted, registered = [], [], []
     real_copy, real_write = avatar_glb_bodies.copy_file, avatar_glb_bodies._write_json
     monkeypatch.setattr(avatar_glb_bodies, 'copy_file', lambda source, target: (copies.append(_LOCK._is_owned()), real_copy(source, target))[1])
     monkeypatch.setattr(avatar_glb_bodies, '_write_json',
                         lambda path, value: (accepted.append((path.name, _LOCK._is_owned())), real_write(path, value))[1])
+    real_create = factory.pipeline.create
+    monkeypatch.setattr(factory.pipeline, 'create',
+                        lambda *args: (registered.append(_LOCK._is_owned()), real_create(*args))[1])
     asset, payload, (job, created) = register(factory, uploads)
     assert created and job['status'] == 'review_required' and job['source_sha256'] == asset['id']
     assert copies and not any(copies)
-    assert ('job.json', True) in accepted and all(held for name, held in accepted if name in ('job.json', 'record.json', 'pipeline.json'))
+    # The character is registered and the job's records staged with the request key held; the process lock covers
+    # only the job.json that accepts the job, as for a base body made from images.
+    assert registered == [False]
+    assert [name for name, held in accepted if held] == ['job.json']
     native = factory.directory(1, job['id'])/'native-parts'
     version = read_json(native/'current.json')['version']
     assert read_json(native/version/'record.json')['files'] == {'body.glb': asset['id'], 'model.glb': asset['id']}

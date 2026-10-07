@@ -13,7 +13,7 @@ from src.services.character_parts import blender_executable, blender_process, st
 from src.services.character_pipeline import PipelineError, now, read_json, require_request_key
 from src.services.keyed_lock import keyed_lock
 from src.services.process_identity import identity, state as process_state
-from src.services.object_storage import WorkspaceUploadError, copy_file, local_workspace, publish_checkpoint
+from src.services.object_storage import WorkspaceUploadError, copy_file, immutable, local_workspace, publish_checkpoint
 from src.services.avatar_production_spec import production_spec, refresh_fitting_spec
 from src.services.avatar_equipment import is_native_part_set
 from src.services.run_lock import WorkerLocks, final_write, this_process, worker_alive
@@ -21,7 +21,7 @@ from src.services.worker_env import worker_environment
 from src.services.avatar_pipeline_quality import REVISION as QUALITY_REVISION, verify_quality
 
 SLOTS = ('hair', 'hat', 'top', 'bottom', 'shoes')
-RECIPE = 'native-parts-v14-matte-limb-fit'
+RECIPE = 'native-parts-v15-hair-hood-skirt'
 # The assembly worker of each version directory that runs in this process.
 _WORKERS = WorkerLocks()
 # How often an admission reads its inputs again when they changed before it could write.
@@ -532,7 +532,8 @@ class AvatarNativeParts:
                 continue
             path = self.factory.artifact(owner, job, f'generated-{slot}.glb')
             entry = {'slot': slot, 'path': str(path), 'sha256': digest(path), 'part_method': method,
-                     'garment_kind': garment_kinds[slot], 'fit_profile': part_inputs[slot].get('fit_profile')}
+                     'garment_kind': garment_kinds[slot], 'fit_profile': part_inputs[slot].get('fit_profile'),
+                     'description': part_inputs[slot].get('description', '')}
             # Tripo returns models facing glTF +X; Meshy and the fitting code expect +Z.
             if (read_json(job_directory/'parts'/slot/'character.json') or {}).get('provider') == 'tripo':
                 entry['front_axis'] = '+x'
@@ -592,7 +593,10 @@ class AvatarNativeParts:
                     'expression_uv_sha256': digest(Path(__file__).with_name('avatar_expression_uv_blender.py')),
                     # The rest of what the Blender worker imports: a change to any of them must make a new version.
                     'limb_fit_sha256': digest(Path(__file__).with_name('avatar_limb_fit.py')),
+                    'garment_weights_sha256': digest(Path(__file__).with_name('avatar_garment_weights.py')),
+                    'part_gate_sha256': digest(Path(__file__).with_name('avatar_part_gate.py')),
                     'hood_room_sha256': digest(Path(__file__).with_name('avatar_hood_room.py')),
+                    'clothing_binding_sha256': digest(Path(__file__).with_name('avatar_clothing_binding.py')),
                     'wardrobe_coverage_sha256': digest(Path(__file__).with_name('avatar_wardrobe_coverage.py')),
                     'glb_sha256': digest(Path(__file__).with_name('glb.py')),
                     'native_hair_upload_sha256': digest(Path(__file__).with_name('native_hair_upload.py')),
@@ -602,6 +606,8 @@ class AvatarNativeParts:
                     'quality_worker_sha256': digest(Path(__file__).with_name('avatar_quality_blender.py')),
                     'shell_garment_sha256': digest(Path(__file__).with_name('avatar_shell_garment.py')),
                     'garment_kinds': garment_kinds,
+                    # A top's description says whether its hood is raised (avatar_clothing_binding.raised_hood).
+                    'clothing_descriptions': {p['slot']: p.get('description', '') for p in parts if p['slot'] == 'top'},
                     'part_methods': {p['slot']: p.get('part_method', 'isolated') for p in parts},
                     'front_axes': {p['slot']: p['front_axis'] for p in parts if p.get('front_axis')},
                     'worn_drawings': {p['slot']: p['drawing_sha256'] for p in parts if p.get('drawing_sha256')},
@@ -764,7 +770,9 @@ class AvatarNativeParts:
     def artifact(self, owner, job, version, name, *, record=None):
         """The path of an assembly file that still matches the hash its version's record gives it, else 404. The
         owner's job is found from its job.json alone. `record`: the version's record.json when the caller holds it
-        already, so that checking two files of one version reads it once."""
+        already, so that checking two files of one version reads it once. A sealed version's file never changes
+        (a sealed version is never run again) and is served as immutable; a failed one's renders are drawn again
+        when it is resumed."""
         root = self._owned_root(owner, job)
         if not re.fullmatch('[a-f0-9]{24}', version) or Path(name).name != name:
             raise PipelineError('not_found', '산출물을 찾을 수 없습니다.', 404)
@@ -774,4 +782,4 @@ class AvatarNativeParts:
         path = root/version/name
         if not expected or not path.is_file() or digest(path) != expected:
             raise PipelineError('artifact_changed', '검증된 산출물을 찾을 수 없습니다.', 404)
-        return path
+        return immutable(path) if record.get('status') == 'review_required' else path

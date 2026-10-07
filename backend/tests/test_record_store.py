@@ -420,6 +420,50 @@ def test_update_json_on_plain_files(disk):
     assert json.loads(path.read_text(encoding='utf-8')) == {'a': 1}
 
 
+@pytest.mark.parametrize('path, scope', [
+    ('avatar-factory/1/aaa/job.json', 'avatar-factory/1/aaa/'),
+    ('avatar-factory/1/aaa/parts/top/character.json', 'avatar-factory/1/aaa/'),
+    ('avatar-factory/1/common-body.json', None),
+    ('avatar-factory/1/library/catalog.json', 'avatar-factory/1/library/catalog.json'),
+    ('avatar-factory/1/library/wardrobe-colors/abc-v3.json', 'avatar-factory/1/library/wardrobe-colors/abc-v3.json'),
+    ('avatar-factory/1/library/textures/t1/record.json', 'avatar-factory/1/library/textures/t1/'),
+    ('avatar-factory/1/library/textures/t1/a/b.json', 'avatar-factory/1/library/textures/t1/'),
+])
+def test_a_library_is_scoped_per_item_like_its_s3_keys(path, scope):
+    assert record_store.scope_of(path) == scope
+
+
+def test_reading_one_library_file_selects_only_that_record(cloud):
+    root, prefix = cloud
+    library = StoredPath(root) / 'avatar-factory' / '1' / 'library'
+    object_storage.write_json(library / 'catalog.json', {'items': {}})
+    object_storage.write_json(library / 'wardrobe-bodies.json', {'bodies': []})
+    for index in range(30):
+        object_storage.write_json(library / 'wardrobe-colors' / f'{index:02d}-v3.json', {'regions': [index]})
+    object_storage.write_json(library / 'textures' / 't1' / 'record.json', {'id': 't1'})
+    object_storage.write_json(library / 'textures' / 't2' / 'record.json', {'id': 't2'})
+    record_store.reset()
+    assert json.loads((library / 'catalog.json').read_text(encoding='utf-8')) == {'items': {}}
+    assert json.loads((library / 'wardrobe-bodies.json').read_text(encoding='utf-8')) == {'bodies': []}
+    # Each read indexed its own record, not the library.
+    assert {scope: sorted(index) for (_, scope), (_, index) in record_store._indexes.items()} == {
+        f'avatar-factory/1/library/{name}': [f'avatar-factory/1/library/{name}']
+        for name in ('catalog.json', 'wardrobe-bodies.json')}
+    # A write updates only its own record's index.
+    object_storage.write_json(library / 'catalog.json', {'items': {'x': {}}})
+    assert len(record_store._indexes[prefix, 'avatar-factory/1/library/wardrobe-bodies.json'][1]) == 1
+    assert json.loads((library / 'catalog.json').read_text(encoding='utf-8')) == {'items': {'x': {}}}
+    # Collections and items are still listed and found as before.
+    assert len(list((library / 'wardrobe-colors').glob('*.json'))) == 30
+    assert sorted(path.parent.name for path in (library / 'textures').glob('*/record.json')) == ['t1', 't2']
+    assert child_names(library / 'textures') == ['t1', 't2']
+    assert (library / 'textures' / 't1').is_dir() and not (library / 'textures' / 't3').is_dir()
+    assert json.loads((library / 'textures' / 't2' / 'record.json').read_text(encoding='utf-8')) == {'id': 't2'}
+    (library / 'wardrobe-colors' / '05-v3.json').unlink()
+    assert not (library / 'wardrobe-colors' / '05-v3.json').is_file()
+    assert len(list((library / 'wardrobe-colors').glob('*.json'))) == 29
+
+
 def test_another_process_write_shows_within_the_cache_horizon(cloud, database, monkeypatch):
     root, prefix = cloud
     path = StoredPath(root) / 'avatar-factory' / '1' / ('g' * 24) / 'job.json'
@@ -518,6 +562,18 @@ def test_artifact_response_serves_records_from_the_database(cloud):
     assert response.body == b'{"assets": []}'
     assert response.media_type == 'application/json'
     assert response.headers['cache-control'] == 'private, no-store'
+
+
+def test_a_file_of_a_sealed_version_is_kept_by_the_browser_and_a_callers_headers_still_apply(cloud):
+    root, _ = cloud
+    path = StoredPath(root) / 'avatar-factory' / '1' / ('k' * 24) / 'native-parts' / ('1' * 24) / 'preview.json'
+    path.write_text('{"sealed": true}', encoding='utf-8')
+    response = object_storage.artifact_response(object_storage.immutable(path))
+    assert response.headers['cache-control'] == 'private, max-age=31536000, immutable'
+    # The same file not marked immutable, and a caller's own header on a database record.
+    assert object_storage.artifact_response(path).headers['cache-control'] == 'private, no-store'
+    response = object_storage.artifact_response(path, headers={'X-Content-Type-Options': 'nosniff'})
+    assert response.headers['x-content-type-options'] == 'nosniff'
 
 
 @pytest.mark.anyio
@@ -879,7 +935,8 @@ def test_a_marker_the_role_may_not_delete_keeps_servers_refusing_and_says_so(imp
     with pytest.raises(SystemExit, match='s3:DeleteObject was denied'):
         records.export_prefix(conn, s3, 'fixture-bucket', prefix, out=lines.append)
     assert _marker(prefix) in s3.objects
-    assert any('keep refusing to start' in line and 's3:DeleteObject was denied' in line for line in lines)
+    assert any('keep refusing to start' in line and 's3:DeleteObject was denied' in line
+               and line.endswith(f'aws s3 rm s3://fixture-bucket/{_marker(prefix)}') for line in lines)
 
 
 def test_a_migration_that_changed_after_it_was_applied_is_refused(database, tmp_path, monkeypatch):

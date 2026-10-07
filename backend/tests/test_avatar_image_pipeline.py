@@ -386,3 +386,144 @@ def test_a_single_image_that_resume_takes_is_offered_for_resume(setup, monkeypat
         receipt = factory.directory(1, job['id'])/'output'/'hair-provider'
         assert receipt.with_suffix('.response.json').is_file() and not receipt.with_suffix('.response.partial').exists()
     service.resume(1, job['id'])
+
+
+# --- the process lock is taken only for the records that accept or queue a job -----------------------------------------
+
+def test_a_new_job_copies_its_source_and_reused_parts_without_the_process_lock(setup, monkeypatch):
+    from src.services.avatar_factory import _LOCK
+    service, factory, payload, _, _, _ = setup
+    copied, written = [], []
+    real_reuse, real_write = AvatarImagePipeline._reuse_character_parts, module._write_json
+    monkeypatch.setattr(AvatarImagePipeline, '_reuse_character_parts',
+                        staticmethod(lambda *args: (copied.append(_LOCK._is_owned()), real_reuse(*args))[1]))
+    monkeypatch.setattr(module, '_write_json', lambda path, value: (written.append((path.name, _LOCK._is_owned())),
+                                                                   real_write(path, value))[1])
+    job, created = service.create(1, 'unlocked-staging', {**payload, 'production_mode': 'character_parts', 'slots': []})
+    assert created and copied == [False]
+    assert ('job.json', True) in written and all(locked for name, locked in written if name == 'job.json')
+    again, created_again = service.create(1, 'unlocked-staging', {**payload, 'production_mode': 'character_parts', 'slots': []})
+    assert not created_again and again['id'] == job['id']
+
+
+def test_a_resume_checks_the_saved_parts_without_the_process_lock_and_queues_the_record_it_checked(setup, monkeypatch):
+    from src.services.avatar_factory import _LOCK
+    service, factory, payload, _, _, _ = setup
+    job, _ = service.create(1, 'unlocked-resume', {**payload, 'production_mode': 'character_parts', 'slots': []})
+    directory = factory.directory(1, job['id'])
+    _write_json(directory/'job.json', {**read_json(directory/'job.json'), 'status': 'pipeline_paused'})
+    checked, real_adopt = [], module.character_jobs.adopt_submitted_task
+
+    def adopt(run, task):
+        if not checked:
+            # A stop recorded by a GET lands between the checks and the lock: the record is checked again.
+            _write_json(directory/'job.json', {**read_json(directory/'job.json'), 'error': '서버 재시작으로 중단됨'})
+        checked.append(_LOCK._is_owned())
+        return real_adopt(run, task)
+    monkeypatch.setattr(module.character_jobs, 'adopt_submitted_task', adopt)
+    resumed = service.resume(1, job['id'])
+    assert resumed['status'] == 'pipeline_queued' and resumed['error'] is None
+    assert checked and not any(checked)
+    # The parts were checked twice: once for the record that changed, once for the one that was queued.
+    assert len(checked) == 2 * PART_COUNT
+    with pytest.raises(PipelineError) as error:
+        service.resume(1, job['id'])
+    assert error.value.code == 'invalid_state'
+
+
+def test_every_stage_that_runs_on_through_the_assembly_counts_its_expressions_as_paid(setup, monkeypatch):
+    from src.services import avatar_stage_resume
+    service, factory, payload, _, _, _ = setup
+    job, _ = service.create(1, 'stage-cost', {**payload, 'production_mode': 'character_parts', 'slots': []})
+    monkeypatch.setattr(avatar_stage_resume, 'assembly_paid', lambda directory, public: False)
+    free = {action['stage']: action['paid'] for action in avatar_stage_resume.AvatarStageResume(factory).get(1, job['id'])['actions']}
+    assert free['assemble'] is False
+    monkeypatch.setattr(avatar_stage_resume, 'assembly_paid', lambda directory, public: True)
+    paid = {action['stage']: action['paid'] for action in avatar_stage_resume.AvatarStageResume(factory).get(1, job['id'])['actions']}
+    assert all(paid[stage] for stage in ('images', 'models', 'rig', 'assemble'))
+
+
+# --- a failed run's files are archived once ---------------------------------------------------------------------------
+
+def failed_job(service, factory, payload, key):
+    job, _ = service.create(1, key, {**payload, 'production_mode': 'character_parts', 'slots': []})
+    directory = factory.directory(1, job['id'])
+    _write_json(directory/'job.json', {**read_json(directory/'job.json'), 'status': 'failed'})
+    _write_json(directory/'output/input.json', {'run': 'failed'})
+    return job, directory
+
+
+def archives(directory):
+    return sorted(path.parent.name for path in (directory/'attempts').glob('*/job.json'))
+
+
+def test_a_failed_job_resumed_from_two_tabs_at_once_is_archived_once(setup, monkeypatch):
+    import threading
+    import time
+    service, factory, payload, _, _, _ = setup
+    job, directory = failed_job(service, factory, payload, 'two-tab-resume')
+    copies, real_copy = [], module.copy_tree
+
+    def copy(source, target):
+        copies.append(target)
+        time.sleep(.2)  # A large output: the other tab's resume arrives meanwhile.
+        return real_copy(source, target)
+    monkeypatch.setattr(module, 'copy_tree', copy)
+    outcomes = []
+
+    def resume():
+        try:
+            outcomes.append(service.resume(1, job['id'])['status'])
+        except PipelineError as exc:
+            outcomes.append(exc.code)
+    threads = [threading.Thread(target=resume) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert sorted(outcomes) == ['invalid_state', 'pipeline_queued'] and len(copies) == 1
+    saved = read_json(directory/'job.json')
+    assert [attempt['id'] for attempt in saved['previous_attempts']] == archives(directory)
+
+
+def test_a_resume_that_reads_the_record_again_archives_the_failed_run_once(setup, monkeypatch):
+    service, factory, payload, _, _, _ = setup
+    job, directory = failed_job(service, factory, payload, 'reread-resume')
+    copies, real_copy = [], module.copy_tree
+
+    def copy(source, target):
+        copies.append(target)
+        # Something is recorded about the stopped job while its files are archived: the record is read again.
+        _write_json(directory/'job.json', {**read_json(directory/'job.json'), 'error': '서버 재시작으로 중단됨'})
+        return real_copy(source, target)
+    monkeypatch.setattr(module, 'copy_tree', copy)
+    resumed = service.resume(1, job['id'])
+    assert resumed['status'] == 'pipeline_queued' and len(copies) == 1
+    assert [attempt['id'] for attempt in read_json(directory/'job.json')['previous_attempts']] == archives(directory)
+    assert len(archives(directory)) == 1
+
+
+def test_a_resume_waiting_on_another_resume_of_the_job_answers_within_the_proxy_deadline(setup, monkeypatch):
+    import threading
+    from src.services.keyed_lock import keyed_lock
+    service, factory, payload, _, _, _ = setup
+    job, directory = failed_job(service, factory, payload, 'busy-resume')
+    monkeypatch.setattr(module, 'RESUME_WAIT_SECONDS', .1)
+    held, release = threading.Event(), threading.Event()
+
+    def other_resume():
+        # Another tab's resume of the job, still archiving the failed run's files.
+        with keyed_lock(('image-resume', str(directory))):
+            held.set()
+            release.wait(10)
+    thread = threading.Thread(target=other_resume)
+    thread.start()
+    try:
+        assert held.wait(10)
+        with pytest.raises(PipelineError) as error:
+            service.resume(1, job['id'])
+        assert (error.value.code, error.value.status) == ('job_changed', 409)
+    finally:
+        release.set()
+        thread.join(10)
+    assert service.resume(1, job['id'])['status'] == 'pipeline_queued'

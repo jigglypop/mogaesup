@@ -21,7 +21,7 @@ from src.services.asset_editor import _retry_file_io, _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, generate_image,
                                               generate_standard_part_image, OpenAIImageHTTPError,
-                                              image_error_message, saved_response)
+                                              image_error_message, never_sent, saved_response)
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.illustration_motion import FORMATS, MOTION_REVISION, encode, render_frames
 from src.services.illustration_rig import build_rig
@@ -30,6 +30,7 @@ from src.services.model_providers import (LABELS, PROVIDERS, base_url, client as
                                           configured as provider_keys, model_problem, resolve_provider)
 from src.services.process_identity import identity
 from src.services.object_storage import copy_file, provider_image
+from src.services.keyed_lock import keyed_lock
 from src.services.run_lock import WorkerLocks, final_write, worker_alive
 from src.services.studio_materials import texture_maps, prop_model
 
@@ -143,7 +144,7 @@ class StudioGenerations:
             if error:
                 return False, image_error_message(error.get('category'), error.get('http_status'))
             request = read_json(directory/'image-provider.request.json')
-            if request and request.get('submission') != 'not_sent':
+            if request and not never_sent(request):
                 return False, '이미지 응답을 확인하지 못했습니다. 저장된 요청을 유지하며 유료 요청을 반복하지 않습니다.'
         return True, None
 
@@ -234,64 +235,91 @@ class StudioGenerations:
         job_id = request_job_id(self.owner, 'studio', key)
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         directory = self.directory(job_id)
+        # The checks and the reference copy (a stored image copied and hashed) run with this request key held, not
+        # the process lock that every admission waits for; that lock is taken only to write the record.
+        with keyed_lock(('studio-generation-admission', str(directory))):
+            return self._create(key, payload, requested, job_id, fingerprint, directory)
+
+    def _create(self, key, payload, requested, job_id, fingerprint, directory):
+        """create() with the request key held."""
+        previous = read_json(directory/'record.json')
+        if previous:
+            if previous['fingerprint'] != fingerprint:
+                raise PipelineError('idempotency_conflict', '같은 요청의 입력이 변경됐습니다.', 409)
+            return self.get(job_id), previous['status'] == 'accepted'
+        if not self.capabilities(payload['kind'])['ready']:
+            raise PipelineError('provider_unavailable', 'S3·이미지·3D 생성 서비스 연결을 확인하세요.', 503)
+        provider = self._provider_ready(requested) if payload['kind'] == 'prop' else None
+        directory.mkdir(parents=True, exist_ok=True)
+        reference = None
+        if payload['kind'] == 'illustration' and payload.get('reference_id'):
+            parent = self._record(payload['reference_id'])
+            if parent.get('kind') != 'illustration' or parent.get('status') != 'complete':
+                raise PipelineError('invalid_reference', '완료된 2D 원화만 기준으로 선택할 수 있습니다.', 422)
+            parent_image = self.artifact(payload['reference_id'], 'image.png')
+            parent_sha256 = parent['files']['image.png']
+            frozen = directory/'reference.png'
+            copy_file(parent_image, frozen)
+            if digest(frozen) != parent_sha256:
+                raise PipelineError('reference_changed', '기준 원화 이미지가 변경되었습니다.', 409)
+            reference = {'id': payload['reference_id'], 'file': 'reference.png', 'sha256': parent_sha256}
+        provider_prompt = (self._illustration_prompt(payload['prompt'], bool(reference))
+                           if payload['kind'] == 'illustration' else None)
+        record = {**payload, 'id': job_id, 'request_key': key, 'fingerprint': fingerprint,
+                  'status': 'accepted', 'stage': 'image',
+                  'files': {'reference.png': reference['sha256']} if reference else {},
+                  'reference': reference, 'process': identity(),
+                  'created_at': now(), 'error': None,
+                  'image_model': os.getenv('AVATAR_IMAGE_MODEL', DEFAULT_MODEL),
+                  'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
+                  'meshy_base': base_url('meshy')}
+        if provider:
+            record['provider'] = provider
+            if provider == 'tripo':
+                record['tripo_base'] = base_url('tripo')
+        if provider_prompt is not None:
+            record.update(provider_prompt=provider_prompt,
+                          provider_prompt_sha256=hashlib.sha256(provider_prompt.encode()).hexdigest(),
+                          prompt_revision=ILLUSTRATION_PROMPT_REVISION)
         with _LOCK:
+            # Written meanwhile only by another process on this data root (the key is held in this one).
             previous = read_json(directory/'record.json')
-            if previous:
-                if previous['fingerprint'] != fingerprint:
-                    raise PipelineError('idempotency_conflict', '같은 요청의 입력이 변경됐습니다.', 409)
-                return self.get(job_id), previous['status'] == 'accepted'
-            if not self.capabilities(payload['kind'])['ready']:
-                raise PipelineError('provider_unavailable', 'S3·이미지·3D 생성 서비스 연결을 확인하세요.', 503)
-            provider = self._provider_ready(requested) if payload['kind'] == 'prop' else None
-            directory.mkdir(parents=True, exist_ok=True)
-            reference = None
-            if payload['kind'] == 'illustration' and payload.get('reference_id'):
-                parent = self._record(payload['reference_id'])
-                if parent.get('kind') != 'illustration' or parent.get('status') != 'complete':
-                    raise PipelineError('invalid_reference', '완료된 2D 원화만 기준으로 선택할 수 있습니다.', 422)
-                parent_image = self.artifact(payload['reference_id'], 'image.png')
-                parent_sha256 = parent['files']['image.png']
-                frozen = directory/'reference.png'
-                copy_file(parent_image, frozen)
-                if digest(frozen) != parent_sha256:
-                    raise PipelineError('reference_changed', '기준 원화 이미지가 변경되었습니다.', 409)
-                reference = {'id': payload['reference_id'], 'file': 'reference.png', 'sha256': parent_sha256}
-            provider_prompt = (self._illustration_prompt(payload['prompt'], bool(reference))
-                               if payload['kind'] == 'illustration' else None)
-            record = {**payload, 'id': job_id, 'request_key': key, 'fingerprint': fingerprint,
-                      'status': 'accepted', 'stage': 'image',
-                      'files': {'reference.png': reference['sha256']} if reference else {},
-                      'reference': reference, 'process': identity(),
-                      'created_at': now(), 'error': None,
-                      'image_model': os.getenv('AVATAR_IMAGE_MODEL', DEFAULT_MODEL),
-                      'image_base': os.getenv('OPENAI_API_BASE', DEFAULT_BASE).rstrip('/'),
-                      'meshy_base': base_url('meshy')}
-            if provider:
-                record['provider'] = provider
-                if provider == 'tripo':
-                    record['tripo_base'] = base_url('tripo')
-            if provider_prompt is not None:
-                record.update(provider_prompt=provider_prompt,
-                              provider_prompt_sha256=hashlib.sha256(provider_prompt.encode()).hexdigest(),
-                              prompt_revision=ILLUSTRATION_PROMPT_REVISION)
-            _write_json(directory/'record.json', record)
+            if not previous:
+                _write_json(directory/'record.json', record)
+        if previous:
+            if previous['fingerprint'] != fingerprint:
+                raise PipelineError('idempotency_conflict', '같은 요청의 입력이 변경됐습니다.', 409)
+            return self.get(job_id), previous['status'] == 'accepted'
         return self.get(job_id), True
 
     def resume(self, job_id, provider=None):
         """Continue a paused job. A named provider that differs from the frozen one, or a job blocked by a
-        refused 3D request, sends the 3D step (only) to that provider again."""
-        with _LOCK:
-            public = self.get(job_id)
-            if (provider is not None and public['status'] != 'complete'
-                    and (provider != public['provider'] or not public['can_resume'])):
-                self._change_provider(job_id, public, provider)
-                public = self.get(job_id)
-            if not public['can_resume']:
+        refused 3D request, sends the 3D step (only) to that provider again.
+
+        The job is read (its record and receipts) without the process lock that every admission waits for; under it
+        the record is read again and changed only if it is the record that was read. A new provider is saved with the
+        resume, in one write: a resume refused because the job kept changing leaves the provider it had."""
+        directory = self.directory(job_id)
+        for _ in range(4):
+            held = _WORKERS.busy(str(directory))
+            seen = self._record(job_id)
+            public = self._public(job_id, seen, held)
+            change = (provider is not None and public['status'] != 'complete'
+                      and (provider != public['provider'] or not public['can_resume']))
+            if not change and not public['can_resume']:
                 return public, False
-            record = self._record(job_id)
-            record.update(status='accepted', process=identity(), error=None)
-            self._save(self.directory(job_id), record)
-        return self.get(job_id), True
+            with _LOCK:
+                record = self._record(job_id)
+                if record != seen or (_WORKERS.busy(str(directory)) and not held):
+                    continue
+                if change:
+                    # Allowed only for a paused job whose image is kept and whose 3D step no provider took: with the
+                    # new provider's run set aside it resumes.
+                    record = self._change_provider(job_id, public, provider, record)
+                record.update(status='accepted', process=identity(), error=None)
+                self._save(directory, record)
+            return self.get(job_id), True
+        raise PipelineError('job_changed', '작업 상태가 바뀌는 중입니다. 잠시 후 다시 실행해 주세요.', 409)
 
     @staticmethod
     def _provider_ready(requested):
@@ -300,8 +328,9 @@ class StudioGenerations:
             raise PipelineError('provider_unavailable', f'{LABELS[provider]} API 설정이 필요합니다.', 503)
         return provider
 
-    def _change_provider(self, job_id, public, provider):
-        """Callers hold _LOCK. Earlier refused attempts stay as receipts; the image is never requested again."""
+    def _change_provider(self, job_id, public, provider, record):
+        """`record` with `provider` for its 3D step, for the caller to save; callers hold _LOCK. Earlier refused
+        attempts stay as receipts; the image is never requested again."""
         if public['kind'] != 'prop':
             raise PipelineError('invalid_provider', '3D 생성 제공자는 기물 생성에서만 고릅니다.', 422)
         directory = self.directory(job_id)
@@ -310,7 +339,6 @@ class StudioGenerations:
             raise PipelineError('provider_locked', '3D 작업이 접수됐거나 접수 여부를 확인하지 못해 다시 요청할 수 없습니다.'
                                 if started else public['error'] or '진행 중인 작업은 제공자를 바꿀 수 없습니다.', 409)
         provider = self._provider_ready(provider)
-        record = self._record(job_id)
         previous = self._run(directory, record); task = read_json(previous/'character.json')
         if task:
             problem = model_problem(task, previous) or {}
@@ -323,7 +351,7 @@ class StudioGenerations:
         record['provider'] = provider
         if provider == 'tripo':
             record['tripo_base'] = base_url('tripo')
-        self._save(directory, record)
+        return record
 
     @staticmethod
     def _save(directory, record):
@@ -467,10 +495,11 @@ class StudioGenerations:
         directory = self.directory(job_id)
         for name, content in files.items():
             (directory/name).write_bytes(content)
+        # Hashed from the bytes written, not read back from the store under the process lock.
+        hashes = {name: hashlib.sha256(content).hexdigest() for name, content in files.items()}
         with _LOCK:
             record = self._record(job_id)
-            for name in files:
-                record['files'][name] = digest(directory/name)
+            record['files'].update(hashes)
             update(record)
             self._save(directory, record)
 

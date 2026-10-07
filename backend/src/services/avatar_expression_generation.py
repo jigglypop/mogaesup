@@ -10,7 +10,7 @@ import httpx
 from PIL import Image
 
 from src.services.asset_editor import _write_json
-from src.services.avatar_factory import _LOCK, digest
+from src.services.avatar_factory import digest
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_openai_images import (
     DEFAULT_BASE,
@@ -18,9 +18,11 @@ from src.services.avatar_openai_images import (
     OpenAIImageHTTPError,
     generate_standard_part_image,
     image_error_message,
+    never_sent,
     saved_response,
 )
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
+from src.services.keyed_lock import keyed_lock
 from src.services.object_storage import copy_file
 from src.services.process_identity import identity, lease_guard
 from src.services.run_lock import WorkerLocks, final_write, worker_alive
@@ -122,7 +124,7 @@ class AvatarExpressionGeneration:
         if error:
             return False, image_error_message(error.get('category'), error.get('http_status'))
         request = read_json(directory/'image-provider.request.json')
-        if request and request.get('submission') != 'not_sent':
+        if request and not never_sent(request):
             return False, '이미지 응답 수신 여부를 확인할 수 없어 같은 유료 요청을 다시 보내지 않습니다.'
         return True, None
 
@@ -162,7 +164,9 @@ class AvatarExpressionGeneration:
         fingerprint = hashlib.sha256(json.dumps(fingerprint_data, sort_keys=True).encode()).hexdigest()
         generation_id = request_job_id(self.owner, f'{self.job}:{self.version}:expression', key)
         directory = self.directory(generation_id)
-        with _LOCK, expression_lease(directory):
+        # The references are copied and hashed under this generation's own locks (one request at a time in this
+        # process, then the lease every process takes), not the process lock that every admission waits for.
+        with keyed_lock(('expression-generation', str(directory))), expression_lease(directory):
             previous = read_json(directory/'record.json')
             if previous:
                 if previous.get('fingerprint') != fingerprint:
@@ -221,7 +225,8 @@ class AvatarExpressionGeneration:
         return self.get(generation_id), True
 
     def resume(self, generation_id):
-        with _LOCK, expression_lease(self.directory(generation_id)):
+        directory = self.directory(generation_id)
+        with keyed_lock(('expression-generation', str(directory))), expression_lease(directory):
             public = self.get(generation_id)
             if not public['can_resume']:
                 return public, False

@@ -161,8 +161,12 @@ class StudioClient:
                         break
             except (ValueError, AttributeError, TypeError):
                 pass
-            return {'ok': False, 'status': status,
-                    'error': {'code': code, 'message': 'The API refused this request'}}
+            message = 'The API refused this request'
+            if status == 401 and code == 'login_required':
+                # The session ends at a sign-out, a password change and "log out other devices" (also one made from the
+                # browser this session was copied from).
+                message = 'The session has ended; sign in again and set its new MOGA_STUDIO_SESSION'
+            return {'ok': False, 'status': status, 'error': {'code': code, 'message': message}}
         return {'ok': True, 'data': self.sanitize(value)}
 
     def read(self, tool: str, identifier='', operation=''):

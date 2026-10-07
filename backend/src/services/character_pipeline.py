@@ -1,7 +1,7 @@
 """File-backed character control, public views, and durable action receipts."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -9,6 +9,8 @@ import json
 import os
 from src.services.object_storage import StoredPath as Path, sha256 as _digest
 import re
+from threading import Lock
+import time
 import uuid
 
 from PIL import Image
@@ -23,6 +25,10 @@ from src.services.run_lock import WorkerLocks, run_lock
 _LISTING_READERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='character-listing')
 # Operations whose worker runs in this process (src.services.character_actions.execute), by operation id.
 OPERATIONS = WorkerLocks()
+# The character registry (characters/batch.json): one change at a time in this process, a few seconds' wait for another.
+_REGISTRY = Lock()
+REGISTRY_WAIT_SECONDS = 5
+REGISTRY_POLL_SECONDS = .1
 
 
 class PipelineError(Exception):
@@ -315,8 +321,25 @@ class CharacterPipeline:
             _write_json(run / "control.json", control)
         return self.detail(character_id, user_id)
 
+    @contextmanager
+    def _registry(self):
+        """The character registry held for one change. Registrations of this process (a character, a base body's or
+        a GLB body's) take turns; one by another process (a CLI) is waited for up to REGISTRY_WAIT_SECONDS before
+        `busy`, so requests that arrive together are not refused for each other."""
+        with _REGISTRY, ExitStack() as stack:
+            deadline = time.monotonic() + REGISTRY_WAIT_SECONDS
+            while True:
+                try:
+                    stack.enter_context(self.lock(self.root / "characters/.registry"))
+                    break
+                except PipelineError as exc:
+                    if exc.code != "busy" or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(REGISTRY_POLL_SECONDS)
+            yield
+
     def create(self, name: str, height: float | None, user_id: int):
-        with self.lock(self.root / "characters/.registry"):
+        with self._registry():
             data = read_json(self.manifest, {"version": 1, "characters": []})
             character_id = "char-" + uuid.uuid4().hex[:12]
             data["characters"].append({"id": character_id, "name": name, "height_meters": height,

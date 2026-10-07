@@ -15,6 +15,7 @@ from PIL import Image, ImageOps
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, valid_request_key
+from src.services.keyed_lock import keyed_lock
 from src.services.object_storage import copy_file
 from src.services.run_lock import WorkerLocks, worker_alive
 
@@ -191,24 +192,32 @@ class AnimalLibrary:
         fingerprint = hashlib.sha256(json.dumps(submitted, sort_keys=True).encode()).hexdigest()
         animal_id = request_job_id(self.owner, 'animal', key)
         directory = self.directory(animal_id)
-        with _LOCK:
+        # The picture is copied and hashed, and every record read for the next order, with this owner's animal
+        # admissions held (one at a time, so two never take the same order), not the process lock that every
+        # admission of every job waits for; that lock is taken only to write the record.
+        with keyed_lock(('animal-admission', str(self.root))):
             previous = read_json(directory/'record.json')
-            if previous:
-                if previous.get('fingerprint') != fingerprint:
-                    raise PipelineError('idempotency_conflict', '같은 요청에 다른 설정이 있습니다.', 409)
-                return self.get(animal_id), False
-            frozen = self.blob(animal_id, 'reference.png', reference)
-            copy_file(self.reference(reference), frozen)
-            if digest(frozen) != reference:
-                raise PipelineError('reference_changed', '올린 그림이 변경되었습니다. 다시 올려 주세요.', 409)
-            orders = [read_json(path).get('order') for path in self.root.glob('*/record.json')]
-            order = max((value for value in orders if type(value) in (int, float)), default=0) + 1
-            created = now()
-            _write_json(directory/'record.json', {
-                'id': animal_id, 'name': submitted['name'], 'species': species, 'order': order,
-                'created_at': created, 'updated_at': created, 'request_key': key, 'fingerprint': fingerprint,
-                'source': {'kind': 'upload', 'reference_sha256': reference},
-                # Production reads design notes (worn/held items) when present; an upload has none yet.
-                'design': {}, 'files': {'reference.png': reference},
-                'stages': {stage: None for stage in STAGES}, 'production': None})
+            if not previous:
+                frozen = self.blob(animal_id, 'reference.png', reference)
+                copy_file(self.reference(reference), frozen)
+                if digest(frozen) != reference:
+                    raise PipelineError('reference_changed', '올린 그림이 변경되었습니다. 다시 올려 주세요.', 409)
+                orders = [read_json(path).get('order') for path in self.root.glob('*/record.json')]
+                order = max((value for value in orders if type(value) in (int, float)), default=0) + 1
+                created = now()
+                with _LOCK:
+                    # Written meanwhile only by another process on this data root.
+                    previous = read_json(directory/'record.json')
+                    if not previous:
+                        _write_json(directory/'record.json', {
+                            'id': animal_id, 'name': submitted['name'], 'species': species, 'order': order,
+                            'created_at': created, 'updated_at': created, 'request_key': key, 'fingerprint': fingerprint,
+                            'source': {'kind': 'upload', 'reference_sha256': reference},
+                            # Production reads design notes (worn/held items) when present; an upload has none yet.
+                            'design': {}, 'files': {'reference.png': reference},
+                            'stages': {stage: None for stage in STAGES}, 'production': None})
+        if previous:
+            if previous.get('fingerprint') != fingerprint:
+                raise PipelineError('idempotency_conflict', '같은 요청에 다른 설정이 있습니다.', 409)
+            return self.get(animal_id), False
         return self.get(animal_id), True

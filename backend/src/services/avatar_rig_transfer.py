@@ -18,6 +18,13 @@ from src.services.studio_library import StudioLibrary
 _WORKERS = WorkerLocks()
 
 
+def _workers():
+    """The hashes of the Blender code a recovery runs, as its input.json names them."""
+    here = Path(__file__)
+    return {'worker_sha256': digest(here.with_name('avatar_rig_transfer_blender.py')),
+            'binding_sha256': digest(here.with_name('avatar_blender_common.py'))}
+
+
 class AvatarRigTransfer:
     def __init__(self, factory):
         self.factory = factory
@@ -88,8 +95,13 @@ class AvatarRigTransfer:
                          or (task.get('stage') == 'rigging' and task.get('status') == 'submission_rejected'
                              and task.get('http_status') == 422)))
         recommended = self.recommended(owner, job_id) if eligible and status == 'not_started' else None
+        from src.services.avatar_stage_resume import assembly_paid
         return {**{key: record.get(key) for key in ('id', 'request_key', 'source_job_id', 'source_version', 'error')},
                 'recommended_source': recommended,
+                # The recovery itself is local; the assembly it hands the job to makes the default expressions not made
+                # yet, which are paid image edits. The app's gateway reads this flag before it sends a recovery and
+                # counts the recovery as paid work only when it is true.
+                'paid': assembly_paid(directory, job),
                 'status': status, 'can_start': bool(eligible and status not in ('accepted', 'running')
                     and not blender_alive and (during_pipeline or not job.get('character_flow', {}).get('busy'))
                     and blender_executable()),
@@ -97,11 +109,15 @@ class AvatarRigTransfer:
                                                if status == 'paused' else None)}
 
     def start(self, owner, job_id, source_job_id, source_version, key, *, during_pipeline=False):
+        """Admit a recovery from the saved body `source_job_id`/`source_version`. The job is read and the donor body
+        hashed and parsed without the process lock that every admission of every job waits for; under it the records
+        the recovery was decided on are read again, and it is written only if they are unchanged."""
         require_request_key(key, '복구 요청 식별자가 필요합니다.')
         root = self.root(owner, job_id)
         request_id = hashlib.sha256(key.encode()).hexdigest()[:24]
         directory = root/request_id
-        with _LOCK:
+        for _ in range(3):
+            seen = self._admission(root)
             previous = read_json(directory/'record.json')
             if previous:
                 if (previous['source_job_id'], previous['source_version']) != (source_job_id, source_version):
@@ -111,8 +127,12 @@ class AvatarRigTransfer:
                             'status': 'paused', 'can_start': False, 'error': '이후 접수된 골격 복구 작업을 확인해 주세요.'}, None
                 state = self.get(owner, job_id, during_pipeline=during_pipeline)
                 if state['status'] == 'paused':
-                    previous.update(status='accepted', process=identity(), error=None)
-                    self._save(root, directory, previous)
+                    with _LOCK:
+                        if read_json(directory/'record.json') != previous or self._admission(root) != seen:
+                            continue
+                        self._refresh_workers(directory)
+                        previous.update(status='accepted', process=identity(), error=None)
+                        self._save(root, directory, previous)
                 return self.get(owner, job_id, during_pipeline=during_pipeline), request_id if previous['status'] == 'accepted' else None
             if source_job_id == job_id or not self.get(owner, job_id, during_pipeline=during_pipeline)['can_start']:
                 raise PipelineError('transfer_unavailable', '현재 골격 복구를 시작할 수 없습니다.', 409)
@@ -125,9 +145,10 @@ class AvatarRigTransfer:
             if source_job.get('production_mode') != 'character_parts' or source_job.get('base_job_id'):
                 raise PipelineError('invalid_rig_source', '완료된 기본 몸의 골격을 선택하세요.', 422)
             donor = AvatarNativeParts(self.factory).artifact(owner, source_job_id, source_version, 'body.glb')
+            donor_sha256 = digest(donor)
             planned = (read_json(root.parent.parent/'pipeline.json').get('base_body_setup') or {}).get('rig_source')
             if planned and ((planned['job_id'], planned['version']) != (source_job_id, source_version)
-                            or planned['body_sha256'] != digest(donor)):
+                            or planned['body_sha256'] != donor_sha256):
                 raise PipelineError('rig_source_changed', '접수한 기본 몸의 골격 원본이 변경되었습니다.', 409)
             body = self.factory.artifact(owner, job_id, 'generated-body.glb')
             doc, _ = parse_glb(donor.read_bytes(), strict=True)
@@ -136,16 +157,36 @@ class AvatarRigTransfer:
             record = {'id': request_id, 'request_key': key, 'status': 'accepted', 'source_job_id': source_job_id,
                       'source_version': source_version, 'process': identity(), 'created_at': now(), 'error': None}
             payload = {'body': str(body), 'body_sha256': digest(body), 'donor': str(donor),
-                       'donor_sha256': digest(donor), 'output': str(directory),
-                       'worker_sha256': digest(Path(__file__).with_name('avatar_rig_transfer_blender.py')),
-                       'binding_sha256': digest(Path(__file__).with_name('avatar_blender_common.py'))}
-            directory.mkdir(parents=True, exist_ok=True)
-            _write_json(directory/'input.json', payload)
-            _write_json(directory/'previous-worker.json', read_json(root.parent/'worker.json'))
-            _write_json(directory/'record.json', record)
-            _write_json(root/'current.json', {'id': request_id})
-            _write_json(root.parent/'worker.json', {**record, 'origin': 'rig_transfer'})
-        return self.get(owner, job_id), request_id
+                       'donor_sha256': donor_sha256, 'output': str(directory), **_workers()}
+            with _LOCK:
+                if read_json(directory/'record.json') or self._admission(root) != seen:
+                    continue  # Admitted under this key, or the job changed, meanwhile: read it again.
+                directory.mkdir(parents=True, exist_ok=True)
+                _write_json(directory/'input.json', payload)
+                _write_json(directory/'previous-worker.json', read_json(root.parent/'worker.json'))
+                _write_json(directory/'record.json', record)
+                _write_json(root/'current.json', {'id': request_id})
+                _write_json(root.parent/'worker.json', {**record, 'origin': 'rig_transfer'})
+            return self.get(owner, job_id), request_id
+        raise PipelineError('transfer_changed', '작업 상태가 바뀌는 중입니다. 잠시 후 다시 실행해 주세요.', 409)
+
+    @staticmethod
+    def _refresh_workers(directory):
+        """A paused recovery runs again with the Blender code of this release: its input names the worker scripts it
+        runs with, and one paused before they changed (a deployment) would otherwise stay paused under its key, the
+        fixed key of a base body's own recovery among them. The body and the donor stay the ones it was accepted with,
+        and the worker checks their hashes."""
+        payload, workers = read_json(directory/'input.json'), _workers()
+        if payload and {key: payload.get(key) for key in workers} != workers:
+            _write_json(directory/'input.json', {**payload, **workers})
+
+    @staticmethod
+    def _admission(root):
+        """The records a recovery is admitted on: the job's stage run, assembly, rig worker and delivery (with whether
+        their workers run), its current recovery and Meshy's rig receipt."""
+        from src.services.avatar_stage_resume import admission_token
+        return (admission_token(root.parent.parent), read_json(root/'current.json'),
+                read_json(root.parent/'character.json'), _WORKERS.busy(str(root.parent)))
 
     def recover_rejected(self, owner, job_id):
         """One local fallback in the accepted character pipeline; never another paid POST."""
@@ -205,8 +246,8 @@ class AvatarRigTransfer:
                 raise
             try:
                 payload = read_json(directory/'input.json')
-                if (payload['worker_sha256'] != digest(Path(__file__).with_name('avatar_rig_transfer_blender.py'))
-                        or payload['binding_sha256'] != digest(Path(__file__).with_name('avatar_blender_common.py'))):
+                workers = _workers()
+                if {key: payload.get(key) for key in workers} != workers:
                     raise ValueError('Rig transfer worker changed')
                 with local_workspace(directory, inputs=[payload['body'], payload['donor']]):
                     command = [blender_executable(), '--background', '--factory-startup', '--disable-autoexec',

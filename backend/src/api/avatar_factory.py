@@ -9,13 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.auth import UserContext, get_current_user
 from src.paths import data_root
-from src.services.avatar_factory import AvatarFactory, PROFILE, _LOCK
+from src.services.avatar_factory import AvatarFactory, PROFILE
 from src.services.avatar_image_pipeline import AvatarImagePipeline, capabilities
 from src.services.avatar_equipment import ImageSlot
 from src.services.avatar_meshy import AvatarMeshy
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_native_outfits import AvatarNativeOutfits
-from src.services.avatar_stage_resume import AvatarStageResume, ensure_stage_idle
+from src.services.avatar_stage_resume import AvatarStageResume, ensure_stage_idle, require_stage_idle
 from src.services.avatar_rig_transfer import AvatarRigTransfer
 from src.services.character_pipeline import PipelineError
 from src.services.meshy_options import MeshyPartOptions
@@ -582,6 +582,13 @@ def review_native_parts(job_id: str, version: str, body: NativeReviewInput,
     return AvatarNativeParts(factory).get(user.user_id, job_id, version)
 
 
+def _stage_idle(factory, owner, job_id):
+    """The idle stage check an admission repeats under the process lock: the job was read (and its owner checked) by
+    ensure_stage_idle before it, so only the stage run is read again."""
+    directory = factory.directory(owner, job_id)
+    return lambda: require_stage_idle(directory)
+
+
 @router.post('/jobs/{job_id}/native-parts', status_code=202)
 def fit_native_parts(job_id: str, background: BackgroundTasks, canonical_pose: bool = False,
                      user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
@@ -590,7 +597,7 @@ def fit_native_parts(job_id: str, background: BackgroundTasks, canonical_pose: b
     # The inputs are hashed and an uploaded hair validated outside the process lock; the stage is checked again under
     # it, right before the version is written.
     state, created = service.start(user.user_id, job_id, canonical_pose=canonical_pose,
-                                   admit=lambda: ensure_stage_idle(factory, user.user_id, job_id))
+                                   admit=_stage_idle(factory, user.user_id, job_id))
     if created or state.get('expression_pending'):
         background.add_task(service.execute_refit, user.user_id, job_id)
     return state
@@ -621,9 +628,8 @@ def save_native_outfit(job_id: str, version: str, body: NativeOutfitInput,
 @router.post('/jobs/{job_id}/meshy/rig', status_code=202)
 def meshy_rig(job_id: str, background: BackgroundTasks, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarMeshy(factory)
-    with _LOCK:
-        ensure_stage_idle(factory, user.user_id, job_id)
-        state = service.start(user.user_id, job_id)
+    ensure_stage_idle(factory, user.user_id, job_id)
+    state = service.start(user.user_id, job_id, admit=_stage_idle(factory, user.user_id, job_id))
     background.add_task(service.execute, user.user_id, job_id)
     return state
 
@@ -632,9 +638,10 @@ def meshy_rig(job_id: str, background: BackgroundTasks, user: UserContext = Depe
 def meshy_action(job_id: str, body: MeshyMotionInput, background: BackgroundTasks,
                  user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     service = AvatarMeshy(factory)
-    with _LOCK:
-        ensure_stage_idle(factory, user.user_id, job_id)
-        state = service.request_action(user.user_id, job_id, body.slot, body.action_id)
+    ensure_stage_idle(factory, user.user_id, job_id)
+    # Meshy's action list is fetched before the process lock (request_action), which only the record checks take.
+    state = service.request_action(user.user_id, job_id, body.slot, body.action_id,
+                                   admit=_stage_idle(factory, user.user_id, job_id))
     background.add_task(service.execute, user.user_id, job_id)
     return state
 
@@ -736,7 +743,7 @@ def refit_one_native_part(job_id: str, body: NativePartRefitInput, background: B
         fit_profile=body.fit_profile.model_dump(exclude_none=True) if body.fit_profile is not None else None,
         part_method=body.part_method,
         shape=body.shape.model_dump(exclude_none=True) if body.shape is not None else None,
-        admit=lambda: ensure_stage_idle(factory, user.user_id, job_id))
+        admit=_stage_idle(factory, user.user_id, job_id))
     from src.services.avatar_expression_reuse import expression_reuse_state
     expressions = expression_reuse_state(factory.directory(user.user_id, job_id))
     current_version = service.get(user.user_id, job_id).get('version')

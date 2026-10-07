@@ -21,7 +21,8 @@ from src.services.animal_library import JOBS as _JOBS, AnimalLibrary
 from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, _QUEUE, digest
-from src.services.avatar_openai_images import DEFAULT_BASE, DEFAULT_MODEL, generate_standard_part_image, saved_response
+from src.services.avatar_openai_images import (DEFAULT_BASE, DEFAULT_MODEL, generate_standard_part_image, never_sent,
+                                              saved_response)
 from src.services.character_parts import blender_executable, blender_process, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, valid_request_key
 from src.services.model_providers import client as provider_client
@@ -67,11 +68,18 @@ MESHY_UNCHECKED = 'Meshy 작업 상태를 확인하지 못했습니다. 같은 �
 RIG_TIMEOUT = 1200
 # Every rig and motion file made from a model; a new model makes all of them stale.
 RIG_FILES = ('rigged.glb', 'walk.glb', 'motions-standard.glb', 'standard.json')
-CLIPS = ('walk', 'run', 'idle', 'bark', 'sit', 'lie', 'jump')
+# The rig's clips (animal_standard_rig_blender.py); sit_hold and lie_hold loop the held sit and lie.
+CLIPS = ('walk', 'run', 'idle', 'bark', 'sit', 'lie', 'jump', 'sit_hold', 'lie_hold')
 RIG_FAILED = '표준 골격을 씌우지 못했습니다.'
 RIG_ERRORS = {'mesh_missing': '3D 모델에서 메시를 찾지 못했습니다.', 'mesh_degenerate': '3D 모델의 크기를 읽지 못했습니다.',
               'paws_not_found': '네 발의 위치를 찾지 못했습니다.', 'head_not_found': '머리 위치를 찾지 못했습니다.'}
 LEGS = {'fore_L': '왼쪽 앞다리', 'fore_R': '오른쪽 앞다리', 'hind_L': '왼쪽 뒷다리', 'hind_R': '오른쪽 뒷다리'}
+
+
+def standard_clips(report):
+    """The clips a standard-rig report names that the rig makes, in its order; anything else is dropped."""
+    named = report.get('clips') if isinstance(report, dict) else None
+    return [clip for clip in named or [] if isinstance(clip, str) and clip in CLIPS]
 
 
 class StepPaused(Exception):
@@ -408,7 +416,7 @@ class AnimalProduction:
             # Nothing was sent: a configuration error stays as it is, anything else can be retried.
             return reason if isinstance(reason, PipelineError) else StepPaused(
                 '이미지 요청을 보내기 전에 중단됐습니다. 같은 요청으로 이어서 실행할 수 있습니다.')
-        if request.get('submission') == 'not_sent':
+        if never_sent(request):
             return StepPaused('이미지 서버 연결 실패 · 같은 요청으로 이어서 실행할 수 있습니다.')
         return StepBlocked('이미지 요청의 접수 여부를 확인하지 못했습니다. 유료 요청을 다시 보내지 않습니다.')
 
@@ -588,7 +596,7 @@ class AnimalProduction:
         if _sha(content) != expected or inspect_glb(content, budget_warnings=True)['errors']:
             raise PipelineError('rig_failed', '표준 골격 결과를 확인하지 못했습니다.', 422)
         paws = report.get('paw_height_pct') if isinstance(report.get('paw_height_pct'), dict) else {}
-        clips = [clip for clip in report.get('clips') or [] if isinstance(clip, str) and clip in CLIPS]
+        clips = standard_clips(report)
 
         def stage(record):
             if record['files'].get('model.glb') != model_sha:

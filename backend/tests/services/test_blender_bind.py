@@ -62,6 +62,29 @@ def test_a_rigid_binding_finds_its_bone_on_a_prefixed_skeleton(blender):
     assert weights_of(hair) == [{'mixamorig:Head': 1.}]*2
 
 
+@pytest.mark.parametrize('prefix', ['mixamorig_', 'mixamorig1_', 'Armature:mixamorig_'])
+def test_a_rigid_binding_finds_its_bone_on_an_underscore_prefixed_skeleton(blender, prefix):
+    # Some exporters write a Mixamo rig as 'mixamorig_Head': hair and hats bind to it as to 'mixamorig:Head'.
+    bpy, common, _ = blender
+    scene = bpy.context.scene
+    rig = armature(scene, 'rig', [bone(f'{prefix}Hips'), bone(f'{prefix}Head', (0, 0, 1))])
+    body = body_quad(scene, rig, bones=(f'{prefix}Hips', f'{prefix}Head'))
+    hat = mesh(scene, 'hat', [(.5, -.02, .9), (.6, -.02, 1.)])
+    common.bind([hat], [body], rig, {'slot': 'hat', 'binding': 'rigid', 'bone': 'Head', 'anchors': [],
+                                     'max_anchor_error_m': .0001, 'max_transfer_distance_m': None},
+                transform=common.Matrix.Identity(4))
+    assert weights_of(hat) == [{f'{prefix}Head': 1.}]*2
+    assert common.find_bone(rig, 'hips', 'pelvis') == f'{prefix}Hips' and common.find_bone(rig, 'spine') is None
+
+
+def test_blender_bone_keys_are_the_wardrobes(blender):
+    from src.services.avatar_wardrobe_coverage import bone_keys
+    _, common, _ = blender
+    names = ['mixamorig:LeftLeg', 'mixamorig_LeftLeg', 'mixamorig1_RightUpLeg', 'Armature:mixamorig_Head', 'LeftLeg',
+             'a:b:Head', 'Left_Leg', 'mixamorigLeftLeg', 'Hips']
+    assert [common.bone_key(name) for name in names] == list(bone_keys(names))
+
+
 @pytest.mark.parametrize('contract', [{'binding': 'rigid'}, {'binding': 'rigid', 'bone': 'Tail'}])
 def test_a_rigid_binding_without_a_bone_of_the_skeleton_is_refused(blender, contract):
     bpy, common, _ = blender

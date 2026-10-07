@@ -10,6 +10,7 @@ import numpy as np
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
+from src.services.avatar_blender_common import find_bone
 from src.services.avatar_fit_geometry import bounds, head_region, place
 
 
@@ -95,6 +96,28 @@ SCALP_WIDTH = .85     # below the ears, the scalp spans this share of the half w
 SCALP_SPECK = .05     # a cap island smaller than this share of the largest is dropped
 
 
+def hip_height(rig):
+    """Z of the hip joints (the upper legs' heads), or None for a skeleton without both."""
+    names = [find_bone(rig, key) for key in ('leftupleg', 'rightupleg')]
+    if not all(names):
+        return None
+    return float(sum((rig.matrix_world @ rig.data.bones[name].head_local).z for name in names)/2)
+
+
+def backing_floor(floor, reference_floor, rig, head_low):
+    """(lowest Z of an extended rear backing, the limit it keeps to): down to the rear drawing's outline below the
+    strands' own lowest point, never below the hip joints (without them, the head's lowest skin).
+
+    The rear drawing is registered by the seated hair's overall width: locks and stray pieces beside the head widen
+    that, and a drawing whose hair differs from the model's (a bun drawn for long hair) comes out longer than the hair.
+    Hung from the head, a backing below the hip joints is a stepped sheet the legs pass through (the two audited ones
+    ended 13 and 25 cm below the knees; avatar_part_gate refuses that).
+    """
+    lowest = hip_height(rig)
+    lowest = float(head_low) if lowest is None else lowest
+    return max(min(float(floor), float(reference_floor)), lowest), lowest
+
+
 def _srgb_to_linear(values):
     return np.where(values <= .04045, values/12.92, ((values+.055)/1.055)**2.4)
 
@@ -118,16 +141,22 @@ def hair_colour(meshes, samples=4000):
         mesh = obj.data
         if obj.get('scalp_backing') or not len(mesh.polygons):
             continue
-        uv_layer = mesh.uv_layers.active
+        # A join can leave an imported mesh without an active editing UV layer; the layer it renders and exports with
+        # still maps its texture.
+        uv_layer = (mesh.uv_layers.active or next((layer for layer in mesh.uv_layers if layer.active_render), None)
+                    or (mesh.uv_layers[0] if len(mesh.uv_layers) else None))
+        material_index = np.empty(len(mesh.polygons), dtype=np.int64); mesh.polygons.foreach_get('material_index', material_index)
         if uv_layer is not None:
             uv = np.empty(len(mesh.loops)*2); uv_layer.data.foreach_get('uv', uv); uv = uv.reshape(-1, 2)
-            material_index = np.empty(len(mesh.polygons), dtype=np.int64); mesh.polygons.foreach_get('material_index', material_index)
             loop_start = np.empty(len(mesh.polygons), dtype=np.int64); mesh.polygons.foreach_get('loop_start', loop_start)
             loop_total = np.empty(len(mesh.polygons), dtype=np.int64); mesh.polygons.foreach_get('loop_total', loop_total)
             loop_material = np.full(len(mesh.loops), -1, dtype=np.int64)
             for start, total, index in zip(loop_start, loop_total, material_index):
                 loop_material[start:start+total] = index
         for index, slot in enumerate(obj.material_slots):
+            # A slot no face uses (a leftover of the provider's file) does not colour the hair.
+            if not (material_index == index).any():
+                continue
             image = _base_image(slot.material) if uv_layer is not None else None
             if image is None:
                 shader = (next((n for n in slot.material.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
@@ -240,7 +269,8 @@ def _reference(path):
     if image.channels < 4 or not np.any(rgba[:, :, 3] < .1):
         bpy.data.images.remove(image)
         return None
-    occupied = rgba[:, :, 3] >= .8
+    # The backing's material clips at .5 (glTF MASK): translucent strands under .8 are hair too.
+    occupied = rgba[:, :, 3] >= .5
     ys, xs = np.where(occupied)
     if len(xs) < 16:
         bpy.data.images.remove(image)
@@ -254,7 +284,8 @@ def repair_hair_backing(meshes, body, rig, spec, image_paths, *, shared_canvas=F
     A projected rear image supplies the strand color/texture. Geometry follows
     the measured rear head surface, with a small clearance and overlap beneath
     existing strands. V4 extends the backing to the reference silhouette below
-    the skull; it does not claim to recover individual missing locks.
+    the skull, down to the hip joints at most; it does not claim to recover
+    individual missing locks.
     """
     extended = spec['fitting'].get('hair_rear_surface') == 'reference-silhouette-v4'
     report = {'method': 'reference_rear_surface_v4' if extended else 'reference_backed_rear_roots_v3', 'added_faces': 0,
@@ -287,7 +318,7 @@ def repair_hair_backing(meshes, body, rig, spec, image_paths, *, shared_canvas=F
         # its lower rear. Register it at the same pixel scale, never stretch it.
         reference_floor = ((py0-(height-1-canvas['sole_y']))/canvas['pixels_per_metre']
                            if use_canvas else hair_hi.z-(py1-py0)/pixel_scale)
-        floor = min(floor, reference_floor)
+        floor, report['lowest_allowed_m'] = backing_floor(floor, reference_floor, rig, lo.z)
 
     def project(x, z):
         if use_canvas:
@@ -400,7 +431,7 @@ def repair_hair_backing(meshes, body, rig, spec, image_paths, *, shared_canvas=F
     meshes.append(obj)
     return {**report, 'added_faces': len(faces), 'added_vertices': len(used),
             'exposed_samples': len(missing), 'source_view': 'back',
-            'lower_reference_samples': lower_samples,
+            'lower_reference_samples': lower_samples, 'floor_m': float(floor),
             'projection': 'shared_canvas' if use_canvas else 'uniform_crown_registration',
             'source_texture_size_px': [width, height], 'texture_size_px': list(image.size),
             'clearance_m': clearance,

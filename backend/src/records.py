@@ -338,7 +338,8 @@ def _export_prefix(conn, s3, bucket, prefix, *, dry_run, out, ignore_stale):
         code = str(exc.response.get('Error', {}).get('Code', ''))
         reason = 's3:DeleteObject was denied' if code in ('AccessDenied', '403') else f'S3 answered {code or type(exc).__name__}'
         out(f'  The marker {marker} could not be deleted ({reason}). The records are back in S3, but servers without '
-            f'CHARACTER_DATABASE_URL keep refusing to start until a role that may delete it removes the marker.')
+            f'CHARACTER_DATABASE_URL keep refusing to start until a role that may delete it removes the marker: '
+            f'aws s3 rm s3://{bucket}/{marker}')
         raise SystemExit(f'{prefix or "(no prefix)"}: records written back, marker not deleted ({reason})')
     return written
 

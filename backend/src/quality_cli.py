@@ -6,13 +6,29 @@ providers; they never change a job or block a result.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from src.paths import data_root
+from src.services.avatar_factory import _QUEUE
 from src.services.character_parts import blender_executable, blender_process
 from src.services.asset_editor import _write_json
+
+
+def share_with_workers(folder, *, geteuid=getattr(os, 'geteuid', None), stat=os.stat, chown=getattr(os, 'chown', None),
+                       chmod=os.chmod):
+    """Lets the studio's Blender worker use `folder`, True when it had to. In the studio container a CLI runs as root
+    and Blender as studio-worker (infra/blender-worker.py), whose group the data root is shared with: the folder becomes
+    that group's, group-writable and setgid, so the worker reads input.json and writes metrics.json there. Run as any
+    other user (or on Windows), Blender is that user and nothing changes."""
+    if geteuid is None or geteuid() != 0:
+        return False
+    chown(folder, -1, stat(data_root()).st_gid)
+    chmod(folder, 0o2770)
+    return True
 
 
 def measure(directory, *, images=None, canvas=None):
@@ -22,13 +38,17 @@ def measure(directory, *, images=None, canvas=None):
     worker = Path(__file__).with_name('services')/'avatar_quality_blender.py'
     with tempfile.TemporaryDirectory(prefix='asset-quality-') as scratch:
         scratch = Path(scratch)
+        shared = share_with_workers(scratch)
         payload = {'directory': str(Path(directory).resolve()), 'output': str(scratch/'metrics.json'),
                    'images': images or {}, 'canvas': canvas}
         (scratch/'input.json').write_text(json.dumps(payload), encoding='utf8')
+        if shared:
+            os.chmod(scratch/'input.json', 0o640)
         command = [executable, '--background', '--factory-startup', '--disable-autoexec',
                    '--python-exit-code', '1', '--python', str(worker), '--', str(scratch/'input.json')]
-        with blender_process(command, scratch/'worker.log', scratch/'runner.json',
-                             write_json=_write_json, checkpoint=False) as process:
+        # One of the data root's Blender slots, as every worker the API starts; the timeout starts once it is taken.
+        with _QUEUE, blender_process(command, scratch/'worker.log', scratch/'runner.json',
+                                     write_json=_write_json, checkpoint=False) as process:
             try:
                 code = process.wait(timeout=600)
             except subprocess.TimeoutExpired:

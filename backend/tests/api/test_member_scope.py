@@ -1,6 +1,8 @@
 """A member's wardrobe reads as they reach the API in the AWS container: from the loopback, with Host 127.0.0.1 and the
 X-User-Id 1 nginx adds on the SSM port, carrying the token the studio gateway signs with MEMBER (server/src/factory.rs).
 The token decides: a member is listed and served only what the wardrobe offers, whatever header came with it."""
+import hashlib
+
 import jwt as pyjwt
 import pytest
 from fastapi import FastAPI
@@ -54,6 +56,10 @@ def client(library):
     # What nginx makes of every request: the loopback peer, its own Host, and X-User-Id 1.
     with TestClient(app, base_url='http://127.0.0.1', client=('127.0.0.1', 41234), headers={'x-user-id': '1'}) as client:
         yield client
+
+
+def sha_bytes(content):
+    return hashlib.sha256(content).hexdigest()
 
 
 def files(client, headers, name):
@@ -121,3 +127,48 @@ def test_a_member_reads_previews_colours_and_coverage_only_at_the_offered_versio
     assert all(response.json()['error']['code'] == 'not_found' for response in reads(MEMBER, LATER))
     # The studio's operators still look at any version.
     assert [response.status_code for response in reads(OWNER, LATER)][1:] == [200, 200, 200]
+    # A sealed version's preview and mask never change under their address: the browser keeps them.
+    preview, _, mask, _ = reads(MEMBER, V1)
+    assert preview.headers['cache-control'] == mask.headers['cache-control'] == 'private, max-age=31536000, immutable'
+
+
+def test_files_of_a_sealed_version_are_kept_by_the_browser_and_a_failed_versions_are_not(client, library):
+    assert files(client, MEMBER, 'hair.glb').headers['cache-control'] == 'private, max-age=31536000, immutable'
+    assert files(client, OWNER, 'model.glb').headers['cache-control'] == 'private, max-age=31536000, immutable'
+    # A failed version's renders are drawn again when it is resumed.
+    record = library.directory(PART)/'native-parts'/LATER/'record.json'
+    (record.parent/'front.png').parent.mkdir(parents=True, exist_ok=True)
+    (record.parent/'front.png').write_bytes(b'first try')
+    put(record, {'status': 'failed', 'files': {'front.png': sha_bytes(b'first try')}, 'result': {}})
+    response = client.get(f'/api/avatar-factory/jobs/{PART}/native-parts/{LATER}/front.png', headers=OWNER)
+    assert response.content == b'first try' and response.headers['cache-control'] == 'private, no-store'
+
+
+def test_a_part_whose_limb_check_failed_is_listed_and_served_to_a_member_too(client, library):
+    # The limb check is an operator's warning: only the seal's quality gate or the operator's trash hide a part.
+    record = library.directory(PART)/'native-parts'/V1/'record.json'
+    value = read_json(record)
+    value['result']['parts'] = [{**part, 'limb_fit': {'check': {'status': 'fail', 'failures': [{'message': 'sleeve off'}]}}}
+                                if part['slot'] == 'hair' else part for part in value['result']['parts']]
+    put(record, value)
+    member = client.get(f'/api/avatar-factory/wardrobe/bodies/{BODY}/parts', headers=MEMBER).json()
+    operator = client.get(f'/api/avatar-factory/wardrobe/bodies/{BODY}/parts', headers=OWNER).json()
+    assert [(part['slot'], part['fit_check']) for part in member['parts']] == [('hair', None)]
+    assert [(part['slot'], part['fit_check']['status']) for part in operator['parts']] == [('hair', 'fail')]
+    assert files(client, MEMBER, 'hair.glb').content == b'hair'
+
+
+def test_a_part_the_quality_gate_refused_is_neither_listed_nor_served_to_a_member(client, library):
+    record = library.directory(PART)/'native-parts'/V1/'record.json'
+    value = read_json(record)
+    value['result']['parts'] = [{**part, 'available': False, 'unavailable_reason': 'hat_covers_eyes', 'fit_status': 'failed'}
+                                if part['slot'] == 'hair' else part for part in value['result']['parts']]
+    put(record, value)
+    member = client.get(f'/api/avatar-factory/wardrobe/bodies/{BODY}/parts', headers=MEMBER).json()
+    operator = client.get(f'/api/avatar-factory/wardrobe/bodies/{BODY}/parts', headers=OWNER).json()
+    assert member['parts'] == [] and member['unavailable'] == [] and operator['parts'] == []
+    assert sorted((row['slot'], row['reason']) for row in operator['unavailable']) == [
+        ('hair', 'hat_covers_eyes'), ('top', 'fit_exception')]
+    response = files(client, MEMBER, 'hair.glb')
+    assert response.status_code == 404 and response.json()['error']['code'] == 'not_found'
+    assert files(client, OPERATOR, 'hair.glb').content == b'hair'

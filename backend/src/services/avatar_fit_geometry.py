@@ -4,7 +4,7 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from copy import deepcopy
 
-from src.services.avatar_blender_common import bounds, blender_to_gltf
+from src.services.avatar_blender_common import bounds, blender_to_gltf, bone_key
 
 
 def target_box(value):
@@ -84,14 +84,12 @@ def normalize_body(objects, body, target):
 
 def head_weighted_vertices(body, rig, minimum=.25):
     """Return vertices that are materially controlled by the canonical Head bone."""
-    head = next((bone for bone in rig.data.bones
-                 if bone.name.lower().split(':')[-1] == 'head'), None)
+    head = next((bone for bone in rig.data.bones if bone_key(bone.name) == 'head'), None)
     if head is None:
         return {}
     result = {}
     for obj in body:
-        group = next((group for group in obj.vertex_groups
-                      if group.name.lower().split(':')[-1] == 'head'), None)
+        group = next((group for group in obj.vertex_groups if bone_key(group.name) == 'head'), None)
         if group is None:
             continue
         underlayer = set()
@@ -116,7 +114,7 @@ def head_weighted_vertices(body, rig, minimum=.25):
 def head_region(body, rig, spec):
     """Measure skin weighted to Head, with a bounded geometric fallback."""
     lo, hi = bounds(body)
-    bones = {bone.name.lower().split(':')[-1]: bone for bone in rig.data.bones}
+    bones = {bone_key(bone.name): bone for bone in rig.data.bones}
     shoulders = [rig.matrix_world @ bones[name].head_local
                  for name in ('leftarm', 'rightarm') if name in bones]
     rise = spec['anchors']['neck'][1]-spec['anchors']['shoulder_left'][1]
@@ -186,7 +184,7 @@ def hair_target(body, rig, spec, slot='hair'):
 def bind_body_head(body, rig, spec):
     """Keep the visible head on Head even when auto-rigging chose a shoulder."""
     _, _, collar = head_region(body, rig, spec)
-    bone = next((b for b in rig.data.bones if b.name.lower().split(':')[-1] == 'head'), None)
+    bone = next((b for b in rig.data.bones if bone_key(b.name) == 'head'), None)
     if bone is None:
         return {'method': 'unchanged', 'adjusted_vertices': 0}
     blend_start = collar-.04
