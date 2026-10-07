@@ -48,7 +48,6 @@ export function SelectionInspector({ session, object }: { session: EditSession; 
     <>
       <header>
         <b>{objectLabel(object, session.labels)}</b>
-        <small>{turnable(object) ? '끌어서 옮겨요 · 화살표 1m · R 90° · Shift+R 45°' : '끌어서 옮겨요 · 화살표 1m'}</small>
       </header>
       {turnable(object) && (
         <div className="mg-label">

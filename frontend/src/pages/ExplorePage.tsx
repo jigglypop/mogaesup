@@ -6,7 +6,7 @@ import { homeApi } from '../api/endpoints';
 import type { HomeSummary } from '../api/types';
 import { PageShell } from '../shell/Shell';
 import { Icon } from '../ui/icons';
-import { appendHomes, EXPLORE_PAGE, nextBefore, searchOf } from './explore';
+import { appendHomes, EXPLORE_PAGE, nextCursor, searchOf, type ExploreCursor } from './explore';
 
 /** How long the typing rests before the list asks the server. */
 const SEARCH_REST_MS = 300;
@@ -67,7 +67,7 @@ export function ExplorePage() {
   const query = params.get('q') ?? '';
   const search = useRested(searchOf(query), SEARCH_REST_MS);
   const [homes, setHomes] = useState<HomeSummary[] | null>(null);
-  const [before, setBefore] = useState<string | null>(null);
+  const [cursor, setCursor] = useState<ExploreCursor | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
   /** Counts 다시 불러오기 presses: each asks for the first page again. */
@@ -83,7 +83,7 @@ export function ExplorePage() {
     firstReady.current = false;
     paging.current = false;
     setHomes(null);
-    setBefore(null);
+    setCursor(null);
     setError('');
     setLoadingMore(false);
     homeApi.list({ limit: EXPLORE_PAGE, q: search }, controller.signal).then(
@@ -91,14 +91,14 @@ export function ExplorePage() {
         if (controller.signal.aborted) return;
         firstReady.current = true;
         setHomes(result.homes);
-        setBefore(nextBefore(result.homes));
+        setCursor(nextCursor(result.homes));
         setError('');
       },
       () => {
         if (controller.signal.aborted) return;
         // What stays on screen would be the answer to an earlier search.
         setHomes(null);
-        setBefore(null);
+        setCursor(null);
         setError('목록을 불러오지 못했어요');
       },
     );
@@ -107,15 +107,15 @@ export function ExplorePage() {
 
   const loadMore = () => {
     const controller = asking.current;
-    if (!before || !controller || !firstReady.current || paging.current || searchOf(query) !== search) return;
+    if (!cursor || !controller || !firstReady.current || paging.current || searchOf(query) !== search) return;
     paging.current = true;
     setLoadingMore(true);
     setError('');
-    homeApi.list({ limit: EXPLORE_PAGE, q: search, before }, controller.signal).then(
+    homeApi.list({ limit: EXPLORE_PAGE, q: search, ...cursor }, controller.signal).then(
       (result) => {
         if (controller.signal.aborted) return;
         setHomes((current) => appendHomes(current ?? [], result.homes));
-        setBefore(nextBefore(result.homes));
+        setCursor(nextCursor(result.homes));
         setLoadingMore(false);
         paging.current = false;
       },
@@ -180,7 +180,7 @@ export function ExplorePage() {
             </li>
           ))}
         </ul>
-        {before && (
+        {cursor && (
           <button className="mg-btn is-quiet is-wide" disabled={loadingMore || searchOf(query) !== search} onClick={loadMore}>
             더 보기
           </button>

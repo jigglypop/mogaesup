@@ -72,6 +72,7 @@ function Connection({ usage, failed, refresh }: ReturnType<typeof useFactoryUsag
           이번 달 유료 작업 {known.paidThisMonth} / {known.paidMonthly}
         </small>
       )}
+      {known?.connected && known.memberScope === false && <small>회원 옷장 범위 제한 꺼짐</small>}
       {usage?.connected && <StudioPowerLine canStart />}
     </section>
   );

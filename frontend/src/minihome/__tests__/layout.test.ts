@@ -101,8 +101,18 @@ describe('실제 섬 매장 자동 배치', () => {
     unsubscribe(); history.stop();
   });
 
-  it('측정되지 않은 기존 모델을 가정해 배치하지 않는다', () => {
+  it('크기를 확인하지 못한 기존 모델 하나로 배치를 통째로 거절하지 않고, 그 둘레 한 칸을 비우고 그 기물을 알린다', () => {
     const { snapshot } = island();
-    expect(() => proposeLayout(snapshot, interpretLayout('카페'), measured, [0, 0])).toThrow('기존 기물');
+    const lost = snapshot.objects.find(v => v.type === 'model' && !!v.config?.modelUrl)!;
+    const lostUrl = lost.config!.modelUrl!;
+    const plan = proposeLayout(snapshot, interpretLayout('12m × 12m 카페 2인'), measured, [lost.position.x, lost.position.z],
+      [[SPAWN[0], SPAWN[2]]], url => (url === lostUrl ? undefined : bounds.get(url)));
+    expect(plan.notice).toContain(`${lost.config!.modelLabel ?? lost.config!.modelId}: 크기를 확인하지 못해 한 칸을 비웠어요`);
+    const half = 2 * Math.max(1, lost.config!.modelScale ?? 1);
+    const cell: XZ[] = [[lost.position.x - half, lost.position.z - half], [lost.position.x + half, lost.position.z - half],
+      [lost.position.x + half, lost.position.z + half], [lost.position.x - half, lost.position.z + half]];
+    for (const object of plan.objects) expect(footprintsOverlap(objectFootprint(object, bounds.get(object.config!.modelUrl!)!), cell, .15)).toBe(false);
+    // Everything measured: nothing to say.
+    expect(proposal(snapshot).notice.some(text => text.includes('크기를 확인하지 못해'))).toBe(false);
   });
 });

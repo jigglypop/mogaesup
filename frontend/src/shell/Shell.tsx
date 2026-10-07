@@ -6,13 +6,14 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 import { problemText } from '../api/client';
 import { authApi, socialApi } from '../api/endpoints';
-import type { IlchonRequest } from '../api/types';
+import type { IlchonRequest, User } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { can } from '../auth/can';
 import { hasUnsavedWork } from '../auth/sessionWork';
 import { Icon, type IconName } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
+import { leaveFor } from './leaving';
 import { PasswordDialog } from './PasswordDialog';
 
 /** Where an arrow, Home or End key moves to in a menu of `count` items from `index` (-1: none focused yet). */
@@ -94,11 +95,22 @@ export function Brand() {
 
 type RailItem = { label: string; icon: IconName; to: string; active: boolean; divided?: boolean };
 
+/**
+ * Where 운영 opens for `user`: the catalog for catalog editors, the character factory for operators (paid operators are
+ * operators too), and null for anyone with neither.
+ */
+export function adminHome(user: User | null | undefined): string | null {
+  if (can(user, 'catalog_editor')) return '/admin';
+  if (can(user, 'operator')) return '/admin/studio';
+  return null;
+}
+
 /** The app's five places. Signed-out visitors get the island list and the way in. */
 export function Rail() {
   const { user } = useAuth();
   const { pathname } = useLocation();
   const home = user ? `/@${user.username}` : '/';
+  const admin = adminHome(user);
   const items: RailItem[] = [
     { label: '섬', icon: 'island', to: home, active: !!user && pathname === home },
     ...(user
@@ -108,9 +120,7 @@ export function Rail() {
         ]
       : []),
     { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
-    ...(can(user, 'catalog_editor')
-      ? [{ label: '운영', icon: 'shield' as const, to: '/admin', active: pathname.startsWith('/admin'), divided: true }]
-      : []),
+    ...(admin ? [{ label: '운영', icon: 'shield' as const, to: admin, active: pathname.startsWith('/admin'), divided: true }] : []),
   ];
   return (
     <nav className="mg-rail mg-glass" aria-label="모개숲">
@@ -129,13 +139,14 @@ export function Rail() {
   );
 }
 
-function SearchBox() {
+/** The top bar's search: Enter opens 둘러보기 on what was typed, the way a link there would (`leaveFor`). */
+export function SearchBox() {
   const navigate = useNavigate();
   const [text, setText] = useState('');
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const query = text.trim();
-    navigate(query ? `/explore?q=${encodeURIComponent(query)}` : '/explore');
+    leaveFor(query ? `/explore?q=${encodeURIComponent(query)}` : '/explore', navigate);
   };
   return (
     <form className="mg-search" role="search" onSubmit={submit}>
@@ -269,6 +280,8 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
 
 /** Signing out drops what is held for the member here; it asks first when that loses edits nobody saved. */
 const UNSAVED_QUESTION = '저장하지 못한 변경이 있어요. 로그아웃하면 사라져요. 계속할까요?';
+/** Ending every other session signs the member out on all their other devices at once, so it asks first. */
+const END_OTHERS_QUESTION = '다른 기기에서 모두 로그아웃할까요?';
 
 function UserMenu() {
   const { user, lapsed, logout } = useAuth();
@@ -289,6 +302,12 @@ function UserMenu() {
     setStatus('');
     setPassword(false);
   }, [userId]);
+  // What an item did last time is not news when the menu opens again.
+  useEffect(() => {
+    if (!open) return;
+    setError('');
+    setStatus('');
+  }, [open]);
   const signOut = async () => {
     if (pending.current) return;
     if (hasUnsavedWork() && !window.confirm(UNSAVED_QUESTION)) return;
@@ -300,6 +319,7 @@ function UserMenu() {
   };
   const endOthers = async () => {
     if (pending.current) return;
+    if (!window.confirm(END_OTHERS_QUESTION)) return;
     pending.current = true;
     setEndingOthers(true); setError(''); setStatus('');
     try {

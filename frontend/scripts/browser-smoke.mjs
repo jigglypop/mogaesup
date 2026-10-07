@@ -44,6 +44,12 @@ async function member(username, name) {
   await page.locator('input[name=password]').fill(PASSWORD);
   await page.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
   await page.waitForURL(`**/@${username}`);
+  // The first visit to a new island opens 섬 고르기; closing it keeps (and saves) the forest island.
+  const chooser = page.getByRole('dialog', { name: '섬 고르기' });
+  if (await chooser.waitFor({ timeout: WORLD_READY_MS }).then(() => true, () => false)) {
+    await chooser.getByRole('button', { name: '닫기', exact: true }).click();
+    await chooser.waitFor({ state: 'detached' });
+  }
   return page;
 }
 

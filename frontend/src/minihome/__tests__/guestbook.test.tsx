@@ -13,6 +13,8 @@ const { guestbook, write, remove, removeByAuthor } = vi.hoisted(() => ({
 }));
 vi.mock('../../api/endpoints', () => ({ socialApi: { guestbook, write, remove, removeByAuthor } }));
 vi.mock('../../shell/Shell', () => ({ initialOf: (name: string) => name[0], toneOf: () => '0' }));
+const auth = vi.hoisted(() => ({ value: null as { lapsed: User | null } | null }));
+vi.mock('../../auth/AuthProvider', () => ({ useOptionalAuth: () => auth.value }));
 
 const viewer: User = { id: 'owner', username: 'me', displayName: '나', role: 'user' };
 const entry = (id: string): GuestbookEntry => ({
@@ -93,6 +95,34 @@ describe('방명록 요청', () => {
     expect(guestbook.mock.calls[0]?.[2]?.aborted).toBe(true);
     await act(async () => { old(page(['old'])); });
     expect(container.textContent).toContain('글 new'); expect(container.textContent).not.toContain('글 old');
+    await unmount();
+  });
+
+  it('세션이 풀려도 쓰던 글을 지우지 않고 같은 사람이 다시 로그인하면 그대로 있으며, 다른 사람이나 로그아웃이면 지운다', async () => {
+    const at = (who: User | null, lapsed: User | null = null) => {
+      auth.value = { lapsed };
+      return <MemoryRouter><Guestbook username="home" viewer={who} /></MemoryRouter>;
+    };
+    const { container, rerender, unmount } = await mount(at(viewer));
+    const field = () => container.querySelector<HTMLTextAreaElement>('textarea');
+    await type(field()!, '쓰다 만 글');
+    await act(async () => { container.querySelector<HTMLInputElement>('input[type=checkbox]')!.click(); });
+
+    await rerender(at(null, viewer));
+    expect(field()).toBeNull();
+    await rerender(at(viewer));
+    expect(field()?.value).toBe('쓰다 만 글');
+    expect(container.querySelector<HTMLInputElement>('input[type=checkbox]')?.checked).toBe(true);
+
+    await rerender(at(null, viewer));
+    await rerender(at({ ...viewer, id: 'someone', username: 'someone' }));
+    expect(field()?.value).toBe('');
+
+    await type(field()!, '다른 사람의 글');
+    await rerender(at(null));
+    await rerender(at({ ...viewer, id: 'someone', username: 'someone' }));
+    expect(field()?.value).toBe('');
+    auth.value = null;
     await unmount();
   });
 });

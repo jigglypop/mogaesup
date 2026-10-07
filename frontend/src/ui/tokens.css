@@ -51,6 +51,61 @@
   --mg-island-sky: #8fd3ee;
   /* A person's initial on their own colour (the chat bar's faces). */
   --mg-peer-ink: #ffffff;
+  /* Speech balloons over the island (minihome/balloons): each design's fill, line, letters and the rest it draws. The
+     default follows the glass, and 비눗방울 and 리본 follow the theme; the others look the same in either. */
+  --mg-balloon-glass-fill: var(--mg-glass-strong);
+  --mg-balloon-glass-line: var(--mg-hair-strong);
+  --mg-balloon-glass-ink: var(--mg-ink);
+  --mg-balloon-cloud-fill: #ffffff;
+  --mg-balloon-cloud-line: #cfe3f5;
+  --mg-balloon-cloud-ink: #24435f;
+  --mg-balloon-cloud-shadow: rgba(36, 67, 95, 0.18);
+  --mg-balloon-candy-fill: linear-gradient(160deg, #ffe3ec, #ffd2df);
+  --mg-balloon-candy-tip: #ffd2df;
+  --mg-balloon-candy-ring: rgba(255, 255, 255, 0.95);
+  --mg-balloon-candy-shine: rgba(255, 255, 255, 0.9);
+  --mg-balloon-candy-ink: #7a2848;
+  --mg-balloon-candy-shadow: rgba(232, 121, 156, 0.32);
+  --mg-balloon-mint-fill: rgba(214, 246, 233, 0.84);
+  --mg-balloon-mint-line: rgba(47, 158, 122, 0.35);
+  --mg-balloon-mint-ink: #0f5b3d;
+  --mg-balloon-mint-shadow: rgba(15, 91, 61, 0.14);
+  --mg-balloon-night-fill: rgba(29, 24, 48, 0.86);
+  --mg-balloon-night-line: rgba(255, 255, 255, 0.12);
+  --mg-balloon-night-ink: #f3f0ff;
+  --mg-balloon-night-star: #fff3c4;
+  --mg-balloon-night-shadow: rgba(29, 24, 48, 0.3);
+  --mg-balloon-paper-fill: #fffaf0;
+  --mg-balloon-paper-rule: rgba(184, 138, 74, 0.2);
+  --mg-balloon-paper-fold: #ead8b4;
+  --mg-balloon-paper-tape: rgba(255, 214, 120, 0.75);
+  --mg-balloon-paper-ink: #4a3a22;
+  --mg-balloon-paper-shadow: rgba(74, 58, 34, 0.22);
+  --mg-balloon-shout-fill: #ffe066;
+  --mg-balloon-shout-line: #1d1830;
+  --mg-balloon-shout-ink: #1d1830;
+  --mg-balloon-heart-fill: #fff0f5;
+  --mg-balloon-heart-line: #ffb3c9;
+  --mg-balloon-heart-ink: #8a2346;
+  --mg-balloon-heart-shadow: rgba(217, 70, 111, 0.16);
+  --mg-balloon-pixel-fill: #f6f4ea;
+  --mg-balloon-pixel-line: #34303c;
+  --mg-balloon-pixel-ink: #34303c;
+  --mg-balloon-leaf-fill: linear-gradient(150deg, #eef8e4, #d5ecc2);
+  --mg-balloon-leaf-tip: #dcefcd;
+  --mg-balloon-leaf-line: #9ccc84;
+  --mg-balloon-leaf-vein: rgba(106, 168, 79, 0.3);
+  --mg-balloon-leaf-ink: #2f5a1f;
+  --mg-balloon-leaf-shadow: rgba(47, 90, 31, 0.16);
+  --mg-balloon-ribbon-fill: var(--mg-primary);
+  --mg-balloon-ribbon-ink: var(--mg-primary-ink);
+  --mg-balloon-ribbon-shadow: rgba(29, 24, 48, 0.25);
+  --mg-balloon-bubble-fill: rgba(255, 255, 255, 0.34);
+  --mg-balloon-bubble-rim: linear-gradient(120deg, #ff9ad5, #ffd36e, #8ff0c4, #7cc6e0, #b59cff);
+  --mg-balloon-bubble-shine: rgba(255, 255, 255, 0.9);
+  --mg-balloon-bubble-edge: rgba(124, 198, 224, 0.85);
+  --mg-balloon-bubble-ink: var(--mg-ink);
+  --mg-balloon-bubble-shadow: rgba(29, 24, 48, 0.1);
   /* 매장 배치's preview canvas (hex: three.js reads them): its sky, and the way in kept clear. */
   --mg-layout-sky: #cde4e8;
   --mg-layout-path: #52bba4;
@@ -91,11 +146,13 @@
   --mg-impostor-alarm: #ff4d4f;
   --mg-impostor-visor: #9fd8ef;
   --mg-impostor-dark: rgba(6, 8, 20, 0.94);
-  /* 임포스터's ship over the island (hex: three.js reads them): hall and room floors, the cafeteria, walls. */
+  /* 임포스터's ship in the island's place (hex: three.js reads them): hall and room floors, the cafeteria, walls, and
+     the hull under them all. */
   --mg-ship-hall: #8e94a6;
   --mg-ship-room: #c9cfdc;
   --mg-ship-cafeteria: #d9d2c1;
   --mg-ship-wall: #5d6578;
+  --mg-ship-hull: #3b4254;
   /* The crew's colours: bots wear them, and the wires of a task (hex: three.js reads them). */
   --mg-crew-0: #d6302f;
   --mg-crew-1: #2f55d4;
@@ -110,7 +167,7 @@
   --mg-crew-10: #3fd6c8;
   --mg-crew-11: #7bd84a;
   /* 카트 in the island's canvas (hex: three.js reads them): the road, its lines and the start's dark squares, the curbs,
-     the floor under the circuit, item boxes, boost pads, the karts' tyres and seats, a water bubble and a booster's
+     the grass of the racing island, item boxes, boost pads, the karts' tyres and seats, a water bubble and a booster's
      flame; the HUD's big words over the world. */
   --mg-kart-road: #4c5160;
   --mg-kart-line: #f5f2ea;
@@ -126,6 +183,19 @@
   --mg-kart-bubble: #8fd6ff;
   --mg-kart-flame: #ffb03a;
   --mg-kart-shout: #ffffff;
+  /* 카트's racing island round the circuit (hex: three.js reads them): its beach, the shallows and the sea, the groves,
+     the rails behind the curbs and the start's gantry; the drivers' suits, faces and eyes, and the karts' metal. */
+  --mg-kart-sand: #ecd59e;
+  --mg-kart-shallow: #86d6cf;
+  --mg-kart-sea: #3fa6c2;
+  --mg-kart-tree: #3d8c55;
+  --mg-kart-trunk: #8f6545;
+  --mg-kart-rail: #dfe3ea;
+  --mg-kart-gantry: #646b7d;
+  --mg-kart-suit: #fff2da;
+  --mg-kart-skin: #efbf95;
+  --mg-kart-face: #292535;
+  --mg-kart-metal: #bcc5d3;
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(200, 186, 255, 0.5), transparent 62%),
@@ -181,6 +251,12 @@
   --mg-surface: #151622;
   --mg-scrim: rgba(0, 0, 0, 0.5);
 
+  /* The glass balloon follows the glass by itself; 비눗방울's light letters need a darker bubble, dark enough over sand
+     and sky (4.5:1 and more) to read. */
+  --mg-balloon-bubble-fill: rgba(30, 26, 52, 0.62);
+  --mg-balloon-bubble-shine: rgba(255, 255, 255, 0.6);
+  --mg-balloon-bubble-shadow: rgba(0, 0, 0, 0.22);
+
   --mg-shadow: 0 18px 48px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --mg-shadow-soft: 0 6px 18px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.06);
 
@@ -194,6 +270,7 @@
   --mg-ship-room: #8a91a6;
   --mg-ship-cafeteria: #9d9583;
   --mg-ship-wall: #3e4558;
+  --mg-ship-hull: #262b38;
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(110, 88, 190, 0.35), transparent 62%),

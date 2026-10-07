@@ -10,7 +10,8 @@ export const PASSWORD_MIN = 10;
 export const PASSWORD_MAX = 128;
 
 /**
- * Changing the password: the current one and the new one, sent once; what the server says went wrong stays on the form.
+ * Changing the password: the current one and the new one (typed twice, and the two must match), sent once; what the
+ * server says went wrong stays on the form.
  * A modal dialog over the page, closed by Escape, 취소 or 닫기, after which the keyboard goes back where it was.
  */
 export function PasswordDialog({ onClose }: { onClose: () => void }) {
@@ -28,6 +29,7 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
     const form = new FormData(event.currentTarget);
     const currentPassword = String(form.get('currentPassword') ?? '');
     const newPassword = String(form.get('newPassword') ?? '');
+    const confirmPassword = String(form.get('confirmPassword') ?? '');
     const length = [...newPassword].length;
     if (!currentPassword) {
       setError('현재 비밀번호를 입력해 주세요.');
@@ -35,6 +37,11 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
     }
     if (length < PASSWORD_MIN || length > PASSWORD_MAX) {
       setError(`새 비밀번호는 ${PASSWORD_MIN}자 이상 ${PASSWORD_MAX}자 이하예요.`);
+      return;
+    }
+    // A typo would end every other session on a password nobody knows, so the new one is typed twice.
+    if (confirmPassword !== newPassword) {
+      setError('새 비밀번호가 서로 달라요.');
       return;
     }
     sending.current = true;
@@ -86,6 +93,19 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
               <input
                 className="mg-field"
                 name="newPassword"
+                type="password"
+                required
+                minLength={PASSWORD_MIN}
+                maxLength={PASSWORD_MAX}
+                readOnly={busy}
+                autoComplete="new-password"
+              />
+            </label>
+            <label className="mg-label">
+              새 비밀번호 확인
+              <input
+                className="mg-field"
+                name="confirmPassword"
                 type="password"
                 required
                 minLength={PASSWORD_MIN}

@@ -3,27 +3,24 @@ import type { RapierRigidBody } from '@react-three/rapier';
 import type { Group } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { multiplayer, avatars, balloon, frame, ticket } = vi.hoisted(() => ({
-  multiplayer: vi.fn(), avatars: vi.fn(() => null), balloon: vi.fn(() => null), frame: vi.fn(), ticket: vi.fn(),
+const { multiplayer, avatars, ticket } = vi.hoisted(() => ({
+  multiplayer: vi.fn(), avatars: vi.fn((_props: object) => null), ticket: vi.fn(),
 }));
 vi.mock('gaesup-world', async (original) => ({
   ...await original<typeof import('gaesup-world')>(),
   useMultiplayer: multiplayer,
   RemotePlayers: avatars,
-  SpeechBalloon: balloon,
-}));
-vi.mock('@react-three/fiber', async (original) => ({
-  ...await original<typeof import('@react-three/fiber')>(),
-  useFrame: frame,
 }));
 vi.mock('../../api/endpoints', () => ({ authApi: { realtimeTicket: ticket } }));
 
 import { MemoryRouter } from 'react-router-dom';
 
 import type { RealtimeTicket, User } from '../../api/types';
-import { mount } from '../../__tests__/mount';
+import { mount, type } from '../../__tests__/mount';
+import { onSessionCheck } from '../../auth/sessionWork';
 import { useUIConfigStore } from 'gaesup-world';
 
+import { balloonTtl, PERSON_COLORS } from '../balloons/designs';
 import { ChatBar, LiveAvatars, LiveRoom } from '../live';
 
 const user: User = { id: 'viewer-a', username: 'a', displayName: '방문자 A', role: 'user' };
@@ -42,8 +39,8 @@ describe('방문자 연결과 캐릭터 전달', () => {
   };
   const body = { current: null! as RapierRigidBody };
   const visual = { current: null! as Group };
-  const room = (viewer: User | null = user) => <LiveRoom username="host" viewer={viewer}
-    characterUrl="/models/assembled.glb" playerRef={body} visualRotationRef={visual}>
+  const room = (viewer: User | null = user, balloon?: string) => <LiveRoom username="host" viewer={viewer}
+    viewerBalloon={balloon} characterUrl="/models/assembled.glb" playerRef={body} visualRotationRef={visual}>
     <LiveAvatars playerRef={body} />
   </LiveRoom>;
 
@@ -68,29 +65,47 @@ describe('방문자 연결과 캐릭터 전달', () => {
     expect(rendered[0].config).toBe(options.config);
     expect(rendered[0].players).toBe(live.players);
     expect(options.config.rendering).toMatchObject({ materialPolicy: 'figure', tintCharacter: false, characterScale: 1.5 });
+    expect(options.config.rendering.nameTagHeight).toBeCloseTo(1.7 * 1.5 + 0.4);
     expect(live.connect).toHaveBeenCalledWith({ roomId: 'host', playerName: user.displayName, playerColor: expect.stringMatching(/^#[0-9a-f]{6}$/) });
     await view.unmount();
     expect(live.disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it('내가 한 말은 내 캐릭터 위 말풍선으로 몸을 따라간다', async () => {
+  it('말풍선은 엔진이 아니라 섬이 그리며, 방이 열린 동안 엔진의 말풍선은 꺼 둔다', async () => {
+    live.speechByPlayerId = new Map([['p1', '안녕']]);
     const view = await mount(room());
     await flush();
-    expect(balloon).not.toHaveBeenCalled();
-    Object.assign(live, { localSpeechText: '안녕하세요' });
-    multiplayer.mockReturnValue({ ...live });
-    await view.rerender(room());
-    const props = (balloon.mock.calls.at(-1) as unknown as [{ text: string; position: { x: number; y: number; z: number } }])[0];
-    expect(props.text).toBe('안녕하세요');
-    // Each frame copies the body's place into the vector the balloon follows.
-    body.current = { translation: () => ({ x: 3, y: 1.5, z: -2 }) } as unknown as RapierRigidBody;
-    (frame.mock.calls.at(-1) as unknown as [() => void])[0]();
-    expect([props.position.x, props.position.y, props.position.z]).toEqual([3, 1.5, -2]);
-    // Balloons (the others' too) sit just above the name tags, sized for the island camera.
-    const balloons = useUIConfigStore.getState().config.speechBalloon;
-    expect(balloons.defaultOffset.y).toBeCloseTo(1.7 * 1.5 + 1.05);
-    expect([balloons.scaleMultiplier, balloons.maxWidth]).toEqual([1, 400]);
-    body.current = null!;
+    // The engine gets no words to draw over the visitors.
+    for (const [props] of avatars.mock.calls) expect(props).not.toHaveProperty('speechByPlayerId');
+    expect(useUIConfigStore.getState().config.speechBalloon.enabled).toBe(false);
+    await view.unmount();
+    expect(useUIConfigStore.getState().config.speechBalloon.enabled).toBe(true);
+  });
+
+  it('기본 말풍선은 계정마다의 색으로, 고른 말풍선은 그 색으로 방에 들어가고, 바꾸면 그 색으로 다시 들어간다', async () => {
+    const view = await mount(room(user, 'glass'));
+    await flush();
+    const own = live.connect.mock.calls[0]![0].playerColor;
+    expect(PERSON_COLORS).toContain(own);
+    // A page that does not know its viewer's balloon (an older server) joins in the same colour.
+    await view.rerender(room(user, undefined));
+    expect(live.disconnect).not.toHaveBeenCalled();
+
+    await view.rerender(room(user, 'cloud'));
+    expect(live.disconnect).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(live.connect).toHaveBeenLastCalledWith({ roomId: 'host', playerName: user.displayName, playerColor: '#4f9fd8' });
+    await view.unmount();
+  });
+
+  it('방이 끊겨 다시 들어갈 때마다 고른 말풍선의 색으로 들어간다', async () => {
+    // The room stays down: the page keeps joining again, each time with a new ticket.
+    const view = await mount(room(user, 'heart'));
+    await flush();
+    await act(async () => vi.advanceTimersByTimeAsync(12_000));
+    expect(live.connect.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const [options] of live.connect.mock.calls) expect(options.playerColor).toBe('#d9466f');
+    expect(live.disconnect).not.toHaveBeenCalled();
     await view.unmount();
   });
 
@@ -120,12 +135,16 @@ describe('방문자 연결과 캐릭터 전달', () => {
     await view.unmount();
   });
 
-  it('티켓 발급 시 쿠키 계정이 이미 바뀌었다면 이전 이름으로 방에 들어가지 않는다', async () => {
+  it('티켓 발급 시 쿠키 계정이 이미 바뀌었다면 이전 이름으로 방에 들어가지 않고, 누가 로그인했는지 다시 묻게 한다', async () => {
     ticket.mockResolvedValue(pass('wrong-owner', other));
+    const recheck = vi.fn();
+    const stop = onSessionCheck(recheck);
     const view = await mount(room());
     await flush();
     expect(live.connect).not.toHaveBeenCalled();
     expect(live.updateConfig).not.toHaveBeenCalled();
+    expect(recheck).toHaveBeenCalledTimes(1);
+    stop();
     await view.unmount();
   });
 
@@ -164,6 +183,35 @@ describe('로그인하지 않은 방문자의 말하기 자리', () => {
     expect(links.map((link) => link.textContent)).toEqual(['로그인']);
     expect(links[0]?.getAttribute('href')).toBe('/?next=%2F%40host');
     expect(view.container.textContent).toBe('로그인');
+    await view.unmount();
+  });
+});
+
+describe('방에서 말하기', () => {
+  afterEach(() => multiplayer.mockReset());
+
+  it('한 말은 글자 수만큼 떠 있고, 함께 있는 사람의 이름 글자는 그 사람 색 위에서 읽히는 색이다', async () => {
+    const sendChat = vi.fn();
+    const players = new Map([
+      ['p1', { name: '외침이', color: '#e0a800' }],
+      ['p2', { name: '보통이', color: '#5a8acf' }],
+    ]);
+    multiplayer.mockReturnValue({ connectionStatus: 'connected', isConnected: true, localPlayerId: 'me', connect: vi.fn(),
+      disconnect: vi.fn(), updateConfig: vi.fn(), players, speechByPlayerId: new Map(), localSpeechText: null, sendChat });
+    const view = await mount(
+      <MemoryRouter>
+        <LiveRoom username="host" viewer={null} characterUrl="/models/a.glb" playerRef={{ current: null! as RapierRigidBody }}
+          visualRotationRef={{ current: null! as Group }}>
+          <ChatBar signedIn />
+        </LiveRoom>
+      </MemoryRouter>,
+    );
+    const faces = [...view.container.querySelectorAll<HTMLElement>('.mg-chatbar-people i')];
+    expect(faces.map((face) => [face.textContent, face.style.color])).toEqual([['외', 'rgb(29, 24, 48)'], ['보', 'rgb(255, 255, 255)']]);
+    const line = '  오늘 섬에 놀러 와 줘서 고마워요  ';
+    await type(view.container.querySelector<HTMLInputElement>('input[aria-label="말하기"]')!, line);
+    await act(async () => view.container.querySelector('form')!.requestSubmit());
+    expect(sendChat).toHaveBeenCalledExactlyOnceWith(line.trim(), { ttlMs: balloonTtl(line.trim()) });
     await view.unmount();
   });
 });

@@ -4,12 +4,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError, ApiTimeoutError } from '../../api/client';
 import type { Credentials, Registration, User } from '../../api/types';
+import { FakeChannel } from '../../__tests__/broadcast';
 import { mount } from '../../__tests__/mount';
 import { Loading } from '../../pages/Loading';
 import { AuthProvider, SESSION_RENEW_MS, useAuth } from '../AuthProvider';
 import { draftKey } from '../drafts';
+import { SESSION_CHANNEL } from '../otherTabs';
 import { followSession, SESSION_RETRY_MS, SESSION_UNREACHABLE_AFTER } from '../session';
-import { expireSession, followSessionOwner, sessionEpoch, sessionLapsed, setSessionOwner } from '../sessionWork';
+import {
+  expireSession,
+  followSessionOwner,
+  requestSessionCheck,
+  sessionEpoch,
+  sessionLapsed,
+  setSessionOwner,
+  startOver,
+  trackUnsaved,
+} from '../sessionWork';
 
 const { me, login, register, logout } = vi.hoisted(() => ({
   me: vi.fn<() => Promise<{ user: User | null }>>(),
@@ -126,9 +137,14 @@ describe('세션 확인', () => {
 });
 
 describe('로그인 상태 제공자', () => {
-  beforeEach(() => vi.useFakeTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('BroadcastChannel', FakeChannel);
+  });
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+    FakeChannel.open.clear();
     me.mockReset();
     login.mockReset(); register.mockReset(); logout.mockReset(); setSessionOwner(null);
   });
@@ -164,7 +180,7 @@ describe('로그인 상태 제공자', () => {
     await unmount();
   });
 
-  it('오래 열어 둔 화면은 보일 때 다시 물어 서버가 세션을 늘리게 하고, 로그인 상태는 그대로 둔다', async () => {
+  it('화면이 다시 보이면 누가 로그인했는지 묻고(포커스와 함께 와도 한 번), 보이는 채로 둔 화면은 반나절마다 물어 세션을 늘린다', async () => {
     const visibility = (state: DocumentVisibilityState) => Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
     visibility('visible');
     me.mockResolvedValue({ user: mogae });
@@ -174,34 +190,39 @@ describe('로그인 상태 제공자', () => {
       </AuthProvider>,
     );
     expect(me).toHaveBeenCalledTimes(1);
-    // Within the half day: nothing more is asked, however often the page is shown.
+    // Coming back to the tab: focus and visibilitychange arrive together, and ask once.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_RENEW_MS - 60_000);
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    expect(me).toHaveBeenCalledTimes(1);
-    // A hidden page does not ask; shown again after the half day, it does, once.
-    visibility('hidden');
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2 * SESSION_RENEW_MS);
-    });
-    expect(me).toHaveBeenCalledTimes(1);
-    visibility('visible');
-    await act(async () => {
-      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('focus'));
       document.dispatchEvent(new Event('visibilitychange'));
       await flush();
     });
     expect(me).toHaveBeenCalledTimes(2);
-    // A page left in view asks on its own as well.
+    // A hidden page does not ask, on its own or as it is hidden.
+    visibility('hidden');
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(SESSION_RENEW_MS + SESSION_RENEW_MS / 12);
+      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(2 * SESSION_RENEW_MS);
+    });
+    expect(me).toHaveBeenCalledTimes(2);
+    visibility('visible');
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      await flush();
     });
     expect(me).toHaveBeenCalledTimes(3);
+    // Left in view, it asks on its own once the half day since the last ask is up.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_RENEW_MS - SESSION_RENEW_MS / 12);
+    });
+    expect(me).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_RENEW_MS / 6);
+    });
+    expect(me).toHaveBeenCalledTimes(4);
     expect(shown(container)).toBe('signedIn:mogae');
     await unmount();
     await vi.advanceTimersByTimeAsync(2 * SESSION_RENEW_MS);
-    expect(me).toHaveBeenCalledTimes(3);
+    expect(me).toHaveBeenCalledTimes(4);
   });
 
   it('서버가 로그인한 사람이 없다고 하면 바로 anonymous다', async () => {
@@ -380,6 +401,217 @@ describe('로그인 상태 제공자', () => {
       expect(sessionLapsed()).toBe(false);
       expireSession();
       expect(sessionLapsed()).toBe(true);
+    });
+  });
+
+  describe('다른 탭에서 계정이 바뀌었을 때', () => {
+    const visible = () => Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    beforeEach(visible);
+    const other: User = { ...mogae, id: 'u2', username: 'other' };
+
+    it('다른 탭이 로그인을 알리면 바로 다시 묻고 그 계정으로 바뀌며, 이전 계정의 작업은 멈춘다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn();
+      followSessionOwner(mogae.id, stop);
+      const otherTab = new FakeChannel(SESSION_CHANNEL);
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { otherTab.postMessage({ userId: other.id }); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      expect(stop).toHaveBeenCalledTimes(1);
+      otherTab.close();
+      await unmount();
+    });
+
+    it('다른 탭에서 로그아웃했다면 돌아올 때 세션이 풀린 것으로 보고 작업을 남기며, 다시 로그인하면 잇는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn(); const resume = vi.fn();
+      const unwatch = followSessionOwner(mogae.id, stop, resume);
+      me.mockResolvedValueOnce({ user: null });
+      await act(async () => { window.dispatchEvent(new Event('focus')); await flush(); });
+      expect(shown(container)).toBe('anonymous:-');
+      expect(auth.lapsed).toEqual(mogae);
+      expect(sessionLapsed()).toBe(true);
+      expect(stop).not.toHaveBeenCalled();
+
+      login.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { await auth.login({ username: 'mogae', password: 'password' }); });
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(stop).not.toHaveBeenCalled();
+      unwatch();
+      await unmount();
+    });
+
+    it('같은 계정이면 아무것도 바꾸지 않고, 서버가 새로 알려 준 권한만 받는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn(); const resume = vi.fn();
+      const unwatch = followSessionOwner(mogae.id, stop, resume);
+      const before = auth.user;
+      me.mockResolvedValueOnce({ user: { ...mogae } });
+      await act(async () => { window.dispatchEvent(new Event('focus')); await flush(); });
+      expect(auth.user).toBe(before);
+      me.mockResolvedValueOnce({ user: { ...mogae, permissions: ['operator'] } });
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await flush(); });
+      expect(auth.user?.permissions).toEqual(['operator']);
+      expect(stop).not.toHaveBeenCalled();
+      expect(resume).not.toHaveBeenCalled();
+      unwatch();
+      await unmount();
+    });
+
+    it('다른 계정에게 간 답(실시간 티켓)이 다시 묻게 한다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { requestSessionCheck(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      await unmount();
+      // A page that is gone asks nothing.
+      requestSessionCheck();
+      expect(me).toHaveBeenCalledTimes(2);
+    });
+
+    it('다른 탭이 다른 계정으로 로그인해도 이 탭에 저장하지 못한 편집이 있으면 버리지 않고 세션이 풀린 채로 두며, 다시 로그인하면 잇는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn(); const resume = vi.fn();
+      const unwatch = followSessionOwner(mogae.id, stop, resume);
+      const untrack = trackUnsaved(() => true);
+      const otherTab = new FakeChannel(SESSION_CHANNEL);
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { otherTab.postMessage({ userId: other.id }); await flush(); });
+      expect(shown(container)).toBe('anonymous:-');
+      expect(auth.lapsed).toEqual(mogae);
+      expect(stop).not.toHaveBeenCalled();
+      // Coming back to the tab asks again; the edits still wait for their member.
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { window.dispatchEvent(new Event('focus')); await flush(); });
+      expect(auth.lapsed).toEqual(mogae);
+      expect(stop).not.toHaveBeenCalled();
+
+      login.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { await auth.login({ username: 'mogae', password: 'password' }); });
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(stop).not.toHaveBeenCalled();
+      expect(shown(container)).toBe('signedIn:mogae');
+      untrack(); unwatch(); otherTab.close();
+      await unmount();
+    });
+
+    it('기다리던 편집이 저장되거나 정리되면 다음에 물을 때 다른 탭의 계정을 따른다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn();
+      followSessionOwner(mogae.id, stop);
+      let unsaved = true;
+      const untrack = trackUnsaved(() => unsaved);
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { requestSessionCheck(); await flush(); });
+      expect(auth.lapsed).toEqual(mogae);
+      unsaved = false;
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { window.dispatchEvent(new Event('focus')); await flush(); });
+      expect(shown(container)).toBe('signedIn:other');
+      expect(stop).toHaveBeenCalledTimes(1);
+      untrack();
+      await unmount();
+    });
+
+    it('이 탭에서 세션을 새로 열면(비밀번호 바꾸기, 다른 기기 로그아웃) 다른 탭에 알린다', async () => {
+      const otherTab = new FakeChannel(SESSION_CHANNEL);
+      const heard = vi.fn();
+      otherTab.onmessage = (event) => heard(event.data);
+      me.mockResolvedValueOnce({ user: mogae });
+      const { unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      startOver()('renewed');
+      expect(heard).toHaveBeenCalledExactlyOnceWith({ userId: mogae.id, renewed: true });
+      // A change that brought no new cookie (a wrong password) tells nobody.
+      startOver()();
+      expect(heard).toHaveBeenCalledTimes(1);
+      otherTab.close();
+      await unmount();
+    });
+
+    it('다른 탭이 세션을 새로 열었다고 알리면 옛 쿠키에 대한 늦은 거절은 흘려듣고, 그 사이 풀린 세션은 되찾아 작업을 잇는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn(); const resume = vi.fn();
+      const unwatch = followSessionOwner(mogae.id, stop, resume);
+      const otherTab = new FakeChannel(SESSION_CHANNEL);
+      // Sent with the old cookie before the news; refused after it.
+      const sentAt = sessionEpoch();
+      me.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { otherTab.postMessage({ userId: mogae.id, renewed: true }); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      await act(async () => { expireSession(sentAt); });
+      expect(shown(container)).toBe('signedIn:mogae');
+      expect(resume).toHaveBeenCalledTimes(1);
+
+      // Refused before the news came: the tab lapsed for a moment, and the news brings the member back.
+      await act(async () => { expireSession(); });
+      expect(shown(container)).toBe('anonymous:-');
+      me.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { otherTab.postMessage({ userId: mogae.id, renewed: true }); await flush(); });
+      expect(shown(container)).toBe('signedIn:mogae');
+      expect(resume).toHaveBeenCalledTimes(2);
+      expect(stop).not.toHaveBeenCalled();
+      unwatch(); otherTab.close();
+      await unmount();
+    });
+
+    it('세션을 새로 여는 사이에 물은 me가 옛 쿠키로 아무도 아니라고 답해도 세션을 풀지 않는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      let answer!: (value: { user: User | null }) => void;
+      me.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+      await act(async () => { window.dispatchEvent(new Event('focus')); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      startOver()('renewed');
+      await act(async () => { answer({ user: null }); await flush(); });
+      expect(shown(container)).toBe('signedIn:mogae');
+      expect(sessionLapsed()).toBe(false);
+      await unmount();
+    });
+
+    it('이 탭이 로그인하는 사이 다른 탭이 로그인을 알리면, 끝난 뒤 다시 물어 쿠키의 주인을 따른다', async () => {
+      me.mockResolvedValueOnce({ user: null });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      let signedIn!: (value: { user: User }) => void;
+      login.mockImplementationOnce(() => new Promise((resolve) => { signedIn = resolve; }));
+      let done!: Promise<User>;
+      await act(async () => { done = auth.login({ username: 'mogae', password: 'password' }); });
+      const otherTab = new FakeChannel(SESSION_CHANNEL);
+      await act(async () => { otherTab.postMessage({ userId: other.id }); await flush(); });
+      expect(me).toHaveBeenCalledTimes(1);
+      // The other tab's sign-in reached the cookie last.
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { signedIn({ user: mogae }); await done; await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      otherTab.close();
+      await unmount();
+    });
+
+    it('이 탭에서 로그인하거나 로그아웃하면 다른 탭에 알린다', async () => {
+      const otherTab = new FakeChannel(SESSION_CHANNEL);
+      const heard = vi.fn();
+      otherTab.onmessage = (event) => heard(event.data);
+      me.mockResolvedValueOnce({ user: null });
+      const { unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      login.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { await auth.login({ username: 'mogae', password: 'password' }); });
+      expect(heard).toHaveBeenLastCalledWith({ userId: mogae.id });
+      logout.mockResolvedValueOnce(undefined);
+      await act(async () => { await auth.logout(); });
+      expect(heard).toHaveBeenLastCalledWith({ userId: null });
+      expect(heard).toHaveBeenCalledTimes(2);
+      await unmount();
+      expect(FakeChannel.open.size).toBe(1);
+      otherTab.close();
     });
   });
 

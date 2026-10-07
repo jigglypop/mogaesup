@@ -122,8 +122,8 @@ describe('island saver', () => {
     }
   });
 
-  it('408·429·5xx는 서버 쪽 사정이라 잠시 뒤 다시 저장한다', async () => {
-    for (const status of [408, 429, 500, 502]) {
+  it('429·5xx는 서버 쪽 사정이라 잠시 뒤 다시 저장한다', async () => {
+    for (const status of [429, 500, 502]) {
       const world = fakeWorld();
       const saver = await ready(world, { retryMs: [3_000] });
       world.answers.push(new ApiRequestError(status, 'http_error', ''));
@@ -134,6 +134,52 @@ describe('island saver', () => {
       expect(world.system.save).toHaveBeenCalledTimes(2);
       expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
     }
+  });
+
+  it('섬을 끝까지 올리지 못한 incomplete_world·408은 회선 탓이라 편집을 둔 채 잠시 뒤 다시 저장한다', async () => {
+    // A slow upload: the server stopped waiting for the island's body before it had all of it.
+    for (const error of [new ApiRequestError(400, 'incomplete_world', ''), new ApiRequestError(408, 'http_error', '')]) {
+      const world = fakeWorld();
+      const saver = await ready(world, { retryMs: [3_000] });
+      world.answers.push(error);
+      world.edit();
+      await saver.save();
+      expect(saver.getState()).toMatchObject({ problem: { kind: 'network' }, dirty: true });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(world.system.save).toHaveBeenCalledTimes(2);
+      expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
+    }
+  });
+
+  it('세션을 새로 여는 사이 옛 쿠키로 거절되면 로그인을 기다리지 않고, 새 쿠키가 온 뒤 flush하면 바로 저장한다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    world.answers.push(new ApiRequestError(401, 'login_required', '로그인이 필요합니다.', true));
+    world.edit();
+    await saver.save();
+    expect(saver.getState().problem).toMatchObject({ kind: 'network' });
+    // The new cookie is in (the page's session went on): the island goes at once, not after the retry delay.
+    expect(await saver.flush()).toBe(true);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
+  });
+
+  it('사이트 저장 공간이 다 차 거절되면 같은 섬은 다시 보내지 않다가, 섬이 바뀌면 다시 저장해 본다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world, { idleMs: 1_000, retryMs: [3_000] });
+    world.answers.push(new ApiRequestError(507, 'site_storage_full', '지금은 섬을 더 크게 저장할 수 없어요.'));
+    world.edit();
+    await saver.save();
+    expect(saver.getState().problem).toMatchObject({ kind: 'tooLarge' });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(await saver.flush()).toBe(false);
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+
+    world.edit();
+    saver.changed();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(saver.getState().problem).toBeNull();
   });
 
   it('로그인이 풀려 거절되면 자동 저장을 멈추고 편집을 둔 채 기다리다, 다시 로그인한 뒤 flush하면 저장한다', async () => {
@@ -407,10 +453,46 @@ describe('save messages', () => {
     expect(describeSaveError(new ApiRequestError(401, 'login_required', ''))).toMatchObject({ kind: 'session' });
     expect(describeSaveError(new ApiRequestError(403, 'forbidden', ''))).toMatchObject({ kind: 'auth' });
     expect(describeSaveError(new ApiRequestError(409, 'owner_changed', ''))).toMatchObject({ kind: 'auth' });
-    expect(describeSaveError(new ApiRequestError(408, 'http_error', ''))).toMatchObject({ kind: 'server' });
+    // A request timeout is the upload not arriving in time, as with a body cut short below.
+    expect(describeSaveError(new ApiRequestError(408, 'http_error', ''))).toMatchObject({ kind: 'network' });
     expect(describeSaveError(new ApiRequestError(429, 'rate_limited', ''))).toMatchObject({ kind: 'server' });
     expect(describeSaveError(new ApiRequestError(503, 'database', ''))).toMatchObject({ kind: 'server' });
+    expect(describeSaveError(new ApiRequestError(503, 'timeout', ''))).toMatchObject({ kind: 'server' });
     expect(describeSaveError(new TypeError('Failed to fetch'))).toMatchObject({ kind: 'network' });
+  });
+
+  it('섬 본문을 끝까지 받지 못한 400 incomplete_world와 408은 섬이 잘못된 것이 아니라 회선 탓이라 다시 보낸다', () => {
+    for (const error of [
+      new ApiRequestError(400, 'incomplete_world', '섬 데이터를 끝까지 받지 못했습니다. 다시 저장해 주세요.'),
+      new ApiRequestError(408, 'http_error', '요청이 실패했어요 (408)'),
+    ]) {
+      const problem = describeSaveError(error);
+      expect(problem).toMatchObject({ kind: 'network', message: '섬을 끝까지 보내지 못했어요. 곧 다시 저장해 볼게요.' });
+      expect(problem !== 'conflict' && retryable(problem)).toBe(true);
+    }
+    expect(describeSaveError(new ApiRequestError(400, 'invalid_world', ''))).toMatchObject({ kind: 'invalid' });
+  });
+
+  it('서버가 저장 자리를 내주지 못한 429(world_busy·world_saving)와 시간 초과 503은 잠시 뒤 다시 보낸다', () => {
+    for (const [status, code] of [[429, 'world_busy'], [429, 'world_saving'], [503, 'timeout']] as const) {
+      const problem = describeSaveError(new ApiRequestError(status, code, ''));
+      expect(problem).toMatchObject({ kind: 'server' });
+      expect(problem !== 'conflict' && retryable(problem)).toBe(true);
+    }
+    expect(describeSaveError(new ApiRequestError(400, 'invalid_residents', ''))).toMatchObject({ kind: 'invalid' });
+    expect(describeSaveError(new ApiRequestError(413, 'too_large', ''))).toMatchObject({ kind: 'tooLarge' });
+  });
+
+  it('세션을 새로 여는 사이 옛 쿠키로 거절된 401은 로그인이 풀린 것이 아니라 다시 보낼 실패다', () => {
+    expect(describeSaveError(new ApiRequestError(401, 'login_required', '', true))).toMatchObject({ kind: 'network' });
+    expect(describeSaveError(new ApiRequestError(401, 'login_required', '', false))).toMatchObject({ kind: 'session' });
+  });
+
+  it('사이트 저장 공간이 다 찬 507은 서버가 잠시 멈춘 것이 아니라 섬을 줄여야 저장된다', () => {
+    const full = describeSaveError(new ApiRequestError(507, 'site_storage_full', '지금은 섬을 더 크게 저장할 수 없어요.'));
+    expect(full).toMatchObject({ kind: 'tooLarge' });
+    expect(full !== 'conflict' && full.message).toContain('더 크게 저장할 수 없어요');
+    expect(full !== 'conflict' && (retryable(full) || savesLater(full))).toBe(false);
   });
 
   it('다시 보내서 될 실패, 로그인 뒤에 저장될 실패, 섬을 바꿔야 할 실패를 가른다', () => {

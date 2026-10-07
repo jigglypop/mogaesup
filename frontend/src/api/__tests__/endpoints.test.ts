@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { setSessionOwner } from '../../auth/sessionWork';
-import { homeApi, homesPath, layoutApi, shareUrl, socialApi } from '../endpoints';
+import { onSessionLapse, setSessionOwner } from '../../auth/sessionWork';
+import { authApi, homeApi, homesPath, layoutApi, shareUrl, socialApi } from '../endpoints';
 
 describe('섬 공유 링크', () => {
   it('미리보기를 읽는 서버의 공유 페이지를 가리킨다', () => {
@@ -27,6 +27,15 @@ describe('섬 목록 주소', () => {
     // 시간대의 +가 공백으로 읽히면 안 된다.
     expect(path).toContain('%2B09%3A00');
     expect(path).not.toContain('모');
+  });
+
+  it('다음 쪽은 마지막 섬의 주인 id를 시각과 함께 보낸다', () => {
+    const owner = '7d9f2c1e-0b4a-4c3e-9a51-2f6d8e0c4b17';
+    const query = new URLSearchParams(homesPath({ limit: 24, before: '2026-09-30T00:00:00Z', beforeId: owner }).slice('/homes?'.length));
+    expect(query.get('before')).toBe('2026-09-30T00:00:00Z');
+    expect(query.get('beforeId')).toBe(owner);
+    // 시각 없는 주인 id는 이어 볼 자리가 아니다.
+    expect(homesPath({ beforeId: owner })).toBe('/homes');
   });
 
   describe('목록을 부를 때', () => {
@@ -147,6 +156,38 @@ describe('섬 목록 주소', () => {
       await Promise.all([before, after]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       setSessionOwner(null);
+    });
+  });
+
+  describe('세션을 새로 여는 계정 요청', () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const lapses = vi.fn();
+    let stop = () => {};
+    beforeEach(() => {
+      vi.stubGlobal('fetch', fetchMock);
+      setSessionOwner('u1');
+      stop = onSessionLapse(lapses);
+    });
+    afterEach(() => {
+      stop();
+      lapses.mockReset();
+      setSessionOwner(null);
+      fetchMock.mockReset();
+      vi.unstubAllGlobals();
+    });
+
+    it.each([
+      ['비밀번호 바꾸기', () => authApi.changePassword({ currentPassword: 'old-password', newPassword: 'new-password' }), new Response(null, { status: 204 })],
+      ['다른 기기 로그아웃', () => authApi.logoutOthers(), new Response(JSON.stringify({ ended: 2 }), { status: 200 })],
+    ])('%s 중 닫힌 실시간 연결이 옛 쿠키로 티켓을 거절당해도 로그아웃하지 않는다', async (_name, call, answered) => {
+      let answer!: (response: Response) => void;
+      fetchMock.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+      const pending = call();
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ code: 'login_required', message: '' }), { status: 401 }));
+      await expect(authApi.realtimeTicket()).rejects.toMatchObject({ status: 401, code: 'login_required' });
+      answer(answered);
+      await pending;
+      expect(lapses).not.toHaveBeenCalled();
     });
   });
 });

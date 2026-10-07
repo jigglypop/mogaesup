@@ -19,12 +19,17 @@ const { mine, get, visit, items, looks, opened, closed } = vi.hoisted(() => ({
 }));
 vi.mock('../../api/endpoints', () => ({ homeApi: { mine, get, visit }, catalogApi: { items }, lookApi: { mine: looks } }));
 vi.mock('../../minihome/Minihome', () => ({
-  default: function Island({ view, viewer }: MinihomeProps) {
+  default: function Island({ view, viewer, viewerBalloon, onView }: MinihomeProps) {
     useEffect(() => {
       opened(view.isOwner);
       return () => closed();
     }, [view]);
-    return <p className="island" data-visits={view.visits.today}>{viewer?.username ?? '-'}</p>;
+    return (
+      <p className="island" data-visits={view.visits.today} data-balloon={viewerBalloon ?? ''}
+        onClick={() => onView({ ...view, profile: { ...view.profile, balloon: 'night' } })}>
+        {viewer?.username ?? '-'}
+      </p>
+    );
   },
 }));
 vi.mock('../../minihome/figures', () => ({ FALLBACK_MINIME: 'man', prefetchModels: () => {} }));
@@ -144,6 +149,20 @@ describe('섬 화면과 세션', () => {
     await unmount();
   });
 
+  it('미니미 목록을 받지 못해도 섬은 열린다', async () => {
+    serve();
+    items.mockImplementation(async (kind: string) => {
+      if (kind === 'minime') throw new Error('502');
+      return { items: [] };
+    });
+    auth = { status: 'signedIn', user: other, lapsed: null };
+    const { container, unmount } = await mount(page(false));
+    await settle();
+    expect(container.querySelector('.island')?.textContent).toBe('other');
+    expect(container.textContent).not.toContain('섬을 불러오지 못했어요');
+    await unmount();
+  });
+
   it('꾸미기 서랍의 스튜디오 가구 목록은 섬 주인에게만 받는다', async () => {
     serve();
     const kinds = () => items.mock.calls.map(([kind]) => kind);
@@ -157,6 +176,29 @@ describe('섬 화면과 세션', () => {
     const owner = await mount(page(false));
     await settle();
     expect(kinds()).toContain('furniture');
+    await owner.unmount();
+  });
+
+  it('주인은 자기 섬의 말풍선으로, 방문자는 자기 섬에서 고른 말풍선으로 말하고, 주인이 바꾸면 바로 그것으로 말한다', async () => {
+    serve();
+    const withBalloon = (isOwner: boolean, balloon: string) => ({ ...view(isOwner), profile: { ...view(isOwner).profile, balloon } });
+    mine.mockResolvedValue(withBalloon(true, 'cloud'));
+    get.mockImplementation(async (name: string) => (name === 'other' ? withBalloon(true, 'shout') : withBalloon(false, 'cloud')));
+    auth = { status: 'signedIn', user: other, lapsed: null };
+    const visitor = await mount(page(false));
+    await settle();
+    expect(visitor.container.querySelector('.island')?.getAttribute('data-balloon')).toBe('shout');
+    // Only the owner's changes are theirs to talk in.
+    await act(async () => visitor.container.querySelector<HTMLElement>('.island')!.click());
+    expect(visitor.container.querySelector('.island')?.getAttribute('data-balloon')).toBe('shout');
+    await visitor.unmount();
+
+    auth = { status: 'signedIn', user: mogae, lapsed: null };
+    const owner = await mount(page(false));
+    await settle();
+    expect(owner.container.querySelector('.island')?.getAttribute('data-balloon')).toBe('cloud');
+    await act(async () => owner.container.querySelector<HTMLElement>('.island')!.click());
+    expect(owner.container.querySelector('.island')?.getAttribute('data-balloon')).toBe('night');
     await owner.unmount();
   });
 });

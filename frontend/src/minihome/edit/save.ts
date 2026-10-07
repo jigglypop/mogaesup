@@ -29,11 +29,24 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
   }
   if (error instanceof ApiRequestError) {
     if (error.code === 'owner_changed') return { kind: 'auth', message: error.message };
+    // The site keeps as much island text as it may: an island no larger than the stored one still saves.
+    if (error.code === 'site_storage_full') {
+      return { kind: 'tooLarge', message: '지금은 섬을 더 크게 저장할 수 없어요. 물건이나 바닥을 줄이면 저장할 수 있어요.' };
+    }
     if (error.status === 409) return 'conflict';
-    if (error.status === 401 && error.code === SESSION_REFUSED) return { kind: 'session', message: '로그인이 풀려 저장하지 못했어요. 다시 로그인하면 이어서 저장해요.' };
+    if (error.status === 401 && error.code === SESSION_REFUSED) {
+      // Sent with the cookie this page had before its session started over (a password change): the session goes on.
+      if (error.staleCookie) return { kind: 'network', message: '섬을 저장하지 못했어요. 곧 다시 저장해 볼게요.' };
+      return { kind: 'session', message: '로그인이 풀려 저장하지 못했어요. 다시 로그인하면 이어서 저장해요.' };
+    }
     if (error.status === 401 || error.status === 403) return { kind: 'auth', message: '이 섬을 저장할 권한이 없어요.' };
-    // A timeout, a rate limit or a server error may pass in a moment; any other refusal would come back the same.
-    if (error.status === 408 || error.status === 429 || error.status >= 500) {
+    // The island stopped coming before its end (a slow or broken upload), or the server stopped waiting for it: nothing
+    // was stored, and the same island goes again.
+    if (error.code === 'incomplete_world' || error.status === 408) {
+      return { kind: 'network', message: '섬을 끝까지 보내지 못했어요. 곧 다시 저장해 볼게요.' };
+    }
+    // A rate limit or a server error may pass in a moment; any other refusal would come back the same.
+    if (error.status === 429 || error.status >= 500) {
       return { kind: 'server', message: '서버가 잠시 대답하지 않아요. 조금 뒤에 다시 저장해 볼게요.' };
     }
     if (error.status === 422) {

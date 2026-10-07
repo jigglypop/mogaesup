@@ -1,8 +1,8 @@
 import type { SaveAdapter, SaveBlob } from 'gaesup-world';
 
-import { ApiRequestError, ApiTimeoutError } from '../api/client';
+import { ApiRequestError, ApiTimeoutError, SESSION_REFUSED } from '../api/client';
 import { homeApi } from '../api/endpoints';
-import { followSessionOwner } from '../auth/sessionWork';
+import { followSessionOwner, sessionLapsed } from '../auth/sessionWork';
 
 const MAIN_SLOT = 'main';
 /** The server's limit on one island's save envelope (`MAX_WORLD_BYTES`). */
@@ -101,6 +101,9 @@ export function createHomeSaveAdapter(options: { username: string; ownerId: stri
     async write(slot, blob) {
       if (!options.writable || slot !== MAIN_SLOT) return;
       if (controller.signal.aborted) throw new ApiRequestError(409, 'owner_changed', '계정이 바뀌어 저장을 중단했어요.');
+      // A lapsed session sends nothing: the cookie is no one's, or someone else's who signed in from another tab, and the
+      // owner signing in again saves the island (as a refusal of the session would have it wait).
+      if (sessionLapsed()) throw new ApiRequestError(401, SESSION_REFUSED, '로그인이 필요합니다.');
       const text = JSON.stringify(blob);
       lastBytes = byteLength(text);
       if (lastBytes > MAX_ISLAND_BYTES) throw new IslandTooLargeError(lastBytes);

@@ -1,11 +1,10 @@
 import './minihome.css';
 import './edit/edit.css';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 
 import type { RapierRigidBody } from '@react-three/rapier';
 
-import { useNavigate } from 'react-router-dom';
 import { DefaultLoadingManager, type Group } from 'three';
 
 import {
@@ -22,8 +21,11 @@ import { homeApi, lookApi } from '../api/endpoints';
 import { followSessionOwner, sessionBelongsTo, trackUnsaved } from '../auth/sessionWork';
 import type { CatalogItem, HomeView, Look, ProfileChanges, User } from '../api/types';
 import { GameDock } from '../games/GameDock';
+import { GameSurface } from '../games/GameSurface';
 import { GameWorld } from '../games/GameWorld';
 import { GameRoom } from '../games/room';
+import { PetButton, PetSheet, usePetIsland } from '../pets/PetPanel';
+import { PetWorld } from '../pets/PetWorld';
 import { Brand, initialOf, Rail, toneOf, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
 import { useTabs } from '../ui/tabs';
@@ -32,13 +34,18 @@ import { Decorate } from './Decorate';
 import { EditContext, useEditState, useSaver } from './edit/context';
 import { EditBar, EditHelp, SaveBanners, StartBanner } from './edit/EditChrome';
 import { createEditHistory, readParts, sameParts } from './edit/history';
-import { appDestination, hasUnsaved, heldSavesSettled, leaveIsland } from './edit/leave';
+import { arriveAtStart, changeIsland, createIslandBackup, restoreIsland } from './edit/islandChange';
+import { IslandChooser, useIslandChooser } from './edit/IslandChooser';
+import { hasUnsaved, heldSavesSettled, leaveIsland } from './edit/leave';
 import { createIslandSaver } from './edit/save';
 import { createEditSession } from './edit/session';
+import { useIslandLeaving } from './edit/useIslandLeaving';
 import { useIslandStart } from './edit/useIslandStart';
 import { Guestbook } from './Guestbook';
 import { NeighborsTab, useNeighbors } from './Ilchons';
 import { InteractButton } from './InteractButton';
+import { templateOf } from './islands';
+import { createIslandStore } from './islands/domain';
 import { ChatBar, LiveAvatars, LiveRoom, usePresence } from './live';
 import { createHomeSaveAdapter } from './persistence';
 import { About, minimeOf, ProfileHeader } from './Profile';
@@ -49,7 +56,7 @@ import { SettingsMenu } from './Settings';
 import { SharedToast, ShareLink, type Shared } from './ShareLink';
 import { StatusPanel } from './StatusPanel';
 import { useStored } from './stored';
-import { createVillage, spawnFor } from './village';
+import { spawnFor } from './village';
 import { WEATHER_NOW } from './weather';
 import { createMinihomeRuntime, MINIHOME_WORLD_ID } from './world';
 import { WorldKeyboard } from './WorldKeyboard';
@@ -135,6 +142,8 @@ export type MinihomeProps = {
   viewer: User | null;
   /** The 미니미 the viewer walks the island as: the owner's own, or the visitor's. */
   viewerMinime: string;
+  /** The speech balloon the viewer talks in, theirs on every island (the default when not given). */
+  viewerBalloon?: string;
   minimes: CatalogItem[];
   /** Furniture copied in from the character studio, for the decorating drawer. */
   studioItems: CatalogItem[];
@@ -149,9 +158,8 @@ export type MinihomeProps = {
 };
 
 /** One home's island. Its runtime is this home's alone; mount it under a `key` per home. */
-export default function Minihome({ view, viewer, viewerMinime, minimes, studioItems, npcItems, viewerLook, onLook, editing, onView }: MinihomeProps) {
+export default function Minihome({ view, viewer, viewerMinime, viewerBalloon, minimes, studioItems, npcItems, viewerLook, onLook, editing, onView }: MinihomeProps) {
   const { profile, isOwner } = view;
-  const navigate = useNavigate();
   const [saved, setSaved] = useState(false);
   const [shared, setShared] = useState<Shared | null>(null);
   const [profileError, setProfileError] = useState('');
@@ -164,8 +172,11 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const [world] = useState(() => {
     const adapter = createHomeSaveAdapter({ username: profile.username, ownerId: profile.ownerId, worldId: MINIHOME_WORLD_ID, writable: isOwner });
     const residents = createResidentStore();
+    const island = createIslandStore();
     const greetings = createGreetingStore();
-    const runtime = createMinihomeRuntime(adapter, residents, (error, context) => console.error(`[island ${context.source}]`, error));
+    const runtime = createMinihomeRuntime(adapter, residents, island, (error, context) => console.error(`[island ${context.source}]`, error));
+    // The island from before the owner's last change of kind, kept to go back to.
+    const backup = isOwner ? createIslandBackup({ username: profile.username, ownerId: profile.ownerId }) : null;
     const saver = createIslandSaver({ system: runtime.save, adapter, writable: isOwner });
     const history = createEditHistory(runtime.buildingStore);
     const labels = new Map(studioItems.map((item) => [item.id, item.label]));
@@ -177,7 +188,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const release = () => {
       if (released) return;
       released = true;
-      untrack(); stopSession(); adapter.dispose();
+      untrack(); stopSession(); adapter.dispose(); backup?.dispose();
       void runtime.dispose().catch((error: unknown) => console.error(error));
     };
     // Someone else signing in (or a sign-out) ends this owner's island; the owner signing in again after their session
@@ -185,7 +196,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     if (isOwner) stopSession = followSessionOwner(profile.ownerId, () => { adapter.dispose(); saver.dispose(); }, () => void saver.flush());
     // An earlier visit to this island may still be saving what it was left with; this one reads the island after that.
     const start = { load: () => heldSavesSettled(profile.username).then(() => saver.load()) };
-    return { runtime, saver, start, history, session, residents, greetings, release };
+    return { runtime, saver, start, history, session, residents, greetings, release, island, adapter, backup };
   });
   const { runtime, saver, session, residents, greetings } = world;
   const { failed: startFailed, retry: retryStart } = useIslandStart({ runtime, saver: world.start, history: world.history });
@@ -251,6 +262,20 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const [spawn] = useState(() => spawnFor(isOwner ? null : (viewer?.username ?? null)));
   const playerRef = useRef<RapierRigidBody>(null!);
   const visualRotationRef = useRef<Group>(null!);
+  // The kind of island: its sky, rooms and arrival areas. An owner whose island was never saved picks one first (asked
+  // once, when it has loaded); 섬 바꾸기 in the drawer opens the same chooser.
+  const islandId = useSyncExternalStore(world.island.subscribe, world.island.getState);
+  const template = templateOf(islandId);
+  const chooser = useIslandChooser(isOwner, saverState.phase, world.adapter);
+  const islandChange = useMemo(
+    () =>
+      world.backup && {
+        ...world,
+        backup: world.backup,
+        arrive: () => arriveAtStart(playerRef.current, session?.getState().active ? session : null),
+      },
+    [world, session],
+  );
   // The same elements on every render, so the memoized scene skips the renders of this page (the panels, the live room).
   const visitors = useMemo(() => <LiveAvatars playerRef={playerRef} />, []);
   const gameWorld = useMemo(() => <GameWorld playerRef={playerRef} />, []);
@@ -258,6 +283,12 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const residentsWorld = useMemo(
     () => <ResidentsWorld runtime={runtime} residents={residents} items={npcItems} greetings={greetings} />,
     [runtime, residents, npcItems, greetings],
+  );
+  // The island's pet: its owner trains it on this page; everyone else sees it where the owner's page relays it.
+  const pets = usePetIsland({ username: profile.username, ownerId: profile.ownerId, isOwner });
+  const petWorld = useMemo(
+    () => pets.home && <PetWorld home={pets.home} runtime={runtime} decorating={decorating} />,
+    [pets.home, runtime, decorating],
   );
   const changeSettings = useCallback(
     (next: Partial<SceneSettings>) => setSettings((current) => ({ ...current, ...next })),
@@ -319,48 +350,21 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     [saver],
   );
   const saveNow = useCallback(() => void save(), [save]);
-  // Leaving saves first; with nothing unsaved (or nothing that can be saved yet) it just leaves. When the save fails the
-  // owner may stay with the edits or leave without them. One leaving at a time, and none once the island is gone (the
-  // save can answer after Back or a sign-out took the page elsewhere).
-  const leaving = useRef(false);
-  const leave = useCallback(
-    (to: string) => {
-      if (leaving.current) return;
-      if (!hasUnsaved(saver.getState())) {
-        navigate(to);
-        return;
-      }
-      leaving.current = true;
-      void save()
-        .then((ok) => {
-          if (!active.current) return;
-          if (!ok && !window.confirm('저장하지 못한 변경이 있어요. 나가면 사라져요. 계속할까요?')) return;
-          discarding.current = !ok;
-          navigate(to);
-        })
-        .finally(() => {
-          leaving.current = false;
-        });
-    },
-    [saver, save, navigate],
-  );
+  const reloaded = () => {
+    world.history.stop();
+    world.history.start();
+  };
+  const { leave } = useIslandLeaving({
+    saver,
+    save,
+    owner: isOwner,
+    decorating,
+    editing,
+    username: profile.username,
+    discarding,
+    onReloaded: reloaded,
+  });
   const exit = () => leave(home);
-  // The router here has no way to block a navigation, so a link out of the editor (the rail, the brand) is caught as it
-  // is clicked and goes the same way. Back and Forward are left to the island's leaving, which keeps what is unsaved, and
-  // so is a link marked to keep the edits (signing in again, after which they are saved).
-  useEffect(() => {
-    if (!decorating) return undefined;
-    const intercept = (event: MouseEvent) => {
-      const to = appDestination(event);
-      if (to === null || !hasUnsaved(saver.getState())) return;
-      if (event.target instanceof Element && event.target.closest('[data-keep-edits]')) return;
-      event.preventDefault();
-      event.stopPropagation();
-      leave(to);
-    };
-    document.addEventListener('click', intercept, true);
-    return () => document.removeEventListener('click', intercept, true);
-  }, [decorating, saver, leave]);
   useEffect(() => {
     if (!saved) return undefined;
     const timer = setTimeout(() => setSaved(false), 2200);
@@ -376,11 +380,6 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const timer = setTimeout(() => setProfileError(''), PROFILE_ERROR_MS);
     return () => clearTimeout(timer);
   }, [profileError]);
-  // Finishing decorating saves what is left, rather than waiting for the autosave.
-  useEffect(() => {
-    if (!decorating) return undefined;
-    return () => void saver.flush();
-  }, [decorating, saver]);
   // Hiding the tab saves; closing or reloading it with edits still unsaved asks first.
   const unsaved = decorating && (saverState.dirty || saverState.saving);
   useEffect(() => {
@@ -406,19 +405,14 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     window.addEventListener('beforeunload', leaving);
     return () => window.removeEventListener('beforeunload', leaving);
   }, [saver, unsaved]);
-  const resetIsland = () => runtime.buildingStore.getState().hydrate(createVillage());
-  const reloaded = () => {
-    world.history.stop();
-    world.history.start();
-  };
 
   return (
     <GaesupWorld runtime={runtime} urls={urls} cameraOption={CAMERA}>
       <Bgm enabled={bgm} />
       <CameraOcclusion fade={settings.cameraFade ?? true} />
-      <LiveRoom username={profile.username} viewer={viewer} characterUrl={characterUrl} playerRef={playerRef} visualRotationRef={visualRotationRef}>
-        <GameRoom username={profile.username} viewer={viewer} building={building} playerRef={playerRef}>
-          <div className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`}>
+      <LiveRoom username={profile.username} viewer={viewer} viewerBalloon={viewerBalloon} characterUrl={characterUrl} playerRef={playerRef} visualRotationRef={visualRotationRef}>
+        <GameRoom username={profile.username} viewer={viewer} building={building} playerRef={playerRef} decorating={decorating}>
+          <GameSurface className={`mg-world${decorating ? ' is-editing' : ''}${panelOpen ? ' has-panel' : ''}`} style={{ '--mg-island-sky': template.sky.background } as CSSProperties}>
             <div className="mg-world-canvas" ref={canvasBox}>
               {/* The canvas reads the decorating session for its in-world tools (R3F bridges the context). */}
               <EditContext.Provider value={decorating ? session : null}>
@@ -429,7 +423,9 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                   spawn={spawn}
                   visitors={visitors}
                   residents={residentsWorld}
+                  pet={petWorld}
                   game={gameWorld}
+                  template={template}
                 />
               </EditContext.Provider>
             </div>
@@ -441,7 +437,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                 <EditBar view={view} session={session} saver={saver} onSave={saveNow} onExit={exit} />
                 <Rail />
                 {saverState.phase === 'ready' || editActive ? (
-                  <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onReset={resetIsland} ownerId={profile.ownerId} />
+                  <Decorate session={session} studioItems={studioItems} residents={residents} npcItems={npcItems} onChangeIsland={chooser.change} ownerId={profile.ownerId} />
                 ) : (
                   <p className="mg-edit-wait mg-glass" role="status">
                     {saverState.phase === 'loading' && !startFailed ? '섬을 불러오는 중이에요.' : '섬을 불러오지 못했어요.'}
@@ -459,6 +455,7 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                   </div>
                   <TopActions>
                     <ShareLink username={profile.username} onShared={setShared} />
+                    {isOwner && <PetButton pets={pets} />}
                     {viewer && <GameDock />}
                     <SettingsMenu settings={settings} onChange={changeSettings} bgm={bgm} onBgm={setBgm} onPerformance={() => setPerformance(true)} />
                   </TopActions>
@@ -509,9 +506,10 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
                 )}
 
                 <div className="mg-world-bottom">
+                  {isOwner && <PetSheet pets={pets} playerRef={playerRef} />}
                   <ResidentGreeting greetings={greetings} />
                   <InteractButton />
-                  <ChatBar signedIn={!!viewer} />
+                  <ChatBar signedIn={!!viewer} onOwnerLine={isOwner ? pets.chat : undefined} />
                 </div>
                 {performance && <StatusPanel onClose={() => setPerformance(false)} />}
               </>
@@ -526,8 +524,19 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
             {startFailed && <StartBanner onRetry={retryStart} />}
             {profileError && <p className="mg-toast mg-glass mg-error" role="alert">{profileError}</p>}
             <SaveBanners saver={saver} editing={decorating} onReloaded={reloaded} />
+            {chooser.mode && islandChange && (
+              <IslandChooser
+                mode={chooser.mode}
+                current={islandId}
+                onChange={(id) => changeIsland(islandChange, id)}
+                onRestore={() => restoreIsland(islandChange)}
+                loadPrevious={islandChange.backup.read}
+                onKeep={saver.save}
+                onClose={chooser.close}
+              />
+            )}
             <ToastHost position="top-center" />
-          </div>
+          </GameSurface>
         </GameRoom>
       </LiveRoom>
     </GaesupWorld>

@@ -24,6 +24,8 @@ type Loaded = {
   /** Published 주민, for the island's residents. */
   npcs: CatalogItem[];
   viewerMinime: string;
+  /** The speech balloon the viewer talks in: theirs on every island. */
+  viewerBalloon: string | undefined;
   /** The signed-in viewer's own look from the wardrobe. */
   viewerLook: Look | null;
   /** Who it was loaded for: the signed-in viewer's username, or null for a signed-out visit. */
@@ -70,10 +72,11 @@ export function MinihomePage({ username, editing }: { username: string; editing:
       // Studio furniture fills only the owner's decorating drawer.
       const studioFurniture = () => catalogApi.items('furniture').catch(() => ({ items: [] }));
       const ownFurniture = own ? studioFurniture() : null;
-      // One round trip: the visitor's own home does not wait for this home to arrive.
+      // One round trip: the visitor's own home does not wait for this home to arrive. Without the 미니미 list the island
+      // still opens, everyone walking as the packaged figure.
       const [view, minimes, npcs, viewerLook, mine] = await Promise.all([
         own ? homeApi.mine() : homeApi.get(username),
-        catalogApi.items('minime'),
+        catalogApi.items('minime').catch(() => ({ items: [] })),
         catalogApi.items('npc').catch(() => ({ items: [] })),
         viewerName ? lookApi.mine().then(({ look }) => look, () => null) : null,
         viewerName && !own ? homeApi.get(viewerName).catch(() => null) : null,
@@ -88,6 +91,7 @@ export function MinihomePage({ username, editing }: { username: string; editing:
         furniture: furniture.items,
         npcs: npcs.items,
         viewerMinime,
+        viewerBalloon: view.isOwner ? view.profile.balloon : mine?.profile.balloon,
         viewerLook,
         as: viewerName,
       });
@@ -135,6 +139,7 @@ export function MinihomePage({ username, editing }: { username: string; editing:
         view={loaded.view}
         viewer={user}
         viewerMinime={loaded.viewerMinime}
+        viewerBalloon={loaded.viewerBalloon}
         minimes={loaded.minimes}
         studioItems={loaded.furniture}
         npcItems={loaded.npcs}
@@ -144,7 +149,12 @@ export function MinihomePage({ username, editing }: { username: string; editing:
         onView={(view) =>
           setLoaded(
             (current) =>
-              current && { ...current, view, viewerMinime: view.isOwner ? view.profile.minime : current.viewerMinime },
+              current && {
+                ...current,
+                view,
+                viewerMinime: view.isOwner ? view.profile.minime : current.viewerMinime,
+                viewerBalloon: view.isOwner ? view.profile.balloon : current.viewerBalloon,
+              },
           )
         }
       />

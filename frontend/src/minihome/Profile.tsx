@@ -4,6 +4,7 @@ import { problemText } from '../api/client';
 import type { CatalogItem, HomeView, HomeVisibility, Look, ProfileChanges } from '../api/types';
 import { draftKey } from '../auth/drafts';
 import { Icon } from '../ui/icons';
+import { BalloonPicker } from './balloons/BalloonPicker';
 import { wearsLook } from './character';
 import { IslandThumbnail } from './Thumbnail';
 
@@ -210,8 +211,8 @@ export function ProfileHeader({
 }
 
 /**
- * 소개: the island's name, the owner's mood and 미니미 (or their own look from the wardrobe), who may visit, and the
- * picture a link to the island shows.
+ * 소개: the island's name, the owner's mood and 미니미 (or their own look from the wardrobe), who may visit, the balloon
+ * they talk in on every island, and the picture a link to the island shows.
  */
 export function About({
   view,
@@ -283,6 +284,10 @@ export function About({
                 </button>
               ))}
             </div>
+          </div>
+          <div className="mg-label">
+            말풍선
+            <BalloonPicker value={profile.balloon} onPick={(balloon) => update({ balloon })} />
           </div>
           {onThumbnail && <IslandThumbnail view={view} onChange={onThumbnail} islandCanvas={islandCanvas} />}
         </section>

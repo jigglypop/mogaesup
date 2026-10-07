@@ -11,13 +11,14 @@ import type { AdminCatalogItem, CatalogChanges, CatalogImport, CatalogKind, Cata
 import { useAuth } from '../auth/AuthProvider';
 import { can } from '../auth/can';
 import { SignInRedirect } from '../auth/signIn';
-import { PageShell } from '../shell/Shell';
+import { adminHome, PageShell } from '../shell/Shell';
 import { StudioPowerLine, WakeBanner, useEvery } from '../studio/StudioPower';
 import { Icon } from '../ui/icons';
 import { CatalogTable } from './admin/CatalogTable';
 import { STATUS_LABEL, outcomeText, retireWarning } from './admin/catalogView';
 import { useImportQueue } from './admin/hooks';
 import { ImportPanel } from './admin/ImportPanel';
+import { PetBreeds } from './admin/PetBreeds';
 import { PipelineBoard, type ImportFields } from './admin/PipelineBoard';
 import { PreviewDialog, type PreviewTarget } from './admin/PreviewDialog';
 import { VersionsDialog } from './admin/VersionsDialog';
@@ -113,7 +114,8 @@ export function AdminPage() {
 
   if (status === 'loading') return <Loading />;
   if (!user) return <SignInRedirect />;
-  if (!isAdmin) return <Navigate to={`/@${user.username}`} replace />;
+  // Operators who do not edit the catalog run the character factory from here.
+  if (!isAdmin) return <Navigate to={adminHome(user) ?? `/@${user.username}`} replace />;
 
   const mark = (keys: string[], on: boolean) =>
     setBusy((previous) => {
@@ -212,18 +214,21 @@ export function AdminPage() {
         )}
 
         {catalogTab ? (
-          <CatalogTable
-            items={items}
-            problem={itemsProblem}
-            onRetry={retryItems}
-            imports={queue.imports ?? []}
-            busy={busy}
-            onPatch={patch}
-            onStatus={setStatus}
-            onBulk={bulk}
-            onPreview={setPreview}
-            onVersions={setVersionsOf}
-          />
+          <>
+            <CatalogTable
+              items={items}
+              problem={itemsProblem}
+              onRetry={retryItems}
+              imports={queue.imports ?? []}
+              busy={busy}
+              onPatch={patch}
+              onStatus={setStatus}
+              onBulk={bulk}
+              onPreview={setPreview}
+              onVersions={setVersionsOf}
+            />
+            <PetBreeds onNotice={setNotice} />
+          </>
         ) : (
           <>
             <ImportPanel

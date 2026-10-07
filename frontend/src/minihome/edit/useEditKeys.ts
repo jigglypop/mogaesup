@@ -39,6 +39,13 @@ export function useEditKeys(session: EditSession, actions: { save: () => void })
     const { history, held } = session;
     const down = (event: KeyboardEvent) => {
       const state = session.getState();
+      // Ctrl+S is never the browser's "save page" while decorating, whatever has the keyboard; it saves the island unless a
+      // dialog is over it.
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key.toLowerCase() === 's' || event.code === 'KeyS')) {
+        event.preventDefault();
+        if (state.active && !state.help && !event.repeat && !modalOpen()) save();
+        return;
+      }
       if (!state.active || event.isComposing || typing(event) || tabbing(event)) return;
       const handled = () => event.preventDefault();
 
@@ -56,7 +63,6 @@ export function useEditKeys(session: EditSession, actions: { save: () => void })
         const is = (letter: string) => event.key.toLowerCase() === letter || event.code === `Key${letter.toUpperCase()}`;
         if (is('z') && !event.shiftKey) history.undo();
         else if ((is('z') && event.shiftKey) || is('y')) history.redo();
-        else if (is('s')) save();
         else if (is('d')) {
           if (!event.repeat) session.duplicateSelected();
         } else return;

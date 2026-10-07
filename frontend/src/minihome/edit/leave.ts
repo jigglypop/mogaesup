@@ -41,6 +41,48 @@ const idle = (saver: IslandSaver) =>
       })
     : Promise.resolve();
 
+/**
+ * Edits nothing will save until the owner acts: a conflict waits for their choice, a too large or refused island for a
+ * change. Leaving the island drops them, so leaving asks first (`guardHistory` for Back and Forward).
+ */
+export const waitsForOwner = (state: SaverState) => hasUnsaved(state) && finished(state);
+
+type HistoryEntry = { state: unknown; href: string };
+const indexOf = (state: unknown) => {
+  const index = (state as { idx?: unknown } | null)?.idx;
+  return typeof index === 'number' ? index : null;
+};
+
+/**
+ * While edits wait for their owner (`waitsForOwner`), Back and Forward to a page off the island ask first. It listens
+ * ahead of the router (capturing, on the window); declining stops the router from hearing the move and goes back to
+ * where the page was (by the router's own history index, or else by putting the address back). `stays` says which paths
+ * keep the island open (its own and its decorating screen); `leaving` runs when the owner chose to go.
+ */
+export function guardHistory(
+  { stays, ask, leaving }: { stays: (path: string) => boolean; ask: () => boolean; leaving: () => void },
+  win: Window = window,
+): () => void {
+  let here: HistoryEntry = { state: win.history.state, href: win.location.href };
+  const popped = (event: PopStateEvent) => {
+    if (stays(win.location.pathname)) {
+      here = { state: win.history.state, href: win.location.href };
+      return;
+    }
+    if (ask()) {
+      leaving();
+      return;
+    }
+    event.stopImmediatePropagation();
+    const from = indexOf(here.state);
+    const to = indexOf(event.state);
+    if (from !== null && to !== null && from !== to) win.history.go(from - to);
+    else win.history.pushState(here.state, '', here.href);
+  };
+  win.addEventListener('popstate', popped, true);
+  return () => win.removeEventListener('popstate', popped, true);
+}
+
 /** Edits a held saver could still store without its owner: not done, and not waiting for them to sign in again. */
 const stillSaving = (state: SaverState) => !finished(state) && state.problem?.kind !== 'session';
 
@@ -101,6 +143,18 @@ export function leaveIsland(saver: IslandSaver, release: () => void, discard = f
       if (saver.disposed || finished(saver.getState())) letGo();
     });
   });
+}
+
+/** Whether `path` opens the island of `username` or its decorating screen: moving there keeps the island mounted. */
+export function onIsland(path: string, username: string): boolean {
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    // A malformed escape is read as it is.
+  }
+  const [slug, rest, ...more] = (decoded.split(/[?#]/)[0] ?? '').split('/').filter(Boolean);
+  return more.length === 0 && (rest === undefined || rest === 'edit') && slug?.toLowerCase() === `@${username.toLowerCase()}`;
 }
 
 type LinkClick = Pick<MouseEvent, 'target' | 'button' | 'defaultPrevented' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>;

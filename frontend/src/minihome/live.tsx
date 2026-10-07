@@ -10,16 +10,14 @@ import {
   type RefObject,
 } from 'react';
 
-import { useFrame } from '@react-three/fiber';
 import type { RapierRigidBody } from '@react-three/rapier';
-import { Vector3, type Group } from 'three';
+import type { Group } from 'three';
 
 import { Link } from 'react-router-dom';
 
 import {
   defaultMultiplayerConfig,
   RemotePlayers,
-  SpeechBalloon,
   useMultiplayer,
   useUIConfigStore,
   type MultiplayerConfig,
@@ -28,15 +26,20 @@ import {
 
 import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
+import { requestSessionCheck } from '../auth/sessionWork';
 import { useSignInPath } from '../auth/signIn';
 import { useHiddenPeers, withoutPeers } from '../games/hiddenPeers';
+import { useRoomQuiet } from '../games/quiet';
+import { noSeat } from '../games/useGameSession';
 import { Icon } from '../ui/icons';
+import { BalloonLayer } from './balloons/BalloonLayer';
+import { NAME_TAG_HEIGHT } from './balloons/board';
+import { balloonOf, balloonTtl, readableInk, roomColor } from './balloons/designs';
 import { MINIME_SCALE } from './character';
 import { peerColor } from './peers';
 
 type Multiplayer = ReturnType<typeof useMultiplayer>;
 
-const COLORS = ['#ff7a59', '#8b6cf0', '#2bb3a3', '#e89b16', '#5a8acf', '#e5534b'];
 const MAX_CHAT = 200;
 const CHECK_MS = 1_000;
 /** A connect() this recent may not have rendered as `connecting` yet. */
@@ -55,7 +58,7 @@ const CONFIG: MultiplayerConfig = {
   rendering: {
     ...defaultMultiplayerConfig.rendering,
     characterScale: MINIME_SCALE,
-    nameTagHeight: 1.7 * MINIME_SCALE + 0.4,
+    nameTagHeight: NAME_TAG_HEIGHT,
     materialPolicy: 'figure',
     tintCharacter: false,
   },
@@ -64,21 +67,49 @@ const CONFIG: MultiplayerConfig = {
 const roomUrl = (username: string, ticket: string) =>
   `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/rooms/${encodeURIComponent(username)}?ticket=${encodeURIComponent(ticket)}`;
 
-const colorOf = (id: string) => COLORS[[...id].reduce((sum, char) => sum + char.charCodeAt(0), 0) % COLORS.length]!;
+/**
+ * The socket the engine opens while `open` runs, caught as it is made: the engine keeps a close's code and reason to
+ * itself, and the page says why the room had no seat. Null when none was made.
+ */
+function openedSocket(open: () => void): WebSocket | null {
+  const Native = globalThis.WebSocket;
+  if (typeof Native !== 'function') {
+    open();
+    return null;
+  }
+  const caught: { socket: WebSocket | null } = { socket: null };
+  class Watched extends Native {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols);
+      caught.socket = this;
+    }
+  }
+  globalThis.WebSocket = Watched;
+  try {
+    open();
+  } finally {
+    globalThis.WebSocket = Native;
+  }
+  return caught.socket;
+}
 
 /**
  * The home's live room: signed-in people on the same minihome see each other walk and talk. Once a second it checks
  * the connection; when it is down it asks the server for a new ticket and connects again, waiting longer after each
- * failed try, up to half a minute.
+ * failed try, up to half a minute, and half a minute after the room had no seat (`refused` says why until it has one).
+ * The viewer joins in their balloon's colour (their own colour for the default one), which tells everyone how to draw
+ * what they say; another balloon joins again in its colour.
  */
 function useLiveRoom(options: {
   username: string;
   viewer: User | null;
+  /** The balloon the viewer talks in (`HomeProfile.balloon`); the default when not given. */
+  viewerBalloon?: string;
   characterUrl: string;
   playerRef: RefObject<RapierRigidBody>;
   visualRotationRef: RefObject<Group>;
-}): Multiplayer {
-  const { username, viewer, characterUrl, playerRef, visualRotationRef } = options;
+}): Multiplayer & { refused: string | null } {
+  const { username, viewer, viewerBalloon, characterUrl, playerRef, visualRotationRef } = options;
   const live = useMultiplayer({
     config: CONFIG,
     characterUrl: new URL(characterUrl, location.origin).href,
@@ -87,11 +118,13 @@ function useLiveRoom(options: {
   });
   const liveRef = useRef(live);
   liveRef.current = live;
+  const [refused, setRefused] = useState<string | null>(null);
   const viewerId = viewer?.id;
   const viewerName = viewer?.displayName;
+  const viewerColor = viewerId && roomColor(viewerBalloon, viewerId);
 
   useEffect(() => {
-    if (!viewerId || !viewerName) return undefined;
+    if (!viewerId || !viewerName || !viewerColor) return undefined;
     let stopped = false;
     let busy = false;
     let delay = RETRY_FIRST_MS;
@@ -99,22 +132,40 @@ function useLiveRoom(options: {
     let triedAt = 0;
     const check = async () => {
       const status = liveRef.current.connectionStatus;
-      if (status === 'connected') delay = RETRY_FIRST_MS;
+      if (status === 'connected') {
+        delay = RETRY_FIRST_MS;
+        setRefused(null);
+      }
       const down = status === 'disconnected' || status === 'error';
       const now = Date.now();
       if (stopped || busy || !down || now < nextAt || now - triedAt < SETTLE_MS) return;
       busy = true;
       try {
         const { ticket, user } = await authApi.realtimeTicket();
-        if (stopped || user.id !== viewerId) return;
+        if (stopped) return;
+        // The cookie is someone else's now (another tab signed in): the page finds out who, and joins as them.
+        if (user.id !== viewerId) {
+          requestSessionCheck();
+          return;
+        }
         liveRef.current.updateConfig({ websocket: { ...CONFIG.websocket, url: roomUrl(username, ticket) } });
-        liveRef.current.connect({ roomId: username, playerName: viewerName, playerColor: colorOf(viewerId) });
+        const socket = openedSocket(() =>
+          liveRef.current.connect({ roomId: username, playerName: viewerName, playerColor: viewerColor }),
+        );
+        socket?.addEventListener('close', (event) => {
+          const why = noSeat(event);
+          if (stopped || !why) return;
+          setRefused(why);
+          // No seat: not again for a while (each try takes a ticket).
+          delay = RETRY_LAST_MS;
+          nextAt = Date.now() + RETRY_LAST_MS;
+        });
         triedAt = Date.now();
       } catch {
         // Signed out or rate limited; the next try waits longer.
       } finally {
         busy = false;
-        nextAt = Date.now() + delay;
+        nextAt = Math.max(nextAt, Date.now() + delay);
         delay = Math.min(delay * 2, RETRY_LAST_MS);
       }
     };
@@ -125,30 +176,47 @@ function useLiveRoom(options: {
       clearInterval(timer);
       liveRef.current.disconnect();
     };
-  }, [username, viewerId, viewerName]);
+  }, [username, viewerId, viewerName, viewerColor]);
 
-  return live;
+  return useMemo(() => ({ ...live, refused }), [live, refused]);
 }
 
-/** What the room's screens read: who is here, what they say, and the way to talk. */
+/**
+ * What the room's screens read: who is here, what they say, the way to talk, why the room had no seat, and the balloon
+ * the viewer talks in.
+ */
 type Live = Pick<
   Multiplayer,
   'isConnected' | 'localPlayerId' | 'players' | 'speechByPlayerId' | 'localSpeechText' | 'sendChat'
->;
+> & { refused: string | null; balloon: string };
 const LiveContext = createContext<Live | null>(null);
 
 /** Opens the live room for everything below it; render it under `GaesupWorld`, whose runtime the tracking reads. */
 export function LiveRoom({ children, ...options }: Parameters<typeof useLiveRoom>[0] & { children: ReactNode }) {
-  useBalloonStyle();
-  const { isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat } = useLiveRoom(options);
+  useEngineBalloonsOff();
+  const { isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat, refused } = useLiveRoom(options);
+  const balloon = balloonOf(options.viewerBalloon);
   // The room answers a new object on every update, a visitor's moves (several a second) and pings included, and every
   // reader of this context re-renders with its value, the island's canvas too (R3F bridges contexts into it). Moves reach
   // the avatars through `players` itself; the value changes only when one of these does.
   const live = useMemo(
-    () => ({ isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat }),
-    [isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat],
+    () => ({ isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat, refused, balloon }),
+    [isConnected, localPlayerId, players, speechByPlayerId, localSpeechText, sendChat, refused, balloon],
   );
   return <LiveContext.Provider value={live}>{children}</LiveContext.Provider>;
+}
+
+/**
+ * The page draws the balloons (BalloonLayer); the engine's own (a canvas sprite of one shrinking line) stay off while
+ * the room is open, should anything still hand it words.
+ */
+function useEngineBalloonsOff() {
+  useEffect(() => {
+    const config = useUIConfigStore.getState();
+    const enabled = config.config.speechBalloon.enabled;
+    config.updateSpeechBalloonConfig({ enabled: false });
+    return () => useUIConfigStore.getState().updateSpeechBalloonConfig({ enabled });
+  }, []);
 }
 
 /** The room as its screens read it (`players` keeps each avatar's latest state between renders); null outside one. */
@@ -168,68 +236,29 @@ export function useLivePlayers(): ReadonlyMap<string, PlayerState> | null {
   return useLive()?.players ?? null;
 }
 
-/** Everyone else in the room, each in their own 미니미, but those a game hides; mount inside the world's physics. */
+/**
+ * Everyone else in the room, each in their own 미니미, but those a game hides, and what everyone says (the viewer too)
+ * in their own balloon; mount inside the world's physics.
+ */
 export function LiveAvatars({ playerRef }: { playerRef: RefObject<RapierRigidBody> }) {
   const live = useLive();
   const hidden = useHiddenPeers();
   const everyone = live?.players;
   const players = useMemo(() => everyone && withoutPeers(everyone, hidden), [everyone, hidden]);
-  if (!live || !players) return null;
+  if (!live || !everyone || !players) return null;
   return (
     <>
-      <RemotePlayers players={players} config={CONFIG} playerRef={playerRef} speechByPlayerId={live.speechByPlayerId} />
-      {live.localSpeechText ? <LocalSpeech text={live.localSpeechText} playerRef={playerRef} /> : null}
+      <RemotePlayers players={players} config={CONFIG} playerRef={playerRef} />
+      <BalloonLayer
+        speech={live.speechByPlayerId}
+        ownKey={live.localPlayerId}
+        ownDesign={live.balloon}
+        players={everyone}
+        hidden={hidden}
+        playerRef={playerRef}
+      />
     </>
   );
-}
-
-/** Where a balloon sits: just above a 미니미's name tag (`nameTagHeight`), sized for the island camera. */
-const BALLOON_HEIGHT = 1.7 * MINIME_SCALE + 1.05;
-
-/**
- * Speech balloons (the engine draws them for everyone in the room) in the glass colours, re-read when the theme changes;
- * the engine's own defaults float them 4.5 m up at 4 × 2 m and squeeze the words into a fifth of the balloon.
- */
-function useBalloonStyle() {
-  useEffect(() => {
-    const apply = () => {
-      const css = getComputedStyle(document.documentElement);
-      const token = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
-      useUIConfigStore.getState().updateSpeechBalloonConfig({
-        defaultOffset: { x: 0, y: BALLOON_HEIGHT, z: 0 },
-        scaleMultiplier: 1,
-        fontSize: 72,
-        padding: 24,
-        maxWidth: 400,
-        borderRadius: 64,
-        borderWidth: 4,
-        backgroundColor: token('--mg-glass-strong', 'rgba(255, 255, 255, 0.86)'),
-        textColor: token('--mg-ink', '#1d1830'),
-        borderColor: token('--mg-hair-strong', 'rgba(29, 24, 48, 0.14)'),
-      });
-    };
-    apply();
-    const theme = new MutationObserver(apply);
-    theme.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    return () => theme.disconnect();
-  }, []);
-}
-
-/** What the member just said, above their own character, drawn as the others' words are drawn above theirs. */
-function LocalSpeech({ text, playerRef }: { text: string; playerRef: RefObject<RapierRigidBody> }) {
-  // The balloon follows this vector every frame; the body is where the room places the member for the others too. It
-  // starts where the body is, so the first frame does not draw it at the island's origin and fly it over.
-  const position = useMemo(() => {
-    const at = playerRef.current?.translation();
-    return at ? new Vector3(at.x, at.y, at.z) : new Vector3();
-  }, [playerRef]);
-  useFrame(() => {
-    const body = playerRef.current;
-    if (!body) return;
-    const at = body.translation();
-    position.set(at.x, at.y, at.z);
-  });
-  return <SpeechBalloon text={text} position={position} />;
 }
 
 /** How many are on the island now, counting the viewer, and who the others are; empty until the room connects. */
@@ -240,11 +269,16 @@ export function usePresence() {
   return { connected: true, count: others.length + 1, others };
 }
 
-/** Who is here with you, and a line to say to whoever stands near; signed out, the way in (and back to this island). */
-export function ChatBar({ signedIn }: { signedIn: boolean }) {
+/**
+ * Who is here with you, and a line to say to whoever stands near; signed out, the way in (and back to this island).
+ * `onOwnerLine` hears each line the island's owner says (their pet takes commands from it).
+ */
+export function ChatBar({ signedIn, onOwnerLine }: { signedIn: boolean; onOwnerLine?: ((line: string) => void) | undefined }) {
   const live = useLive();
   const signIn = useSignInPath();
   const [text, setText] = useState('');
+  // A game that keeps its players quiet in the room now (임포스터 between meetings): nothing to send.
+  const quiet = useRoomQuiet();
   if (!signedIn) {
     return (
       <Link className="mg-btn is-primary mg-chatbar-signin" to={signIn}>
@@ -255,40 +289,46 @@ export function ChatBar({ signedIn }: { signedIn: boolean }) {
   if (!live?.isConnected) {
     return (
       <div className="mg-chatbar mg-glass is-hint" role="status">
-        <span>함께 있는 사람을 찾는 중…</span>
+        <span>{live?.refused ?? '함께 있는 사람을 찾는 중…'}</span>
       </div>
     );
   }
   const send = (event: FormEvent) => {
     event.preventDefault();
-    const line = text.trim();
-    if (!line) return;
-    live.sendChat(line.slice(0, MAX_CHAT));
+    const line = text.trim().slice(0, MAX_CHAT);
+    if (!line || quiet) return;
+    // Up over the viewer as long as it stays over them for the others.
+    live.sendChat(line, { ttlMs: balloonTtl(line) });
+    onOwnerLine?.(line);
     setText('');
   };
   const others = [...live.players.values()];
   return (
     <form className="mg-chatbar mg-glass" onSubmit={send}>
       <span className="mg-chatbar-people" aria-hidden="true">
-        {others.slice(0, 3).map((player, index) => (
-          <i key={index} style={{ background: peerColor(player.color) }}>
-            {[...player.name][0] ?? '?'}
-          </i>
-        ))}
+        {others.slice(0, 3).map((player, index) => {
+          const color = peerColor(player.color);
+          return (
+            <i key={index} style={{ background: color, color: readableInk(color) }}>
+              {[...player.name][0] ?? '?'}
+            </i>
+          );
+        })}
       </span>
       <b className="mg-chatbar-count">함께 {others.length + 1}명</b>
       {live.localSpeechText && <span className="mg-chip is-soft mg-chatbar-said">{live.localSpeechText}</span>}
       <input
         value={text}
         maxLength={MAX_CHAT}
-        placeholder="근처에 있는 사람에게 말하기"
+        placeholder="말하기"
         aria-label="말하기"
         enterKeyHint="send"
         autoComplete="off"
+        disabled={quiet}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => event.stopPropagation()}
       />
-      <button className="mg-chatbar-send" type="submit" aria-label="말 보내기" disabled={!text.trim()}>
+      <button className="mg-chatbar-send" type="submit" aria-label="말 보내기" disabled={quiet || !text.trim()}>
         <Icon name="send" />
       </button>
     </form>

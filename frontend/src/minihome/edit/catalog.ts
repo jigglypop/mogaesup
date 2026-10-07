@@ -115,10 +115,39 @@ export const NATURE: Piece[] = [
   ...NATURE_MODELS.filter((item) => !NATURE_LOOKS.some(([id]) => id === item.id)).map((item) => modelPiece(item, 'bush')),
 ];
 
+export type IslandFloor = { id: string; label: string; color: string };
+
 /** The island's own floors first, so painted ground can go back to lawn. */
-export const ISLAND_FLOORS = [
+export const ISLAND_FLOORS: IslandFloor[] = [
   { id: 'lawn', label: '잔디밭', color: '#8ccd65' },
   { id: 'flowers', label: '꽃밭', color: '#6fbf53' },
   { id: 'field', label: '밭', color: '#8a5f3a' },
   { id: 'floor', label: '마루', color: '#d3a36a' },
 ];
+
+/** Ground the kinds of island (`../islands`) are made of, by their mesh ids. */
+const KIND_FLOORS: IslandFloor[] = [
+  { id: 'pavement', label: '보도', color: '#e2dccf' },
+  { id: 'road-north', label: '위 차선', color: '#575b61' },
+  { id: 'road-south', label: '아래 차선', color: '#575b61' },
+  { id: 'crossing', label: '횡단보도', color: '#9a9ca0' },
+  { id: 'plaza', label: '벽돌 광장', color: '#cc7c5e' },
+  { id: 'market', label: '테라코타', color: '#d48a5f' },
+  { id: 'promenade', label: '부두', color: '#c3c7c8' },
+  { id: 'cafe-floor', label: '헤링본 마루', color: '#c48b55' },
+  { id: 'terrace', label: '테라스', color: '#de9f78' },
+  { id: 'gravel', label: '자갈길', color: '#d8cdb6' },
+  { id: 'plaza-stone', label: '돌 광장', color: '#e9e2d2' },
+  { id: 'boardwalk', label: '데크', color: '#d3a36a' },
+  { id: 'deck', label: '데크', color: '#d3a36a' },
+  { id: 'sand', label: '모래', color: '#cdb37c' },
+  { id: 'snow', label: '눈밭', color: '#f6f9fc' },
+  { id: 'ice', label: '얼음', color: '#cfe6f5' },
+  { id: 'cobbles', label: '돌길', color: '#8c877e' },
+];
+
+/** The fixed floors, then this island's own ground among `meshIds` (the meshes its store holds). */
+export function islandFloors(meshIds: Iterable<string>): IslandFloor[] {
+  const held = new Set(meshIds);
+  return [...ISLAND_FLOORS, ...KIND_FLOORS.filter((floor) => held.has(floor.id))];
+}

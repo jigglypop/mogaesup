@@ -53,8 +53,8 @@ describe('둘러보기 화면', () => {
     await unmount();
   });
 
-  it('쪽이 가득 차면 더 보기로 마지막 섬의 시각 뒤를 이어 붙인다', async () => {
-    const first = page(EXPLORE_PAGE);
+  it('쪽이 가득 차면 더 보기로 마지막 섬의 시각과 주인 뒤를 이어 붙인다', async () => {
+    const first = page(EXPLORE_PAGE).map((item, index) => ({ ...item, ownerId: `owner-${index}` }));
     list.mockResolvedValueOnce({ homes: first });
     const { container, unmount } = await open();
     await flush();
@@ -63,11 +63,29 @@ describe('둘러보기 화면', () => {
     list.mockResolvedValueOnce({ homes: [home(EXPLORE_PAGE), home(EXPLORE_PAGE + 1)] });
     await act(async () => more(container)!.click());
     await flush();
-    expect(list.mock.calls[1]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '', before: first[EXPLORE_PAGE - 1]?.updatedAt });
+    expect(list.mock.calls[1]?.[0]).toEqual({
+      limit: EXPLORE_PAGE,
+      q: '',
+      before: first[EXPLORE_PAGE - 1]?.updatedAt,
+      beforeId: `owner-${EXPLORE_PAGE - 1}`,
+    });
     expect(names(container)).toHaveLength(EXPLORE_PAGE + 2);
     expect(names(container).at(-1)).toBe(`섬${EXPLORE_PAGE + 1}`);
     // 둘째 쪽이 모자랐으니 끝이다.
     expect(more(container)).toBeUndefined();
+    await unmount();
+  });
+
+  it('주인 id가 없는 옛 서버의 목록은 시각으로만 이어 붙인다', async () => {
+    const first = page(EXPLORE_PAGE);
+    list.mockResolvedValueOnce({ homes: first });
+    const { container, unmount } = await open();
+    await flush();
+
+    list.mockResolvedValueOnce({ homes: [home(EXPLORE_PAGE)] });
+    await act(async () => more(container)!.click());
+    await flush();
+    expect(list.mock.calls[1]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '', before: first[EXPLORE_PAGE - 1]?.updatedAt });
     await unmount();
   });
 

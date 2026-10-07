@@ -62,4 +62,42 @@ describe('꾸미기 단축키', () => {
     expect(session.deleteSelected).toHaveBeenCalledTimes(1);
     await unmount();
   });
+
+  it('Ctrl·⌘+S는 어디에서 눌러도 브라우저의 페이지 저장을 막고, 대화상자가 없으면 섬을 저장한다', async () => {
+    const session = fakeSession();
+    const save = vi.fn();
+    const { unmount } = await mount(<Keys session={session as unknown as EditSession} save={save} />);
+    const send = (target: EventTarget, init: KeyboardEventInit) => {
+      const event = new KeyboardEvent('keydown', { key: 's', code: 'KeyS', bubbles: true, cancelable: true, ...init });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    // Typing in a field (the drawer's search, a resident's line) and a Korean input mode (ㄴ on the S key) too.
+    const field = document.body.appendChild(document.createElement('input'));
+    await act(async () => {
+      expect(send(field, { ctrlKey: true })).toBe(true);
+      expect(send(document.body, { metaKey: true, key: 'ㄴ' })).toBe(true);
+    });
+    expect(save).toHaveBeenCalledTimes(2);
+    // Held down, it saves once.
+    await act(async () => {
+      expect(send(document.body, { ctrlKey: true, repeat: true })).toBe(true);
+    });
+    expect(save).toHaveBeenCalledTimes(2);
+
+    const modal = document.body.appendChild(document.createElement('div'));
+    modal.setAttribute('aria-modal', 'true');
+    await act(async () => {
+      expect(send(modal, { ctrlKey: true })).toBe(true);
+    });
+    expect(save).toHaveBeenCalledTimes(2);
+    modal.remove();
+    field.remove();
+    // A plain S moves the view; it does not save.
+    await act(async () => {
+      send(document.body, {});
+    });
+    expect(save).toHaveBeenCalledTimes(2);
+    await unmount();
+  });
 });

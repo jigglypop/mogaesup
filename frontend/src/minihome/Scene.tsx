@@ -1,4 +1,4 @@
-import { memo, Suspense, useLayoutEffect, useState, type ReactNode, type RefObject } from 'react';
+import { memo, Suspense, useLayoutEffect, useMemo, useState, type ReactNode, type RefObject } from 'react';
 
 import { Canvas, useThree } from '@react-three/fiber';
 import type { RapierRigidBody } from '@react-three/rapier';
@@ -19,31 +19,25 @@ import {
   WorldGi,
   WorldPhysics,
   type GiEnvironment,
-  type LightingProfile,
   type WorldQuality,
 } from 'gaesup-world';
 import { BuildingController } from 'gaesup-world/building';
 
+import { useGameStage } from '../games/room';
 import { createWorldRenderer } from '../rendering/worldRenderer';
 import { MINIME_SCALE } from './character';
 import { EditCanvas } from './edit/EditCanvas';
 import { IdleFrameRate } from './IdleFrameRate';
+import { forest } from './islands/forest';
+import type { IslandTemplate, SkyPreset } from './islands/types';
 import { Shore } from './Shore';
 import { SPAWN } from './village';
-import { AREAS } from './world';
 
-const MINIROOM = AREAS.find((area) => area.id === 'miniroom')!;
-/** Inside the miniroom most daylight stays out; a warm fill and the ceiling lamp light the room. */
-const ROOM_LIGHT: LightingProfile = { sun: 0.3, fill: 0.72, sky: '#ffe8d2', ground: '#8a6d58', environment: 0.45 };
-const ROOM_LAMP = { color: '#ffcf8f', intensity: 9, distance: 10, height: 3 };
-/** Daylight from the sky and the grass it bounces off; world GI takes this over when it is on. */
-const SKY = { color: '#eaf6ff', ground: '#6f8a57', intensity: 1.22 };
-const scaled = (hex: string) => hexToLinearRgb(hex).map((channel) => channel * SKY.intensity) as [number, number, number];
-const GI_SKY: Partial<GiEnvironment> = {
-  skyZenith: scaled(SKY.color),
-  skyHorizon: scaled('#c4d9d0'),
-  skyGround: scaled(SKY.ground),
-};
+/** World GI's sky for an island's daylight (the hemisphere's colours at its strength); GI takes the hemisphere's place. */
+function giSky({ hemisphere, environment }: SkyPreset): Partial<GiEnvironment> {
+  const scaled = (hex: string) => hexToLinearRgb(hex).map((channel) => channel * hemisphere.intensity) as [number, number, number];
+  return { skyZenith: scaled(hemisphere.sky), skyHorizon: scaled(environment.horizon ?? '#c4d9d0'), skyGround: scaled(hemisphere.ground) };
+}
 /**
  * High-quality lighting on WebGPU devices: world GI probes bounce the sun and sky off the island, and the post-process
  * adds reflections and contact shadows. Its screen-space GI stays off so the bounce is not counted twice.
@@ -85,46 +79,61 @@ type SceneProps = SceneSettings & {
   visitors?: ReactNode;
   /** The island's residents. */
   residents?: ReactNode;
+  /** The island's pet. */
+  pet?: ReactNode;
   /** The island's game, when one is playing. */
   game?: ReactNode;
   /** Where the player starts (the crossroads unless given). */
   spawn?: [number, number, number];
+  /** The kind of island: its sky, rooms and arrival areas (the forest unless given). */
+  template?: IslandTemplate;
 };
 
 /**
  * The island canvas: the player, the village, visitors, residents, a game and the rule engine's trigger areas. Memoized: the
  * page around it re-renders with the live room and the panels, and every render of the canvas reconfigures its root.
  */
-export const Scene = memo(function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visualRotationRef, visitors, residents, game, spawn = SPAWN }: SceneProps) {
+export const Scene = memo(function Scene({ quality, postProcessing, cinematic, idleThrottle, playerRef, visualRotationRef, visitors, residents, pet, game, spawn = SPAWN, template = forest }: SceneProps) {
   // A lost GPU device remounts the canvas with a fresh renderer; the island's state lives outside it.
   const canvasKey = useRendererRecovery();
   // The ratio the engine last drew at, given back to the canvas so that applying its prop changes nothing.
   const [dpr, setDpr] = useState<number>();
-  const worldGi = postProcessing && !!cinematic;
+  // While a game's map takes the island's place, the island's own things give way (and come back as they were); a game
+  // that drives the viewer's body has their figure and walking off meanwhile. World GI bounces light off the island's
+  // own buildings, so it waits too.
+  const stage = useGameStage();
+  const onIsland = stage === 'island';
+  const driving = stage === 'drive';
+  const worldGi = postProcessing && !!cinematic && onIsland;
+  const { sky } = template;
+  const gi = useMemo(() => giSky(sky), [sky]);
   return (
     <Canvas key={canvasKey} dpr={dpr ?? FIRST_DPR} shadows="percentage" gl={createWorldRenderer} camera={{ position: [spawn[0], 14, spawn[2] + 12], fov: 38 }}>
       <ReportDpr onDpr={setDpr} />
-      <color attach="background" args={['#8fd3ee']} />
+      <color attach="background" args={[sky.background]} />
       {/* Daylight: sky and bounced ground fill, a warm sun, and a small sky map for PBR reflections. */}
-      <hemisphereLight args={[SKY.color, SKY.ground, worldGi ? 0 : SKY.intensity]} />
-      <SkyEnvironment intensity={0.32} />
+      <hemisphereLight args={[sky.hemisphere.sky, sky.hemisphere.ground, worldGi ? 0 : sky.hemisphere.intensity]} />
+      <SkyEnvironment {...sky.environment} />
       <Suspense fallback={null}>
         <GaesupWorldContent quality={quality} postProcessing={postProcessing && (cinematic ? CINEMATIC : true)}>
-          <CascadedSun position={[18, 36, 22]} intensity={2.55} color="#fff3da" />
-          {worldGi && <WorldGi environment={GI_SKY} />}
-          {idleThrottle && <IdleFrameRate />}
+          <CascadedSun position={sky.sun.position} intensity={sky.sun.intensity} color={sky.sun.color} />
+          {worldGi && <WorldGi environment={gi} />}
+          {idleThrottle && onIsland && <IdleFrameRate />}
           <WorldPhysics>
-            <GaesupController rigidBodyRef={playerRef} innerGroupRef={visualRotationRef} position={spawn} scale={MINIME_SCALE} materialPolicy="figure" modelHierarchy clickToMove />
-            <BuildingController />
-            <Shore />
+            <group visible={!driving}>
+              <GaesupController rigidBodyRef={playerRef} innerGroupRef={visualRotationRef} position={spawn} scale={MINIME_SCALE} materialPolicy="figure" modelHierarchy clickToMove={!driving} />
+            </group>
+            {onIsland && <BuildingController />}
+            {onIsland && <Shore />}
             {visitors}
-            {residents}
+            {onIsland && residents}
+            {onIsland && pet}
             {game}
           </WorldPhysics>
-          <InteractionTracker />
+          {onIsland && <InteractionTracker />}
           <EditCanvas />
-          {AREAS.map((area) => <GameplayArea key={area.id} {...area} />)}
-          <LightingZone center={MINIROOM.center} size={MINIROOM.size} profile={ROOM_LIGHT} lamp={ROOM_LAMP} />
+          {onIsland && template.areas.map((area) => <GameplayArea key={`${template.id}:${area.id}`} {...area} />)}
+          {onIsland && template.rooms.map((room) => <LightingZone key={`${template.id}:${room.id}`} {...room} />)}
           <ContactShadows />
           <Nameplates />
         </GaesupWorldContent>

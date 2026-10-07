@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import { problemText } from '../api/client';
 import { socialApi } from '../api/endpoints';
 import type { GuestbookEntry, User } from '../api/types';
+import { useOptionalAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { initialOf, toneOf } from '../shell/Shell';
 
@@ -56,10 +57,23 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
     action().catch((problem: unknown) => { if (scope && !scope.controller.signal.aborted) setError(problemText(problem)); });
   };
 
+  // The note being written is its writer's: a session that lapses keeps it for them (signing in again shows it again),
+  // while a sign-out or someone else signing in starts empty.
+  const lapsedId = useOptionalAuth()?.lapsed?.id ?? null;
+  const lapsedRef = useRef(lapsedId);
+  lapsedRef.current = lapsedId;
+  const writer = useRef<string | null>(viewer?.id ?? null);
   useEffect(() => {
     const scope = { controller: new AbortController(), reads: 0, paging: false, mutating: false };
     context.current = scope;
-    setEntries([]); setTotal(0); setNextBefore(null); setText(''); setSecret(false); setPosting(false); setError('');
+    const viewerId = viewer?.id ?? null;
+    const keep = viewerId === null ? lapsedRef.current !== null && lapsedRef.current === writer.current : viewerId === writer.current;
+    if (!keep) {
+      setText('');
+      setSecret(false);
+      writer.current = viewerId;
+    }
+    setEntries([]); setTotal(0); setNextBefore(null); setPosting(false); setError('');
     void load().catch((problem: unknown) => { if (!scope.controller.signal.aborted) setError(problemText(problem)); });
     return () => { scope.controller.abort(); };
   }, [load, viewer?.id]);

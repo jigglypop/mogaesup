@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { describeSaveError } from '../edit/save';
 import { createHomeSaveAdapter, IslandTooLargeError, MAX_ISLAND_BYTES } from '../persistence';
-import { setSessionOwner } from '../../auth/sessionWork';
+import { expireSession, setSessionOwner } from '../../auth/sessionWork';
 
 const blob = { version: 1, savedAt: 1, domains: { building: { objects: [] } } };
 const json = (status: number, body?: unknown) =>
@@ -153,6 +154,21 @@ describe('home save adapter', () => {
     expect(await pending).toMatchObject({ name: 'AbortError' });
     const rejected = await adapter.write('main', blob).catch((problem: unknown) => problem);
     expect(rejected).toMatchObject({ status: 409, code: 'owner_changed' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('세션이 풀린 동안에는 보내지 않고(다른 탭이 다른 계정으로 로그인했어도) 다시 로그인하기를 기다리게 한다', async () => {
+    const adapter = createHomeSaveAdapter({ username: 'mogae', ownerId: 'owner', worldId: 'minihome-v6', writable: true });
+    expireSession();
+    const waiting = await adapter.write('main', blob).catch((problem: unknown) => problem);
+    expect(waiting).toMatchObject({ status: 401, code: 'login_required' });
+    expect(describeSaveError(waiting)).toMatchObject({ kind: 'session' });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The owner signs in again: the island goes.
+    setSessionOwner('owner');
+    fetchMock.mockResolvedValueOnce(json(200, { worldId: 'minihome-v6', revision: 1, data: blob, updatedAt: '' }));
+    await adapter.write('main', blob);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

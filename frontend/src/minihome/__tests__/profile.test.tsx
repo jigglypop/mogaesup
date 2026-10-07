@@ -147,6 +147,25 @@ describe('상태 메시지 저장', () => {
       expect(onUpdate).not.toHaveBeenCalled();
     });
 
+    it('말풍선은 열두 가지를 그려 보이고, 고르면 그 디자인을 저장하며, 이미 고른 것은 다시 저장하지 않는다', async () => {
+      const { container, rerender, unmount } = await mount(<About view={view()} minimes={[]} look={null} onUpdate={onUpdate} onWearLook={() => {}} />);
+      const group = container.querySelector('[role=radiogroup][aria-label="말풍선"]')!;
+      const options = [...group.querySelectorAll<HTMLButtonElement>('[role=radio]')];
+      expect(options).toHaveLength(12);
+      // Each option is the balloon itself, with the engine's first word.
+      expect(options[1]!.querySelector('.mg-balloon')?.getAttribute('data-design')).toBe('cloud');
+      expect(options[1]!.querySelector('.mg-balloon b')?.textContent).toBe('안녕');
+      // An island from an older server has the default.
+      expect(options.filter((option) => option.getAttribute('aria-checked') === 'true').map((option) => option.textContent)).toEqual(['안녕기본']);
+      await act(async () => options[1]!.click());
+      expect(onUpdate).toHaveBeenCalledExactlyOnceWith({ balloon: 'cloud' });
+      await rerender(<About view={view({ balloon: 'cloud' })} minimes={[]} look={null} onUpdate={onUpdate} onWearLook={() => {}} />);
+      expect(options[1]!.getAttribute('aria-checked')).toBe('true');
+      await act(async () => options[1]!.click());
+      expect(onUpdate).toHaveBeenCalledTimes(1);
+      await unmount();
+    });
+
     it('예전 형식(글만 있는) 초안은 무엇을 바탕으로 썼는지 몰라 되살리지 않는다', () => {
       localStorage.setItem(draftKey('owner', 'title'), '"옛 초안"');
       expect(openingText(draftKey('owner', 'title'), '모개숲')).toBe('모개숲');

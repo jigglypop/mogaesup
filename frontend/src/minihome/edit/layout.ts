@@ -60,13 +60,15 @@ export function checkLayoutIntent(intent: LayoutIntent): void {
 /**
  * Every extent comes from the GLB the current browser actually decodes, including overrides/quantization: the pieces
  * the planner places, and `extraUrls` (the island's placed models, its obstacles). Not the whole furniture catalog, whose
- * dozens of studio models the planner never places and would all be downloaded and decoded for each proposal.
+ * dozens of studio models the planner never places and would all be downloaded and decoded for each proposal. An island
+ * model that cannot be measured (its file gone, or empty) does not stop the plan: `proposeLayout` keeps a cell clear
+ * around it and says so.
  */
 export async function measureLayoutCatalog(extraUrls: readonly string[] = []): Promise<LayoutCatalogItem[]> {
   const wanted = new Set(['table-basic', 'chair-basic', 'shop-stall-basic', 'storage-basic', 'lamp-basic']);
   const items = DEFAULT_BUILDING_OBJECT_CATALOG.filter(item => wanted.has(item.id) && !!item.modelUrl)
     .map(item => ({ id: item.id, label: item.label, modelUrl: item.modelUrl!, scale: item.defaultScale, color: item.defaultColor }));
-  await Promise.all([...new Set(extraUrls)].map(url => loadModelBounds(url)));
+  await Promise.allSettled([...new Set(extraUrls)].map(url => loadModelBounds(url)));
   return Promise.all(items.map(async item => ({ ...item, bounds: await loadModelBounds(item.modelUrl) })));
 }
 
@@ -82,6 +84,17 @@ export function objectFootprint(object: PlacedObject, bounds?: LocalBox): XZ[] {
 }
 
 const rect = (x0: number, z0: number, x1: number, z1: number): XZ[] => [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+/** A footprint with an edge too short to give an axis (a model flat along x or z) cannot be tested for overlap. */
+const degenerate = (poly: readonly XZ[]) =>
+  poly.some((from, index) => {
+    const to = poly[(index + 1) % poly.length]!;
+    return Math.hypot(to[0] - from[0], to[1] - from[1]) < EPS;
+  });
+/** What a placed model the browser could not measure keeps clear: a whole cell around it, more for one scaled up. */
+function cellAround(object: PlacedObject): XZ[] {
+  const half = 2 * Math.max(1, object.config?.modelScale ?? 1);
+  return rect(object.position.x - half, object.position.z - half, object.position.x + half, object.position.z + half);
+}
 export function footprintsOverlap(a: readonly XZ[], b: readonly XZ[], margin = 0): boolean {
   for (const poly of [a, b]) for (let i = 0; i < poly.length; i++) {
     const from = poly[i]!, to = poly[(i + 1) % poly.length]!;
@@ -109,11 +122,16 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
   // Tiles that can cover a 4 m cell other than their own: larger ones, and any off the grid. A one-cell tile on the grid
   // covers only its own cell, which `allCells` already answers, so the per-cell scan below runs over these few alone.
   const spanning = allTiles.filter(tile => (tile.size ?? 1) !== 1 || tile.position.x % 4 !== 0 || tile.position.z % 4 !== 0);
+  // A placed model whose size is not known keeps a cell clear around it instead of stopping the plan; each one is named.
+  const unmeasured = new Set<string>();
   const existing = snapshot.objects.map(object => {
     const bounds = object.config?.modelUrl ? knownBounds(object.config.modelUrl) : undefined;
-    if (object.type === 'model' && !bounds) throw new Error('기존 기물의 크기를 확인하지 못했어요. 다시 배치해 주세요.');
-    return objectFootprint(object, bounds);
+    const footprint = object.type === 'model' && !bounds ? null : objectFootprint(object, bounds);
+    if (footprint && !degenerate(footprint)) return footprint;
+    unmeasured.add(object.config?.modelLabel ?? object.config?.modelId ?? '기물');
+    return cellAround(object);
   });
+  const unmeasuredNotice = [...unmeasured].map(label => `${label}: 크기를 확인하지 못해 한 칸을 비웠어요`);
   const blockBounds = snapshot.blocks.map(block => rect(block.position.x - 2, block.position.z - 2,
     block.position.x - 2 + 4 * (block.size?.x ?? 1), block.position.z - 2 + 4 * (block.size?.z ?? 1)));
   // A wall pivot is half a wall-length behind its center along local Z, as the engine's wallBox contract specifies.
@@ -246,7 +264,7 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
     next.objects.push(...objects);
     if (bytes(next) > MAX_BYTES - 64 * 1024) throw new Error('섬의 저장 공간이 부족해요. 기물을 줄인 뒤 다시 배치해 주세요.');
     return { id: planId, baseline: sameSnapshot(snapshot), snapshot: next, intent, objects, walls, floor: { min, max, color: floorPreset.color },
-      entrance, corridorX, corridor, measured: [...measured], notice: [...intent.warnings] };
+      entrance, corridorX, corridor, measured: [...measured], notice: [...intent.warnings, ...unmeasuredNotice] };
   }
   throw new Error(`${intent.widthCells * 4}m × ${intent.depthCells * 4}m의 빈 땅과 출입 경로가 없어요.`);
 }

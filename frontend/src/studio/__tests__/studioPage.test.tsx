@@ -147,6 +147,21 @@ describe('캐릭터 서버 연결 표시', () => {
     expect(usage).toHaveBeenCalledTimes(3);
   });
 
+  it('회원 옷장 읽기가 회원 범위로 좁혀지지 않는 서버(FACTORY_JWT_SECRET 없음)면 그렇다고 보인다', async () => {
+    usage.mockResolvedValueOnce({ connected: true, access: 'paid', paidThisMonth: 0, paidMonthly: 10, memberScope: false });
+    const { container, unmount } = await open();
+    expect(container.querySelector('.mg-studio-connection')?.textContent).toContain('회원 옷장 범위 제한 꺼짐');
+    await unmount();
+
+    // Narrowed, or a server that does not say: nothing to show.
+    for (const answer of [{ memberScope: true }, {}]) {
+      usage.mockResolvedValueOnce({ connected: true, access: 'paid', paidThisMonth: 0, paidMonthly: 10, ...answer });
+      const again = await open();
+      expect(again.container.textContent).not.toContain('회원 옷장 범위');
+      await again.unmount();
+    }
+  });
+
   it('읽기에 실패하면 다시 확인으로 바로 다시 읽는다', async () => {
     usage.mockRejectedValueOnce(new ApiRequestError(502, 'bad_gateway', '응답 없음')).mockResolvedValue({ connected: true, access: 'write', paidThisMonth: 0, paidMonthly: 0 });
     const { container, unmount } = await open();

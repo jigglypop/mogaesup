@@ -36,14 +36,29 @@ import type {
   User,
   VisitCounter,
 } from './types';
+import type {
+  AdminPetBreed,
+  AdminPetBreedChanges,
+  IslandPet,
+  MyPet,
+  PetAdoption,
+  PetBrainSave,
+  PetBreed,
+  PetBreedRegistration,
+  PetChanges,
+  SavedPetBrain,
+} from './types';
 
 const segment = encodeURIComponent;
 
-/** `/homes` with only the paging and search that are set. */
-export function homesPath({ limit, before, q }: HomeListQuery = {}): string {
+/** `/homes` with only the paging and search that are set; `beforeId` goes only with the `before` it belongs to. */
+export function homesPath({ limit, before, beforeId, q }: HomeListQuery = {}): string {
   const query = new URLSearchParams();
   if (limit) query.set('limit', String(limit));
-  if (before) query.set('before', before);
+  if (before) {
+    query.set('before', before);
+    if (beforeId) query.set('beforeId', beforeId);
+  }
   if (q) query.set('q', q);
   const text = query.toString();
   return text ? `/homes?${text}` : '/homes';
@@ -54,10 +69,13 @@ export const authApi = {
   register: (body: Registration) => api<{ user: User }>('/auth/register', { method: 'POST', body }),
   login: (body: Credentials) => api<{ user: User }>('/auth/login', { method: 'POST', body }),
   logout: () => api<void>('/auth/logout', { method: 'POST' }),
-  /** 204 once the password is changed; `wrong_password` when the current one is not it. */
-  changePassword: (body: PasswordChange) => api<void>('/auth/password', { method: 'POST', body }),
-  /** Ends every other session of the member; `ended` counts them. */
-  logoutOthers: () => api<{ ended: number }>('/auth/logout-others', { method: 'POST' }),
+  /**
+   * 204 once the password is changed; `wrong_password` when the current one is not it. Every session ends, this one
+   * too: the answer brings this browser a new one, and its realtime sockets connect again.
+   */
+  changePassword: (body: PasswordChange) => api<void>('/auth/password', { method: 'POST', body, startsOver: true }),
+  /** Ends every other session of the member; `ended` counts them. This browser goes on under a new session too. */
+  logoutOthers: () => api<{ ended: number }>('/auth/logout-others', { method: 'POST', startsOver: true }),
   realtimeTicket: () => api<RealtimeTicket>('/auth/realtime-ticket', { method: 'POST' }),
 };
 
@@ -186,4 +204,22 @@ export const layoutApi = {
       method: 'POST', body, signal, timeoutMs: 60_000,
       headers: body.requestId ? { 'Idempotency-Key': body.requestId } : undefined,
     }),
+};
+
+/** Island pets (`server/src/pets.rs`): each member keeps one dog; its owner's page trains it and saves what changed. */
+export const petApi = {
+  breeds: (signal?: AbortSignal) => api<{ breeds: PetBreed[] }>('/pets/breeds', { signal }),
+  /** The pet of `username`'s island, for anyone who may see the island. */
+  island: (username: string, signal?: AbortSignal) => api<{ pet: IslandPet | null }>(`/homes/${segment(username)}/pet`, { signal }),
+  mine: (signal?: AbortSignal) => api<{ pet: MyPet | null }>('/pets/me', { signal }),
+  adopt: (body: PetAdoption) => api<{ pet: MyPet }>('/pets/me', { method: 'POST', body }),
+  update: (body: PetChanges) => api<{ pet: MyPet }>('/pets/me', { method: 'PATCH', body }),
+  /** `keepalive` for the save a page sends as it is hidden or left (the body stays far under the browser's 64 KB). */
+  saveBrain: (body: PetBrainSave, { keepalive = false }: { keepalive?: boolean } = {}) =>
+    api<SavedPetBrain>('/pets/me/brain', { method: 'PUT', body, keepalive }),
+  release: (body: { expectedOwnerId: string; petId?: string }) => api<void>('/pets/me', { method: 'DELETE', body }),
+  adminBreeds: () => api<{ breeds: AdminPetBreed[] }>('/pets/admin/breeds'),
+  patchBreed: (id: string, body: AdminPetBreedChanges) =>
+    api<AdminPetBreed>(`/pets/admin/breeds/${segment(id)}`, { method: 'PATCH', body }),
+  registerBreed: (body: PetBreedRegistration) => api<AdminPetBreed>('/pets/admin/breeds', { method: 'POST', body }),
 };

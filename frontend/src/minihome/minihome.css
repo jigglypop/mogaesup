@@ -9,6 +9,9 @@
   overflow: hidden;
   background: var(--mg-island-sky);
 }
+/* A game's map in the island's place: the island's own panels step aside, kept as they were, and the screen's edges are
+   the game's. */
+.mg-world[data-environment='game'] :is(.mg-side, .mg-side-open, .mg-rail, .mg-world-bottom, .mg-time) { display: none; }
 /* A long press on the world walks or turns; it should not select text or open the phone's callout. */
 .mg-world-canvas { position: absolute; inset: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .mg-world-canvas canvas { display: block; touch-action: none; }
@@ -451,6 +454,20 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
 @media (max-width: 1100px) {
   .mg-world { --mg-side: 330px; }
   .mg-time { display: none; }
+}
+/* Landscape phones and small tablets: the pet and game buttons keep only their icons and the search waits in 둘러보기,
+   so the island's name keeps its room next to the actions. */
+@media (max-width: 1024px) {
+  .mg-world:not(.is-editing) .mg-topbar .mg-pet-toggle,
+  .mg-world:not(.is-editing) .mg-topbar .mg-game-toggle { width: 44px; padding: 0; }
+  .mg-world:not(.is-editing) .mg-topbar .mg-pet-toggle-label,
+  .mg-world:not(.is-editing) .mg-topbar .mg-game-toggle-label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .mg-world:not(.is-editing) .mg-island-pill { min-width: 0; }
+}
+@media (max-width: 900px) {
+  .mg-world:not(.is-editing) .mg-topbar-right .mg-search { display: none; }
 }
 @media (max-width: 720px) {
   .mg-island-name small, .mg-island-pill .mg-badge { display: none; }

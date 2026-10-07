@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError } from '../../api/client';
-import { appDestination, hasUnsaved, HeldSaveError, heldSavesSettled, leaveIsland } from '../edit/leave';
+import { appDestination, guardHistory, hasUnsaved, HeldSaveError, heldSavesSettled, leaveIsland, onIsland, waitsForOwner } from '../edit/leave';
 import type { SaverState } from '../edit/save';
 import { IslandTooLargeError } from '../persistence';
 import { fakeWorld, ready } from './fakeWorld';
@@ -169,6 +169,28 @@ describe('나갈 때 저장하지 않은 변경', () => {
     }
   });
 
+  it('섬을 끝까지 올리지 못한 400 incomplete_world는 버리지 않고 붙잡아 두었다가, 다시 저장되면 놓아 준다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    world.failing.with = new ApiRequestError(400, 'incomplete_world', '섬 데이터를 끝까지 받지 못했습니다. 다시 저장해 주세요.');
+    world.edit();
+    saver.changed();
+    const release = vi.fn();
+    leaveIsland(saver, release);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(release).not.toHaveBeenCalled();
+    expect(waitsForOwner(saver.getState())).toBe(false);
+    // Closing the page asks first (and tries once more, on the same slow line).
+    expect(closePage()).toBe(true);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+
+    world.failing.with = null;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(world.system.save).toHaveBeenCalledTimes(3);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(closePage()).toBe(false);
+  });
+
   it('같은 섬을 다시 열 때는 붙잡아 둔 섬의 저장이 끝나기를 기다린다', async () => {
     const world = fakeWorld();
     const saver = await ready(world);
@@ -322,6 +344,109 @@ describe('저장하지 않은 것', () => {
   it('섬을 불러오기 전이나 불러오지 못했을 때는 잃을 것이 없다', () => {
     expect(hasUnsaved(state({ phase: 'loading', dirty: true }))).toBe(false);
     expect(hasUnsaved(state({ phase: 'loadFailed', dirty: true }))).toBe(false);
+  });
+
+  it('주인을 기다리는 변경은 충돌이나 고쳐야 저장되는 실패에 걸린 것뿐이다', () => {
+    const tooLarge = { kind: 'tooLarge', message: '' } as const;
+    expect(waitsForOwner(state({ dirty: true, conflict: true }))).toBe(true);
+    expect(waitsForOwner(state({ dirty: true, problem: tooLarge }))).toBe(true);
+    expect(waitsForOwner(state({ dirty: true, problem: { kind: 'invalid', message: '' } }))).toBe(true);
+    // Saved later on its own, or once the owner signs in again; or nothing to lose; or still on its way.
+    expect(waitsForOwner(state({ dirty: true, problem: { kind: 'network', message: '' } }))).toBe(false);
+    expect(waitsForOwner(state({ dirty: true, problem: { kind: 'session', message: '' } }))).toBe(false);
+    expect(waitsForOwner(state({ dirty: true }))).toBe(false);
+    expect(waitsForOwner(state({ problem: tooLarge }))).toBe(false);
+    expect(waitsForOwner(state({ dirty: true, saving: true, problem: tooLarge }))).toBe(false);
+  });
+});
+
+describe('같은 섬에 머무는 경로', () => {
+  it('섬과 그 꾸미기 화면이면 대소문자와 쿼리에 상관없이 같은 섬이다', () => {
+    expect(onIsland('/@mogae', 'mogae')).toBe(true);
+    expect(onIsland('/@Mogae/', 'mogae')).toBe(true);
+    expect(onIsland('/@mogae/edit?tab=1#top', 'mogae')).toBe(true);
+    expect(onIsland('/%40mogae/edit', 'mogae')).toBe(true);
+    expect(onIsland('/@mogae/edit/more', 'mogae')).toBe(false);
+    expect(onIsland('/@mogae/other', 'mogae')).toBe(false);
+    expect(onIsland('/@other', 'mogae')).toBe(false);
+    expect(onIsland('/explore', 'mogae')).toBe(false);
+    expect(onIsland('/%E0%A4%A', 'mogae')).toBe(false);
+  });
+});
+
+describe('뒤로·앞으로 가기로 섬을 떠날 때', () => {
+  /** The router's own listener, added before the guard as the app's is. */
+  const router = vi.fn();
+  let go: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    window.addEventListener('popstate', router);
+    go = vi.spyOn(window.history, 'go').mockImplementation(() => {});
+    window.history.replaceState({ idx: 4, key: 'edit', usr: null }, '', '/@me/edit');
+  });
+  afterEach(() => {
+    window.removeEventListener('popstate', router);
+    router.mockReset();
+    vi.restoreAllMocks();
+    window.history.replaceState(null, '', '/');
+  });
+  /** What the browser does on Back or Forward: the address and state change, then popstate. */
+  const pop = (path: string, state: unknown) => {
+    window.history.replaceState(state, '', path);
+    window.dispatchEvent(new PopStateEvent('popstate', { state }));
+  };
+
+  it('그만두면 라우터가 듣지 못하게 하고 원래 자리로 돌아간다', () => {
+    const ask = vi.fn(() => false);
+    const leaving = vi.fn();
+    const stop = guardHistory({ stays: (path) => onIsland(path, 'me'), ask, leaving });
+    pop('/explore', { idx: 3, key: 'explore', usr: null });
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(router).not.toHaveBeenCalled();
+    expect(leaving).not.toHaveBeenCalled();
+    expect(go).toHaveBeenCalledExactlyOnceWith(1);
+
+    // Forward past it, two entries on: two back.
+    pop('/character', { idx: 6, key: 'character', usr: null });
+    expect(go).toHaveBeenLastCalledWith(-2);
+    stop();
+  });
+
+  it('주인이 떠나겠다고 하면 그대로 두고 알린다', () => {
+    const leaving = vi.fn();
+    const stop = guardHistory({ stays: (path) => onIsland(path, 'me'), ask: () => true, leaving });
+    pop('/explore', { idx: 3, key: 'explore', usr: null });
+    expect(leaving).toHaveBeenCalledTimes(1);
+    expect(router).toHaveBeenCalledTimes(1);
+    expect(go).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('같은 섬 안의 이동은 묻지 않고, 그 자리를 새 기준으로 삼는다', () => {
+    const ask = vi.fn(() => false);
+    const stop = guardHistory({ stays: (path) => onIsland(path, 'me'), ask, leaving: vi.fn() });
+    pop('/@me', { idx: 3, key: 'island', usr: null });
+    expect(ask).not.toHaveBeenCalled();
+    expect(router).toHaveBeenCalledTimes(1);
+    pop('/explore', { idx: 2, key: 'explore', usr: null });
+    expect(go).toHaveBeenCalledExactlyOnceWith(1);
+    stop();
+  });
+
+  it('라우터의 위치를 모르면 주소를 원래대로 되돌려 놓는다', () => {
+    const stop = guardHistory({ stays: (path) => onIsland(path, 'me'), ask: () => false, leaving: vi.fn() });
+    pop('/explore', null);
+    expect(go).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe('/@me/edit');
+    expect(window.history.state).toEqual({ idx: 4, key: 'edit', usr: null });
+    stop();
+  });
+
+  it('지켜보기를 멈추면 더 묻지 않는다', () => {
+    const ask = vi.fn(() => false);
+    guardHistory({ stays: () => false, ask, leaving: vi.fn() })();
+    pop('/explore', { idx: 3 });
+    expect(ask).not.toHaveBeenCalled();
+    expect(router).toHaveBeenCalledTimes(1);
   });
 });
 

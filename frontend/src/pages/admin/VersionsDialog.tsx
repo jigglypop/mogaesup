@@ -42,7 +42,7 @@ export function VersionsDialog({
   }, [load]);
 
   const rollback = async (version: CatalogVersion) => {
-    const question = `${item.label}을(를) 버전 #${version.id}(으)로 되돌릴까요? 공개 상태·이름·이모지·순서는 그대로예요.`;
+    const question = `${item.label}을(를) 버전 #${version.id}(으)로 되돌릴까요?`;
     if (!window.confirm(question)) return;
     setBusy(version.id);
     try {

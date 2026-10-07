@@ -45,6 +45,8 @@ export type HomeProfile = {
   updatedAt: string;
   /** The picture the island's link preview shows (a stored 1200×630 JPEG); null or missing for the site's own. */
   thumbnailUrl?: string | null;
+  /** The speech balloon the owner talks in on every island (minihome/balloons/designs.json); missing from older servers. */
+  balloon?: string;
 };
 
 export type VisitCounter = { today: number; total: number };
@@ -57,13 +59,18 @@ export type HomeView = {
 
 export type HomeSummary = Pick<HomeProfile, 'username' | 'ownerName' | 'title' | 'statusMessage' | 'emoji' | 'updatedAt'> & {
   total: number;
+  /** The owner's id, the next page's `beforeId`; missing from a server older than it. */
+  ownerId?: string;
 };
 
-/** The island list is newest first: `before` is the last island's `updatedAt`, `q` a search in names and titles. */
-export type HomeListQuery = { limit?: number; before?: string; q?: string };
+/**
+ * The island list is newest first: `before` is the last island's `updatedAt` and `beforeId` its `ownerId`, which tells
+ * islands saved at the same time apart; `q` a search in names and titles.
+ */
+export type HomeListQuery = { limit?: number; before?: string; beforeId?: string; q?: string };
 
 export type ProfileChanges = Partial<
-  Pick<HomeProfile, 'title' | 'statusMessage' | 'mood' | 'minime' | 'emoji' | 'visibility'>
+  Pick<HomeProfile, 'title' | 'statusMessage' | 'mood' | 'minime' | 'emoji' | 'visibility' | 'balloon'>
 >;
 
 /** The runtime's save envelope for one world, stored as-is; the server only owns its revision. */
@@ -204,7 +211,17 @@ export type StudioPower =
 /** How far the studio screens reach through the server (`FACTORY_ACCESS`), and this month's paid requests. */
 export type FactoryUsage =
   | { connected: false }
-  | { connected: true; access: 'read' | 'write' | 'paid'; paidThisMonth: number; paidMonthly: number };
+  | {
+      connected: true;
+      access: 'read' | 'write' | 'paid';
+      paidThisMonth: number;
+      paidMonthly: number;
+      /**
+       * Whether members' wardrobe reads reach the character server narrowed to what members may see (FACTORY_JWT_SECRET
+       * is set); false while they go as the server's own. Absent from servers before it was told.
+       */
+      memberScope?: boolean;
+    };
 
 /** Admin listing rows: the item, where it came from, its versions and how many homes wear it. */
 export type AdminCatalogItem = CatalogItem & {
@@ -343,3 +360,84 @@ export type Look = {
   error: { code: string; message: string } | null;
   updatedAt: string;
 };
+
+/** A dog anyone may adopt (`GET /api/pets/breeds`, published ones only). */
+export type PetBreed = {
+  id: string;
+  label: string;
+  emoji: string;
+  modelUrl: string;
+  thumbnailUrl: string | null;
+  /** Engine clip names the model plays (idle, walk, run, sit_hold, …). */
+  clips: string[];
+  /** Metres from the ground to the top of the ears in the first frame of idle: the engine template's height. */
+  heightM: number;
+};
+
+/** A breed as the catalog's editors see it (`/api/pets/admin/breeds`). */
+export type AdminPetBreed = PetBreed & {
+  species: 'dog';
+  status: CatalogStatus;
+  sortOrder: number;
+  source: 'builtin' | 'factory';
+  sourceRef: string | null;
+  /** Pets of this breed. */
+  pets: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminPetBreedChanges = Partial<Pick<AdminPetBreed, 'label' | 'emoji' | 'status' | 'sortOrder' | 'heightM'>>;
+
+/** A model the app ships (`/gltf/pets/<slug>.glb`, its picture beside it) offered as a breed; a draft unless `status`. */
+export type PetBreedRegistration = Pick<PetBreed, 'id' | 'label' | 'modelUrl' | 'thumbnailUrl' | 'clips'> & {
+  emoji?: string;
+  heightM?: number;
+  status?: CatalogStatus;
+  sortOrder?: number;
+};
+
+/** Where a pet rests while its owner is away, on the island's ground. */
+export type PetHome = { x: number; z: number };
+
+/** A pet as anyone who may see its island sees it (`GET /api/homes/{username}/pet`). */
+export type IslandPet = { id: string; name: string; breed: string; breedInfo: PetBreed; home: PetHome };
+
+/** Drives, each 0..1 (all four when saved); `{}` for a new pet. */
+export type PetDrivesRecord = Partial<Record<'energy' | 'satiety' | 'mood' | 'bond', number>>;
+/** One command's training: times given, feedback that answered it, and mastery in percent. */
+export type PetCommandStats = Partial<Record<'given' | 'treats' | 'praises' | 'scolds' | 'mastery', number>>;
+/** Training counts, whole numbers under the keys the server accepts (`server/src/pets.rs`). */
+export type PetStatsRecord = Partial<Record<'treats' | 'praises' | 'pats' | 'scolds' | 'bondDay' | 'bondGainedMilli', number>> & {
+  commands?: Partial<Record<'come' | 'sit' | 'down' | 'stay' | 'fetch' | 'speak' | 'jump', PetCommandStats>>;
+};
+
+/** The owner's own pet (`GET /api/pets/me`), with what its training changed. */
+export type MyPet = IslandPet & {
+  seed: number;
+  graphId: string;
+  /** `pet-brain-v1`. */
+  model: string;
+  /** The `pet-brain-v1` bytes in standard base64; null until the first save. */
+  brain: string | null;
+  drives: PetDrivesRecord;
+  stats: PetStatsRecord;
+  /** The revision the next brain save names. */
+  revision: number;
+  createdAt: string;
+  /** When the brain, drives and stats were last saved (the adoption until then): the time the drives are as of. */
+  updatedAt: string;
+};
+
+export type PetAdoption = { breedId: string; name: string; home: PetHome; expectedOwnerId: string };
+/** `petId`: the pet the page has; a change meant for another one is refused. */
+export type PetChanges = { name?: string; home?: PetHome; expectedOwnerId: string; petId?: string };
+export type PetBrainSave = {
+  revision: number;
+  brain: string;
+  drives: Required<PetDrivesRecord>;
+  stats: PetStatsRecord;
+  expectedOwnerId: string;
+  petId?: string;
+};
+export type SavedPetBrain = { revision: number; updatedAt: string };

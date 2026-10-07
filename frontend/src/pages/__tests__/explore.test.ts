@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { HomeSummary } from '../../api/types';
-import { appendHomes, EXPLORE_PAGE, nextBefore, searchOf, SEARCH_MAX } from '../explore';
+import { appendHomes, EXPLORE_PAGE, nextCursor, searchOf, SEARCH_MAX } from '../explore';
 
 const home = (username: string, updatedAt = '2026-09-30T00:00:00Z'): HomeSummary => ({
   username,
@@ -31,11 +31,16 @@ describe('둘러보기 검색어', () => {
 });
 
 describe('둘러보기 다음 쪽', () => {
-  it('쪽이 가득 차면 마지막 섬의 시각에서 이어 가고, 모자라면 끝이다', () => {
+  it('쪽이 가득 차면 마지막 섬의 시각과 주인에서 이어 가고, 모자라면 끝이다', () => {
+    const full = page(EXPLORE_PAGE).map((item, index) => ({ ...item, ownerId: `owner-${index}` }));
+    expect(nextCursor(full)).toEqual({ before: full[EXPLORE_PAGE - 1]?.updatedAt, beforeId: `owner-${EXPLORE_PAGE - 1}` });
+    expect(nextCursor(page(EXPLORE_PAGE - 1))).toBeNull();
+    expect(nextCursor([])).toBeNull();
+  });
+
+  it('주인 id가 없는 옛 서버의 쪽은 시각으로만 이어 간다', () => {
     const full = page(EXPLORE_PAGE);
-    expect(nextBefore(full)).toBe(full[EXPLORE_PAGE - 1]?.updatedAt);
-    expect(nextBefore(page(EXPLORE_PAGE - 1))).toBeNull();
-    expect(nextBefore([])).toBeNull();
+    expect(nextCursor(full)).toEqual({ before: full[EXPLORE_PAGE - 1]?.updatedAt });
   });
 
   it('이어 붙일 때 이미 있는 섬은 한 번만 두고 순서를 지킨다', () => {

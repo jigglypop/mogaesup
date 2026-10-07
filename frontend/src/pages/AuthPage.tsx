@@ -4,6 +4,7 @@ import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { problemText } from '../api/client';
 import { useAuth } from '../auth/AuthProvider';
+import { hasUnsavedWork } from '../auth/sessionWork';
 import { returnPath } from '../auth/signIn';
 import { Icon } from '../ui/icons';
 import { useTabs } from '../ui/tabs';
@@ -11,13 +12,14 @@ import { Loading } from './Loading';
 
 type Mode = 'login' | 'signup';
 const MODES: readonly Mode[] = ['login', 'signup'];
+const OTHER_ACCOUNT_QUESTION = '저장하지 못한 변경이 있어요. 다른 계정으로 로그인하면 사라져요. 계속할까요?';
 
 /**
  * `/`: sign in or sign up. Afterwards, and for a visitor already signed in, it goes back to `?next=` (a path on this
  * site the sign-in link came from) or else to their own island.
  */
 export function AuthPage() {
-  const { status, user, login, register } = useAuth();
+  const { status, user, lapsed, login, register } = useAuth();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const next = returnPath(params.get('next'));
@@ -43,14 +45,18 @@ export function AuthPage() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const field = (key: string) => String(form.get(key) ?? '');
+    // What the member whose session lapsed left unsaved waits for them; anyone else signing in drops it, so that asks.
+    const username = field('username').trim().toLowerCase();
+    const other = lapsed !== null && (mode === 'signup' || lapsed.username.toLowerCase() !== username);
+    if (other && hasUnsavedWork() && !window.confirm(OTHER_ACCOUNT_QUESTION)) return;
     setBusy(true);
     setError('');
     try {
       const signedIn =
         mode === 'login'
-          ? await login({ username: field('username').trim().toLowerCase(), password: field('password') })
+          ? await login({ username, password: field('password') })
           : await register({
-              username: field('username').trim().toLowerCase(),
+              username,
               displayName: field('displayName').trim(),
               password: field('password'),
             });

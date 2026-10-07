@@ -6,6 +6,7 @@ import { Vector3 } from 'three';
 import type { GaesupRuntime, NPCInstanceData, NPCTemplate } from 'gaesup-world';
 
 import type { CatalogItem } from '../api/types';
+import { clearNpcLayer, setNpcLayer } from '../pets/npcLayer';
 import { Icon } from '../ui/icons';
 import {
   FACE_RADIUS,
@@ -21,6 +22,8 @@ import {
 
 /** How often residents look for someone to turn to, in seconds. */
 const LOOK_EVERY = 0.2;
+/** The residents' entries in the runtime's NPC store (`setNpcLayer`). */
+export const RESIDENT_LAYER = 'resident:';
 /** A greeting card closes by itself after this long, or once the player walks off. */
 const GREETING_MS = 10_000;
 const HEAD = 0.9;
@@ -59,13 +62,14 @@ export function ResidentsWorld({ runtime, residents, items, greetings }: Residen
         if (!instance) instances.set(resident, (instance = residentInstance(resident)));
         drawn.set(resident.id, instance);
       }
-      runtime.npcStore.setState({ templates: used, instances: drawn });
+      // The island's pet shares the store: only the residents' own entries are replaced.
+      setNpcLayer(runtime, RESIDENT_LAYER, used.values(), drawn.values());
     };
     sync();
     const unsubscribe = residents.subscribe(sync);
     return () => {
       unsubscribe();
-      runtime.npcStore.setState({ templates: new Map(), instances: new Map() });
+      clearNpcLayer(runtime, RESIDENT_LAYER);
     };
   }, [runtime, residents, items]);
 

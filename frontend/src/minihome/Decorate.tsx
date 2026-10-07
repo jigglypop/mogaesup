@@ -21,7 +21,7 @@ import {
 import type { CatalogItem } from '../api/types';
 import { Icon } from '../ui/icons';
 import { useTabs } from '../ui/tabs';
-import { FURNITURE, ISLAND_FLOORS, LIVING, NATURE, SHELVES, type ModelPiece, type Piece, type Shelf } from './edit/catalog';
+import { FURNITURE, islandFloors, LIVING, NATURE, SHELVES, type ModelPiece, type Piece, type Shelf } from './edit/catalog';
 import { useEditState } from './edit/context';
 import { EditIcon, PieceIcon } from './edit/icons';
 import { EIGHTHS, SelectionInspector, Stepper, Turns } from './edit/Inspector';
@@ -112,7 +112,8 @@ type DecorateProps = {
   /** The island's residents, and the published 주민 the owner may add. */
   residents: ResidentStore;
   npcItems: CatalogItem[];
-  onReset: () => void;
+  /** Opens 섬 바꾸기: another kind of island, or the island from before. */
+  onChangeIsland: () => void;
   ownerId: string;
 };
 
@@ -120,7 +121,7 @@ type DecorateProps = {
  * 꾸미기: the island's decorating tools over gaesup-world's building store. 선택 picks placed objects to move, turn,
  * copy or remove; 놓기, 칠하기 and 지우기 are the engine's tools, working on the drawer's objects, floors or walls.
  */
-export function Decorate({ session, studioItems, residents, npcItems, onReset, ownerId }: DecorateProps) {
+export function Decorate({ session, studioItems, residents, npcItems, onChangeIsland, ownerId }: DecorateProps) {
   const store = useBuildingStoreApi();
   const tool = useEditState(session, (state) => state.tool);
   const part = useEditState(session, (state) => state.part);
@@ -128,6 +129,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
   const topDown = useEditState(session, (state) => state.topDown);
   const notice = useEditState(session, (state) => state.notice);
   const objects = useBuildingStore((state) => state.objects);
+  const meshes = useBuildingStore((state) => state.meshes);
   const piece = useBuildingStore((state) =>
     state.selectedPlacedObjectType === 'model'
       ? state.selectedModelObjectId
@@ -176,7 +178,8 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
     // Residents are placed and weather is picked from the drawer; a click on the island must not drop the last chosen piece.
     if (next === 'residents' || next === 'weather') session.setTool('select');
   };
-  const shelfTabs = useTabs(SHELF_IDS, shelf, chooseShelf);
+  // One panel shows the chosen shelf's pieces, so only the chosen tab names it.
+  const shelfTabs = useTabs(SHELF_IDS, shelf, chooseShelf, { sharedPanel: true });
   /** Picking a floor or wall means using it: the select tool gives way to placing, painting and erasing stay. */
   const toPlace = () => {
     if (session.getState().tool === 'select') session.setTool('place');
@@ -231,7 +234,7 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
     }
     if (shelf === 'floor') {
       return [
-        ...ISLAND_FLOORS.filter((item) => matches(item.label)).map((item) => (
+        ...islandFloors(meshes.keys()).filter((item) => matches(item.label)).map((item) => (
           <button
             key={item.id}
             className="mg-piece"
@@ -316,13 +319,8 @@ export function Decorate({ session, studioItems, residents, npcItems, onReset, o
   })();
 
   const reset = (
-    <button
-      className="mg-btn is-danger is-small"
-      onClick={() => {
-        if (window.confirm('섬을 처음 모습으로 되돌릴까요? 되돌리기로 다시 가져올 수 있어요.')) onReset();
-      }}
-    >
-      섬 처음 모습으로
+    <button className="mg-btn is-small" onClick={onChangeIsland}>
+      섬 바꾸기
     </button>
   );
 
