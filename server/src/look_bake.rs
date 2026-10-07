@@ -24,6 +24,9 @@ use crate::{
 };
 
 pub const HAIR_SLOTS: [&str; 3] = ["hair", "hairFront", "hairBack"];
+/// The rules a look is baked with. A stored look baked under other rules is baked again when it is saved again, never
+/// worn from the store (`looks.rs`).
+pub const REVISION: &str = "look-v2-hair-reference-light";
 /// Slots whose part covers some of the body: the wardrobe reads a coverage record for each.
 pub const COVERED_SLOTS: [&str; 5] = ["top", "bottom", "shoes", "hat", "hair"];
 /// Slots whose worn part a member may resize and move (`PartEdit`), as the wardrobe offers them
@@ -177,9 +180,11 @@ fn luminance(color: [f64; 3]) -> f64 {
     color.iter().zip(LUMINANCE).map(|(channel, weight)| channel * weight).sum()
 }
 
-/// A part's hair colour: the strand luminance times the target, as `hair-color.ts` shades it.
-fn hair_shade(base: [f64; 3], target: [f64; 3]) -> [f64; 3] {
-    let light = luminance(base) * 2.5;
+/// A part's hair colour, as `hair-color.ts` shades it: the target times the texel's light against `reference`, its colour
+/// map's mean light, so the mean texel takes the target however dark or light the hair was. The epsilon lets black hair
+/// take a colour.
+fn hair_shade(base: [f64; 3], target: [f64; 3], reference: f64) -> [f64; 3] {
+    let light = (luminance(base) + 0.0001) / (reference + 0.0001);
     target.map(|channel| (channel * light).clamp(0.0, 1.0))
 }
 
@@ -674,9 +679,10 @@ fn pbr_of(out: &mut Out, material: usize) -> Option<&mut Value> {
 }
 
 /// A new colour map for `material`: each texel of its current map (or its factor, without one) through `shade`, which
-/// takes the texel's linear colour times the factor and its UV. The factor turns white, since the map now holds it.
-/// None when the material is not there or the map cannot be decoded here.
-fn repaint(out: &mut Out, material: usize, shade: &dyn Fn([f64; 3], f64, f64) -> [f64; 3]) -> Option<()> {
+/// takes the texel's linear colour times the factor, its UV and the map's mean light (weighted by alpha: transparent
+/// atlas texels are not hair). The factor turns white, since the map now holds it. None when the material is not there
+/// or the map cannot be decoded here.
+fn repaint(out: &mut Out, material: usize, shade: &dyn Fn([f64; 3], f64, f64, f64) -> [f64; 3]) -> Option<()> {
     let factor = {
         let values = &out.json["materials"][material]["pbrMetallicRoughness"]["baseColorFactor"];
         let mut factor = [1.0; 4];
@@ -688,7 +694,7 @@ fn repaint(out: &mut Out, material: usize, shade: &dyn Fn([f64; 3], f64, f64) ->
     let tint = [factor[0], factor[1], factor[2]];
     let reference = out.json["materials"][material]["pbrMetallicRoughness"]["baseColorTexture"].clone();
     let Some(texture) = index(&reference["index"]) else {
-        let color = shade(tint, 0.5, 0.5);
+        let color = shade(tint, 0.5, 0.5, luminance(tint));
         pbr_of(out, material)?["baseColorFactor"] = json!([color[0], color[1], color[2], factor[3]]);
         return Some(());
     };
@@ -706,9 +712,15 @@ fn repaint(out: &mut Out, material: usize, shade: &dyn Fn([f64; 3], f64, f64) ->
     let mut picture = slim::decode(bytes, format, MAX_EDGE, MAX_ALLOC)?.to_rgba8();
     let (width, height) = picture.dimensions();
     let table: Vec<f64> = (0..=255).map(|value| to_linear(f64::from(value) / 255.0)).collect();
+    let base = |pixel: &image::Rgba<u8>| [0, 1, 2].map(|channel| table[usize::from(pixel[channel])] * tint[channel]);
+    let (sum, weight) = picture.pixels().fold((0.0, 0.0), |(sum, weight), pixel| {
+        let alpha = f64::from(pixel[3]) / 255.0;
+        (sum + luminance(base(pixel)) * alpha, weight + alpha)
+    });
+    let mean_light = if weight > 0.0 { sum / weight } else { luminance(tint) };
     for (x, y, pixel) in picture.enumerate_pixels_mut() {
-        let base = [0, 1, 2].map(|channel| table[usize::from(pixel[channel])] * tint[channel]);
-        let color = shade(base, (f64::from(x) + 0.5) / f64::from(width), (f64::from(y) + 0.5) / f64::from(height));
+        let u = (f64::from(x) + 0.5) / f64::from(width);
+        let color = shade(base(pixel), u, (f64::from(y) + 0.5) / f64::from(height), mean_light);
         for channel in 0..3 {
             pixel[channel] = (to_srgb(color[channel]) * 255.0).round() as u8;
         }
@@ -911,7 +923,7 @@ fn add_part(
         .collect();
     if let Some(target) = hair.filter(|_| HAIR_SLOTS.contains(&slot)) {
         for material in &used {
-            match repaint(out, material + materials, &|base, _, _| hair_shade(base, target)) {
+            match repaint(out, material + materials, &|base, _, _, reference| hair_shade(base, target, reference)) {
                 Some(()) => added.recolored += 1,
                 None => added.unreadable_maps += 1,
             }
@@ -936,7 +948,9 @@ fn add_part(
         };
         // A material without a colour map is shaded from its flat colour, as the wardrobe's shader does.
         if palette.material < own_materials && mask_width > 0 && mask_height > 0 {
-            match repaint(out, palette.material + materials, &|base, u, v| region_shade(base, weights(u, v), palette)) {
+            match repaint(out, palette.material + materials, &|base, u, v, _| {
+                region_shade(base, weights(u, v), palette)
+            }) {
                 Some(()) => added.recolored += 1,
                 None => added.unreadable_maps += 1,
             }
@@ -1411,6 +1425,7 @@ pub fn bake_with_edits(
     compact(&mut out)?;
     out.json["asset"]["generator"] = "mogaesup look".into();
     let report = json!({
+        "bakeRevision": REVISION,
         "parts": slots,
         "partEdits": edits,
         "coverageDisabledForEdits": worn.difference(&covering_worn).collect::<Vec<_>>(),
@@ -1888,6 +1903,93 @@ pub(crate) mod tests {
         let texel = map_color(&baked.glb, json["materials"].as_array().unwrap().len() - 1);
         assert!(texel[1] > 100 && texel[0] < 10 && texel[2] < 10, "{texel:?}");
         assert_eq!(map_color(&baked.glb, 0), [255, 255, 255, 255]);
+    }
+
+    /// `slot`'s part with its colour map replaced by `picture` and its alpha factor by `alpha`, and its parts.
+    fn hair_with_map(slot: &str, picture: &RgbaImage, alpha: f64) -> (Vec<u8>, Value, Vec<u8>) {
+        let original = part(slot, 0.5);
+        let (json, bin) = split(&original).unwrap();
+        let mut source = Out { json, bin: bin.to_vec() };
+        let mut png = Cursor::new(Vec::new());
+        picture.write_to(&mut png, ImageFormat::Png).unwrap();
+        let view = source.push_view(&png.into_inner(), None);
+        source.json["images"][0]["bufferView"] = view.into();
+        source.json["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"][3] = alpha.into();
+        (join(&source.json, &source.bin), source.json, source.bin)
+    }
+
+    #[test]
+    fn dark_and_light_hair_take_the_selected_colour_without_changing_their_shape_or_alpha() {
+        let target = linear_color("#f0d080").unwrap();
+        // The old shade (the strand light times the target, times 2.5) left black hair black and burnt light hair white.
+        for gray in [0, 32, 128, 224] {
+            // Transparent white padding must not make visible dark strands look darker.
+            let picture = RgbaImage::from_fn(2, 1, |x, _| {
+                image::Rgba(if x == 0 { [gray, gray, gray, 255] } else { [255, 255, 255, 0] })
+            });
+            let (hair, source_json, source_bin) = hair_with_map("hairBack", &picture, 0.7);
+            let baked = wear("hairBack", &hair, Some(target)).unwrap();
+            assert_eq!(baked.report["bakeRevision"], REVISION);
+            let (json, bin) = split(&baked.glb).unwrap();
+            let material = json["materials"].as_array().unwrap().len() - 1;
+            assert_eq!(map_color(&baked.glb, material), [240, 208, 128, 255], "source grey {gray}");
+            assert_eq!(json["materials"][material]["pbrMetallicRoughness"]["baseColorFactor"][3], 0.7);
+            let node =
+                json["nodes"].as_array().unwrap().iter().find(|node| node["extras"]["standard_slot"] == "hairBack");
+            let attributes = &json["meshes"][index(&node.unwrap()["mesh"]).unwrap()]["primitives"][0]["attributes"];
+            let source = &source_json["meshes"][0]["primitives"][0]["attributes"];
+            for name in ["POSITION", "JOINTS_0", "WEIGHTS_0"] {
+                assert_eq!(
+                    read(&json, bin, index(&attributes[name]).unwrap()),
+                    read(&source_json, &source_bin, index(&source[name]).unwrap()),
+                    "{name}"
+                );
+            }
+        }
+        // The solid scalp cap has no colour map: it takes the colour its strands' mean does.
+        let cap = edited(&part("hairFront", 0.5), |json| {
+            json["materials"][0]["pbrMetallicRoughness"].as_object_mut().unwrap().remove("baseColorTexture");
+            json["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] = json!([0.0, 0.0, 0.0, 0.7]);
+        });
+        let baked = wear("hairFront", &cap, Some(target)).unwrap();
+        let (json, _) = split(&baked.glb).unwrap();
+        let color = &json["materials"].as_array().unwrap().last().unwrap()["pbrMetallicRoughness"]["baseColorFactor"];
+        for channel in 0..3 {
+            assert!((color[channel].as_f64().unwrap() - target[channel]).abs() < 1e-12);
+        }
+        assert_eq!(color[3], 0.7);
+    }
+
+    #[test]
+    fn a_strand_keeps_its_light_against_the_mean_of_its_map() {
+        // Two strands, one with twice the other's linear light: the mean takes the colour, each strand its share of it.
+        let dark = (to_srgb(0.05) * 255.0).round() as u8;
+        let light = (to_srgb(0.10) * 255.0).round() as u8;
+        let picture = RgbaImage::from_fn(2, 1, |x, _| {
+            let byte = if x == 0 { dark } else { light };
+            image::Rgba([byte, byte, byte, 255])
+        });
+        let (hair, _, _) = hair_with_map("hair", &picture, 1.0);
+        let target = linear_color("#404080").unwrap();
+        let baked = wear("hair", &hair, Some(target)).unwrap();
+        let (json, bin) = split(&baked.glb).unwrap();
+        let material = json["materials"].as_array().unwrap().len() - 1;
+        let texture = index(&json["materials"][material]["pbrMetallicRoughness"]["baseColorTexture"]["index"]).unwrap();
+        let view = &json["bufferViews"]
+            [index(&json["images"][index(&json["textures"][texture]["source"]).unwrap()]["bufferView"]).unwrap()];
+        let start = number(&view["byteOffset"]);
+        let dyed = image::load_from_memory(&bin[start..start + number(&view["byteLength"])]).unwrap().to_rgba8();
+        // The part's colour factor (0.5) tints both strands.
+        let strand = |byte: u8| to_linear(f64::from(byte) / 255.0) * 0.5;
+        let mean = (strand(dark) + strand(light)) / 2.0;
+        for (x, byte) in [(0, dark), (1, light)] {
+            let share = (strand(byte) + 0.0001) / (mean + 0.0001);
+            let pixel = dyed.get_pixel(x, 0).0;
+            for channel in 0..3 {
+                let expected = (to_srgb(target[channel] * share) * 255.0).round();
+                assert!((f64::from(pixel[channel]) - expected).abs() <= 1.0, "strand {x}: {pixel:?}");
+            }
+        }
     }
 
     #[test]

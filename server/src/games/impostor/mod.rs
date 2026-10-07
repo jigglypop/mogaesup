@@ -25,28 +25,41 @@
 //!   (8 s when one person is left among bots), then vote for 30 s (`target`: a living player, or null to skip), once
 //!   each; the vote ends when every living player has voted. When it ends the bodies go and the waits start again.
 //! - Talk: up to 120 characters a line, one line a second. The living talk to everyone during meetings; the dead talk
-//!   any time, to the dead only.
+//!   any time, to the dead only. Between meetings nobody talks in the island's live room.
+//! - Time: a game that nobody has won fifteen minutes after its start is the impostors'.
+//! - Reach: every distance above is on the ground, and only within 3 m of the same height (someone up in a jump does
+//!   not reach); someone already at work, holding a panel or in a vent stays so within 6 m of its height (a jump). A
+//!   body lies on the floor (the table's height), wherever its victim stood.
+//! - The live room: everyone moves at most at a run (24 m/s), catching up 40 m at once after a stalled link, jumping
+//!   only where the game sends them, once a socket each (to their place by the table at the start; to their seat at a
+//!   meeting; to the vent they move to). It hides the dead from the living and whoever is in a vent from everyone,
+//!   until the game ends or they leave it. Whoever is on the island and does not play watches from the layout's
+//!   `stand`, out of the players' sight and hearing (see [`super::Stand`]).
 //!
 //! Layout (from the host's page): `{"stations": [[x, y, z]; 6..=12], "table": [x, y, z], "vents": [[x, y, z]; 0..=8],
 //! "walk": [[x, y, z]; 0..=400], "panels": {"lights": i, "comms": i, "reactor": [i, j]} | null, "bots": 0..=9, "role":
-//! "crew" | "impostor" | null}`: the places of the map the page builds (the ship over the island, see
-//! frontend/src/games/impostor/ship.ts; the walk is every floor cell the bots may go to), which stations fix each
-//! sabotage (four different ones; without them the reactor gets the two farthest apart), the bots to add, and the role
-//! of someone playing alone. Stations nearer than 3.6 m to the table or an earlier station count as that place; six
-//! must remain (and the panels then go by the game's own choice). People and bots together are 4 to 15.
+//! "crew" | "impostor" | null, "stand": [x, y, z] | null}`: the places of the map the page builds (the ship, which
+//! takes the island's place on the pages while the game plays, see frontend/src/games/impostor/ship.ts; the walk is
+//! every floor cell the bots may go to), which stations fix each sabotage (four different ones; without them the
+//! reactor gets the two farthest apart), the bots to add, the role of someone playing alone, and where whoever watches
+//! stands (without it they stay where they are). Stations nearer than 3.6 m to the table or an earlier station count
+//! as that place; six must remain (and the panels then go by the game's own choice). People and bots together are 4
+//! to 15.
 //!
 //! Actions: `{"do": "task"}`, `{"do": "finish"}`, `{"do": "stop"}`, `{"do": "kill", "target": id}`, `{"do": "report",
 //! "body": n}`, `{"do": "meeting"}`, `{"do": "vote", "target": id | null}`, `{"do": "say", "text": "…"}`,
 //! `{"do": "vent", "to": n?}`, `{"do": "sabotage", "kind": "lights" | "comms" | "reactor"}`, `{"do": "fix"}`.
 //!
-//! View (per viewer; secrets only to their owner): `phase` (`play` | `discuss` | `vote` | `ended`), `role` (`crew` |
+//! View (per viewer; secrets only to their owner; `hidden` is always `[]`, kept for pages from before the live room
+//! hid anyone itself, which read it): `phase` (`play` | `discuss` | `vote` | `ended`), `role` (`crew` |
 //! `impostor`, null to someone watching), `impostors` (to impostors only), `alive`, `spawn` (where the viewer starts),
 //! `tasks` (`[{station, done}]`, an impostor's being fake), `working` (`{station, kind, readyAt}` | null), `progress`
 //! (`{done, total}` over the crew's tasks; null to the crew while the comms are down), `players` (`[{id, name, alive,
-//! bot}]` as everyone knows it; to the dead, as it is), `hidden` (people whose avatars the viewer does not see: the
-//! dead, even once they have left, and those in vents), `bots` (`[{id, name, color, route: {points, departAt, speed},
+//! bot}]` as everyone knows it; to the dead, as it is), `bots` (`[{id, name, color, route: {points, departAt, speed},
 //! ghost}]`, the ones the viewer sees), `bodies` (`[{id, victim, color, name, position, reported}]`, a bot's in its
-//! colour), `table`, `stations`, `stationKinds`, `vents`, `panels` (`{lights, comms, reactor: [a, b]}`, stations),
+//! colour: to the living those reported or within 10 m of them, 5 m for the crew with the lights out; to the dead
+//! all), `endsAt` (when the time runs out), `table`, `stations`, `stationKinds`, `vents`, `panels` (`{lights, comms,
+//! reactor: [a, b]}`, stations),
 //! `sabotage` (null or `{kind, endsAt, held}`), `sabotageFrom` (to impostors), `venting` (the viewer's vent),
 //! `meeting`, `talk`, `lastMeeting` (`{number, ejected, name, impostor, remaining, votes}`), `kill` (to living
 //! impostors: `{readyAt, targets}`), `near` (`{station, body, table, vent, panel}`: what the viewer's buttons reach, as
@@ -56,7 +69,7 @@
 //! "verdict", number, ejected, name, impostor}`, `{"type": "sabotage", kind}` and `{"type": "fixed", kind}` to
 //! everyone.
 //!
-//! Result: `{"winner": "crew" | "impostor", "reason": "tasks" | "impostorsOut" | "parity" | "meltdown", "players":
+//! Result: `{"winner": "crew" | "impostor", "reason": "tasks" | "impostorsOut" | "parity" | "meltdown" | "time", "players":
 //! [{id, name, role, alive, left, bot}]}`.
 
 mod bots;
@@ -73,8 +86,8 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    BAD_ACTION, BAD_LAYOUT, Ctx, Game, GameError, Kind, Millis, distance_xz, distinct, layout_points, pick_many, point,
-    within,
+    BAD_ACTION, BAD_LAYOUT, Ctx, Game, GameError, Kind, Millis, Movement, Stand, Teleport, distance_xz, distinct,
+    layout_points, pick_many, point, within,
 };
 use bots::Bot;
 use walk::{Route, Walk};
@@ -114,6 +127,19 @@ const VOTE: Millis = 30_000;
 const FIRST_SABOTAGE: Millis = 20_000;
 const SABOTAGE_COOLDOWN: Millis = 30_000;
 const REACTOR_TIME: Millis = 40_000;
+/// How long a game may run before the impostors have it.
+const GAME_LIMIT: Millis = 15 * 60_000;
+/// How far above or below a place someone may stand and still reach it.
+const LEVEL: f64 = 3.0;
+/// The same for someone already at work, holding a panel or in a vent, who stays so: a jump goes about 5 m up.
+const JUMP_LEVEL: f64 = 6.0;
+/// How far the living see a body, in meters, and the crew with the lights out.
+const BODY_SIGHT: f64 = 10.0;
+const BODY_SIGHT_DARK: f64 = 5.0;
+/// The fastest anyone moves in the live room, in m/s: a run (20) and a jump.
+const RUN_SPEED: f64 = 24.0;
+/// How near the place the game sends someone to they land: their page sets them a meter over it.
+const LANDING: f64 = 2.5;
 const MAX_TEXT: usize = 120;
 /// The least time between two lines of one player.
 const TALK_GAP: Millis = 1_000;
@@ -173,6 +199,8 @@ enum Reason {
     Parity,
     /// Nobody fixed the reactor in time.
     Meltdown,
+    /// The game ran out of time.
+    Time,
 }
 
 impl Reason {
@@ -182,6 +210,7 @@ impl Reason {
             Self::ImpostorsOut => "impostorsOut",
             Self::Parity => "parity",
             Self::Meltdown => "meltdown",
+            Self::Time => "time",
         }
     }
 }
@@ -293,6 +322,8 @@ struct Player {
     said_at: Option<Millis>,
     /// The vent they are in.
     venting: Option<usize>,
+    /// How many times they have gone into a vent or on to another: tells each jump to a vent from the last.
+    vent_moves: u64,
 }
 
 impl Player {
@@ -347,6 +378,8 @@ struct Line {
     name: String,
     text: String,
     ghost: bool,
+    /// The players it names.
+    names: Vec<Uuid>,
 }
 
 pub(crate) struct Impostor {
@@ -377,7 +410,11 @@ pub(crate) struct Impostor {
     sabotage_at: Millis,
     /// Where everyone stood at the last tick: what the views' in-reach flags are measured from.
     seen: HashMap<Uuid, [f64; 3]>,
+    /// When the time runs out.
+    ends_at: Millis,
     winner: Option<(Role, Reason)>,
+    /// Where whoever watches stands.
+    stand: Option<[f64; 3]>,
 }
 
 /// How many impostors play among `players`.
@@ -391,6 +428,48 @@ fn impostors_for(players: usize) -> usize {
 
 fn create(layout: &Value, ctx: &mut Ctx) -> Result<Box<dyn Game>, GameError> {
     Ok(Box::new(Impostor::new(layout, ctx)?))
+}
+
+/// Whether `point` is within `radius` of `place` on the ground, and near its height.
+fn near(place: [f64; 3], point: [f64; 3], radius: f64) -> bool {
+    within(place, point, radius) && (place[1] - point[1]).abs() <= LEVEL
+}
+
+/// How far `point` is from `place` on the ground, when it is near its height.
+fn gap(place: [f64; 3], point: [f64; 3]) -> Option<f64> {
+    ((place[1] - point[1]).abs() <= LEVEL).then(|| distance_xz(place, point))
+}
+
+/// Whether someone at `point`, already at `place` (working, holding, in a vent), is still there: within `radius` on
+/// the ground, and up to a jump over it.
+fn still_at(place: [f64; 3], point: [f64; 3], radius: f64) -> bool {
+    within(place, point, radius) && (place[1] - point[1]).abs() <= JUMP_LEVEL
+}
+
+/// What may follow a name that a line calls someone by: a title or a particle ("감자님이", "감자가", "감자를").
+const AFTER_NAME: [&str; 18] = [
+    "님", "씨", "이", "가", "은", "는", "을", "를", "도", "만", "의", "랑", "요", "한테", "에게", "께", "하고", "이랑",
+];
+
+/// Whether `text` calls someone named `name`: the name standing as a word of its own, or with a particle after it, not
+/// inside another word ("이" is not in "있었어요").
+fn calls(text: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(found) = text[from..].find(name) {
+        let (start, end) = (from + found, from + found + name.len());
+        let alone_before = text[..start].chars().next_back().is_none_or(|before| !before.is_alphanumeric());
+        let rest = &text[end..];
+        let alone_after = rest.chars().next().is_none_or(|after| !after.is_alphanumeric())
+            || AFTER_NAME.iter().any(|particle| rest.starts_with(particle));
+        if alone_before && alone_after {
+            return true;
+        }
+        from = start + name.chars().next().map_or(1, char::len_utf8);
+    }
+    false
 }
 
 /// Centimeters, as the host's spots are written.
@@ -491,6 +570,10 @@ impl Impostor {
         let named = named_panels(layout, named, stations.len())?;
         let vents = distinct(optional_points(layout, "vents", MAX_VENTS)?, SAME_VENT);
         let walk = optional_points(layout, "walk", MAX_WALK)?;
+        let stand = match layout.get("stand") {
+            None | Some(Value::Null) => None,
+            Some(at) => Some(point(at)?),
+        };
         let bots = match layout.get("bots") {
             None | Some(Value::Null) => 0,
             Some(count) => count.as_u64().filter(|count| *count <= MAX_BOTS as u64).ok_or(BAD_LAYOUT)? as usize,
@@ -527,6 +610,7 @@ impl Impostor {
                 called: false,
                 said_at: None,
                 venting: None,
+                vent_moves: 0,
             })
             .collect();
         let taken: Vec<&str> = people.iter().map(|member| member.name.as_str()).collect();
@@ -546,6 +630,7 @@ impl Impostor {
                 called: false,
                 said_at: None,
                 venting: None,
+                vent_moves: 0,
             });
         }
 
@@ -618,7 +703,9 @@ impl Impostor {
             sabotage: None,
             sabotage_at: now + FIRST_SABOTAGE,
             seen: HashMap::new(),
+            ends_at: now + GAME_LIMIT,
             winner: None,
+            stand,
         })
     }
 
@@ -662,7 +749,7 @@ impl Impostor {
             .iter()
             .enumerate()
             .filter(|(_, task)| !task.done)
-            .map(|(index, task)| (index, distance_xz(self.stations[task.station], at)))
+            .filter_map(|(index, task)| Some((index, gap(self.stations[task.station], at)?)))
             .filter(|(_, distance)| *distance <= TASK_REACH)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(index, _)| index)
@@ -673,7 +760,7 @@ impl Impostor {
         self.bodies
             .iter()
             .filter(|body| !body.reported)
-            .map(|body| (body, distance_xz(body.position, at)))
+            .filter_map(|body| Some((body, gap(body.position, at)?)))
             .filter(|(_, distance)| *distance <= REPORT_REACH)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(body, _)| body)
@@ -682,7 +769,7 @@ impl Impostor {
     /// The nearest vent within reach of `at`.
     fn vent_near(&self, at: [f64; 3], reach: f64) -> Option<usize> {
         (0..self.vents.len())
-            .map(|vent| (vent, distance_xz(self.vents[vent], at)))
+            .filter_map(|vent| Some((vent, gap(self.vents[vent], at)?)))
             .filter(|(_, distance)| *distance <= reach)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(vent, _)| vent)
@@ -700,7 +787,7 @@ impl Impostor {
 
     /// Which of the sabotage's panels (by its place in [`Impostor::trouble_spots`]) is within reach of `at`.
     fn panel_near(&self, at: [f64; 3]) -> Option<usize> {
-        self.trouble_spots().iter().position(|station| within(self.stations[*station], at, TASK_REACH))
+        self.trouble_spots().iter().position(|station| near(self.stations[*station], at, TASK_REACH))
     }
 
     /// The living crew within an impostor's reach of `at`, nearest first.
@@ -709,7 +796,7 @@ impl Impostor {
             .players
             .iter()
             .filter(|player| player.living() && player.role == Role::Crew)
-            .filter_map(|player| Some((player.id, distance_xz(*self.seen.get(&player.id)?, at))))
+            .filter_map(|player| Some((player.id, gap(*self.seen.get(&player.id)?, at)?)))
             .filter(|(_, distance)| *distance <= KILL_REACH)
             .collect();
         near.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -848,9 +935,11 @@ impl Impostor {
         self.judge();
     }
 
-    /// Kills `victim` where they stand, `at`: their body stays there, and the bots who saw it remember who did it.
+    /// Kills `victim` where they stand, `at`: their body stays there, on the floor (in the air, they fall), and the bots
+    /// who saw it remember who did it.
     fn kill_now(&mut self, killer: usize, victim: usize, at: [f64; 3], ctx: &mut Ctx) {
         let now = ctx.now();
+        let at = [at[0], self.table[1], at[2]];
         self.players[killer].kill_at = now + KILL_COOLDOWN;
         let killer = self.players[killer].id;
         let dead = &mut self.players[victim];
@@ -869,13 +958,13 @@ impl Impostor {
         self.judge();
     }
 
-    /// Tasks underway: dropped once their player steps away.
+    /// Tasks underway: dropped once their player steps away (a jump on the spot keeps them).
     fn work(&mut self, ctx: &Ctx) {
         let stations = &self.stations;
         for player in &mut self.players {
             let Some(work) = player.working else { continue };
             let station = stations[player.tasks[work.task].station];
-            if !ctx.position(player.id).is_some_and(|at| within(station, at, TASK_REACH)) {
+            if !ctx.position(player.id).is_some_and(|at| still_at(station, at, TASK_REACH)) {
                 player.working = None;
             }
         }
@@ -886,7 +975,7 @@ impl Impostor {
         let vents = &self.vents;
         for player in &mut self.players {
             if player.venting.is_some()
-                && !ctx.position(player.id).is_some_and(|at| vents.iter().any(|vent| within(*vent, at, VENT_LEASH)))
+                && !ctx.position(player.id).is_some_and(|at| vents.iter().any(|vent| still_at(*vent, at, VENT_LEASH)))
             {
                 player.venting = None;
             }
@@ -908,7 +997,7 @@ impl Impostor {
             let stays =
                 holder.and_then(|id| self.players.iter().position(|player| player.id == id)).is_some_and(|index| {
                     self.players[index].living()
-                        && self.position(index, ctx).is_some_and(|at| within(station, at, TASK_REACH))
+                        && self.position(index, ctx).is_some_and(|at| still_at(station, at, TASK_REACH))
                 });
             if !stays {
                 *holder = None;
@@ -955,7 +1044,7 @@ impl Impostor {
             return Err(NOT_YET);
         }
         let station = self.stations[player.tasks[work.task].station];
-        if !ctx.position(player.id).is_some_and(|at| within(station, at, TASK_REACH)) {
+        if !ctx.position(player.id).is_some_and(|at| still_at(station, at, TASK_REACH)) {
             return Err(TOO_FAR);
         }
         let player = &mut self.players[me];
@@ -988,7 +1077,7 @@ impl Impostor {
             .position(|player| player.id == target && player.living() && player.role == Role::Crew)
             .ok_or(NO_TARGET)?;
         let (Some(from), Some(at)) = (ctx.position(killer.id), self.position(victim, ctx)) else { return Err(TOO_FAR) };
-        if !within(from, at, KILL_REACH) {
+        if !near(from, at, KILL_REACH) {
             return Err(TOO_FAR);
         }
         self.kill_now(me, victim, at, ctx);
@@ -1008,7 +1097,7 @@ impl Impostor {
         }
         let found =
             self.bodies.iter().position(|found| u64::from(found.id) == body && !found.reported).ok_or(NO_BODY)?;
-        if !self.position(me, ctx).is_some_and(|at| within(self.bodies[found].position, at, REPORT_REACH)) {
+        if !self.position(me, ctx).is_some_and(|at| near(self.bodies[found].position, at, REPORT_REACH)) {
             return Err(TOO_FAR);
         }
         self.report_body(me, found, ctx);
@@ -1043,7 +1132,7 @@ impl Impostor {
         if ctx.now() < self.calm_until {
             return Err(TOO_SOON);
         }
-        if !ctx.position(player.id).is_some_and(|at| within(self.table, at, TABLE_REACH)) {
+        if !ctx.position(player.id).is_some_and(|at| near(self.table, at, TABLE_REACH)) {
             return Err(TOO_FAR);
         }
         self.players[me].called = true;
@@ -1086,16 +1175,19 @@ impl Impostor {
         if player.said_at.is_some_and(|at| now < at + TALK_GAP) {
             return Err(TOO_FAST);
         }
-        self.add_line(me, text.to_owned());
+        let names =
+            self.players.iter().filter(|player| !player.left && calls(text, &player.name)).map(|player| player.id);
+        let names = names.collect();
+        self.add_line(me, text.to_owned(), names);
         self.players[me].said_at = Some(now);
         Ok(())
     }
 
-    /// Player `me`'s line, in the log they talk to.
-    fn add_line(&mut self, me: usize, text: String) {
+    /// Player `me`'s line, naming `names`, in the log they talk to.
+    fn add_line(&mut self, me: usize, text: String, names: Vec<Uuid>) {
         let player = &self.players[me];
         let ghost = !player.alive;
-        let line = Line { id: self.next_line, from: player.id, name: player.name.clone(), text, ghost };
+        let line = Line { id: self.next_line, from: player.id, name: player.name.clone(), text, ghost, names };
         let log = if ghost { &mut self.ghost_talk } else { &mut self.talk };
         log.push_back(line);
         if log.len() > TALK_KEPT {
@@ -1129,7 +1221,11 @@ impl Impostor {
             (Some(_), Some(_)) => return Err(BAD_ACTION),
             (None, Some(_)) => return Err(NO_VENT),
         };
-        self.players[me].venting = venting;
+        let player = &mut self.players[me];
+        if venting.is_some() && venting != player.venting {
+            player.vent_moves += 1;
+        }
+        player.venting = venting;
         Ok(())
     }
 
@@ -1243,7 +1339,7 @@ impl Game for Impostor {
         let station =
             me.filter(|me| me.role == Role::Crew).and_then(|me| Some(me.tasks[self.task_near(me, at?)?].station));
         let body = free_at.and_then(|at| self.body_near(at)).map(|body| body.id);
-        let table = free_at.is_some_and(|at| within(self.table, at, TABLE_REACH));
+        let table = free_at.is_some_and(|at| near(self.table, at, TABLE_REACH));
         let vent = venting.or_else(|| living_at.filter(|_| impostor).and_then(|at| self.vent_near(at, VENT_REACH)));
         let panel = free_at.is_some_and(|at| self.panel_near(at).is_some());
         let kill = me.filter(|me| impostor && me.alive).map(|me| {
@@ -1263,13 +1359,23 @@ impl Game for Impostor {
             (None, Some(_)) => "discuss",
             (None, None) => "play",
         };
-        // The dead see everyone; the living do not see the dead walk, nor anyone in the vents.
-        let hidden: Vec<Uuid> = self
-            .players
+        // The living see the bodies near them and those reported; the dead see them all.
+        let sight = if self.broken(Trouble::Lights) && !impostor { BODY_SIGHT_DARK } else { BODY_SIGHT };
+        let seer = me.and_then(|me| self.seen.get(&me.id).copied());
+        let bodies: Vec<Value> = self
+            .bodies
             .iter()
-            .filter(|player| player.bot.is_none() && self.winner.is_none())
-            .filter(|player| (!player.left && player.venting.is_some()) || (!ghost && !player.alive))
-            .map(|player| player.id)
+            .filter(|body| ghost || body.reported || seer.is_some_and(|at| near(body.position, at, sight)))
+            .map(|body| {
+                json!({
+                    "id": body.id,
+                    "victim": body.victim,
+                    "color": body.color,
+                    "name": body.name,
+                    "position": body.position,
+                    "reported": body.reported,
+                })
+            })
             .collect();
         let bots: Vec<Value> = self
             .players
@@ -1312,16 +1418,11 @@ impl Game for Impostor {
                 "alive": if ghost { player.alive } else { !player.known_dead },
                 "bot": player.bot.is_some(),
             })).collect::<Vec<_>>(),
-            "hidden": hidden,
+            // The live room hides whom it must itself now; pages from before still read this list.
+            "hidden": [],
             "bots": bots,
-            "bodies": self.bodies.iter().map(|body| json!({
-                "id": body.id,
-                "victim": body.victim,
-                "color": body.color,
-                "name": body.name,
-                "position": body.position,
-                "reported": body.reported,
-            })).collect::<Vec<_>>(),
+            "bodies": bodies,
+            "endsAt": self.ends_at,
             "table": self.table,
             "stations": self.stations,
             "stationKinds": self.chores.iter().map(|chore| chore.name()).collect::<Vec<_>>(),
@@ -1394,6 +1495,10 @@ impl Game for Impostor {
             return;
         }
         let now = ctx.now();
+        if now >= self.ends_at {
+            self.end((Role::Impostor, Reason::Time));
+            return;
+        }
         match &mut self.meeting {
             None => {
                 self.work(ctx);
@@ -1436,6 +1541,45 @@ impl Game for Impostor {
             }
         }
         self.judge();
+    }
+
+    /// A run at most, catching up a game's burst at once, jumping only to the start, to the viewer's seat at a meeting
+    /// and to the vent they move to (each once a socket); quiet in the live room between meetings.
+    fn movement(&self, player: Uuid, _now: Millis) -> Option<Movement> {
+        let me = self.present(player).filter(|me| me.bot.is_none() && self.winner.is_none())?;
+        let land = |tag: u64, to: [f64; 3]| Teleport { tag, to, radius: LANDING };
+        let mut teleports: Vec<Teleport> = self.spawns.get(&player).map(|spawn| land(0, *spawn)).into_iter().collect();
+        if let Some(meeting) = &self.meeting
+            && let Some((_, seat)) = meeting.seats.iter().find(|(seated, _)| *seated == player)
+        {
+            teleports.push(land(u64::from(meeting.number), *seat));
+        }
+        if let Some(vent) = me.venting {
+            teleports.push(land(me.vent_moves, self.vents[vent]));
+        }
+        Some(Movement { speed: RUN_SPEED, teleports, mute: self.meeting.is_none(), ..Movement::default() })
+    }
+
+    /// Until the game ends: the dead to everyone but the dead, and whoever is in a vent to everyone; nobody who has
+    /// left the game, who is back on the island like anyone else.
+    fn hidden(&self) -> Vec<(Uuid, Vec<Uuid>)> {
+        if self.winner.is_some() {
+            return Vec::new();
+        }
+        let people = self.players.iter().filter(|player| player.bot.is_none() && !player.left);
+        let ghosts: Vec<Uuid> = people.clone().filter(|player| !player.alive).map(|player| player.id).collect();
+        people
+            .filter_map(|player| match (player.venting, player.alive) {
+                (Some(_), _) => Some((player.id, Vec::new())),
+                (_, false) => Some((player.id, ghosts.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Until it is over, out of the players' sight: the crew must hear nothing from whoever watches.
+    fn stand(&self) -> Option<Stand> {
+        self.stand.filter(|_| self.winner.is_none()).map(|at| Stand { at, apart: true })
     }
 
     fn result(&self) -> Option<Value> {

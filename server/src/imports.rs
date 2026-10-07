@@ -1,7 +1,9 @@
 //! Catalog imports from the character server. The request only queues one and answers 202; a task copies the model
 //! step by step (source, download, checks, textures, store, picture, catalog) while the admin page polls it. Every check
 //! lands in a report, so an admin sees everything wrong at once, and a finished import becomes a version of its catalog
-//! item. Re-importing into an item replaces its model and keeps its status, order, name and emoji.
+//! item. Re-importing into an item replaces its model and keeps its status, order, name and emoji. A studio dog
+//! (`kind: "pet"`, its animal id as `factoryJobId`) becomes a pet breed instead (`pet_breeds`, see `pets`), the same
+//! way but without versions.
 
 use axum::{
     Json,
@@ -64,6 +66,12 @@ const NOT_PLAYABLE: ApiError =
 const NOT_RESIDENT: ApiError = bad("not_playable", "주민으로 쓰려면 리깅(스킨)과 idle 애니메이션이 있어야 합니다.");
 /** Engine clips a resident needs: it stands where the island's owner put it, so a walk is optional. */
 const RESIDENT_CLIPS: [&str; 1] = ["idle"];
+/// What a studio dog is imported as: a pet breed, not a catalog item.
+const PET: &str = "pet";
+const NOT_PET: ApiError = bad("not_playable", "펫으로 쓰려면 리깅(스킨)과 idle·walk 애니메이션이 있어야 합니다.");
+/// Clips a pet plays when its breed has them (frontend/src/pets); one missing is a warning.
+const PET_CLIPS: [&str; 5] = ["sit_hold", "lie_hold", "run", "bark", "jump"];
+const PET_LABEL: usize = 40;
 const RUNNING: ApiError = conflict("import_running", "이 항목은 이미 가져오는 중입니다. 끝난 뒤 다시 시도해 주세요.");
 const NOT_FOUND: ApiError = not_found("import_not_found", "없는 가져오기 작업입니다.");
 const INTERRUPTED: &str = "서버가 다시 시작되어 가져오기가 멈췄습니다. 다시 시도해 주세요.";
@@ -175,7 +183,8 @@ fn thumbnail(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 
 /// Runs every check on a downloaded model into `report`, then fails on the first hard problem, in this order: not a
 /// GLB, a checksum that differs from the character server's record, a character whose data cannot be read (with what
-/// could not), a 미니미 without a rig or without idle and walk, a resident (`npc`) without a rig or without idle.
+/// could not), a 미니미 or pet without a rig or without idle and walk, a resident (`npc`) without a rig or without idle.
+/// A pet's height is not checked (the engine draws a breed at its own), and the pet clips it lacks are warnings.
 fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report) -> ApiResult<glb::Details> {
     let sha256 = hex::encode(Sha256::digest(bytes));
     let checksum = match expected {
@@ -210,7 +219,8 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
         return Err(COMPRESSED);
     }
     let resident = kind == "npc";
-    let character = kind == "minime" || resident;
+    let pet = kind == PET;
+    let character = kind == "minime" || resident || pet;
     // What a character must have is only worth noting on furniture.
     let must = if character { Level::Error } else { Level::Info };
     let wanted: &[&'static str] = if resident { &RESIDENT_CLIPS } else { &glb::REQUIRED_CLIPS };
@@ -234,9 +244,19 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
     } else {
         report.check("clips", must, format!("필요한 애니메이션이 없습니다: {}", missing.join(", ")));
     }
+    if pet {
+        let absent: Vec<&str> =
+            PET_CLIPS.into_iter().filter(|clip| !details.animations.iter().any(|name| name == clip)).collect();
+        if absent.is_empty() {
+            report.check("pet_clips", Level::Ok, format!("펫 동작({})이 모두 있습니다.", PET_CLIPS.join("·")));
+        } else {
+            report.check("pet_clips", Level::Warning, format!("없는 펫 동작: {}", absent.join(", ")));
+        }
+    }
     let unused: Vec<&str> =
         details.animations.iter().filter(|name| glb::engine_clip(name).is_none()).map(String::as_str).collect();
-    if !unused.is_empty() {
+    // A pet plays its own clips by name.
+    if !unused.is_empty() && !pet {
         report.check("unused_clips", Level::Info, format!("엔진이 쓰지 않는 애니메이션: {}", unused.join(", ")));
     }
     if details.triangles > TRIANGLE_BUDGET {
@@ -249,7 +269,7 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
         report.check("triangles", Level::Ok, format!("삼각형 {}개 · 정점 {}개", details.triangles, details.vertices));
     }
     match details.size {
-        Some([_, height, _]) if !character || HEIGHT_RANGE.contains(&height) => {
+        Some([_, height, _]) if !character || pet || HEIGHT_RANGE.contains(&height) => {
             report.check("height", Level::Ok, format!("높이 {height:.2} m"));
         }
         Some([_, height, _]) => {
@@ -272,9 +292,28 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
         return Err(bad("not_playable", problem.message()));
     }
     if character && (!summary.skinned || !missing.is_empty()) {
-        return Err(if resident { NOT_RESIDENT } else { NOT_PLAYABLE });
+        return Err(if resident {
+            NOT_RESIDENT
+        } else if pet {
+            NOT_PET
+        } else {
+            NOT_PLAYABLE
+        });
     }
     Ok(details)
+}
+
+/// A pet breed's clips: the model's own animation names a page plays by name (lowercase, digits and `_`), once each.
+fn pet_clips(animations: &[String]) -> Vec<String> {
+    let mut clips: Vec<String> = Vec::new();
+    for name in animations {
+        let plain = (1..=32).contains(&name.len())
+            && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if plain && !clips.contains(name) {
+            clips.push(name.clone());
+        }
+    }
+    clips
 }
 
 /// Checks on the stored copy: whether its textures shrank, what is still oversized, and its size.
@@ -368,20 +407,29 @@ pub async fn enqueue(
     Json(body): Json<ImportBody>,
 ) -> ApiResult<Response> {
     let admin = require(&state, &headers, CATALOG_EDITOR).await?;
+    let pet = body.kind == PET;
     let order = Order {
         item: catalog::catalog_id(&body.id)?.to_owned(),
-        kind: catalog::kind(&body.kind)?.to_owned(),
-        label: catalog::label(&body.label, 30, "invalid_label")?,
+        kind: if pet { PET.to_owned() } else { catalog::kind(&body.kind)?.to_owned() },
+        label: catalog::label(&body.label, if pet { PET_LABEL } else { 30 }, "invalid_label")?,
         emoji: catalog::label(&body.emoji, 16, "invalid_emoji")?,
         status: catalog::status(body.status)?.unwrap_or_else(|| "draft".into()),
         sort_order: body.sort_order.unwrap_or(100),
-        job: studio::segment(&body.factory_job_id).ok_or(studio::JOB_NOT_FOUND)?.to_owned(),
+        job: if pet {
+            studio::animal_id(&body.factory_job_id)?.to_owned()
+        } else {
+            studio::segment(&body.factory_job_id).ok_or(studio::JOB_NOT_FOUND)?.to_owned()
+        },
     };
     factory::configured(&state)?;
-    let existing = sqlx::query("SELECT kind, source FROM catalog_items WHERE id = $1")
-        .bind(&order.item)
-        .fetch_optional(&state.db)
-        .await?;
+    let existing = sqlx::query(if pet {
+        "SELECT 'pet' AS kind, source FROM pet_breeds WHERE id = $1"
+    } else {
+        "SELECT kind, source FROM catalog_items WHERE id = $1"
+    })
+    .bind(&order.item)
+    .fetch_optional(&state.db)
+    .await?;
     if let Some(row) = &existing {
         check_target(row.get("kind"), row.get("source"), &order.kind)?;
     }
@@ -537,8 +585,13 @@ impl Task {
     }
 
     async fn copy(&self, report: &mut Report) -> ApiResult<()> {
+        let pet = self.order.kind == PET;
         self.step("source").await;
-        let source = studio::source(&self.state, &self.username, &self.order.job).await?;
+        let source = if pet {
+            studio::animal_source(&self.state, &self.username, &self.order.job).await?
+        } else {
+            studio::source(&self.state, &self.username, &self.order.job).await?
+        };
         report.source = Some(json!({
             "jobId": source.job_id, "version": source.version, "face": source.expression, "stage": source.stage,
             "characterId": source.character_id, "modelPath": source.model_path,
@@ -592,6 +645,9 @@ impl Task {
         let thumbnail_url = self.picture(&source.thumbnail_path, report).await?;
 
         self.step("save").await;
+        if pet {
+            return self.save_breed(&source, model_url, thumbnail_url, pet_clips(&details.animations), report).await;
+        }
         self.save(&source, model_url, thumbnail_url, details.clips, report).await
     }
 
@@ -764,6 +820,87 @@ impl Task {
         tx.commit().await?;
         Ok(())
     }
+
+    /// Makes the copy a pet breed's model in one transaction with the finished import, as [`Task::save`] does for an
+    /// item: a new breed starts with the order's name, emoji, status and place; one imported before keeps those and,
+    /// when no new picture came, its picture. Built-in breeds are never replaced, and breeds keep no versions.
+    async fn save_breed(
+        &self,
+        source: &studio::Source,
+        model_url: String,
+        thumbnail_url: Option<String>,
+        clips: Vec<String>,
+        report: &mut Report,
+    ) -> ApiResult<()> {
+        let source_ref = format!("animal:{}:{}", source.job_id, source.version);
+        let mut tx = self.state.db.begin().await?;
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM catalog_imports WHERE id = $1 FOR UPDATE")
+            .bind(self.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if !matches!(status.as_deref(), Some("queued" | "running")) {
+            return Err(GAVE_UP);
+        }
+        let existing =
+            sqlx::query("SELECT source, model_url, thumbnail_url, source_ref FROM pet_breeds WHERE id = $1 FOR UPDATE")
+                .bind(&self.order.item)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let outcome = match &existing {
+            Some(row) => {
+                check_target(PET, row.get("source"), PET)?;
+                let previous: Option<String> = row.get("thumbnail_url");
+                if thumbnail_url.is_none() && previous.is_some() {
+                    report.check("thumbnail_kept", Level::Info, "이전 대표 그림을 그대로 씁니다.");
+                }
+                let thumbnail_url = thumbnail_url.or(previous);
+                let same = row.get::<String, _>("model_url") == model_url
+                    && row.get::<Option<String>, _>("thumbnail_url") == thumbnail_url
+                    && row.get::<Option<String>, _>("source_ref").as_deref() == Some(source_ref.as_str());
+                sqlx::query(
+                    "UPDATE pet_breeds SET model_url = $2, thumbnail_url = $3, clips = $4, source_ref = $5,
+                     updated_at = now() WHERE id = $1",
+                )
+                .bind(&self.order.item)
+                .bind(&model_url)
+                .bind(&thumbnail_url)
+                .bind(&clips)
+                .bind(&source_ref)
+                .execute(&mut *tx)
+                .await?;
+                if same { "unchanged" } else { "updated" }
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO pet_breeds (id, label, emoji, model_url, thumbnail_url, clips, source, source_ref,
+                     status, sort_order) VALUES ($1, $2, $3, $4, $5, $6, 'factory', $7, $8, $9)",
+                )
+                .bind(&self.order.item)
+                .bind(&self.order.label)
+                .bind(&self.order.emoji)
+                .bind(&model_url)
+                .bind(&thumbnail_url)
+                .bind(&clips)
+                .bind(&source_ref)
+                .bind(&self.order.status)
+                .bind(self.order.sort_order)
+                .execute(&mut *tx)
+                .await?;
+                "created"
+            }
+        };
+        report.outcome = Some(outcome);
+        sqlx::query(
+            "UPDATE catalog_imports SET status = 'done', step = 'done', progress = 100, detail = NULL, report = $2,
+             updated_at = now(), finished_at = now() WHERE id = $1",
+        )
+        .bind(self.id)
+        .bind(report.json())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -881,6 +1018,32 @@ mod tests {
         let unused = stored["checks"].as_array().unwrap().iter().find(|check| check["code"] == "unused_clips").unwrap();
         assert_eq!(unused["message"], "엔진이 쓰지 않는 애니메이션: Dance");
         assert!(!stored.to_string().contains("\\u0000"), "{stored}");
+    }
+
+    #[test]
+    fn a_pet_needs_a_rig_idle_and_walk_and_only_warns_of_its_other_clips() {
+        let dog = crate::test_glb::character(&["idle", "walk", "sit_hold", "bark"]);
+        let mut report = Report::default();
+        let details = verify(PET, &dog, None, &mut report).unwrap();
+        let clips = report.checks.iter().find(|check| check.code == "pet_clips").unwrap();
+        assert_eq!((clips.level, clips.message.as_str()), (Level::Warning, "없는 펫 동작: lie_hold, run, jump"));
+        assert!(!levels(&report).iter().any(|(code, _)| *code == "unused_clips"), "a pet plays its clips by name");
+        assert_eq!(pet_clips(&details.animations), ["idle", "walk", "sit_hold", "bark"]);
+        // The engine draws a breed at its own height, so a model of any height will do.
+        let (mut tall, bin) = crate::test_glb::document(&["idle", "walk"]);
+        tall["nodes"][0]["scale"] = json!([0.05, 0.05, 0.05]);
+        let tall = glb::join(&tall, &bin);
+        let mut report = Report::default();
+        verify(PET, &tall, None, &mut report).unwrap();
+        assert!(levels(&report).contains(&("height", Level::Ok)));
+        let mut report = Report::default();
+        verify("minime", &tall, None, &mut report).unwrap();
+        assert!(levels(&report).contains(&("height", Level::Warning)));
+        // One that cannot walk is refused.
+        let error = verify(PET, &crate::test_glb::character(&["idle", "sit"]), None, &mut Report::default());
+        assert_eq!(error.unwrap_err().message, NOT_PET.message);
+        let names = ["Armature|walk", "idle", "idle", "Sit", "tail_2"].map(String::from);
+        assert_eq!(pet_clips(&names), ["idle", "tail_2"]);
     }
 
     #[test]

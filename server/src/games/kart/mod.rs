@@ -1,10 +1,14 @@
-//! 카트, a kart race in the sky over the host's island, after KartRider's item mode. People and bots, eight karts at
-//! most, race laps of a fixed track the pages build there; the server keeps the laps, the order and the items.
+//! 카트, a kart race after KartRider's item mode on a racing island the pages draw in the host's island's place while
+//! it runs (coast, sea and trees round a fixed track at the island's ground level). People and bots, eight karts at
+//! most, race laps of the track; the server keeps the laps, the order and the items. Whoever is on the island and does
+//! not race watches from a stand beside the start (see [`super::Stand`]).
 //!
 //! - Gates: the track's middle line as points in driving order, the first being the start/finish line. A kart passes
-//!   its next gate on coming within `radius` of it on the ground (and near its height, so the island under the track
-//!   does not count), measured along the way it went since the last tick. Gates count only in order: passing the first
-//!   after the last finishes a lap, and the last lap finishes the race. Nothing counts before the start.
+//!   its next gate on coming within `radius` of it on the ground (and near its height, so a kart thrown high over the
+//!   track does not count), measured along the way it went since the last tick. Gates count only in order: passing the first
+//!   after the last finishes a lap, and the last lap finishes the race. A kart that drove past one or two gates of a
+//!   bend without coming near the one before them (its stalled link's steps arrived at once) passes those too; one
+//!   that jumped there passes nothing on the way. Nothing counts before the start.
 //! - Start: a three-second countdown (`startsAt`), everyone on a slot of the grid behind the line (`spawn`).
 //! - End: 3 s after every person has finished, 30 s after the first kart finishes, or six minutes after the start. Karts
 //!   still racing are ranked by laps, then gates, then how near their next gate they are.
@@ -14,10 +18,16 @@
 //!   ahead it is wasted.
 //! - Bots (see `bots.rs`) drive lanes of their own at a pace of their own; they take the boxes they pass and use items
 //!   a moment later (a bubble once someone is ahead).
+//! - The live room: it holds each kart on its slot through the countdown and where a bubble caught it while it is
+//!   trapped, and keeps it to a kart's top speed (30 m/s; 35 m/s for a moment after a booster or a boost pad), catching
+//!   up 40 m at once after a stalled link and the rest along the way it went at that speed (never settling where it
+//!   stops: the gates count that way). A kart jumps only to its slot, once a socket (from the island as the race
+//!   starts, or a page loaded again).
 //!
 //! Layout (from the host's page): `{"checkpoints": [[x, y, z]; 8..=64], "radius": 2..=15, "grid": [[x, y, z]; 8],
-//! "boxes": [[x, y, z]; 0..=24], "boosts": [[x, y, z]; 0..=24], "laps": 1..=5 (3), "bots": 0..=7 (0)}`. Boost pads
-//! work on the pages alone; the view lists them for drawing. People and bots together are eight at most.
+//! "boxes": [[x, y, z]; 0..=24], "boosts": [[x, y, z]; 0..=24], "laps": 1..=5 (3), "bots": 0..=7 (0), "stand": [x, y,
+//! z] | null}`. Boost pads work on the pages alone; the view lists them for drawing. People and bots together are
+//! eight at most. `stand` is where whoever watches stands, off the road (without it they stay where they are).
 //!
 //! Action: `{"do": "item"}`.
 //!
@@ -40,7 +50,10 @@ use serde_json::{Value, json};
 use std::{cmp::Ordering, collections::HashMap};
 use uuid::Uuid;
 
-use super::{BAD_ACTION, BAD_LAYOUT, Ctx, Game, GameError, Kind, Millis, distance_xz, layout_points, pick_many};
+use super::{
+    BAD_ACTION, BAD_LAYOUT, Ctx, GAME_BURST, Game, GameError, Hold, Kind, Millis, Movement, Stand, Teleport,
+    distance_xz, layout_points, pick_many, point,
+};
 use bots::{Bot, Lane};
 
 pub(crate) const KIND: Kind = Kind::new("kart", 1, MAX_RACERS, create).ticking(20);
@@ -71,14 +84,30 @@ const RESPAWN: Millis = 4_000;
 const BOOST: Millis = 2_000;
 const TRAP: Millis = 1_500;
 const BOOSTER_CHANCE: f64 = 0.6;
-/// How far above or below a gate or a box a kart may be and still pass it: the island under the track does not count.
+/// How far above or below a gate or a box a kart may be and still pass it.
 const HEIGHT: f64 = 6.0;
-/// A move longer than this between two ticks is a teleport, not driving: only where it lands counts.
-const JUMP: f64 = 40.0;
+/// A move longer than this between two ticks is a teleport, not driving: only where it lands counts. The live room
+/// lets a kart catch up [`GAME_BURST`] at once, and a tick more at its speed.
+const JUMP: f64 = 60.0;
+/// How many gates past its next one a kart driving by them passes them all: a stalled link's steps taken at once cut
+/// across a bend between two ticks.
+const LOOK_AHEAD: usize = 2;
 /// How much nearer its next gate a kart must be to pass another on the same gate, in meters.
 const NECK: f64 = 2.0;
 /// How long a bot holding a bubble with nobody ahead waits before it looks again.
 const HOLD: Millis = 2_000;
+/// The fastest a kart goes in the live room, in m/s: its top speed with a drift's boost (27), and with a booster or a
+/// pad (31), with room.
+const DRIVE_SPEED: f64 = 30.0;
+const BOOSTED_SPEED: f64 = 35.0;
+/// How far from its slot a kart may stand through the countdown, and from where a bubble caught it, in meters.
+const GRID_HOLD: f64 = 3.0;
+const TRAP_HOLD: f64 = 2.0;
+/// How near a boost pad (on the ground) a kart takes its push, and how long the push may last on the page.
+const PAD_REACH: f64 = 3.0;
+const PAD_TIME: Millis = 1_500;
+/// How near its slot a kart lands: its page sets it a meter over the slot.
+const LANDING: f64 = 2.5;
 
 const MANY_RACERS: GameError = GameError::new("many_racers", "사람과 봇을 합쳐 8명까지예요.");
 const NOT_NOW: GameError = GameError::new("not_now", "지금은 할 수 없어요.");
@@ -127,6 +156,10 @@ struct Racer {
     item: Option<Item>,
     boost_until: Millis,
     trapped_until: Millis,
+    /// Where a bubble caught it.
+    trapped_at: Option<[f64; 3]>,
+    /// Until when a boost pad it drove over may push it.
+    pad_until: Millis,
     /// Gone from the race: out of the order, the views and the result.
     left: bool,
 }
@@ -157,6 +190,8 @@ pub(crate) struct Kart {
     /// The racers still in, best first, as of the last tick (or the start).
     order: Vec<Uuid>,
     over: bool,
+    /// Where whoever watches stands, off the road.
+    stand: Option<[f64; 3]>,
 }
 
 fn create(layout: &Value, ctx: &mut Ctx) -> Result<Box<dyn Game>, GameError> {
@@ -188,15 +223,21 @@ fn reach(point: [f64; 3], from: [f64; 3], to: [f64; 3]) -> f64 {
     (point[0] - (from[0] + dx * share)).hypot(point[2] - (from[2] + dz * share))
 }
 
+/// Where a kart that went from `from` (where it was at the last tick of the race, if it was) to `to` drove from, near
+/// `mark`'s height: None when it came from elsewhere (it jumped, or dropped from high over it), and only where it is
+/// counts.
+fn driven(mark: [f64; 3], from: Option<[f64; 3]>, to: [f64; 3]) -> Option<[f64; 3]> {
+    let level = |at: [f64; 3]| (at[1] - mark[1]).abs() <= HEIGHT;
+    from.filter(|from| level(*from) && level(to) && distance_xz(*from, to).hypot(from[1] - to[1]) <= JUMP)
+}
+
 /// Whether a kart that went from `from` (where it was at the last tick of the race, if it was) to `to` came within
 /// `radius` of `mark` on the ground, near its height.
 fn passes(mark: [f64; 3], from: Option<[f64; 3]>, to: [f64; 3], radius: f64) -> bool {
-    let level = |at: [f64; 3]| (at[1] - mark[1]).abs() <= HEIGHT;
-    if !level(to) {
+    if (to[1] - mark[1]).abs() > HEIGHT {
         return false;
     }
-    let driven = from.filter(|from| level(*from) && distance_xz(*from, to).hypot(from[1] - to[1]) <= JUMP);
-    reach(mark, driven.unwrap_or(to), to) <= radius
+    reach(mark, driven(mark, from, to).unwrap_or(to), to) <= radius
 }
 
 /// A bot's id: random bytes, from the session's random numbers.
@@ -219,6 +260,10 @@ impl Kart {
         let boosts = optional_points(layout, "boosts", MAX_BOOSTS)?;
         let laps = count(layout, "laps", 1, MAX_LAPS, LAPS)? as u32;
         let bots = count(layout, "bots", 0, MAX_BOTS, 0)? as usize;
+        let stand = match layout.get("stand") {
+            None | Some(Value::Null) => None,
+            Some(at) => Some(point(at)?),
+        };
         let people = ctx.players();
         if people.len() + bots > MAX_RACERS {
             return Err(MANY_RACERS);
@@ -252,6 +297,8 @@ impl Kart {
                 item: None,
                 boost_until: 0,
                 trapped_until: 0,
+                trapped_at: None,
+                pad_until: 0,
                 left: false,
             });
         }
@@ -269,6 +316,7 @@ impl Kart {
             last: HashMap::new(),
             order: Vec::new(),
             over: false,
+            stand,
         };
         // Before anyone has moved, the grid is the order.
         for racer in &kart.racers {
@@ -321,23 +369,35 @@ impl Kart {
         self.order = order.into_iter().map(|racer| racer.id).collect();
     }
 
-    /// Racer `index` went from `from` to `to`: the gates it passed in order, its laps, and its finish.
+    /// Racer `index` went from `from` to `to`: the gates it passed in order, its laps, and its finish. Driving past
+    /// one of the [`LOOK_AHEAD`] gates after its next one passes those before it too.
     fn advance(&mut self, index: usize, from: Option<[f64; 3]>, to: [f64; 3], now: Millis) {
         let count = self.gates.len();
-        for _ in 0..count {
+        let mut passed = 0;
+        while passed < count {
             let racer = &self.racers[index];
-            if racer.finished.is_some() || !passes(self.gates[racer.next], from, to, self.radius) {
+            if racer.finished.is_some() {
                 return;
             }
-            let racer = &mut self.racers[index];
-            if racer.next == 0 {
-                racer.lap += 1;
-                if racer.lap >= self.laps {
-                    racer.finished = Some(now - self.starts_at);
-                    self.first_finish.get_or_insert(now);
+            let ahead = |step: usize| self.gates[(racer.next + step) % count];
+            let next = self.gates[racer.next];
+            let skips = if driven(next, from, to).is_some() { LOOK_AHEAD.min(count - 1) } else { 0 };
+            let Some(step) = (0..=skips).find(|step| passes(ahead(*step), from, to, self.radius)) else { return };
+            for _ in 0..=step {
+                let racer = &mut self.racers[index];
+                if racer.next == 0 {
+                    racer.lap += 1;
+                    if racer.lap >= self.laps {
+                        racer.finished = Some(now - self.starts_at);
+                        self.first_finish.get_or_insert(now);
+                    }
+                }
+                racer.next = (racer.next + 1) % count;
+                passed += 1;
+                if racer.finished.is_some() {
+                    return;
                 }
             }
-            racer.next = (racer.next + 1) % count;
         }
     }
 
@@ -386,8 +446,10 @@ impl Kart {
             }
             Item::Bubble => {
                 let Some(target) = self.ahead(index) else { return false };
+                let caught = self.seen.get(&self.racers[target].id).copied();
                 let racer = &mut self.racers[target];
                 racer.trapped_until = now + TRAP;
+                racer.trapped_at = caught;
                 match racer.bot.as_mut() {
                     Some(bot) => bot.trap(now, now + TRAP),
                     None => ctx.emit_one(racer.id, json!({"type": "trapped", "until": now + TRAP})),
@@ -527,6 +589,9 @@ impl Game for Kart {
                 let from = self.last.get(&id).copied();
                 self.advance(index, from, to, now);
                 self.pick_up(index, from, to, ctx);
+                if self.boosts.iter().any(|pad| passes(*pad, from, to, PAD_REACH)) {
+                    self.racers[index].pad_until = now + PAD_TIME;
+                }
             }
             self.drive_bots(ctx);
             self.last.clone_from(&standing);
@@ -543,6 +608,37 @@ impl Game for Kart {
             self.rank();
             self.judge(ctx.now());
         }
+    }
+
+    /// Held on its slot through the countdown and where a bubble caught it while trapped; a kart's speed, more for a
+    /// moment after a booster or a pad; a jump to its slot (once a socket).
+    fn movement(&self, player: Uuid, now: Millis) -> Option<Movement> {
+        let racer = self.index(player).map(|index| &self.racers[index]).filter(|racer| racer.bot.is_none())?;
+        if self.over {
+            return None;
+        }
+        let hold = if now < self.starts_at {
+            Some(Hold { at: racer.slot, radius: GRID_HOLD })
+        } else if now < racer.trapped_until {
+            racer.trapped_at.map(|at| Hold { at, radius: TRAP_HOLD })
+        } else {
+            None
+        };
+        let pushed = now < racer.boost_until.max(racer.pad_until);
+        Some(Movement {
+            speed: if pushed { BOOSTED_SPEED } else { DRIVE_SPEED },
+            burst: GAME_BURST,
+            // Caught up along the way it went, gate by gate, never at once where it stops.
+            settle: false,
+            hold,
+            teleports: vec![Teleport { tag: 0, to: racer.slot, radius: LANDING }],
+            mute: false,
+        })
+    }
+
+    /// Beside the start, off the road, until the race is over; they see the racers and the racers them.
+    fn stand(&self) -> Option<Stand> {
+        self.stand.filter(|_| !self.over).map(|at| Stand { at, apart: false })
     }
 
     fn result(&self) -> Option<Value> {

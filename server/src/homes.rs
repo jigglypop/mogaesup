@@ -15,22 +15,23 @@ use serde::{
 use serde_json::{Map, Value, json, value::RawValue};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgRow};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
-    io::Write,
+    io::{Read, Write},
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::{
     AppState,
     auth::{User, current_user, optional_user, username},
     error::{ApiError, ApiResult, bad, conflict, forbidden, internal, not_found},
+    models::model_refs,
     permissions::like_escape,
     rebac::{Checker, Object, Subject},
-    security::{client_address, hmac_sha256, rate_limit},
+    security::{KeyedSlot, KeyedSlots, client_address, hmac_sha256, rate_limit, rate_running},
     share,
 };
 
@@ -39,11 +40,24 @@ const MAX_WORLD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SAVE_BYTES: usize = MAX_WORLD_BYTES + 64 * 1024;
 /// Island saves one member may make in the rate window (ten minutes): the autosave writes about every ten seconds.
 const WORLD_SAVES_PER_WINDOW: u32 = 120;
-/// Island saves read, checked and stored at once, site-wide. Each holds its body (up to 2 MiB) and the envelope to
-/// store until it is stored, and nothing is read before a save has its slot.
+/// Island save bodies received or held at once, site-wide, and from one address: each place holds a body (up to 2 MiB)
+/// until its save is done, and is taken before the body is read. A body sent slowly holds only its own place, until
+/// its save's body is due (see [`SAVE_BUDGET`]), never one of the [`SAVE_SLOTS`].
+const READING_SLOTS: usize = 32;
+const READING_PER_ADDRESS: usize = 4;
+/// Island saves checked and stored at once, site-wide, once their bodies are in.
 const SAVE_SLOTS: usize = 4;
-/// How long a save waits for a slot before it is turned away; the page saves again later.
-const SAVE_WAIT: Duration = Duration::from_secs(10);
+/// How long a save or a picture may take on the server, from its start to its answer, its waits and its body
+/// included: the site's front (CloudFront) waits 30 s for an answer, and a save it gave up on would hold its places for
+/// nothing. A save waits a sixth of it for its places (then `world_busy`; the page saves again later), has its body in
+/// by three quarters of it (then `incomplete_world`, sent again as it is), and waits for a slot until an eighth is
+/// left for checking and storing (then `world_busy`). A picture has its body in by five eighths of it.
+const SAVE_BUDGET: Duration = Duration::from_secs(24);
+/// Island text kept by all members together. Past it a save that would make its world larger is refused, so accounts
+/// made in bulk cannot fill the database's disk; saves that keep a world's size or shrink it still pass.
+pub const MAX_SITE_WORLD_BYTES: i64 = 8 * 1024 * 1024 * 1024;
+/// How long the site's total of island text is used before it is summed again.
+const SITE_BYTES_FRESH: Duration = Duration::from_secs(60);
 /// Nodes of the residents domain read into memory at most: twelve residents take a few hundred.
 const MAX_RESIDENT_NODES: usize = 2048;
 /// When a world save last bumped its island's place in the listing: an island edited for an hour moves to the top
@@ -60,10 +74,19 @@ const MAX_MEMBER_WORLD_BYTES: i64 = 6 * 1024 * 1024;
 const MAX_DOMAINS: usize = 64;
 const VISIBILITIES: [&str; 3] = ["public", "ilchon", "private"];
 const MOODS: i16 = 4;
-const MAX_DAILY_VISITORS: i64 = 10_000;
+/// The speech balloons a member may talk in, the first the one every island starts with: the app's
+/// `frontend/src/minihome/balloons/designs.json`, in its order.
+pub const BALLOONS: [&str; 12] =
+    ["glass", "cloud", "candy", "mint", "night", "paper", "shout", "heart", "pixel", "leaf", "ribbon", "bubble"];
+const MAX_DAILY_VISITORS: i32 = 10_000;
 /// Visits counted in the rate window (ten minutes): anonymous ones per address, a member's per member.
 const VISITS_PER_ADDRESS: u32 = 120;
 const VISITS_PER_MEMBER: u32 = 300;
+/// Island pages read in the rate window (ten minutes): by anonymous visitors per address, by a member per member.
+const VIEWS_PER_ADDRESS: u32 = 600;
+const VIEWS_PER_MEMBER: u32 = 600;
+/// The Seoul day, which visits count by.
+const TODAY: &str = "(now() AT TIME ZONE 'Asia/Seoul')::date";
 /// Island loads by anonymous visitors counted in the rate window (ten minutes), per address.
 const WORLD_READS_PER_ADDRESS: u32 = 600;
 /// Searches of the island listing counted in the rate window (ten minutes), per address; each one scans the islands.
@@ -84,6 +107,11 @@ const WORLD_CUT_SHORT: ApiError = ApiError::new(
 );
 const PICTURE_CUT_SHORT: ApiError =
     ApiError::new(StatusCode::BAD_REQUEST, "incomplete_picture", "사진을 끝까지 받지 못했어요. 다시 올려 주세요.");
+const UNKNOWN_ENCODING: ApiError = ApiError::new(
+    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+    "unsupported_encoding",
+    "섬 데이터를 읽을 수 없는 방식으로 보냈습니다.",
+);
 const SAVES_BUSY: ApiError = ApiError::new(
     StatusCode::TOO_MANY_REQUESTS,
     "world_busy",
@@ -94,22 +122,55 @@ const SAVE_RUNNING: ApiError = ApiError::new(
     "world_saving",
     "앞선 저장이 아직 끝나지 않았어요. 잠시 뒤에 다시 저장해 주세요.",
 );
+const SITE_FULL: ApiError =
+    ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "site_storage_full", "지금은 섬을 더 크게 저장할 수 없어요.");
+const PICTURE_SAVING: ApiError = ApiError::new(
+    StatusCode::TOO_MANY_REQUESTS,
+    "picture_saving",
+    "앞서 올린 사진을 아직 받고 있어요. 잠시 뒤에 다시 올려 주세요.",
+);
 const INVALID_RESIDENTS: ApiError = bad("invalid_residents", "섬에 둘 수 없는 주민이 있습니다.");
 
 /// Island saves under way and island loads already compressed: what the server keeps between requests for them.
 #[derive(Clone)]
 pub struct Homes {
+    /// See [`READING_SLOTS`]: site-wide, and per address.
+    reading: Arc<Semaphore>,
+    addresses: KeyedSlots,
     /// See [`SAVE_SLOTS`].
     saving: Arc<Semaphore>,
     /// Members with a save under way: one at a time each.
     members: Arc<Mutex<HashSet<Uuid>>>,
     worlds: Arc<Mutex<WorldCache>>,
+    /// The island text the site may keep ([`MAX_SITE_WORLD_BYTES`]), and its total as last summed, and when.
+    site_limit: i64,
+    site_bytes: Arc<Mutex<Option<(Instant, i64)>>>,
+    /// See [`SAVE_BUDGET`].
+    budget: Duration,
+}
+
+/// When each part of a save that started at a moment must be done by (see [`SAVE_BUDGET`]).
+struct SaveBy {
+    places: Instant,
+    body: Instant,
+    slot: Instant,
+}
+
+/// What is left until `by`.
+fn left(by: Instant) -> Duration {
+    by.saturating_duration_since(Instant::now())
 }
 
 impl Default for Homes {
     fn default() -> Self {
-        Self { saving: Arc::new(Semaphore::new(SAVE_SLOTS)), members: Default::default(), worlds: Default::default() }
+        Self::with_site_limit(MAX_SITE_WORLD_BYTES)
     }
+}
+
+/// The places a save's body holds while it is received and until the save is done (see [`READING_SLOTS`]).
+struct Reading {
+    _address: KeyedSlot,
+    _site: OwnedSemaphorePermit,
 }
 
 /// A member's save under way; dropped (however the request ends), the member may save again.
@@ -125,12 +186,78 @@ impl Drop for Saving {
 }
 
 impl Homes {
+    /// Island saves as [`Default`] has them, the site keeping at most `site_limit` bytes of island text.
+    pub fn with_site_limit(site_limit: i64) -> Self {
+        Self {
+            reading: Arc::new(Semaphore::new(READING_SLOTS)),
+            addresses: KeyedSlots::new(READING_PER_ADDRESS),
+            saving: Arc::new(Semaphore::new(SAVE_SLOTS)),
+            members: Default::default(),
+            worlds: Default::default(),
+            site_limit,
+            site_bytes: Default::default(),
+            budget: SAVE_BUDGET,
+        }
+    }
+
+    /// The same, a save or a picture answered within `budget` in place of [`SAVE_BUDGET`] (its waits and its body each
+    /// the same share of it).
+    pub fn within(self, budget: Duration) -> Self {
+        Self { budget, ..self }
+    }
+
+    /// When the parts of a save that started at `started` must be done by.
+    fn save_by(&self, started: Instant) -> SaveBy {
+        let budget = self.budget;
+        SaveBy { places: started + budget / 6, body: started + budget * 3 / 4, slot: started + budget * 7 / 8 }
+    }
+
+    /// How long a picture's body may take to arrive.
+    fn picture_time(&self) -> Duration {
+        self.budget * 5 / 8
+    }
+
     /// `member`'s save, unless one of theirs is still under way.
     fn begin(&self, member: Uuid) -> ApiResult<Saving> {
         if !self.members.lock().unwrap_or_else(|error| error.into_inner()).insert(member) {
             return Err(SAVE_RUNNING);
         }
         Ok(Saving { members: self.members.clone(), member })
+    }
+
+    /// A place for a save's body from `address`: one of the address's, then one of the site's, both by `by`.
+    async fn reading(&self, address: &str, by: Instant) -> ApiResult<Reading> {
+        let address = self.addresses.acquire(address, left(by)).await.ok_or(SAVES_BUSY)?;
+        let site = tokio::time::timeout(left(by), self.reading.clone().acquire_owned())
+            .await
+            .map_err(|_| SAVES_BUSY)?
+            .map_err(internal)?;
+        Ok(Reading { _address: address, _site: site })
+    }
+
+    /// Whether the site keeps as much island text as it may, by its total summed at most [`SITE_BYTES_FRESH`] ago.
+    async fn site_full(&self, db: &PgPool) -> ApiResult<bool> {
+        let known = *self.site_bytes.lock().unwrap_or_else(|error| error.into_inner());
+        let bytes = match known {
+            Some((at, bytes)) if at.elapsed() < SITE_BYTES_FRESH => bytes,
+            _ => {
+                let bytes: i64 = sqlx::query_scalar("SELECT coalesce(sum(byte_size), 0)::int8 FROM home_worlds")
+                    .fetch_one(db)
+                    .await?;
+                *self.site_bytes.lock().unwrap_or_else(|error| error.into_inner()) = Some((Instant::now(), bytes));
+                bytes
+            }
+        };
+        Ok(bytes >= self.site_limit)
+    }
+
+    /// Counts a save that changed the site's island text by `delta` bytes into the total last summed, so the next
+    /// saves see it before the total is summed again. Worlds pushed out to make room are not taken off: the total
+    /// only errs high, and the next sum puts it right.
+    fn grew(&self, delta: i64) {
+        if let Some((_, bytes)) = self.site_bytes.lock().unwrap_or_else(|error| error.into_inner()).as_mut() {
+            *bytes += delta;
+        }
     }
 
     fn worlds(&self) -> MutexGuard<'_, WorldCache> {
@@ -218,10 +345,13 @@ pub struct HomeProfile {
     /// The picture the island's link preview shows (see [`crate::share`]), a stored JPEG's site path; None for the
     /// site's own.
     pub thumbnail_url: Option<String>,
+    /// The speech balloon the owner talks in, on any island (one of [`BALLOONS`]).
+    pub balloon: String,
 }
 
 const PROFILE_SELECT: &str = "SELECT h.owner_id, u.username, u.display_name AS owner_name, h.title, h.status_message,
-    h.mood, h.minime, h.emoji, h.visibility, h.updated_at, h.thumbnail_url FROM homes h JOIN users u ON u.id = h.owner_id";
+    h.mood, h.minime, h.emoji, h.visibility, h.updated_at, h.thumbnail_url, h.balloon
+    FROM homes h JOIN users u ON u.id = h.owner_id";
 
 fn profile(row: &PgRow) -> HomeProfile {
     HomeProfile {
@@ -236,6 +366,7 @@ fn profile(row: &PgRow) -> HomeProfile {
         visibility: row.get("visibility"),
         updated_at: row.get("updated_at"),
         thumbnail_url: row.get("thumbnail_url"),
+        balloon: row.get("balloon"),
     }
 }
 
@@ -262,15 +393,16 @@ pub async fn visible_home(state: &AppState, name: &str, viewer: Option<&User>) -
     }
 }
 
+/// The island's visitors today and in all, as [`visit`] counts them on the island's row: nothing is counted here.
 async fn visits(state: &AppState, owner: Uuid) -> ApiResult<Value> {
-    let row = sqlx::query(
-        "SELECT (SELECT count(*) FROM home_visits WHERE owner_id = $1 AND day = (now() AT TIME ZONE 'Asia/Seoul')::date) AS today,
-                (SELECT visits_total FROM homes WHERE owner_id = $1) AS total",
-    )
+    let row: Option<(i32, i64)> = sqlx::query_as(&format!(
+        "SELECT CASE WHEN visits_day = {TODAY} THEN visits_today ELSE 0 END, visits_total FROM homes WHERE owner_id = $1"
+    ))
     .bind(owner)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await?;
-    Ok(json!({"today": row.get::<i64, _>("today"), "total": row.get::<Option<i64>, _>("total").unwrap_or(0)}))
+    let (today, total) = row.unwrap_or_default();
+    Ok(json!({"today": today, "total": total}))
 }
 
 async fn home_view(state: &AppState, home: HomeProfile, is_owner: bool) -> ApiResult<Json<Value>> {
@@ -296,11 +428,14 @@ async fn my_home(state: &AppState, user: &User) -> ApiResult<HomeProfile> {
 }
 
 /// `?limit=&before=` on a newest-first listing: at most 50 rows (20 unless asked), older than `before`. `q` is what a
-/// searchable listing looks for.
+/// searchable listing looks for. The island listing also takes `beforeId`, the owner of the row `before` came from: rows
+/// saved at the same time are then told apart by their owner, and none is skipped between two pages.
 #[derive(Deserialize)]
 pub struct Page {
     limit: Option<i64>,
     before: Option<DateTime<Utc>>,
+    #[serde(rename = "beforeId")]
+    before_id: Option<Uuid>,
     q: Option<String>,
 }
 
@@ -325,28 +460,33 @@ impl Page {
 }
 
 /// The listing's columns and order: newest first by when the island last changed, which a world save moves at most
-/// every [`LISTED_EVERY`], ties by owner, so the pages a cursor (`before`) walks stay put.
-const LISTING_SELECT: &str =
-    "SELECT u.username, u.display_name AS owner_name, h.title, h.status_message, h.emoji, h.updated_at, h.visits_total
+/// every [`LISTED_EVERY`], ties by owner, so the pages a cursor (`before`, `beforeId`) walks stay put. Without
+/// `beforeId` the cursor stands before every owner of its time (the nil id is the least), so rows of that very time are
+/// not shown again.
+const LISTING_SELECT: &str = "SELECT h.owner_id, u.username, u.display_name AS owner_name, h.title, h.status_message,
+       h.emoji, h.updated_at, h.visits_total
      FROM homes h JOIN users u ON u.id = h.owner_id
-     WHERE h.visibility = 'public' AND h.updated_at < $1";
-const LISTING_ORDER: &str = "ORDER BY h.updated_at DESC, h.owner_id DESC LIMIT $2";
+     WHERE h.visibility = 'public' AND (h.updated_at, h.owner_id) < ($1, $2)";
+const LISTING_ORDER: &str = "ORDER BY h.updated_at DESC, h.owner_id DESC LIMIT $3";
 
 /// `GET /api/homes?q=`: public islands, newest first; `q` keeps the ones whose owner's username or name, or title,
 /// holds it (capitals do not matter). Searches are counted per address; the plain listing is not. A search looks the
-/// owners and the titles up apart, each where the trigram indexes (when the database has them) find them.
+/// owners and the titles up apart, each where the trigram indexes (when the database has them) find them. Each island
+/// comes with its owner's id, the next page's `beforeId`.
 async fn list(State(state): State<AppState>, headers: HeaderMap, Query(page): Query<Page>) -> ApiResult<Json<Value>> {
     let pattern = page.pattern()?;
+    let before_id = page.before_id.unwrap_or(Uuid::nil());
     let rows = match pattern {
         Some(pattern) => {
             rate_limit(&state, format!("home-search:{}", client_address(&headers)), SEARCHES_PER_ADDRESS)?;
             sqlx::query(&format!(
                 "{LISTING_SELECT} AND h.owner_id IN (
-                   SELECT id FROM users WHERE username ILIKE $3 OR display_name ILIKE $3
-                   UNION SELECT owner_id FROM homes WHERE title ILIKE $3)
+                   SELECT id FROM users WHERE username ILIKE $4 OR display_name ILIKE $4
+                   UNION SELECT owner_id FROM homes WHERE title ILIKE $4)
                  {LISTING_ORDER}"
             ))
             .bind(page.before())
+            .bind(before_id)
             .bind(page.limit())
             .bind(pattern)
             .fetch_all(&state.db)
@@ -355,6 +495,7 @@ async fn list(State(state): State<AppState>, headers: HeaderMap, Query(page): Qu
         None => {
             sqlx::query(&format!("{LISTING_SELECT} {LISTING_ORDER}"))
                 .bind(page.before())
+                .bind(before_id)
                 .bind(page.limit())
                 .fetch_all(&state.db)
                 .await?
@@ -364,6 +505,7 @@ async fn list(State(state): State<AppState>, headers: HeaderMap, Query(page): Qu
         .iter()
         .map(|row| {
             json!({
+                "ownerId": row.get::<Uuid, _>("owner_id"),
                 "username": row.get::<String, _>("username"),
                 "ownerName": row.get::<String, _>("owner_name"),
                 "title": row.get::<String, _>("title"),
@@ -377,14 +519,38 @@ async fn list(State(state): State<AppState>, headers: HeaderMap, Query(page): Qu
     Ok(Json(json!({"homes": homes})))
 }
 
+/// The trigram indexes the island search uses, which `migrations/20261005130000_island_search.sql` makes only where the
+/// database lets it add `pg_trgm`.
+const SEARCH_INDEXES: [&str; 3] = ["users_username_trgm", "users_display_name_trgm", "homes_title_trgm"];
+
+/// Whether the island search has its trigram indexes. Without them it still works, scanning every island, and the
+/// migration that would add them says so only in the database's own log; the server says so at startup. The database's
+/// owner adds them with `CREATE EXTENSION pg_trgm` and the indexes in that migration.
+pub async fn search_indexed(db: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')
+           AND (SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY($1)) = $2",
+    )
+    .bind(&SEARCH_INDEXES[..])
+    .bind(SEARCH_INDEXES.len() as i64)
+    .fetch_one(db)
+    .await
+}
+
 async fn mine(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
     let home = my_home(&state, &user).await?;
     home_view(&state, home, true).await
 }
 
+/// `GET /api/homes/{username}`: the island's page. Reads are counted per address for visitors and per member for
+/// members.
 async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let viewer = optional_user(&state, &headers).await?;
+    match &viewer {
+        None => rate_limit(&state, format!("home-view:{}", client_address(&headers)), VIEWS_PER_ADDRESS)?,
+        Some(user) => rate_limit(&state, format!("home-view-member:{}", user.id), VIEWS_PER_MEMBER)?,
+    }
     let (home, is_owner) = visible_home(&state, &name, viewer.as_ref()).await?;
     home_view(&state, home, is_owner).await
 }
@@ -402,6 +568,7 @@ struct ProfileChanges {
     minime: Option<String>,
     emoji: Option<String>,
     visibility: Option<String>,
+    balloon: Option<String>,
 }
 
 /// Refuses a save that a page loaded for another account sends.
@@ -462,6 +629,9 @@ async fn update(
     if changes.visibility.as_deref().is_some_and(|v| !VISIBILITIES.contains(&v)) {
         return Err(bad("invalid_visibility", "공개 범위를 확인해 주세요."));
     }
+    if changes.balloon.as_deref().is_some_and(|b| !BALLOONS.contains(&b)) {
+        return Err(bad("invalid_balloon", "말풍선을 확인해 주세요."));
+    }
     // Picking a 미니미 means walking as it: a look the owner wore comes off, in the same transaction, so neither change
     // is kept without the other.
     let picked = minime.is_some();
@@ -470,7 +640,7 @@ async fn update(
     sqlx::query(
         "UPDATE homes SET title = COALESCE($2, title), status_message = COALESCE($3, status_message),
          mood = COALESCE($4, mood), minime = COALESCE($5, minime), emoji = COALESCE($6, emoji),
-         visibility = COALESCE($7, visibility), updated_at = now() WHERE owner_id = $1",
+         visibility = COALESCE($7, visibility), balloon = COALESCE($8, balloon), updated_at = now() WHERE owner_id = $1",
     )
     .bind(user.id)
     .bind(title)
@@ -479,6 +649,7 @@ async fn update(
     .bind(minime)
     .bind(emoji)
     .bind(changes.visibility)
+    .bind(changes.balloon)
     .execute(&mut *tx)
     .await?;
     if picked {
@@ -504,12 +675,16 @@ struct PictureSave {
 }
 
 /// `PUT /api/homes/me/thumbnail`: the picture the island's link preview shows ([`crate::share`]), answered with the
-/// island's view. The body is read only once the sender is known and within its budget, and only up to a picture's
-/// size; the picture is read, cropped to the preview and encoded again before it is stored.
+/// island's view. The body is read only once the sender is known and within its budget, with no other picture of
+/// theirs under way, only up to a picture's size and in time (see [`SAVE_BUDGET`]); the picture is read, cropped to the
+/// preview and encoded again before it is stored.
 async fn save_thumbnail(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
     rate_limit(&state, format!("thumbnail:{}", user.id), THUMBNAILS_PER_WINDOW)?;
-    let bytes = limited_body(body, MAX_THUMBNAIL_REQUEST_BYTES, share::PICTURE_TOO_LARGE, PICTURE_CUT_SHORT).await?;
+    let _uploading = rate_running(&state, &format!("thumbnail-running:{}", user.id), 1)?.ok_or(PICTURE_SAVING)?;
+    let time = state.homes.picture_time();
+    let bytes =
+        read_within(time, body, MAX_THUMBNAIL_REQUEST_BYTES, share::PICTURE_TOO_LARGE, PICTURE_CUT_SHORT).await?;
     let save: PictureSave = serde_json::from_slice(&bytes).map_err(|_| share::INVALID_PICTURE)?;
     drop(bytes);
     same_owner(save.expected_owner_id, user.id)?;
@@ -531,8 +706,8 @@ struct OwnerOnly {
     expected_owner_id: Option<Uuid>,
 }
 
-/// `DELETE /api/homes/me/thumbnail`: the link preview shows the site's own picture again. The stored file stays, as
-/// every stored file does (it is named by its bytes).
+/// `DELETE /api/homes/me/thumbnail`: the link preview shows the site's own picture again. The stored file is left to
+/// the model sweep, which takes it once nothing refers to it (`models::Models::sweep`, where `MODEL_SWEEP=on`).
 async fn remove_thumbnail(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -557,8 +732,9 @@ struct VisitBody {
     _visitor_id: Option<Uuid>,
 }
 
-/// Counts one visit per visitor per Seoul day; the owner's own visits do not count. Anonymous visits share a budget per
-/// address; members behind one address (a school, a mobile carrier) each have their own.
+/// Counts one visit per visitor per Seoul day, and the day's visitors on the island's row; the owner's own visits do not
+/// count. Anonymous visits share a budget per address; members behind one address (a school, a mobile carrier) each
+/// have their own.
 async fn visit(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -580,26 +756,33 @@ async fn visit(
             None => format!("ip:{}", hex::encode(hmac_sha256(&state.config.ticket_secret, address.as_bytes()))),
         };
         let mut tx = state.db.begin().await?;
-        sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(home.owner_id).execute(&mut *tx).await?;
-        let full: bool = sqlx::query_scalar("SELECT count(*) >= $2 FROM home_visits WHERE owner_id = $1 AND day = (now() AT TIME ZONE 'Asia/Seoul')::date")
-            .bind(home.owner_id).bind(MAX_DAILY_VISITORS).fetch_one(&mut *tx).await?;
-        if full {
+        let today: i32 = sqlx::query_scalar(&format!(
+            "SELECT CASE WHEN visits_day = {TODAY} THEN visits_today ELSE 0 END FROM homes WHERE owner_id = $1
+             FOR UPDATE"
+        ))
+        .bind(home.owner_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if today >= MAX_DAILY_VISITORS {
             tx.rollback().await?;
             return Ok(Json(visits(&state, home.owner_id).await?));
         }
-        let fresh = sqlx::query(
-            "INSERT INTO home_visits (owner_id, day, visitor) VALUES ($1, (now() AT TIME ZONE 'Asia/Seoul')::date, $2)
-             ON CONFLICT DO NOTHING",
-        )
+        let fresh = sqlx::query(&format!(
+            "INSERT INTO home_visits (owner_id, day, visitor) VALUES ($1, {TODAY}, $2) ON CONFLICT DO NOTHING"
+        ))
         .bind(home.owner_id)
         .bind(visitor)
         .execute(&mut *tx)
         .await?;
         if fresh.rows_affected() > 0 {
-            sqlx::query("UPDATE homes SET visits_total = visits_total + 1 WHERE owner_id = $1")
-                .bind(home.owner_id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(&format!(
+                "UPDATE homes SET visits_total = visits_total + 1,
+                   visits_today = CASE WHEN visits_day = {TODAY} THEN visits_today + 1 ELSE 1 END, visits_day = {TODAY}
+                 WHERE owner_id = $1"
+            ))
+            .bind(home.owner_id)
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
     }
@@ -808,6 +991,16 @@ struct Scan {
     residents: Option<Value>,
     /// The residents domain was larger than any island's could be: reading stopped there.
     crowded: bool,
+    /// The stored files the envelope names anywhere, in a key or a string (see [`model_refs`]).
+    refs: BTreeSet<String>,
+}
+
+impl Scan {
+    /// Notes what a key or a string of the envelope holds: a NUL, and the stored files it names.
+    fn text(&mut self, text: &str) {
+        self.nul |= text.contains('\0');
+        model_refs(text, &mut self.refs);
+    }
 }
 
 impl Scan {
@@ -882,7 +1075,7 @@ impl<'de> Visitor<'de> for Walk<'_> {
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Seen, E> {
-        self.scan.nul |= value.contains('\0');
+        self.scan.text(value);
         self.scan.url |= self.urls && self.fetched && !safe_asset_url(value);
         Ok(Seen::Other)
     }
@@ -921,7 +1114,7 @@ impl<'de> Visitor<'de> for Key<'_> {
     }
 
     fn visit_str<E>(self, key: &str) -> Result<bool, E> {
-        self.scan.nul |= key.contains('\0');
+        self.scan.text(key);
         Ok(fetched_key(key))
     }
 }
@@ -948,7 +1141,7 @@ impl<'de> Visitor<'de> for Envelope<'_> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<(), A::Error> {
         while let Some(key) = entries.next_key::<String>()? {
-            self.scan.nul |= key.contains('\0');
+            self.scan.text(&key);
             let walk = Walk { scan: &mut *self.scan, urls: false, fetched: false };
             match key.as_str() {
                 "version" => {
@@ -1023,7 +1216,7 @@ impl<'de> Visitor<'de> for Domains<'_> {
     }
 
     fn visit_str<E>(self, value: &str) -> Result<(), E> {
-        self.scan.nul |= value.contains('\0');
+        self.scan.text(value);
         self.scan.domains = Some(false);
         Ok(())
     }
@@ -1038,13 +1231,14 @@ impl<'de> Visitor<'de> for Domains<'_> {
         let mut count = 0;
         while let Some(key) = entries.next_key::<String>()? {
             count += 1;
-            self.scan.nul |= key.contains('\0');
+            self.scan.text(&key);
             if key == crate::residents::DOMAIN {
                 let mut left = MAX_RESIDENT_NODES;
                 match entries.next_value_seed(Capture { left: &mut left }) {
                     Ok(residents) => {
                         self.scan.nul |= holds_nul(&residents);
                         self.scan.url |= unsafe_url(&residents);
+                        value_refs(&residents, &mut self.scan.refs);
                         self.scan.residents = Some(residents);
                     }
                     Err(error) => {
@@ -1150,6 +1344,19 @@ fn unsafe_url(value: &Value) -> bool {
     }
 }
 
+/// The stored files the keys and strings anywhere in `value` name (see [`model_refs`]), added to `into`.
+fn value_refs(value: &Value, into: &mut BTreeSet<String>) {
+    match value {
+        Value::String(text) => model_refs(text, into),
+        Value::Array(items) => items.iter().for_each(|item| value_refs(item, into)),
+        Value::Object(map) => map.iter().for_each(|(key, child)| {
+            model_refs(key, into);
+            value_refs(child, into);
+        }),
+        _ => {}
+    }
+}
+
 /// Whether a key or string anywhere in `value` holds a NUL, which PostgreSQL cannot keep in JSON.
 fn holds_nul(value: &Value) -> bool {
     match value {
@@ -1185,6 +1392,8 @@ struct Checked {
     base_revision: i64,
     data: String,
     residents: Residents,
+    /// The stored files the envelope names, kept with it for the model sweep (`models::REFERENCED`).
+    refs: Vec<String>,
 }
 
 /// The request body as `owner`'s save, its envelope measured and checked; for a blocking thread, since it is up to
@@ -1214,7 +1423,13 @@ fn check_save(bytes: &[u8], owner: Uuid) -> ApiResult<Checked> {
         Some(Ok(items)) => Residents::Items(items),
         Some(Err(problem)) => Residents::Bad(problem),
     };
-    Ok(Checked { world_id: save.world_id, base_revision: save.base_revision, data: data.to_owned(), residents })
+    Ok(Checked {
+        world_id: save.world_id,
+        base_revision: save.base_revision,
+        data: data.to_owned(),
+        residents,
+        refs: scan.refs.into_iter().collect(),
+    })
 }
 
 /// What a save answers with: the stored world's id, revision and time. The page has the envelope it sent, and an
@@ -1222,28 +1437,42 @@ fn check_save(bytes: &[u8], owner: Uuid) -> ApiResult<Checked> {
 const SAVED_COLUMNS: &str = "world_id, revision, updated_at";
 
 /// Stores a save under a lock on the owner's home: a first save makes the world's row (None when it exists already),
-/// a later one needs the revision it was based on (None when another save came first). The owner then keeps at most
-/// [`MAX_WORLDS`] worlds and [`MAX_MEMBER_WORLD_BYTES`] in all: the least recently updated of the others make room,
-/// never the one saved here, so saves made at once cannot pass either cap. The island moves up the listing at most
-/// every [`LISTED_EVERY`].
-async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgRow>> {
+/// a later one needs the revision it was based on (None when another save came first). With the stored files it names,
+/// for that revision. The owner then keeps at most [`MAX_WORLDS`] worlds and [`MAX_MEMBER_WORLD_BYTES`] in all: the
+/// least recently updated of the others make room, never the one saved here, so saves made at once cannot pass either
+/// cap. While the site keeps as much island text as it may ([`MAX_SITE_WORLD_BYTES`]), a save that would make its
+/// world larger is refused. The island moves up the listing at most every [`LISTED_EVERY`].
+async fn store(state: &AppState, owner: Uuid, save: &Checked) -> ApiResult<Option<PgRow>> {
+    let site_full = state.homes.site_full(&state.db).await?;
     let bytes = save.data.len() as i32;
-    let mut tx = db.begin().await?;
+    let mut tx = state.db.begin().await?;
     sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(owner).execute(&mut *tx).await?;
+    let stored: Option<i32> =
+        sqlx::query_scalar("SELECT byte_size FROM home_worlds WHERE owner_id = $1 AND world_id = $2")
+            .bind(owner)
+            .bind(&save.world_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if site_full && stored.is_none_or(|stored| bytes > stored) {
+        return Err(SITE_FULL);
+    }
     let row = if save.base_revision == 0 {
         sqlx::query(&format!(
-            "INSERT INTO home_worlds (owner_id, world_id, revision, data, byte_size) VALUES ($1, $2, 1, $3::jsonb, $4)
+            "INSERT INTO home_worlds (owner_id, world_id, revision, data, byte_size, model_refs, model_refs_revision)
+             VALUES ($1, $2, 1, $3::jsonb, $4, $5, 1)
              ON CONFLICT DO NOTHING RETURNING {SAVED_COLUMNS}"
         ))
         .bind(owner)
         .bind(&save.world_id)
         .bind(&save.data)
         .bind(bytes)
+        .bind(&save.refs)
         .fetch_optional(&mut *tx)
         .await?
     } else {
         sqlx::query(&format!(
-            "UPDATE home_worlds SET revision = revision + 1, data = $3::jsonb, byte_size = $4, updated_at = now()
+            "UPDATE home_worlds SET revision = revision + 1, data = $3::jsonb, byte_size = $4, updated_at = now(),
+               model_refs = $6, model_refs_revision = revision + 1
              WHERE owner_id = $1 AND world_id = $2 AND revision = $5 RETURNING {SAVED_COLUMNS}"
         ))
         .bind(owner)
@@ -1251,6 +1480,7 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
         .bind(&save.data)
         .bind(bytes)
         .bind(save.base_revision)
+        .bind(&save.refs)
         .fetch_optional(&mut *tx)
         .await?
     };
@@ -1277,43 +1507,88 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
         .await?;
     }
     tx.commit().await?;
+    if row.is_some() {
+        state.homes.grew(i64::from(bytes) - i64::from(stored.unwrap_or(0)));
+    }
     Ok(row)
 }
 
-/// A request's body, up to `max` bytes. Only a body past that is `too_large`; one that stops coming (the connection
-/// dropped) is `cut_short`.
-async fn limited_body(body: Body, max: usize, too_large: ApiError, cut_short: ApiError) -> ApiResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else { return Err(cut_short) };
-        if chunk.len() > max.saturating_sub(bytes.len()) {
-            return Err(too_large);
+/// A request's body, up to `max` bytes, all of it within `deadline`. Only a body past that size is `too_large`; one
+/// that stops coming (the connection dropped) or does not come in time is `cut_short`.
+async fn read_within(
+    deadline: Duration,
+    body: Body,
+    max: usize,
+    too_large: ApiError,
+    cut_short: ApiError,
+) -> ApiResult<Vec<u8>> {
+    let read = async {
+        let mut bytes = Vec::new();
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { return Err(cut_short) };
+            if chunk.len() > max.saturating_sub(bytes.len()) {
+                return Err(too_large);
+            }
+            bytes.extend_from_slice(&chunk);
         }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+        Ok(bytes)
+    };
+    tokio::time::timeout(deadline, read).await.unwrap_or(Err(cut_short))
 }
 
-/// `PUT /api/homes/me/world`: `{worldId, revision, updatedAt}` of the stored world. The body is read only once the
-/// sender is known and within its budget, with no other save of theirs under way, and once the save has one of the
-/// site's [`SAVE_SLOTS`]: however many saves come at once, a few bodies are held, and none is ever built into a tree.
+/// Whether a save's body comes gzipped (`Content-Encoding: gzip`): a slow link sends a large island in a fraction of
+/// the time its body has. Any other encoding is refused.
+fn gzipped(headers: &HeaderMap) -> ApiResult<bool> {
+    let Some(encoding) = headers.get(header::CONTENT_ENCODING) else { return Ok(false) };
+    match encoding.to_str().map(str::trim) {
+        Ok(name) if name.is_empty() || name.eq_ignore_ascii_case("identity") => Ok(false),
+        Ok(name) if name.eq_ignore_ascii_case("gzip") => Ok(true),
+        _ => Err(UNKNOWN_ENCODING),
+    }
+}
+
+/// A gzipped save's text, refused past [`MAX_SAVE_BYTES`] once unpacked (however small it came).
+fn gunzip(packed: &[u8]) -> ApiResult<Vec<u8>> {
+    let mut text = Vec::new();
+    let limit = u64::try_from(MAX_SAVE_BYTES).unwrap_or(u64::MAX).saturating_add(1);
+    flate2::read::GzDecoder::new(packed).take(limit).read_to_end(&mut text).map_err(|_| INVALID_WORLD)?;
+    if text.len() > MAX_SAVE_BYTES {
+        return Err(WORLD_TOO_LARGE);
+    }
+    Ok(text)
+}
+
+/// `PUT /api/homes/me/world`: `{worldId, revision, updatedAt}` of the stored world. The body (as it is, or gzipped) is
+/// read only once the sender is known and within its budget, with no other save of theirs under way, in one of the
+/// places for bodies (see [`READING_SLOTS`]) and in time; only then does the save wait for one of the site's
+/// [`SAVE_SLOTS`] to be checked and stored. However many saves come at once, a few bodies are held, none is ever built
+/// into a tree, and a body sent slowly holds up nobody's save but its own. The whole save is answered within
+/// [`SAVE_BUDGET`].
 async fn save_world(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Json<Value>> {
+    let by = state.homes.save_by(Instant::now());
     let user = current_user(&state, &headers).await?;
     rate_limit(&state, format!("world:{}", user.id), WORLD_SAVES_PER_WINDOW)?;
+    let packed = gzipped(&headers)?;
     // A body that says it is past the limit is refused before anything waits for it.
     let declared = headers.get(header::CONTENT_LENGTH).and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
     if declared.is_some_and(|length| length > MAX_SAVE_BYTES as u64) {
         return Err(WORLD_TOO_LARGE);
     }
     let _saving = state.homes.begin(user.id)?;
-    let _slot = tokio::time::timeout(SAVE_WAIT, state.homes.saving.clone().acquire_owned())
+    let _reading = state.homes.reading(&client_address(&headers), by.places).await?;
+    let bytes = read_within(left(by.body), body, MAX_SAVE_BYTES, WORLD_TOO_LARGE, WORLD_CUT_SHORT).await?;
+    let _slot = tokio::time::timeout(left(by.slot), state.homes.saving.clone().acquire_owned())
         .await
         .map_err(|_| SAVES_BUSY)?
         .map_err(internal)?;
-    let bytes = limited_body(body, MAX_SAVE_BYTES, WORLD_TOO_LARGE, WORLD_CUT_SHORT).await?;
     let owner = user.id;
-    let save = tokio::task::spawn_blocking(move || check_save(&bytes, owner)).await.map_err(internal)??;
+    let save = tokio::task::spawn_blocking(move || {
+        let text = if packed { gunzip(&bytes)? } else { bytes };
+        check_save(&text, owner)
+    })
+    .await
+    .map_err(internal)??;
     create(&state.db, &user).await?;
     let problem = match &save.residents {
         Residents::Bad(problem) => Some(*problem),
@@ -1323,7 +1598,7 @@ async fn save_world(State(state): State<AppState>, headers: HeaderMap, body: Bod
         tracing::warn!(problem, user = %user.id, "Rejected world save");
         return Err(INVALID_RESIDENTS);
     }
-    let row = store(&state.db, user.id, &save)
+    let row = store(&state, user.id, &save)
         .await?
         .ok_or(conflict("revision_conflict", "다른 곳에서 먼저 저장했어요. 새로 불러온 뒤 다시 저장해 주세요."))?;
     Ok(Json(json!({
@@ -1445,6 +1720,77 @@ mod tests {
         assert!(cache.bytes <= WORLD_CACHE_BYTES);
         cache.put(owner, "huge", 1, at, Bytes::from(vec![0u8; WORLD_CACHE_BYTES / 4 + 1]));
         assert!(cache.get(owner, "huge").is_none());
+    }
+
+    #[test]
+    fn a_save_is_answered_before_the_sites_front_gives_up_and_each_wait_takes_its_share() {
+        // CloudFront waits 30 s for an answer: everything a save waits for ends a few seconds before that, and before
+        // the server's own deadline for an answer would cut it off with a bare `timeout`.
+        assert!(SAVE_BUDGET <= Duration::from_secs(25) && SAVE_BUDGET < crate::REQUEST_DEADLINE);
+        let homes = Homes::default();
+        let started = Instant::now();
+        let by = homes.save_by(started);
+        let after = |at: Instant| at - started;
+        assert_eq!(
+            (after(by.places), after(by.body), after(by.slot)),
+            (Duration::from_secs(4), Duration::from_secs(18), Duration::from_secs(21))
+        );
+        assert_eq!(homes.picture_time(), Duration::from_secs(15));
+        let quick = Homes::default().within(Duration::from_millis(800)).save_by(started);
+        assert_eq!(after(quick.body), Duration::from_millis(600));
+    }
+
+    #[test]
+    fn a_gzipped_save_is_unpacked_only_up_to_a_saves_size() {
+        let pack = |text: &[u8]| {
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(text).unwrap();
+            encoder.finish().unwrap()
+        };
+        assert_eq!(gunzip(&pack(b"{\"worldId\":\"a\"}")).unwrap(), b"{\"worldId\":\"a\"}");
+        // A few kilobytes that would unpack to more than any save: refused without unpacking the rest.
+        let bomb = pack(&vec![b' '; MAX_SAVE_BYTES * 4]);
+        assert!(bomb.len() < 64 * 1024);
+        assert_eq!(gunzip(&bomb).unwrap_err().code, "world_too_large");
+        assert_eq!(gunzip(b"{\"not\":\"gzip\"}").unwrap_err().code, "invalid_world");
+        let sent = |encoding: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            if let Some(encoding) = encoding {
+                headers.insert(header::CONTENT_ENCODING, encoding.parse().unwrap());
+            }
+            gzipped(&headers).map_err(|error| error.code)
+        };
+        assert_eq!(
+            [sent(None), sent(Some("gzip")), sent(Some("GZip")), sent(Some("identity")), sent(Some("br"))],
+            [Ok(false), Ok(true), Ok(true), Ok(false), Err("unsupported_encoding")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_is_read_up_to_its_size_and_within_its_time() {
+        let read = |body: Body, deadline: Duration| read_within(deadline, body, 8, WORLD_TOO_LARGE, WORLD_CUT_SHORT);
+        assert_eq!(read(Body::from("12345678"), Duration::from_secs(5)).await.unwrap(), b"12345678");
+        assert_eq!(read(Body::from("123456789"), Duration::from_secs(5)).await.unwrap_err().code, "world_too_large");
+        // A body that stops coming is given up once its time is out.
+        let stalled = futures_util::stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"{")) })
+            .chain(futures_util::stream::pending());
+        let started = Instant::now();
+        let error = read(Body::from_stream(stalled), Duration::from_millis(100)).await.unwrap_err();
+        assert_eq!(error.code, "incomplete_world");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_save_keeps_the_stored_files_it_names_anywhere() {
+        let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let envelope = json!({"version": 1, "savedAt": 1, "meta": {"cover": format!("/models/{a}.png")}, "domains": {
+            "building": {"objects": [{"modelUrl": format!("/models/{b}.glb")}, {"modelUrl": "gltf/props/bed.glb"}]},
+            "residents": {"version": 1, "residents": [], format!("/models/{c}.glb"): true}}});
+        let scan = scan_world(&envelope.to_string()).ok().unwrap();
+        assert_eq!(
+            scan.refs.into_iter().collect::<Vec<_>>(),
+            [format!("/models/{a}.png"), format!("/models/{b}.glb"), format!("/models/{c}.glb")]
+        );
     }
 
     #[test]

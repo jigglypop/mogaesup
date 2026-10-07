@@ -8,8 +8,8 @@ use std::collections::VecDeque;
 use uuid::Uuid;
 
 use super::{
-    Ctx, Impostor, KILL_REACH, MAX_TEXT, Millis, Player, REPORT_REACH, Role, Stage, TASK_REACH, Trouble, pick_many,
-    walk::Route, within,
+    Ctx, Impostor, KILL_REACH, MAX_TEXT, Millis, Player, REPORT_REACH, Role, Stage, TASK_REACH, Trouble, gap, near,
+    pick_many, walk::Route,
 };
 use crate::games::distance_xz;
 
@@ -77,8 +77,8 @@ pub(super) struct Bot {
     pub(super) plan: Plan,
     /// The kill it saw since the last meeting: who killed whom.
     pub(super) saw: Option<(Uuid, Uuid)>,
-    /// What it says in this meeting, and when.
-    lines: VecDeque<(Millis, String)>,
+    /// What it says in this meeting, when, and whom it names.
+    lines: VecDeque<(Millis, String, Vec<Uuid>)>,
     /// When it votes in this meeting.
     ballot_at: Option<Millis>,
     /// Whom it blamed in this meeting (an impostor's pick), to vote for.
@@ -206,11 +206,11 @@ impl Impostor {
             .iter()
             .enumerate()
             .filter(|(_, body)| !body.reported)
-            .map(|(found, body)| (found, body.id, body.position, distance_xz(body.position, at)))
+            .filter_map(|(found, body)| Some((found, body.id, body.position, gap(body.position, at)?)))
             .filter(|(.., distance)| *distance <= sight)
             .min_by(|a, b| a.3.total_cmp(&b.3));
         if let Some((found, id, position, _)) = seen {
-            if within(position, at, REPORT_REACH) {
+            if near(position, at, REPORT_REACH) {
                 self.halt(index, now);
                 self.report_body(index, found, ctx);
             } else if self.plan(index) != Plan::Body(id) {
@@ -254,7 +254,7 @@ impl Impostor {
             else {
                 return false;
             };
-            if within(place(panel), at, TASK_REACH) {
+            if near(place(panel), at, TASK_REACH) {
                 self.halt(index, now);
                 self.set_plan(index, Plan::Fix(panel));
                 self.fix_at(index, kind, panel, ctx);
@@ -276,7 +276,7 @@ impl Impostor {
                 self.set_plan(index, Plan::Rest(now + 500));
             }
             Plan::Mend(..) => {}
-            _ if within(place(0), at, TASK_REACH) => {
+            _ if near(place(0), at, TASK_REACH) => {
                 self.halt(index, now);
                 self.set_plan(index, Plan::Mend(0, now + MEND));
             }
@@ -344,8 +344,8 @@ impl Impostor {
             .filter_map(|index| Some((index, self.position(index, ctx)?)))
             .collect();
         crew.iter()
-            .filter(|(_, place)| within(*place, at, HUNT))
-            .filter(|(index, place)| !crew.iter().any(|(other, near)| other != index && within(*near, *place, sight)))
+            .filter(|(_, place)| near(*place, at, HUNT))
+            .filter(|(index, place)| !crew.iter().any(|(other, by)| other != index && near(*by, *place, sight)))
             .min_by(|a, b| distance_xz(a.1, at).total_cmp(&distance_xz(b.1, at)))
             .copied()
     }
@@ -356,7 +356,7 @@ impl Impostor {
         let at = self.bot(index).route.at(now);
         if now >= self.players[index].kill_at {
             if let Some((victim, place)) = self.prey(at, ctx) {
-                if within(place, at, KILL_REACH) {
+                if near(place, at, KILL_REACH) {
                     self.halt(index, now);
                     self.kill_now(index, victim, place, ctx);
                     // Off to the far side of the island.
@@ -405,7 +405,7 @@ impl Impostor {
     pub(super) fn witness(&mut self, killer: Uuid, victim: Uuid, at: [f64; 3], ctx: &Ctx) {
         let sight = self.sight();
         for index in 0..self.players.len() {
-            if self.living_crew_bot(index) && within(self.bot(index).route.at(ctx.now()), at, sight) {
+            if self.living_crew_bot(index) && near(self.bot(index).route.at(ctx.now()), at, sight) {
                 self.bot_mut(index).saw = Some((killer, victim));
             }
         }
@@ -426,35 +426,39 @@ impl Impostor {
                 continue;
             }
             let id = player.id;
-            let mut said = Vec::new();
+            let mut said: Vec<(String, Vec<Uuid>)> = Vec::new();
             let mut accused = None;
             if id == caller
-                && let Some((_, victim)) = &body
+                && let Some((victim, name)) = &body
             {
-                said.push(format!("{victim}님이 쓰러져 있었어요."));
+                said.push((format!("{name}님이 쓰러져 있었어요."), vec![*victim]));
             }
             let saw = self.bot(index).saw;
             if let Some((killer, victim)) = saw
                 && self.present(killer).is_some_and(Player::living)
-                && let (Some(killer), Some(victim)) = (name(&self.players, killer), name(&self.players, victim))
+                && let (Some(killer_name), Some(victim_name)) =
+                    (name(&self.players, killer), name(&self.players, victim))
             {
-                said.push(format!("{killer}님이 {victim}님을 처치하는 걸 봤어요!"));
+                said.push((format!("{killer_name}님이 {victim_name}님을 처치하는 걸 봤어요!"), vec![killer, victim]));
             } else if self.players[index].role == Role::Impostor && ctx.rng().gen_bool(0.4) {
                 let crew: Vec<usize> = (0..self.players.len())
                     .filter(|other| self.players[*other].living() && self.players[*other].role == Role::Crew)
                     .collect();
                 if let Some(&blamed) = pick_many(ctx.rng(), &crew, 1).first() {
-                    said.push(format!("{}님이 수상해요.", self.players[blamed].name));
-                    accused = Some(self.players[blamed].id);
+                    let blamed = &self.players[blamed];
+                    said.push((format!("{}님이 수상해요.", blamed.name), vec![blamed.id]));
+                    accused = Some(blamed.id);
                 }
             } else if said.is_empty() && ctx.rng().gen_bool(0.35) {
                 let filler = IDLE_TALK[ctx.rng().gen_range(0..IDLE_TALK.len())];
-                said.push(filler.to_owned());
+                said.push((filler.to_owned(), Vec::new()));
             }
             let window = until.saturating_sub(now).saturating_sub(500).max(1_500);
-            let mut lines: Vec<(Millis, String)> =
-                said.into_iter().map(|text| (now + ctx.rng().gen_range(1_000..=window), line(text))).collect();
-            lines.sort_by_key(|(at, _)| *at);
+            let mut lines: Vec<(Millis, String, Vec<Uuid>)> = said
+                .into_iter()
+                .map(|(text, names)| (now + ctx.rng().gen_range(1_000..=window), line(text), names))
+                .collect();
+            lines.sort_by_key(|(at, ..)| *at);
             let bot = self.bot_mut(index);
             bot.route = Route::still(
                 seats.iter().find(|(seated, _)| *seated == id).map_or(bot.route.at(now), |(_, seat)| *seat),
@@ -489,9 +493,9 @@ impl Impostor {
             let id = player.id;
             let Some(meeting) = &self.meeting else { return };
             let voting = meeting.stage == Stage::Vote && !meeting.votes.iter().any(|(voter, _)| *voter == id);
-            while self.bot(index).lines.front().is_some_and(|(at, _)| *at <= now) {
-                if let Some((_, text)) = self.bot_mut(index).lines.pop_front() {
-                    self.add_line(index, text);
+            while self.bot(index).lines.front().is_some_and(|(at, ..)| *at <= now) {
+                if let Some((_, text, names)) = self.bot_mut(index).lines.pop_front() {
+                    self.add_line(index, text, names);
                 }
             }
             let due = self.bot(index).ballot_at.is_some_and(|at| at <= now);
@@ -528,13 +532,13 @@ impl Impostor {
         }
     }
 
-    /// The living player (other than `except`) whose name this meeting's lines carry most, when one stands out.
-    fn most_named(&self, except: Uuid) -> Option<Uuid> {
+    /// The living player (other than `except`) this meeting's lines name most, when one stands out.
+    pub(super) fn most_named(&self, except: Uuid) -> Option<Uuid> {
         let counts: Vec<(Uuid, usize)> = self
             .players
             .iter()
             .filter(|player| player.living() && player.id != except)
-            .map(|player| (player.id, self.talk.iter().filter(|line| line.text.contains(&player.name)).count()))
+            .map(|player| (player.id, self.talk.iter().filter(|line| line.names.contains(&player.id)).count()))
             .filter(|(_, count)| *count > 0)
             .collect();
         let top = counts.iter().map(|(_, count)| *count).max()?;

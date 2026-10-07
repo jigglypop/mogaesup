@@ -4,20 +4,28 @@
 use super::*;
 
 /// A game for these tests: players add to their own count, each sees a number only they know, and the first count to
-/// reach the layout's `goal` ends it. Its view also shows where the last tick saw everyone stand.
+/// reach the layout's `goal` ends it. Its view also shows where the last tick saw everyone stand. In the live room its
+/// players walk at 12 m/s and may jump to the layout's `spot`, and with `hide` the first player is hidden from everyone.
+/// With a `stand`, its map takes the island's place: whoever watches stands there (`apart` from the players).
 struct Tally {
     goal: u64,
     counts: HashMap<Uuid, u64>,
     secrets: HashMap<Uuid, u64>,
     seen: HashMap<Uuid, [f64; 3]>,
+    spot: Option<[f64; 3]>,
+    hide: Option<Uuid>,
+    stand: Option<Stand>,
 }
 
 fn tally(layout: &Value, ctx: &mut Ctx) -> Result<Box<dyn Game>, GameError> {
     let goal = layout.get("goal").and_then(Value::as_u64).filter(|goal| (1..=100).contains(goal)).ok_or(BAD_LAYOUT)?;
     let players: Vec<Uuid> = ctx.players().iter().map(|player| player.id).collect();
+    let hide = players.first().copied().filter(|_| layout["hide"] == true);
     let secrets = players.into_iter().map(|id| (id, ctx.rng().gen_range(1..1000))).collect();
+    let spot = layout.get("spot").map(point).transpose()?;
+    let stand = layout.get("stand").map(point).transpose()?.map(|at| Stand { at, apart: layout["apart"] == true });
     ctx.emit(json!({"type": "started"}));
-    Ok(Box::new(Tally { goal, counts: HashMap::new(), secrets, seen: HashMap::new() }))
+    Ok(Box::new(Tally { goal, counts: HashMap::new(), secrets, seen: HashMap::new(), spot, hide, stand }))
 }
 
 impl Game for Tally {
@@ -46,6 +54,19 @@ impl Game for Tally {
     fn result(&self) -> Option<Value> {
         let (winner, _) = self.counts.iter().find(|(_, count)| **count >= self.goal)?;
         Some(json!({"winner": winner}))
+    }
+
+    fn movement(&self, player: Uuid, _now: Millis) -> Option<Movement> {
+        let teleports = self.spot.map(|to| Teleport { tag: 7, to, radius: 1.0 }).into_iter().collect();
+        self.secrets.contains_key(&player).then(|| Movement { speed: 12.0, teleports, ..Movement::default() })
+    }
+
+    fn hidden(&self) -> Vec<(Uuid, Vec<Uuid>)> {
+        self.hide.map(|hidden| (hidden, Vec::new())).into_iter().collect()
+    }
+
+    fn stand(&self) -> Option<Stand> {
+        self.stand
     }
 }
 
@@ -419,15 +440,55 @@ fn a_session_nobody_touches_for_ten_minutes_closes() {
 fn islands_are_apart_and_sockets_give_their_places_back() {
     let games = Games::new(TALLY, Some(1));
     let a = person("a");
-    // The owner's own sockets take no one's seat, so all four of the account's open on one island.
-    let held: Vec<Socket> = (0..ACCOUNT_CAPACITY).map(|_| connect_as(&games, &a, "pa", Standing::Owner)).collect();
+    // Three on the account's own island and one on another: the account holds no more anywhere.
+    let mut held: Vec<Socket> =
+        (0..crate::rooms::ACCOUNT_ISLAND_CAPACITY).map(|_| connect_as(&games, &a, "pa", Standing::Owner)).collect();
     let (tx, _rx) = mpsc::channel(4);
-    let refused = games.register("other", arrival(&a, "login", "pa", Standing::Visitor), tx, T0).err().unwrap();
+    let elsewhere = games.register("other", arrival(&a, "login", "pa", Standing::Visitor), tx, T0).unwrap();
+    let (tx, _rx) = mpsc::channel(4);
+    let refused = games.register("third", arrival(&a, "login", "pa", Standing::Visitor), tx, T0).err().unwrap();
     assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(games.count(), ACCOUNT_CAPACITY);
+    assert!(!games.islands().contains(&"third".to_owned()), "a refused island is not kept");
+    drop(elsewhere);
+    assert_eq!(games.islands(), [ISLAND.to_owned()]);
+    held.pop();
+    // An island left by its last socket is taken out, and one opened after it is a new one.
     drop(held);
     assert_eq!(games.count(), 0);
     assert!(games.islands().is_empty());
+    let mut again = connect(&games, &a, "pa");
+    assert_eq!(again.session(), Some(Value::Null));
+    assert_eq!(games.islands(), [ISLAND.to_owned()]);
+}
+
+#[test]
+fn one_address_holds_a_few_dozen_game_sockets_on_the_whole_server() {
+    let games = Games::new(TALLY, Some(1));
+    let crowd: Vec<(User, mpsc::Receiver<Message>, Registration)> = (0..ADDRESS_CAPACITY)
+        .map(|at| {
+            let user = person(&format!("p{at}"));
+            let (tx, rx) = mpsc::channel(8);
+            let arrival = Arrival { address: "school".into(), ..arrival(&user, "login", "p", Standing::Owner) };
+            let registration = games.register(&format!("island{}", at % 3), arrival, tx, T0).unwrap();
+            (user, rx, registration)
+        })
+        .collect();
+    let late = person("late");
+    let (tx, _rx) = mpsc::channel(8);
+    let refused = games
+        .register(
+            "island9",
+            Arrival { address: "school".into(), ..arrival(&late, "login", "p", Standing::Owner) },
+            tx,
+            T0,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(games.count(), ADDRESS_CAPACITY);
+    drop(crowd);
+    assert_eq!(games.count(), 0);
 }
 
 #[test]
@@ -563,51 +624,301 @@ fn a_game_whose_code_panics_ends_its_own_session_and_nothing_else() {
 }
 
 #[test]
-fn the_islands_owner_closes_a_session_someone_else_hosts() {
+fn the_islands_owner_closes_a_session_someone_else_hosts_and_they_wait_to_open_another() {
     let games = Games::new(TALLY, Some(1));
     let (owner, host, guest) = (person("o"), person("h"), person("g"));
     let room = vec![peer("po", &owner, None), peer("ph", &host, None), peer("pg", &guest, None)];
     let mut so = connect_as(&games, &owner, "po", Standing::Owner);
-    let sh = connect(&games, &host, "ph");
+    let mut sh = connect(&games, &host, "ph");
     let mut sg = connect(&games, &guest, "pg");
-    for playing in [false, true] {
-        opened(sh.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0));
-        sg.send(&games, json!({"type": "Join"}), &room, T0);
+    for (round, playing) in [false, true].into_iter().enumerate() {
+        let at = T0 + round as Millis * REOPEN_WAIT;
+        opened(sh.send(&games, json!({"type": "Open", "kind": "tally"}), &room, at));
+        sg.send(&games, json!({"type": "Join"}), &room, at);
         if playing {
-            sh.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, T0);
+            sh.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, at);
         }
-        sg.frames();
-        sg.send(&games, json!({"type": "Close"}), &room, T0);
+        // Its host and the island's owner may close it; the others are told they may not.
+        assert_eq!(so.session().unwrap()["canClose"], true);
+        assert_eq!(sh.session().unwrap()["canClose"], true);
+        assert_eq!(sg.session().unwrap()["canClose"], false);
+        sg.send(&games, json!({"type": "Close"}), &room, at);
         assert_eq!(errors(&sg.frames()), ["not_host"], "only the host, or the owner");
-        so.frames();
-        so.send(&games, json!({"type": "Close"}), &room, T0);
+        so.send(&games, json!({"type": "Close"}), &room, at);
         assert_eq!(so.session(), Some(Value::Null), "playing: {playing}");
+        // Its host may not open another for a while; anyone else may.
+        sh.frames();
+        sh.send(&games, json!({"type": "Open", "kind": "tally"}), &room, at + REOPEN_WAIT - 1);
+        assert_eq!(errors(&sh.frames()), ["closed_by_owner"]);
     }
+    opened(sg.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0 + REOPEN_WAIT + 1));
+    // The owner closing their own lobby keeps nobody out.
+    let games_owner = Games::new(TALLY, Some(2));
+    let so = connect_as(&games_owner, &owner, "po", Standing::Owner);
+    let mut sh = connect(&games_owner, &host, "ph");
+    opened(so.send(&games_owner, json!({"type": "Open", "kind": "tally"}), &room, T0));
+    sh.send(&games_owner, json!({"type": "Join"}), &room, T0);
+    so.send(&games_owner, json!({"type": "Close"}), &room, T0);
+    sh.frames();
+    opened(sh.send(&games_owner, json!({"type": "Open", "kind": "tally"}), &room, T0 + 1));
 }
 
 #[test]
-fn a_game_its_players_are_in_the_room_for_is_not_closed_for_want_of_actions() {
-    let Lobby { games, mut sa, room, id, .. } = lobby();
-    sa.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &room, T0);
-    // Nobody acts for far longer than the idle limit, but both stay in the live room: it plays on.
+fn a_game_is_kept_open_by_its_players_moving_or_acting_and_not_by_their_standing_there() {
+    let Lobby { games, a, b, mut sa, room, id, .. } = lobby();
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 50}}), &room, T0);
+    // Nobody acts for far longer than the idle limit, but they walk about: it plays on.
     for minute in 1..=15 {
-        assert_eq!(games.step(ISLAND, id, &room, T0 + minute * 60_000), Some(Duration::from_millis(100)), "{minute}");
+        let x = minute as f64;
+        let walked = vec![peer("pa", &a, Some([x, 0.0, 2.0])), peer("pb", &b, Some([-3.0, 0.5, 4.0]))];
+        assert_eq!(games.step(ISLAND, id, &walked, T0 + minute * 60_000), Some(Duration::from_millis(100)), "{minute}");
     }
-    assert_ne!(sa.session(), Some(Value::Null));
+    // Then everyone stands still in the room: ten minutes on, it closes.
+    let still = vec![peer("pa", &a, Some([15.0, 0.0, 2.0])), peer("pb", &b, Some([-3.0, 0.5, 4.0]))];
+    let quiet = T0 + 15 * 60_000;
+    assert!(games.step(ISLAND, id, &still, quiet + IDLE_LIMIT - 1).is_some());
+    assert_eq!(games.step(ISLAND, id, &still, quiet + IDLE_LIMIT), None);
+    assert_eq!(sa.session(), Some(Value::Null));
     // A lobby is still closed when nobody does anything with it.
     let Lobby { games, room, id, .. } = lobby();
     assert_eq!(games.step(ISLAND, id, &room, T0 + IDLE_LIMIT), None);
 }
 
 #[test]
-fn one_account_holds_a_few_game_sockets_on_an_island_and_its_owner_more() {
+fn a_playing_game_tells_the_live_room_how_its_players_move_and_lets_them_jump_home_once_it_is_over() {
+    let Lobby { games, a, b, mut sa, mut sb, room, id, .. } = lobby();
+    let governance = |games: &Games, now: Millis| lock(&games.island(ISLAND).unwrap()).governance(now);
+    assert_eq!(governance(&games, T0), Governance::default(), "a lobby asks nothing");
+    let layout = json!({"goal": 3, "spot": [0.0, 80.0, 0.0], "hide": true});
+    sa.send(&games, json!({"type": "Start", "layout": layout}), &room, T0 + 10);
+    let session = sb.session().unwrap();
+    assert_eq!((session["id"].clone(), session["startedAt"].clone()), (json!(id), json!(T0 + 10)));
+    let asked = governance(&games, T0 + 20);
+    let jump = Teleport { tag: 7, to: [0.0, 80.0, 0.0], radius: 1.0 };
+    for user in [a.id, b.id] {
+        assert_eq!(asked.players[&user], Movement { speed: 12.0, teleports: vec![jump], ..Movement::default() });
+    }
+    assert_eq!(asked.hidden, HashMap::from([(a.id, Vec::new())]));
+
+    // B leaves mid-game: B may jump back to where they stood when it started, and the game asks nothing of them.
+    sb.send(&games, json!({"type": "Leave"}), &room, T0 + 30);
+    let home = |user: &User, tag: u64| {
+        let at = room.iter().find(|peer| peer.user == user.id).unwrap().position.unwrap();
+        Teleport { tag, to: at, radius: RETURN_RADIUS }
+    };
+    let asked = governance(&games, T0 + 40);
+    assert_eq!(asked.players[&b.id], Movement { teleports: vec![home(&b, id)], ..Movement::default() });
+    // The game ends: nothing hidden, everyone free, and A may go home too, for a while.
+    sa.send(&games, json!({"type": "Act", "action": {"add": 3}}), &room, T0 + 50);
+    assert_eq!(sa.session().unwrap()["phase"], "ended");
+    let asked = governance(&games, T0 + 60);
+    assert!(asked.hidden.is_empty());
+    assert_eq!(asked.players[&a.id], Movement { teleports: vec![home(&a, id)], ..Movement::default() });
+    // Still so once the session is closed, until the window is over.
+    sa.send(&games, json!({"type": "Close"}), &room, T0 + 70);
+    assert_eq!(governance(&games, T0 + 80).players.len(), 2);
+    assert_eq!(governance(&games, T0 + 50 + RETURN_WINDOW), Governance::default());
+}
+
+#[test]
+fn whoever_watches_a_game_whose_map_takes_the_islands_place_jumps_to_its_stand_once_and_home_once_it_is_over() {
+    let games = Games::new(TALLY, Some(9));
+    let (a, b, c, d) = (person("a"), person("b"), person("c"), person("d"));
+    let (home_a, home_b, home_c, home_d) = ([1.0, 0.0, 2.0], [-3.0, 0.5, 4.0], [6.0, 0.0, -6.0], [-8.0, 0.0, 9.0]);
+    let mut room = vec![peer("pa", &a, Some(home_a)), peer("pb", &b, Some(home_b)), peer("pc", &c, Some(home_c))];
+    let (mut sa, mut sb, mut sc) = (connect(&games, &a, "pa"), connect(&games, &b, "pb"), connect(&games, &c, "pc"));
+    let id = opened(sa.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0));
+    sb.send(&games, json!({"type": "Join"}), &room, T0);
+    let governance = |now: Millis| lock(&games.island(ISLAND).unwrap()).governance(now);
+    let stand = [0.0, 0.0, -12.0];
+    let layout = json!({"goal": 3, "stand": stand, "apart": true});
+    sa.send(&games, json!({"type": "Start", "layout": layout}), &room, T0 + 10);
+    // C watches: told where to stand and where they go back to; the players are told nothing of a stand.
+    let seen = sc.session().unwrap();
+    assert_eq!((seen["stand"].clone(), seen["home"].clone()), (json!(stand), json!(home_c)));
+    let played = sa.session().unwrap();
+    assert_eq!((played["stand"].clone(), played["home"].clone()), (Value::Null, json!(home_a)));
+    let to_stand = Teleport { tag: id, to: stand, radius: STAND_REACH };
+    let watching = Movement { teleports: vec![to_stand], ..Movement::default() };
+    let asked = governance(T0 + 20);
+    assert_eq!(asked.players[&c.id], watching);
+    // Apart: the watchers see each other, the players none of them.
+    assert_eq!(asked.hidden[&c.id], vec![c.id]);
+    // D comes once it has started: a watcher from the next beat, from where they stand then.
+    room.push(peer("pd", &d, Some(home_d)));
+    let mut sd = connect(&games, &d, "pd");
+    assert_eq!(sd.session().unwrap()["stand"], Value::Null, "not yet watching");
+    games.step(ISLAND, id, &room, T0 + 30);
+    let seen = sd.session().unwrap();
+    assert_eq!((seen["stand"].clone(), seen["home"].clone()), (json!(stand), json!(home_d)));
+    let asked = governance(T0 + 40);
+    assert_eq!(asked.players[&d.id], watching);
+    let mut both = vec![c.id, d.id];
+    both.sort_unstable();
+    assert_eq!((asked.hidden[&c.id].clone(), asked.hidden[&d.id].clone()), (both.clone(), both));
+    // B leaves while it plays: B watches from the stand too, and still goes back to where they stood at the start.
+    sb.send(&games, json!({"type": "Leave"}), &room, T0 + 50);
+    let seen = sb.session().unwrap();
+    assert_eq!((seen["stand"].clone(), seen["home"].clone()), (json!(stand), json!(home_b)));
+    assert_eq!(governance(T0 + 60).players[&b.id], watching);
+    // Over: nobody watches any more, nobody is hidden, and everyone may go home once, for a while.
+    let away = vec![
+        peer("pa", &a, Some([20.0, 0.0, 20.0])),
+        peer("pc", &c, Some(stand)),
+        peer("pd", &d, Some(stand)),
+        peer("pb", &b, Some(stand)),
+    ];
+    sa.send(&games, json!({"type": "Act", "action": {"add": 3}}), &away, T0 + 70);
+    let seen = sc.session().unwrap();
+    assert_eq!(
+        (seen["phase"].as_str(), seen["stand"].clone(), seen["home"].clone()),
+        (Some("ended"), Value::Null, json!(home_c))
+    );
+    let asked = governance(T0 + 80);
+    assert!(asked.hidden.is_empty());
+    for (user, home) in [(&a, home_a), (&b, home_b), (&c, home_c), (&d, home_d)] {
+        let back = Teleport { tag: id, to: home, radius: RETURN_RADIUS };
+        assert_eq!(
+            asked.players[&user.id],
+            Movement { teleports: vec![back], ..Movement::default() },
+            "{}",
+            user.username
+        );
+    }
+    // Again before going back (A alone now): C watches from the stand once more, going back where they stood first.
+    sa.send(&games, json!({"type": "Open", "kind": "quick"}), &away, T0 + 90);
+    sa.send(&games, json!({"type": "Start", "layout": layout}), &away, T0 + 100);
+    let seen = sc.session().unwrap();
+    assert_eq!((seen["stand"].clone(), seen["home"].clone()), (json!(stand), json!(home_c)));
+    assert_eq!(governance(T0 + 110).players[&c.id], watching);
+    // A game without a stand leaves whoever watches where they are.
+    sa.send(&games, json!({"type": "Close"}), &away, T0 + 120);
+    let later = T0 + 120 + RETURN_WINDOW;
+    let next = opened(sa.send(&games, json!({"type": "Open", "kind": "quick"}), &away, later));
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 3}}), &away, later);
+    games.step(ISLAND, next, &away, later + 10);
+    assert_eq!(sc.session().unwrap()["stand"], Value::Null);
+    let asked = governance(later + 20);
+    assert!(asked.hidden.is_empty() && !asked.players.contains_key(&c.id), "{asked:?}");
+}
+
+#[test]
+fn a_view_says_where_its_viewer_goes_back_to_and_a_game_started_before_they_went_back_keeps_that_place() {
+    let Lobby { games, a, b, mut sa, mut sb, room, id, .. } = lobby();
+    assert_eq!(sa.session().unwrap()["home"], Value::Null, "a lobby takes nobody anywhere");
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 3, "spot": [0.0, 80.0, 0.0]}}), &room, T0);
+    let (home_a, home_b) = (room[0].position.unwrap(), room[1].position.unwrap());
+    assert_eq!(sa.session().unwrap()["home"], json!(home_a));
+    assert_eq!(sb.session().unwrap()["home"], json!(home_b));
+    // Over: still told, while they may go back.
+    sa.send(&games, json!({"type": "Act", "action": {"add": 3}}), &room, T0 + 10);
+    assert_eq!(sa.session().unwrap()["home"], json!(home_a));
+    // Again before going back, from up there: the trip back still lands where they stood the first time.
+    let away = vec![peer("pa", &a, Some([0.0, 80.0, 0.0])), peer("pb", &b, Some([1.0, 80.0, 0.0]))];
+    sa.send(&games, json!({"type": "Open", "kind": "tally"}), &away, T0 + 20);
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 3}}), &away, T0 + 30);
+    assert_eq!(sa.session().unwrap()["home"], json!(home_a));
+    let governance = lock(&games.island(ISLAND).unwrap()).governance(T0 + 40);
+    sa.send(&games, json!({"type": "Act", "action": {"add": 3}}), &away, T0 + 50);
+    let back = lock(&games.island(ISLAND).unwrap()).governance(T0 + 60);
+    let jump = Teleport { tag: id, to: home_a, radius: RETURN_RADIUS };
+    assert!(governance.players[&a.id].teleports.is_empty(), "no way back while the game has them");
+    assert_eq!(back.players[&a.id].teleports, vec![jump]);
+    // Long after a game, a new one takes them from where they stand then.
+    let later = T0 + 60 + RETURN_WINDOW;
+    sa.send(&games, json!({"type": "Open", "kind": "tally"}), &away, later);
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 3}}), &away, later);
+    assert_eq!(sa.session().unwrap()["home"], json!([0.0, 80.0, 0.0]));
+}
+
+#[test]
+fn the_owner_closing_two_sessions_keeps_both_hosts_out_for_a_while_even_once_the_island_empties() {
+    let games = Games::new(TALLY, Some(5));
+    let (owner, first, second) = (person("o"), person("f"), person("s"));
+    let room = vec![peer("po", &owner, None), peer("pf", &first, None), peer("ps", &second, None)];
+    let so = connect_as(&games, &owner, "po", Standing::Owner);
+    let mut sf = connect(&games, &first, "pf");
+    let ss = connect(&games, &second, "ps");
+    opened(sf.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0));
+    so.send(&games, json!({"type": "Close"}), &room, T0);
+    opened(ss.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0 + 1));
+    so.send(&games, json!({"type": "Close"}), &room, T0 + 1);
+    // The second close does not let the first host back in.
+    sf.frames();
+    sf.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0 + 2);
+    assert_eq!(errors(&sf.frames()), ["closed_by_owner"]);
+    // Everyone goes and the island is let go; back within the wait, both are still held back.
+    drop((so, sf, ss));
+    assert!(games.islands().is_empty());
+    let (mut sf, mut ss) = (connect(&games, &first, "pf"), connect(&games, &second, "ps"));
+    for socket in [&mut sf, &mut ss] {
+        socket.frames();
+        socket.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0 + REOPEN_WAIT - 1);
+        assert_eq!(errors(&socket.frames()), ["closed_by_owner"]);
+    }
+    opened(sf.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0 + REOPEN_WAIT + 1));
+}
+
+#[test]
+fn one_account_holds_a_few_game_sockets_on_an_island_its_owner_too_on_seats_of_their_own() {
     let games = Games::new(TALLY, Some(1));
     let (a, owner) = (person("a"), person("o"));
-    let _few: Vec<Socket> = (0..crate::rooms::ACCOUNT_ISLAND_CAPACITY).map(|_| connect(&games, &a, "pa")).collect();
+    let few = crate::rooms::ACCOUNT_ISLAND_CAPACITY;
+    let _few: Vec<Socket> = (0..few).map(|_| connect(&games, &a, "pa")).collect();
     let (tx, _rx) = mpsc::channel(4);
     let more = games.register(ISLAND, arrival(&a, "login", "pa", Standing::Visitor), tx, T0).err().unwrap();
     assert_eq!((more.status, more.code), (StatusCode::TOO_MANY_REQUESTS, "game"));
-    let _owner: Vec<Socket> =
-        (0..ACCOUNT_CAPACITY).map(|_| connect_as(&games, &owner, "po", Standing::Owner)).collect();
-    assert_eq!(games.count(), crate::rooms::ACCOUNT_ISLAND_CAPACITY + ACCOUNT_CAPACITY);
+    let _owner: Vec<Socket> = (0..few).map(|_| connect_as(&games, &owner, "po", Standing::Owner)).collect();
+    let (tx, _rx) = mpsc::channel(4);
+    let more = games.register(ISLAND, arrival(&owner, "login", "po", Standing::Owner), tx, T0).err().unwrap();
+    assert_eq!(more.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(games.count(), 2 * few);
+}
+
+/// Where the pet stood in each pet frame among `frames` (null for one that says it rests).
+fn pet_xs(frames: &[Value]) -> Vec<Value> {
+    frames.iter().filter(|frame| frame["type"] == "Pet").map(|frame| frame["pet"]["at"][0].clone()).collect()
+}
+
+#[test]
+fn one_of_the_owners_pages_relays_the_pet_until_it_falls_silent_and_late_sockets_see_only_a_fresh_frame() {
+    let games = Games::new(TALLY, Some(5));
+    let (owner, guest) = (person("o"), person("g"));
+    let room = vec![peer("po", &owner, Some([0.0; 3])), peer("pg", &guest, Some([1.0, 0.0, 1.0]))];
+    let mut first = connect_as(&games, &owner, "po", Standing::Owner);
+    let mut second = connect_as(&games, &owner, "po", Standing::Owner);
+    let mut sg = connect(&games, &guest, "pg");
+    for socket in [&mut first, &mut second, &mut sg] {
+        socket.frames();
+    }
+    let pet = |x: f64| {
+        json!({"type": "Pet", "pet": {"id": Uuid::nil(), "t": 1.0, "at": [x, 0.0, 0.0], "ry": 0.0, "move": false,
+            "speed": 0.0, "clip": "sit_hold"}})
+    };
+    assert!(matches!(first.send(&games, pet(1.0), &room, T0), Flow::Continue));
+    assert_eq!(pet_xs(&sg.frames()), [json!(1.0)]);
+    assert_eq!(pet_xs(&second.frames()), [json!(1.0)]);
+    // The other page waits while the first relays it, and takes it over once the first has sent nothing for a while.
+    second.send(&games, pet(2.0), &room, T0 + PET_STALE - 1);
+    assert_eq!(errors(&second.frames()), ["pet_busy"]);
+    second.send(&games, pet(2.0), &room, T0 + PET_STALE);
+    assert_eq!(pet_xs(&sg.frames()), [json!(2.0)]);
+    first.send(&games, pet(3.0), &room, T0 + PET_STALE + 1);
+    assert_eq!(errors(&first.frames()), ["pet_busy"]);
+    // A socket that connects is sent the last frame while it is fresh.
+    let join = |at: Millis| {
+        let (tx, rx) = mpsc::channel(64);
+        Socket {
+            registration: games.register(ISLAND, arrival(&guest, "late", "pg", Standing::Visitor), tx, at).unwrap(),
+            rx,
+        }
+    };
+    assert_eq!(pet_xs(&join(T0 + 2 * PET_STALE - 1).frames()), [json!(2.0)]);
+    assert!(pet_xs(&join(T0 + 2 * PET_STALE).frames()).is_empty());
+    // A guest's frame is refused; the relaying socket closing tells everyone the pet rests.
+    sg.send(&games, pet(4.0), &room, T0 + PET_STALE + 2);
+    assert_eq!(errors(&sg.frames()), ["not_owner"]);
+    drop(second);
+    assert_eq!(pet_xs(&sg.frames()), [Value::Null]);
+    assert_eq!(pet_xs(&first.frames()), [Value::Null]);
 }

@@ -24,8 +24,10 @@ use crate::{
 /// 미니미 are what people walk as, 주민 (`npc`) stand on islands, furniture is placed.
 const KINDS: [&str; 3] = ["minime", "furniture", "npc"];
 const STATUSES: [&str; 3] = ["draft", "published", "retired"];
-/// Faces asked for at once for the character listing, and how long the listing waits for all of them; a face that is
-/// late counts as unknown rather than holding the page past CloudFront's 30 s.
+/// How long the character listing waits for the character server's jobs, then for their faces (asked for a few at once),
+/// within the API's deadline (`REQUEST_DEADLINE`): a face that is late counts as unknown rather than holding the page
+/// past it, and jobs that do not come in time answer `factory_timeout`, to be asked again.
+const LISTING_BUDGET: Duration = Duration::from_secs(12);
 const FACE_LOOKUPS: usize = 6;
 const FACE_BUDGET: Duration = Duration::from_secs(10);
 const MAX_BULK: usize = 200;
@@ -274,7 +276,8 @@ struct Rollback {
 }
 
 /// `POST /api/catalog/admin/items/{id}/rollback`: the item shows one of its earlier versions again. Its status, order,
-/// name and emoji stay; the files are still in the store because stored files are never deleted.
+/// name and emoji stay; the files are still in the store because every version kept refers to its own, and the model
+/// sweep keeps whatever is referred to (`models::REFERENCED`).
 async fn rollback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -313,7 +316,9 @@ fn copy_rank(row: &PgRow) -> (u8, Reverse<DateTime<Utc>>) {
 /// chosen face and stage are the character's latest.
 async fn factory_characters(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let admin = require(&state, &headers, CATALOG_EDITOR).await?;
-    let listing = studio::list(&state, &admin.username).await?;
+    let listing = tokio::time::timeout(LISTING_BUDGET, studio::list(&state, &admin.username))
+        .await
+        .unwrap_or(Err(factory::TIMED_OUT))?;
     let deadline = tokio::time::Instant::now() + FACE_BUDGET;
     let lookups: Vec<_> = listing
         .characters

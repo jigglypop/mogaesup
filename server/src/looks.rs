@@ -41,6 +41,8 @@ const SAVES_PER_WINDOW: u32 = 30;
 const STALE: chrono::Duration = chrono::Duration::minutes(10);
 /// Includes requests checking the wardrobe, queued tasks and active bakes.
 pub const MAX_BAKING: usize = 16;
+/// How long a save may wait for the wardrobe it is checked against, inside the API's deadline (`REQUEST_DEADLINE`).
+const WARDROBE_CHECK: std::time::Duration = std::time::Duration::from_secs(20);
 const BAKING_LOCK: i64 = 7_309_003;
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MASK_BYTES: usize = 16 * 1024 * 1024;
@@ -187,6 +189,20 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
 
+/// A wardrobe body's parts as a member may wear them, from the operator's listing (read without a member-scoped
+/// token): without a part put in the bin or one the wardrobe does not offer. The operator's `parts` are already only
+/// those; this holds even for a character server that lists the others there, marked.
+pub fn wearable(mut listing: Value) -> Value {
+    if let Some(parts) = listing["parts"].as_array_mut() {
+        parts.retain(|part| {
+            part["deleted"] != Value::Bool(true)
+                && part["trashed"] != Value::Bool(true)
+                && part["available"] != Value::Bool(false)
+        });
+    }
+    listing
+}
+
 /// Whether the character server's wardrobe still lists the look's body at its version and every part as the very file
 /// chosen; the body file's SHA-256 when it does.
 pub fn listed(bodies: &Value, listing: &Value, look: &Value) -> ApiResult<String> {
@@ -260,19 +276,21 @@ async fn baking_now(db: impl PgExecutor<'_>) -> Result<i64, sqlx::Error> {
     .await
 }
 
-/// Wears the look the member last had assembled again, when `look` is that very look and its model is stored: nothing
-/// is fetched or baked for it. The look as it is then; None when `look` needs assembling (or one is being assembled).
+/// Wears the look the member last had assembled again, when `look` is that very look and its model is stored, baked under
+/// today's rules (`look_bake::REVISION`): nothing is fetched or baked for it. The look as it is then; None when `look`
+/// needs assembling (or one is being assembled). A model baked under older rules stays worn until its new bake is ready.
 async fn wear_baked(state: &AppState, user: Uuid, look: &Value) -> ApiResult<Option<Value>> {
     let worn = sqlx::query(
         "UPDATE user_looks SET request = $2, revision = revision + 1, status = 'ready', error_code = NULL,
            error_message = NULL, worn = true, wear_on_ready = true, updated_at = now()
-         WHERE user_id = $1 AND baked = $2 AND model_url IS NOT NULL
+         WHERE user_id = $1 AND baked = $2 AND model_url IS NOT NULL AND report->>'bakeRevision' = $4
            AND (status <> 'baking' OR updated_at < now() - make_interval(mins => $3))
          RETURNING user_id",
     )
     .bind(user)
     .bind(look)
     .bind(STALE.num_minutes() as i32)
+    .bind(look_bake::REVISION)
     .fetch_optional(&state.db)
     .await?;
     match worn {
@@ -293,10 +311,17 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     factory::configured(&state)?;
     let admission = state.looks.clone().try_acquire_owned().map_err(|_| BUSY)?;
     let body_job = text(&look["body"], "jobId").to_owned();
-    let bodies =
-        factory::fetch_json(&state, &user.username, "avatar-factory/wardrobe/bodies").await?.unwrap_or_default();
-    let parts_path = format!("avatar-factory/wardrobe/bodies/{body_job}/parts");
-    let listing = factory::fetch_json(&state, &user.username, &parts_path).await?.ok_or(BODY_CHANGED)?;
+    // Checked against the wardrobe as members read it: what they may wear, whoever saves.
+    let wardrobe = async {
+        let bodies = factory::fetch_wardrobe_json(&state, &user.username, "avatar-factory/wardrobe/bodies").await?;
+        let parts_path = format!("avatar-factory/wardrobe/bodies/{body_job}/parts");
+        let listing = factory::fetch_wardrobe_json(&state, &user.username, &parts_path).await?;
+        Ok::<_, ApiError>((bodies.unwrap_or_default(), listing))
+    };
+    let (bodies, listing) = tokio::time::timeout(WARDROBE_CHECK, wardrobe).await.unwrap_or(Err(factory::TIMED_OUT))?;
+    let listing = listing.ok_or(BODY_CHANGED)?;
+    let scoped = state.config.factory.as_ref().is_some_and(factory::member_scoped);
+    let listing = if scoped { listing } else { wearable(listing) };
     let body_sha = listed(&bodies, &listing, &look)?;
     // Recorded and started on a task of its own: a request dropped between the two (its connection closing) would leave
     // the look `baking` with nothing baking it, holding the member's next save until it goes stale.

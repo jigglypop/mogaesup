@@ -495,9 +495,11 @@ fn a_task_is_done_on_the_page_no_sooner_than_its_kind_takes_and_stepping_away_dr
     assert_eq!(play.act(me, task()), Err(NO_TASK));
     assert_eq!(play.act(me, json!({"do": "dance"})), Err(BAD_ACTION));
     assert_eq!(play.act(me, json!({"task": true})), Err(BAD_ACTION));
-    // Within reach on the ground, however high.
+    // Within reach on the ground, near its height: not from up in the air.
     play.at(1_000);
     play.stand(me, [first[0] + 1.0, 4.0, first[2] - 1.0]);
+    assert_eq!(play.act(me, task()), Err(NO_TASK));
+    play.stand(me, [first[0] + 1.0, 2.0, first[2] - 1.0]);
     play.act(me, task()).unwrap();
     let kind = play.game.chores[station].name();
     let working = json!({"station": station, "kind": kind, "readyAt": START + 1_000 + least});
@@ -583,18 +585,30 @@ fn impostors_kill_living_crew_in_reach_once_their_wait_is_over() {
     assert_eq!(play.act(a, kill(c)), Err(TOO_FAR));
     play.standing.remove(&c);
     assert_eq!(play.act(a, kill(c)), Err(TOO_FAR));
+    // Not from up in the air.
     play.stand(c, [12.2, 5.0, 10.0]);
+    assert_eq!(play.act(a, kill(c)), Err(TOO_FAR));
+    play.stand(c, [12.2, 2.0, 10.0]);
     let events = play.act(a, kill(c)).unwrap();
     assert_eq!(events, vec![(Audience::Only(vec![c]), json!({"type": "killed"}))], "only the victim is told");
+    // Who stands near sees the body, which lies on the floor (the victim was in the air); who is far off does not, and
+    // the dead see them all.
+    play.stand(d, [14.0, 0.0, 10.0]);
+    play.stand(e, [40.0, 0.0, 40.0]);
+    play.tick(KILL_COOLDOWN);
     let seen = play.view(d);
     assert_eq!(
         seen["bodies"],
-        json!([{"id": 1, "victim": c, "color": null, "name": play.name(c), "position": [12.2, 5.0, 10.0], "reported": false}])
+        json!([{"id": 1, "victim": c, "color": null, "name": play.name(c), "position": [12.2, 0.0, 10.0], "reported": false}])
     );
-    assert_eq!(seen["hidden"], json!([c]));
+    assert_eq!(play.view(e)["bodies"], json!([]));
+    assert_eq!(play.view(c)["bodies"].as_array().unwrap().len(), 1);
+    // Nobody is told who is dead: the list pages from before read is empty for everyone.
+    assert!(play.views().iter().all(|view| view["hidden"] == json!([])));
     assert!(seen["players"].as_array().unwrap().iter().all(|player| player["alive"] == true), "not public yet");
     assert_eq!(play.view(c)["alive"], false);
-    assert_eq!(play.view(c)["hidden"], json!([]), "the dead see the dead");
+    // The live room hides the dead from all but the dead.
+    assert_eq!(play.game.hidden(), vec![(c, vec![c])]);
     // The dead are no targets; the killer waits again, the other impostor need not.
     assert_eq!(play.act(b, kill(c)), Err(NO_TARGET));
     play.stand(d, [10.0, 0.0, 11.0]);
@@ -863,7 +877,9 @@ fn when_a_meeting_ends_the_bodies_go_and_the_waits_start_again() {
     play.stand(crew[2], [30.0, 0.0, 32.0]);
     play.act(crew[2], report(1)).unwrap();
     let living = play.view(crew[3]);
-    assert_eq!(living["bodies"].as_array().unwrap().len(), 2, "the bodies stay through the meeting");
+    assert_eq!(play.game.bodies.len(), 2, "the bodies stay through the meeting");
+    assert_eq!(play.view(crew[0])["bodies"].as_array().unwrap().len(), 2, "the dead see them all");
+    assert_eq!(living["bodies"].as_array().unwrap().len(), 1, "the living, the one reported");
     let dead: Vec<&Value> =
         living["players"].as_array().unwrap().iter().filter(|player| player["alive"] == false).collect();
     assert_eq!(dead.len(), 2, "both deaths are public at the meeting");
@@ -946,7 +962,7 @@ fn the_impostors_win_once_they_are_as_many_as_the_living_crew() {
     assert_eq!(alive.iter().filter(|alive| !**alive).count(), 2);
     assert!(play.game.bodies.len() == 2 && play.view(crew[2])["phase"] == "ended");
     // Once over, everyone sees everyone again.
-    assert_eq!(play.view(crew[2])["hidden"], json!([]));
+    assert!(play.game.hidden().is_empty());
     // By an ejection: one kill, then the crew vote one of their own out.
     let mut play = Play::new(4, 17);
     let (impostor, crew) = (play.impostor(), play.crew());
@@ -1185,8 +1201,8 @@ fn living_impostors_hide_in_the_vents_and_move_between_them() {
     play.stand(impostor, [VENTS[0][0] + 1.0, 0.0, VENTS[0][2]]);
     assert!(play.act(impostor, vent(None)).unwrap().is_empty(), "nobody is told");
     assert_eq!(play.view(impostor)["venting"], 0);
+    assert_eq!(play.game.hidden(), vec![(impostor, Vec::new())], "hidden from everyone");
     for viewer in [me, crew[1]] {
-        assert_eq!(play.view(viewer)["hidden"], json!([impostor]));
         assert_eq!(play.view(viewer)["venting"], Value::Null);
     }
     // Inside: on to another vent, not the same one nor one that is not there; nothing else.
@@ -1206,7 +1222,7 @@ fn living_impostors_hide_in_the_vents_and_move_between_them() {
     assert_eq!(play.view(impostor)["near"]["vent"], 2);
     // Out again where they are; walking off climbs out too.
     play.act(impostor, vent(None)).unwrap();
-    assert_eq!(play.view(me)["hidden"], json!([]));
+    assert!(play.game.hidden().is_empty());
     play.act(impostor, vent(None)).unwrap();
     play.stand(impostor, [VENTS[2][0] + 3.1, 0.0, VENTS[2][2]]);
     play.tick(FIRST_KILL + 300);
@@ -1428,3 +1444,154 @@ fn whole_games_with_bots_end_and_every_view_can_be_made_along_the_way() {
 }
 
 const MAX_COORDINATE_TEST: f64 = crate::games::MAX_COORDINATE;
+
+#[test]
+fn nothing_is_reached_from_another_floor_and_a_game_nobody_wins_in_time_is_the_impostors() {
+    let mut play = Play::new(5, 31);
+    let crew = play.crew();
+    let me = crew[0];
+    let place = play.station(me, 0);
+    play.stand(me, [place[0], place[1] + 5.0, place[2]]);
+    assert_eq!(play.act(me, task()), Err(NO_TASK));
+    play.stand(me, [place[0], place[1] + 2.0, place[2]]);
+    play.act(me, task()).unwrap();
+    play.at(CALM);
+    play.stand(crew[1], [1.0, -10.0, 1.0]);
+    assert_eq!(play.act(crew[1], call()), Err(TOO_FAR));
+    assert_eq!(play.view(me)["endsAt"], START + GAME_LIMIT);
+    play.tick(GAME_LIMIT - 100);
+    assert!(play.game.result().is_none());
+    play.tick(GAME_LIMIT);
+    let result = play.game.result().unwrap();
+    assert_eq!((result["winner"].as_str(), result["reason"].as_str()), (Some("impostor"), Some("time")));
+}
+
+#[test]
+fn the_live_room_keeps_players_to_a_run_sends_them_where_the_game_does_and_hides_whom_it_must() {
+    let mut play = Play::new(5, 22);
+    let (impostor, crew) = (play.impostor(), play.crew());
+    let me = crew[0];
+    let start = Teleport { tag: 0, to: play.game.spawns[&me], radius: LANDING };
+    let roaming = Movement { speed: RUN_SPEED, teleports: vec![start], mute: true, ..Movement::default() };
+    assert_eq!(play.game.movement(me, START), Some(roaming), "quiet in the room between meetings");
+    // A game's burst to catch up after a stall, and settled at once where they stand still (at a task, a body).
+    let mine = play.game.movement(me, START).unwrap();
+    assert_eq!((mine.burst, mine.settle), (crate::games::GAME_BURST, true));
+    assert!(play.game.hidden().is_empty());
+    // Into a vent and on to another: a jump to each, told apart.
+    let to = |vent: usize, tag: u64| Teleport { tag, to: VENTS[vent], radius: LANDING };
+    play.stand(impostor, VENTS[0]);
+    play.act(impostor, vent(None)).unwrap();
+    assert_eq!(play.game.movement(impostor, START).unwrap().teleports[1..], [to(0, 1)]);
+    play.act(impostor, vent(Some(2))).unwrap();
+    assert_eq!(play.game.movement(impostor, START).unwrap().teleports[1..], [to(2, 2)]);
+    // A meeting: everyone may talk in the room, and the living jump to their seats.
+    play.at(CALM);
+    play.call(me);
+    let seat = play.meeting().seats.iter().find(|(id, _)| *id == me).unwrap().1;
+    let mine = play.game.movement(me, play.now).unwrap();
+    assert!(!mine.mute);
+    assert_eq!(mine.teleports[1], Teleport { tag: 1, to: seat, radius: LANDING });
+    assert!(play.game.hidden().is_empty(), "the meeting brings everyone out of the vents");
+    // Someone not playing is left to the room.
+    assert_eq!(play.game.movement(Uuid::new_v4(), play.now), None);
+}
+
+#[test]
+fn a_jump_on_the_spot_keeps_a_task_a_held_panel_and_a_vent_and_a_body_killed_in_the_air_lies_on_the_floor() {
+    let mut play = Play::new(5, 41);
+    let (impostor, crew) = (play.impostor(), play.crew());
+    let (me, other) = (crew[0], crew[1]);
+    let place = play.station(me, 0);
+    play.stand(me, place);
+    play.act(me, task()).unwrap();
+    // Up five meters at the top of a jump: still at work, and done once back down in time.
+    play.stand(me, [place[0], place[1] + 5.0, place[2]]);
+    play.tick(500);
+    assert!(play.player(me).working.is_some());
+    let ready = play.player(me).working.unwrap().ready;
+    play.at(ready - START);
+    play.act(me, finish()).unwrap();
+    // Higher than a jump goes is somewhere else.
+    let next = play.station(me, 1);
+    play.stand(me, next);
+    play.act(me, task()).unwrap();
+    play.stand(me, [next[0], next[1] + JUMP_LEVEL + 0.5, next[2]]);
+    play.tick(ready - START + 100);
+    assert!(play.player(me).working.is_none());
+    // In a vent, a jump does not climb out.
+    play.stand(impostor, VENTS[1]);
+    play.act(impostor, vent(None)).unwrap();
+    play.stand(impostor, [VENTS[1][0], VENTS[1][1] + 4.5, VENTS[1][2]]);
+    play.tick(ready - START + 200);
+    assert_eq!(play.player(impostor).venting, Some(1));
+    play.act(impostor, vent(None)).unwrap();
+    // Killed at the top of both their jumps: the body lies on the floor, where everyone near can report it.
+    play.at(KILL_COOLDOWN);
+    let up = [30.0, 4.5, 30.0];
+    play.stand(other, up);
+    play.stand(impostor, [31.0, 4.5, 30.0]);
+    play.act(impostor, kill(other)).unwrap();
+    assert_eq!(play.game.bodies[0].position, [30.0, TABLE[1], 30.0]);
+    play.stand(me, [31.5, 0.0, 30.0]);
+    play.tick(KILL_COOLDOWN + 100);
+    assert_eq!(play.view(me)["near"]["body"], 1);
+    play.act(me, report(1)).unwrap();
+}
+
+#[test]
+fn someone_who_leaves_the_game_dead_is_no_longer_hidden_on_the_island() {
+    let mut play = Play::new(6, 42);
+    let (impostor, crew) = (play.impostor(), play.crew());
+    let (ghost, gone) = (crew[0], crew[1]);
+    play.at(KILL_COOLDOWN);
+    play.kill_at(impostor, ghost, [10.0, 0.0, 10.0]);
+    play.at(2 * KILL_COOLDOWN);
+    play.kill_at(impostor, gone, [12.0, 0.0, 12.0]);
+    // In the order they joined, as crew() lists them.
+    assert_eq!(play.game.hidden(), vec![(ghost, vec![ghost, gone]), (gone, vec![ghost, gone])]);
+    // One of the dead leaves the game: back on the island like anyone, seen and heard there; the other stays hidden,
+    // now seen by the dead still playing only.
+    play.leave(gone);
+    assert_eq!(play.game.hidden(), vec![(ghost, vec![ghost])]);
+}
+
+#[test]
+fn whoever_watches_stands_where_the_layout_says_out_of_the_players_sight_until_the_game_is_over() {
+    let mut stood = layout(8);
+    stood["stand"] = json!([0.0, 0.0, -12.0]);
+    let mut play = Play::with(4, 3, stood);
+    assert_eq!(play.game.stand(), Some(Stand { at: [0.0, 0.0, -12.0], apart: true }));
+    // Without one, watchers stay where they are; one that is not a point refuses the layout.
+    assert_eq!(Play::new(4, 3).game.stand(), None);
+    let mut bad = layout(8);
+    bad["stand"] = json!("cafeteria");
+    assert_eq!(refused(bad, 4), Some(BAD_LAYOUT));
+    play.game.winner = Some((Role::Crew, Reason::Tasks));
+    assert_eq!(play.game.stand(), None);
+}
+
+#[test]
+fn a_line_names_someone_by_their_whole_name_and_bots_count_whom_lines_name_by_who_they_are() {
+    assert!(calls("요가 수상해요", "요"));
+    assert!(!calls("아무것도 못 봤어요.", "요"));
+    assert!(calls("감자님이 수상해요.", "감자"));
+    assert!(calls("감자, 어디 있었어?", "감자"));
+    assert!(!calls("고구마감자", "감자"));
+    assert!(!calls("이건 아니에요", "이"));
+    assert!(calls("봇 1님을 봤어요", "봇 1"));
+    assert!(!calls("아무 말", ""));
+    let mut play = Play::new(5, 23);
+    let ids = play.ids();
+    let (speaker, named) = (ids[0], ids[1]);
+    let index = play.index(named);
+    play.game.players[index].name = "요".into();
+    play.at(CALM);
+    play.call(speaker);
+    play.at(CALM + 1_000);
+    play.act(speaker, say("아무것도 못 봤어요. 작업하고 있었어요.")).unwrap();
+    assert_eq!(play.game.most_named(ids[2]), None, "a one-letter name inside other words is no one named");
+    play.at(CALM + 2_000);
+    play.act(speaker, say("요가 수상해요")).unwrap();
+    assert_eq!(play.game.most_named(ids[2]), Some(named));
+}

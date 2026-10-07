@@ -232,11 +232,14 @@ async fn concurrent_visitors_share_the_daily_storage_cap() {
     let owner = app.user_id("visit_cap").await;
     sqlx::query("INSERT INTO home_visits (owner_id, day, visitor) SELECT $1, (now() AT TIME ZONE 'Asia/Seoul')::date, 'fixture:' || n FROM generate_series(1, 9999) AS n")
         .bind(owner).execute(&app.state.db).await.unwrap();
-    sqlx::query("UPDATE homes SET visits_total = 9999 WHERE owner_id = $1")
-        .bind(owner)
-        .execute(&app.state.db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE homes SET visits_total = 9999, visits_today = 9999, visits_day = (now() AT TIME ZONE 'Asia/Seoul')::date
+         WHERE owner_id = $1",
+    )
+    .bind(owner)
+    .execute(&app.state.db)
+    .await
+    .unwrap();
     let (a, b) = tokio::join!(
         app.call("POST", "/api/homes/visit_cap/visits", Some(json!({})), Some(&left)),
         app.call("POST", "/api/homes/visit_cap/visits", Some(json!({})), Some(&right))
@@ -253,6 +256,41 @@ async fn concurrent_visitors_share_the_daily_storage_cap() {
             .await
             .unwrap(),
         10_000
+    );
+    // The page reads the day's count off the island's row.
+    let page = app.call("GET", "/api/homes/visit_cap", None, None).await;
+    assert_eq!(page.body["visits"], json!({"today": 10_000, "total": 10_000}));
+    // A count from another day reads as none yet, and the day's first visit starts it over.
+    sqlx::query("UPDATE homes SET visits_day = visits_day - 1 WHERE owner_id = $1")
+        .bind(owner)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(app.call("GET", "/api/homes/visit_cap", None, None).await.body["visits"]["today"], 0);
+    sqlx::query("DELETE FROM home_visits").execute(&app.state.db).await.unwrap();
+    let next = app.call("POST", "/api/homes/visit_cap/visits", Some(json!({})), Some(&left)).await;
+    assert_eq!(next.body, json!({"today": 1, "total": 10_001}));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 섬_페이지는_익명이면_주소마다_회원이면_회원마다_읽는_횟수가_정해져_있다() {
+    let app = TestApp::new(None).await;
+    let member = app.register("view_member", "Member").await;
+    app.register("view_host", "Host").await;
+    let id = app.user_id("view_member").await;
+    for _ in 0..600 {
+        rate_record(&app.state, "home-view:local".into());
+    }
+    let anonymous = app.call("GET", "/api/homes/view_host", None, None).await;
+    assert_eq!((anonymous.status, anonymous.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    assert_eq!(app.call("GET", "/api/homes/view_host", None, Some(&member)).await.status, StatusCode::OK);
+    for _ in 0..600 {
+        rate_record(&app.state, format!("home-view-member:{id}"));
+    }
+    assert_eq!(
+        app.call("GET", "/api/homes/view_host", None, Some(&member)).await.status,
+        StatusCode::TOO_MANY_REQUESTS
     );
     app.cleanup().await;
 }
@@ -384,6 +422,7 @@ async fn a_few_writers_cannot_fill_someone_elses_guestbook_and_the_owner_clears_
     }
     let refused = write(&guest).await;
     assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::CONFLICT, Some("guestbook_author_full")));
+    assert!(refused.body["message"].as_str().is_some_and(|message| message.contains("24시간")), "{:?}", refused.body);
     assert_eq!(write(&friend).await.status, StatusCode::CREATED, "other writers are not held back");
     // The owner is not limited in their own guestbook.
     for _ in 0..12 {
@@ -415,6 +454,65 @@ async fn a_few_writers_cannot_fill_someone_elses_guestbook_and_the_owner_clears_
     .await
     .unwrap();
     assert_eq!(write(&friend).await.body["code"], "guestbook_author_full");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 한_주소에서_만든_계정들로는_남의_방명록을_하루에_조금만_채운다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("crowd_host", "Host").await;
+    let book = "/api/homes/crowd_host/guestbook";
+    let write = |cookie: String, address: &'static str| {
+        let app = &app;
+        async move {
+            let request = Request::builder()
+                .method("POST")
+                .uri(book)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, cookie)
+                .header("x-forwarded-for", address)
+                .body(Body::from(json!({"body": "hello"}).to_string()))
+                .unwrap();
+            app.send(request).await
+        }
+    };
+    let mut writers = Vec::new();
+    for at in 0..4 {
+        writers.push(app.register(&format!("crowd_{at}"), "Writer").await);
+    }
+    // The owner's 일촌 writes from that address first: their entries take nobody's share of it.
+    let pal = app.register("crowd_pal", "Pal").await;
+    let (owner, friend) = (app.user_id("crowd_host").await, app.user_id("crowd_pal").await);
+    sqlx::query("INSERT INTO ilchons (user_id, friend_id, name) VALUES ($1, $2, 'pal'), ($2, $1, 'pal')")
+        .bind(owner)
+        .bind(friend)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    for _ in 0..9 {
+        assert_eq!(write(pal.clone(), "203.0.113.50").await.status, StatusCode::CREATED);
+    }
+    // Three accounts write their ten each from one address; a fourth from there is turned away for 24 hours, as the
+    // refusal says.
+    for cookie in &writers[..3] {
+        for _ in 0..10 {
+            assert_eq!(write(cookie.clone(), "203.0.113.50").await.status, StatusCode::CREATED);
+        }
+    }
+    let refused = write(writers[3].clone(), "203.0.113.50").await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::CONFLICT, Some("guestbook_address_full")));
+    assert!(refused.body["message"].as_str().is_some_and(|message| message.contains("24시간")), "{:?}", refused.body);
+    // The same account from elsewhere, the owner's 일촌 from there, and the owner are not held back.
+    assert_eq!(write(writers[3].clone(), "198.51.100.7").await.status, StatusCode::CREATED);
+    assert_eq!(write(pal, "203.0.113.50").await.status, StatusCode::CREATED);
+    assert_eq!(write(host, "203.0.113.50").await.status, StatusCode::CREATED);
+    // The address is kept only as a keyed hash.
+    let kept: Vec<Option<String>> = sqlx::query_scalar("SELECT DISTINCT author_address FROM guestbook_entries")
+        .fetch_all(&app.state.db)
+        .await
+        .unwrap();
+    assert!(kept.iter().all(|kept| kept.as_deref().is_some_and(|hash| hash.len() == 64 && !hash.contains("203."))));
     app.cleanup().await;
 }
 
@@ -723,7 +821,7 @@ async fn database_refusals_are_the_requests_problem_and_outages_the_servers() {
 #[tokio::test]
 async fn visitors_do_not_learn_which_studio_job_an_item_was_copied_from() {
     let app = TestApp::new(None).await;
-    let admin = app.register("source_admin", "Admin").await;
+    let admin = app.register("source_admin", "Source").await;
     app.make_admin("source_admin").await;
     let member = app.register("source_member", "Member").await;
     sqlx::query(

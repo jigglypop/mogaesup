@@ -6,7 +6,7 @@ use axum::{
 use serde_json::json;
 
 /// A refusal the client can act on: HTTP status, a stable code and a Korean message for the page.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,

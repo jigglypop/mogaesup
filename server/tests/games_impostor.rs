@@ -62,20 +62,29 @@ async fn next_where(
     }
 }
 
-/// One person on the island: who they are, their live-room socket (where they stand) and their game socket.
+/// One person on the island: who they are, their live-room socket (where they stand, as `peer`) and their game socket.
 struct Member {
     id: String,
     name: &'static str,
+    peer: String,
     at: [f64; 3],
     room: Stream,
     game: Stream,
 }
 
 impl Member {
-    /// Stands somewhere else in the live room.
+    /// Walks somewhere else in the live room, at a walk: the room takes no faster steps.
     async fn walk(&mut self, to: [f64; 3]) {
+        let from = self.at;
+        let far = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
+        let steps = (far / 3.0).ceil().max(1.0) as u32;
+        for step in 1..=steps {
+            let share = f64::from(step) / f64::from(steps);
+            let at = [0, 1, 2].map(|axis| from[axis] + (to[axis] - from[axis]) * share);
+            send(&mut self.room, json!({"type": "Update", "state": {"position": at}})).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         self.at = to;
-        send(&mut self.room, json!({"type": "Update", "state": {"position": to}})).await;
     }
 
     async fn act(&mut self, action: Value) {
@@ -146,7 +155,7 @@ async fn arrive(app: &TestApp, base: &str, username: &str, name: &'static str, a
     let mut game = open(format!("{base}/api/games/{ISLAND}?ticket={}&peer={peer}", ticket(app, &cookie).await)).await;
     let first = next_where(&mut game, "Session", Duration::from_secs(2), |_| true).await.unwrap();
     assert!(first["session"].is_null() || first["session"]["kind"] == "impostor");
-    Member { id, name, at, room, game }
+    Member { id, name, peer, at, room, game }
 }
 
 fn players(session: &Value) -> usize {
@@ -211,13 +220,21 @@ async fn 네_사람이_임포스터를_하며_처치하고_신고해_회의의_�
     let dead = everyone[victim].session(|session| session["game"]["alive"] == false).await;
     assert_eq!(dead["game"]["bodies"][0]["victim"], json!(target));
     assert_eq!(everyone[victim].event("killed").await, json!({"type": "killed"}));
-    let seen = everyone[other].session(|session| session["game"]["hidden"] == json!([target])).await;
-    assert_eq!(seen["game"]["bodies"][0]["name"], everyone[victim].name);
+    // The living are no longer shown the victim: the room tells them it stands far under the island, at the place it
+    // says of everyone hidden (nothing of where the victim fell), and nobody's view says who is dead: the list pages
+    // from before read is empty.
+    let ghost = everyone[victim].peer.clone();
+    let parked = next_where(&mut everyone[other].room, "PlayerUpdate", Duration::from_secs(2), |frame| {
+        frame["client_id"] == ghost.as_str() && frame["state"]["position"][1].as_f64().is_some_and(|y| y < -100.0)
+    });
+    assert_eq!(parked.await.unwrap()["state"]["position"], json!([0.0, -500.0, 0.0]));
+    assert!(views.iter().all(|view| view["game"]["hidden"] == json!([])));
 
     // Another walks up to the body and reports it: everyone alive gets a seat at the table.
     let body = [everyone[victim].at[0], 0.0, 1.5];
     everyone[finder].walk(body).await;
-    everyone[finder].session(|session| session["game"]["near"]["body"] == 1).await;
+    let near = everyone[finder].session(|session| session["game"]["near"]["body"] == 1).await;
+    assert_eq!(near["game"]["bodies"][0]["name"], everyone[victim].name, "the body is seen from near it");
     everyone[finder].act(json!({"do": "report", "body": 1})).await;
     let caller = everyone[finder].id.clone();
     for (index, member) in everyone.iter_mut().enumerate() {
@@ -285,5 +302,61 @@ async fn 네_사람이_임포스터를_하며_처치하고_신고해_회의의_�
     assert_eq!(revealed, dealt);
     let votes = &ended["game"]["lastMeeting"]["votes"];
     assert_eq!(votes.as_array().unwrap().len(), 3);
+    app.cleanup().await;
+}
+
+/// How far apart two points are.
+fn apart(a: &Value, b: [f64; 3]) -> f64 {
+    let at = |axis: usize| a[axis].as_f64().unwrap() - b[axis];
+    (at(0).powi(2) + at(1).powi(2) + at(2).powi(2)).sqrt()
+}
+
+#[tokio::test]
+async fn 구경하는_사람은_우주선의_구경_자리로_한_번_건너가_참가자_눈에_띄지_않고_끝나면_집으로_돌아간다() {
+    let app = TestApp::new(None).await;
+    let base = serve(&app).await;
+    let people = [(ISLAND, "에이"), ("sus_w", "구경"), ("sus_v", "구경둘")];
+    let mut everyone = Vec::new();
+    for (index, (username, name)) in people.into_iter().enumerate() {
+        everyone.push(arrive(&app, &base, username, name, [index as f64 * 10.0, 0.0, 0.0]).await);
+    }
+    // The host plays alone with bots; the ship's layout says where whoever watches stands.
+    send(&mut everyone[0].game, json!({"type": "Open", "kind": "impostor"})).await;
+    everyone[0].session(|session| session["phase"] == "lobby").await;
+    let stations: Vec<[f64; 3]> = (0..6).map(|index| [index as f64 * 10.0 - 40.0, 0.0, 30.0]).collect();
+    let stand = [0.0, 0.0, -8.0];
+    let layout = json!({"table": [0.0, 0.0, -20.0], "stations": stations, "bots": 3, "stand": stand});
+    send(&mut everyone[0].game, json!({"type": "Start", "layout": layout})).await;
+    let played = everyone[0].session(|session| session["phase"] == "playing").await;
+    assert_eq!(played["stand"], Value::Null, "a player is told of no stand");
+    for (index, member) in everyone.iter_mut().enumerate().skip(1) {
+        let seen = member.session(|session| session["phase"] == "playing").await;
+        assert_eq!(
+            (seen["stand"].clone(), seen["home"].clone()),
+            (json!(stand), json!([index as f64 * 10.0, 0.0, 0.0]))
+        );
+    }
+    // The first watcher's page puts them a meter over the stand: the room takes the jump at once (the other watcher is
+    // shown them there), and the player is shown them nowhere (far under the island, where everyone hidden is).
+    let watcher = everyone[1].peer.clone();
+    let landed = [stand[0] + 0.8, 1.0, stand[2] - 0.6];
+    send(&mut everyone[1].room, json!({"type": "Update", "state": {"position": landed}})).await;
+    let shown = next_where(&mut everyone[2].room, "PlayerUpdate", Duration::from_secs(2), |frame| {
+        frame["client_id"] == watcher.as_str() && apart(&frame["state"]["position"], landed) < 0.01
+    });
+    assert!(shown.await.is_some(), "the other watcher saw the jump");
+    let hidden = next_where(&mut everyone[0].room, "PlayerUpdate", Duration::from_secs(2), |frame| {
+        frame["client_id"] == watcher.as_str() && frame["state"]["position"][1].as_f64().is_some_and(|y| y < -100.0)
+    });
+    assert!(hidden.await.is_some(), "the player is not shown the watcher");
+    // The host closes the game: the watcher may jump home, and is seen again by the player there.
+    send(&mut everyone[0].game, json!({"type": "Close"})).await;
+    everyone[1].session(|session| session.is_null()).await;
+    let home = [10.0, 1.0, 0.0];
+    send(&mut everyone[1].room, json!({"type": "Update", "state": {"position": home}})).await;
+    let back = next_where(&mut everyone[0].room, "PlayerUpdate", Duration::from_secs(2), |frame| {
+        frame["client_id"] == watcher.as_str() && apart(&frame["state"]["position"], home) < 0.01
+    });
+    assert!(back.await.is_some(), "home again, at once and in sight");
     app.cleanup().await;
 }

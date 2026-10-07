@@ -6,7 +6,12 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use mogaesup_server::{AppState, MIGRATOR, config::Config, config::Factory, models::Models, rebac, router};
+use mogaesup_server::{
+    AppState, MIGRATOR,
+    config::{Config, Factory, FactoryToken},
+    models::Models,
+    rebac, router,
+};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::path::PathBuf;
@@ -14,6 +19,11 @@ use tower::ServiceExt;
 
 pub const ORIGIN: &str = "http://test.local";
 pub const TICKET_SECRET: &[u8] = b"test-realtime-ticket-secret-of-32-bytes";
+
+/// Operator token settings for a fake character server: members' wardrobe reads go out only with one.
+pub fn factory_token() -> Option<FactoryToken> {
+    Some(FactoryToken { key: vec![7; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 })
+}
 
 fn admin_url() -> String {
     std::env::var("TEST_ADMIN_DATABASE_URL")
@@ -62,6 +72,12 @@ pub struct Reply {
 
 impl TestApp {
     pub async fn new(factory: Option<Factory>) -> Self {
+        Self::tuned(factory, |_| {}).await
+    }
+
+    /// The server with `tune` applied to its state before its router is made: shorter waits or fewer places, so a
+    /// test sees them run out in moments.
+    pub async fn tuned(factory: Option<Factory>, tune: impl FnOnce(&mut AppState)) -> Self {
         let db = TestDb::create().await;
         MIGRATOR.run(&db.pool).await.unwrap();
         let model_dir = std::env::temp_dir().join(&db.name);
@@ -70,9 +86,11 @@ impl TestApp {
             cookie_secure: false,
             ticket_secret: TICKET_SECRET.to_vec(),
             models: Models::open(model_dir.to_str().unwrap()).unwrap(),
+            model_sweep: false,
             factory,
         };
-        let state = AppState::new(db.pool.clone(), config);
+        let mut state = AppState::new(db.pool.clone(), config);
+        tune(&mut state);
         Self { router: router(state.clone()), state, model_dir, db }
     }
 
@@ -135,6 +153,27 @@ impl TestApp {
             .await;
         assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
         reply.cookie.expect("session cookie")
+    }
+
+    /// A member made straight in the database and signed in, without a password anyone can type (and so without the
+    /// password hashing a sign-up takes): for tests whose API deadline is too short for that. Returns the cookie.
+    pub async fn quick_member(&self, username: &str) -> String {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, display_name, password_hash) VALUES ($1, $2, $2, 'not a hash')")
+            .bind(id)
+            .bind(username)
+            .execute(&self.state.db)
+            .await
+            .unwrap();
+        let token = uuid::Uuid::new_v4().simple().to_string().repeat(2);
+        let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()));
+        sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 day')")
+            .bind(hash)
+            .bind(id)
+            .execute(&self.state.db)
+            .await
+            .unwrap();
+        format!("mogaesup_session={token}")
     }
 
     pub async fn user_id(&self, username: &str) -> uuid::Uuid {

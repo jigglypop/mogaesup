@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "mogaesup-server"
 path = "src/main.rs"
 
+[features]
+# The war game's rules (src/war), kept but not served: `cargo test --features war` builds and checks them.
+war = []
+
 [dependencies]
 anyhow = "1"
 argon2 = "0.5"
@@ -35,6 +39,9 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Display names are compared in NFKC, and refused with characters that draw nothing (src/auth.rs).
+unicode-normalization = "0.1"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category", "emoji"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

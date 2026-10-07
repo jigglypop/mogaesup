@@ -8,6 +8,9 @@ use crate::models::Models;
 pub struct Factory {
     pub url: String,
     pub api_key: Option<String>,
+    /// `FACTORY_JWT_SECRET` and the claims around it. Without it requests go without a token, with the server's keys
+    /// alone, members' wardrobe reads too: only the token can narrow those to what members may see
+    /// (`factory::member_scoped`), so the server warns as it starts.
     pub token: Option<FactoryToken>,
     /// What the studio screens may do through this server: `FACTORY_ACCESS`, read unless set.
     pub access: FactoryAccess,
@@ -108,6 +111,10 @@ pub struct Config {
     pub ticket_secret: Vec<u8>,
     /// Catalog models and pictures: `MODEL_STORE`, an `s3://bucket/prefix` or a local directory.
     pub models: Models,
+    /// Whether this server deletes the stored files nothing refers to any more (`models::spawn_sweep`):
+    /// `MODEL_SWEEP=on`, off unless set. Only the server that owns `MODEL_STORE` (production, for its bucket) turns it
+    /// on: a sweep judges by its own database, so one run against another's store would delete what that one uses.
+    pub model_sweep: bool,
     pub factory: Option<Factory>,
 }
 
@@ -198,8 +205,18 @@ impl Config {
             cookie_secure,
             ticket_secret,
             models: Models::open(&model_store(var("MODEL_STORE"), cookie_secure)?).context("MODEL_STORE")?,
+            model_sweep: model_sweep(var("MODEL_SWEEP").as_deref())?,
             factory,
         })
+    }
+}
+
+/// `MODEL_SWEEP`: `on` or `off`, off unless set.
+fn model_sweep(value: Option<&str>) -> anyhow::Result<bool> {
+    match value {
+        None | Some("off") => Ok(false),
+        Some("on") => Ok(true),
+        Some(other) => bail!("MODEL_SWEEP must be on or off, not {other}"),
     }
 }
 
@@ -227,6 +244,16 @@ mod tests {
         }
         for refused in ["http://studio.example.com", "http://10.0.0.5:8016", "ftp://127.0.0.1", "studio"] {
             assert!(factory_url(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn the_model_sweep_runs_only_where_it_is_turned_on() {
+        assert!(!model_sweep(None).unwrap());
+        assert!(!model_sweep(Some("off")).unwrap());
+        assert!(model_sweep(Some("on")).unwrap());
+        for unclear in ["true", "1", "ON", "yes"] {
+            assert!(model_sweep(Some(unclear)).is_err(), "{unclear}");
         }
     }
 

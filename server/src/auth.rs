@@ -9,13 +9,16 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
+use unicode_normalization::UnicodeNormalization;
+use unicode_properties::{GeneralCategory, UnicodeEmoji, UnicodeGeneralCategory};
 use uuid::Uuid;
 
 use crate::{
@@ -23,8 +26,8 @@ use crate::{
     error::{ApiError, ApiResult, LOGIN_REQUIRED, bad, conflict, forbidden, internal},
     rebac::{self, Actor, Checker, PERMISSIONS, Permission, ROLE_COLUMN, Subject, Tuple},
     security::{
-        Running, client_address, constant_time_eq, hmac_sha256, rate_exceeded, rate_limit, rate_record, rate_reserve,
-        rate_running,
+        Running, client_address, constant_time_eq, hmac_sha256, rate_exceeded, rate_limit, rate_record, rate_record_in,
+        rate_reserve, rate_running,
     },
 };
 
@@ -49,20 +52,41 @@ const SESSION_TERM: &str = "30 days";
 const SESSION_RENEW_BELOW: &str = "29 days";
 /// However often it is renewed, a session ends this long after the sign-in that made it: a stolen one cannot be kept.
 const SESSION_LIFETIME: &str = "90 days";
-/// Wrong passwords from one address, for one account, and from one device known to the account, in the rate window
-/// (ten minutes).
+/// How long a session started over still works ([`start_over`]): requests already on their way with its cookie, and the
+/// browser's other tabs, pass while the answer brings the new cookie.
+const REPLACED_GRACE: &str = "90 seconds";
+/// How long after starting over the realtime sockets of the replaced session close: its answer, with the new cookie, is
+/// in by then, and the page connects again under it (under the old one, until its grace ends, when the answer was lost).
+const SOCKETS_GRACE: Duration = Duration::from_secs(3);
+/// Wrong passwords from one address, for one account, from one device known to the account, and from all of its known
+/// devices together, in the rate window (ten minutes).
 const LOGIN_FAILURES_PER_ADDRESS: u32 = 30;
 const LOGIN_FAILURES_PER_ACCOUNT: u32 = 50;
 const LOGIN_FAILURES_PER_DEVICE: u32 = 10;
-/// Wrong current passwords one session may send while changing the password, in the rate window.
-const PASSWORD_FAILURES_PER_SESSION: u32 = 10;
-/// Password checks for one account (or one known device, or one session) waiting or running at once: a burst for one
+const LOGIN_FAILURES_PER_KNOWN_DEVICES: u32 = 30;
+/// Devices one account keeps known (see `signed_device`). Signing in from another forgets the one used least recently.
+pub const DEVICES_PER_USER: i64 = 10;
+/// Wrong current passwords one sign-in may send while changing the password, in the rate window: all the sessions it
+/// started over to count together, so signing the other devices out does not hand it new guesses.
+const PASSWORD_FAILURES_PER_SIGN_IN: u32 = 10;
+/// Signing the other devices out, and password changes made, per account in the rate window. Only a change made counts:
+/// someone holding a session but not the password cannot keep the owner from changing it.
+pub const LOGOUT_OTHERS_PER_USER: u32 = 10;
+pub const PASSWORD_CHANGES_PER_USER: u32 = 5;
+/// Password checks for one account (or one known device, or one sign-in) waiting or running at once: a burst for one
 /// account cannot fill the hashing queue everyone signs in through.
 pub const CHECKS_UNDER_WAY: u32 = 16;
+/// Password checks for names nobody has waiting or running at once, from one address and in all. Their throwaway hash
+/// takes a hashing slot like any check; usernames are public (every island is at `/@name`), so turning a crowd of
+/// them away as busy tells nobody anything, and a flood of made-up names cannot fill the queue members sign in through.
+pub const UNKNOWN_CHECKS_PER_ADDRESS: u32 = 1;
+pub const UNKNOWN_CHECKS_SITE: u32 = 2;
 /// How long a password check waits for a hashing slot: a burst of sign-ins is turned away instead of queueing forever.
+/// A password change waits twice (the current one checked, the new one hashed), within [`AUTH_DEADLINE`].
 const HASH_WAIT: Duration = Duration::from_secs(10);
-/// How long a sign-in route may take in all.
-const AUTH_DEADLINE: Duration = Duration::from_secs(30);
+/// How long a sign-in route may take in all: under the API's own deadline (`REQUEST_DEADLINE`), so it answers busy
+/// before CloudFront gives up on it.
+const AUTH_DEADLINE: Duration = Duration::from_secs(24);
 const BUSY: ApiError = ApiError::new(
     StatusCode::SERVICE_UNAVAILABLE,
     "busy",
@@ -74,11 +98,16 @@ const INVALID_CREDENTIALS: ApiError =
 const WRONG_PASSWORD: ApiError =
     ApiError::new(StatusCode::BAD_REQUEST, "wrong_password", "현재 비밀번호가 올바르지 않습니다.");
 const PASSWORD_CHANGED: ApiError = conflict("password_changed", "비밀번호가 방금 바뀌었습니다. 다시 시도해 주세요.");
-/// Names that read as the site's own staff. New accounts cannot take them; existing ones keep working. Usernames are
-/// ASCII, so the Korean ones only matter if that ever changes.
-const RESERVED_NAMES: [&str; 9] =
-    ["admin", "administrator", "mogaesup", "root", "system", "support", "staff", "운영자", "관리자"];
+/// Names that read as the site's own staff. New accounts cannot take them, as a username or a display name, whatever
+/// their capitals, spaces and compatibility forms (see [`name_key`]); existing ones keep working. Usernames are ASCII,
+/// so the Korean ones guard display names.
+const RESERVED_NAMES: [&str; 10] =
+    ["admin", "administrator", "mogaesup", "root", "system", "support", "staff", "운영자", "관리자", "모개숲"];
 const USERNAME_TAKEN: ApiError = conflict("username_taken", "이미 사용 중인 아이디입니다.");
+const RESERVED_NAME: ApiError = bad("invalid_name", "쓸 수 없는 이름입니다.");
+const HIDDEN_IN_NAME: ApiError = bad("invalid_name", "이름에 쓸 수 없는 문자가 들어 있어요.");
+/// Hangul fillers: letters that draw nothing.
+const HANGUL_FILLERS: [char; 4] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}'];
 
 /// A signed-in account. `role` is `admin` while it holds `system:mogaesup#admin` (see [`rebac`]), else `user`.
 #[derive(Clone, Debug, Serialize)]
@@ -139,19 +168,40 @@ fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-/// The signed-in account and its session's hash.
-async fn signed_in(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<(User, String)>> {
+/// The session a request is signed in with.
+struct Session {
+    /// The token's hash, as `sessions` keeps it.
+    hash: String,
+    /// When the sign-in it belongs to was: a session started over keeps its sign-in's (see [`start_over`]).
+    signed_in_at: DateTime<Utc>,
+    /// It was started over and lives out its grace ([`REPLACED_GRACE`]): it works, but starts nothing over again.
+    replaced: bool,
+}
+
+impl Session {
+    /// The wrong-password budget of a password change: the sign-in's, which every session it started over shares.
+    fn password_budget(&self, user: &User) -> String {
+        format!("login-failed-sign-in:{}:{}", user.id, self.signed_in_at.timestamp_micros())
+    }
+}
+
+/// The signed-in account and its session.
+async fn signed_in(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<(User, Session)>> {
     let Some(presented) = presented(state, headers) else { return Ok(None) };
     let hash = token_hash(presented.token);
     let row = sqlx::query(&format!(
-        "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN} FROM sessions s JOIN users u ON u.id = s.user_id
+        "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, s.created_at, s.replaced_at IS NOT NULL AS replaced
+         FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)"
     ))
     .bind(&hash)
     .bind(presented.legacy)
     .fetch_optional(&state.db)
     .await?;
-    Ok(row.map(|row| (User::from_row(&row), hash)))
+    Ok(row.map(|row| {
+        let session = Session { hash, signed_in_at: row.get("created_at"), replaced: row.get("replaced") };
+        (User::from_row(&row), session)
+    }))
 }
 
 pub async fn optional_user(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<User>> {
@@ -213,12 +263,74 @@ pub(crate) fn username(raw: &str) -> ApiResult<String> {
     Ok(name)
 }
 
+/// A display name as it is kept: what was typed, trimmed (the username when nothing was). Refused when it is too long,
+/// holds a control character or one that draws nothing outside an emoji ([`hides_something`]), or reads as a reserved
+/// name.
 fn display_name(raw: Option<&str>, fallback: &str) -> ApiResult<String> {
     let name = raw.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(fallback).to_owned();
-    if name.chars().count() > 20 || name.chars().any(char::is_control) {
+    if name.chars().count() > 20 {
         return Err(bad("invalid_name", "이름은 20자 이하로 입력해 주세요."));
     }
+    if name.chars().any(char::is_control) || hides_something(&name) {
+        return Err(HIDDEN_IN_NAME);
+    }
+    if reserved(&name) {
+        return Err(RESERVED_NAME);
+    }
     Ok(name)
+}
+
+/// A character that draws nothing, or changes how others are drawn or read: format characters (direction overrides and
+/// marks, joiners, word joiners, tags), variation selectors, Hangul fillers, the combining grapheme joiner, Khmer's
+/// inherent vowels and the blank braille pattern.
+fn invisible(c: char) -> bool {
+    c.general_category() == GeneralCategory::Format
+        || HANGUL_FILLERS.contains(&c)
+        || matches!(
+            c,
+            '\u{fe00}'..='\u{fe0f}'
+                | '\u{e0100}'..='\u{e01ef}'
+                | '\u{180b}'..='\u{180d}'
+                | '\u{180f}'
+                | '\u{34f}'
+                | '\u{17b4}'
+                | '\u{17b5}'
+                | '\u{2800}'
+        )
+}
+
+/// Whether `name` holds an [`invisible`] character outside an emoji sequence. Emoji keep the ones they are made of (the
+/// variation selector of ❤️, the joiners of 👩‍💻, a flag's tags), each right after an emoji or another of its parts;
+/// anywhere else one could hide, reorder or fake what the name shows (자영운 after a right-to-left override reads as
+/// 운영자).
+fn hides_something(name: &str) -> bool {
+    let mut previous: Option<char> = None;
+    for c in name.chars() {
+        let in_emoji = emoji_part(c) && previous.is_some_and(|p| p.is_emoji_char() || emoji_part(p));
+        if invisible(c) && !in_emoji {
+            return true;
+        }
+        previous = Some(c);
+    }
+    false
+}
+
+/// The [`invisible`] characters emoji are made of: the zero-width joiner, the text and emoji variation selectors, and
+/// a flag's tags.
+fn emoji_part(c: char) -> bool {
+    matches!(c, '\u{200d}' | '\u{fe0e}' | '\u{fe0f}' | '\u{e0020}'..='\u{e007f}')
+}
+
+/// `name` as reserved names are compared: in NFKC (full-width letters and decomposed Hangul read as their plain forms),
+/// lowercase, without spaces or the invisible characters emoji may keep.
+fn name_key(name: &str) -> String {
+    name.nfkc().filter(|c| !c.is_whitespace() && !invisible(*c)).flat_map(char::to_lowercase).collect()
+}
+
+/// Whether `name` is one of [`RESERVED_NAMES`], capitals, spaces and compatibility forms aside.
+fn reserved(name: &str) -> bool {
+    let key = name_key(name);
+    RESERVED_NAMES.iter().any(|reserved| name_key(reserved) == key)
 }
 
 fn new_password(password: &str) -> ApiResult<()> {
@@ -261,21 +373,22 @@ async fn hash_password(state: &AppState, password: String) -> ApiResult<String> 
     .map_err(internal)
 }
 
-/// Checks against `hash`, or spends the same work on a throwaway hash so unknown usernames take as long.
+/// Checks against `hash`, or spends the same work on a throwaway hash so unknown usernames take as long. The hashing
+/// slot is held on the blocking thread until the hash is checked, even when the request is given up meanwhile.
 async fn verify_password(state: &AppState, hash: Option<String>, password: String) -> ApiResult<bool> {
-    verify_in(hashing_slot(state).await?, hash, password).await
+    let slot = hashing_slot(state).await?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        matches(hash, &password)
+    })
+    .await
+    .map_err(internal)
 }
 
-/// [`verify_password`] in a hashing slot already held, which it gives back once the hash is checked.
-async fn verify_in(permit: OwnedSemaphorePermit, hash: Option<String>, password: String) -> ApiResult<bool> {
-    let right = check_hash(hash, password).await;
-    drop(permit);
-    right
-}
-
-/// Whether `password` matches `hash`, on a blocking thread; the caller holds a hashing slot.
-async fn check_hash(hash: Option<String>, password: String) -> ApiResult<bool> {
-    tokio::task::spawn_blocking(move || match hash {
+/// Whether `password` matches `hash`; None never matches, after the same work. For a blocking thread holding a hashing
+/// slot.
+fn matches(hash: Option<String>, password: &str) -> bool {
+    match hash {
         Some(hash) => PasswordHash::new(&hash)
             .is_ok_and(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()),
         None => {
@@ -283,13 +396,17 @@ async fn check_hash(hash: Option<String>, password: String) -> ApiResult<bool> {
             let _ = Argon2::default().hash_password(password.as_bytes(), &salt);
             false
         }
-    })
-    .await
-    .map_err(internal)
+    }
 }
 
-/// The budgets one password check runs under: wrong passwords from the request's address, and for `key` (the account,
-/// a device known to it, or a session changing its password), in the rate window.
+/// The wrong-password budget of the request's address.
+fn address_key(headers: &HeaderMap) -> String {
+    format!("login-failed-address:{}", client_address(headers))
+}
+
+/// The budgets one password check runs under: wrong passwords from the request's address, and for each of `keys` (the
+/// account; or a device known to it and all of its known devices together; or a sign-in changing its password), in the
+/// rate window.
 ///
 /// Only a password found wrong counts. A check still waiting or running holds nothing against anyone, so a burst of
 /// them cannot shut the owner out before a single one was found wrong; at most [`CHECKS_UNDER_WAY`] of one key wait or
@@ -298,38 +415,79 @@ async fn check_hash(hash: Option<String>, password: String) -> ApiResult<bool> {
 /// people share one address (a school, a mobile carrier), so their checks under way never use up its budget either.
 struct PasswordCheck {
     address: String,
-    key: String,
-    max: u32,
-    _under_way: Running,
+    keys: Vec<(String, u32)>,
+    under_way: Vec<Running>,
 }
 
 impl PasswordCheck {
-    fn start(state: &AppState, headers: &HeaderMap, key: String, max: u32) -> ApiResult<Self> {
-        let address = format!("login-failed-address:{}", client_address(headers));
+    /// A check of an account's password, under `keys`.
+    fn start(state: &AppState, headers: &HeaderMap, keys: Vec<(String, u32)>) -> ApiResult<Self> {
+        let places = keys.iter().map(|(key, _)| (key.clone(), CHECKS_UNDER_WAY)).collect();
+        Self::begin(state, headers, keys, places)
+    }
+
+    /// A check for a name nobody has: it keeps no budget of its own (made-up names cannot crowd the rate table), and
+    /// takes one of the few places such checks have, from its address and in all ([`UNKNOWN_CHECKS_SITE`]).
+    fn start_unknown(state: &AppState, headers: &HeaderMap) -> ApiResult<Self> {
+        let places = vec![
+            (format!("login-unknown:{}", client_address(headers)), UNKNOWN_CHECKS_PER_ADDRESS),
+            ("login-unknown".to_owned(), UNKNOWN_CHECKS_SITE),
+        ];
+        Self::begin(state, headers, Vec::new(), places)
+    }
+
+    /// Refused when a budget is spent, or busy when one of `places` (a key and how many may wait or run under it at
+    /// once) is full.
+    fn begin(
+        state: &AppState,
+        headers: &HeaderMap,
+        keys: Vec<(String, u32)>,
+        places: Vec<(String, u32)>,
+    ) -> ApiResult<Self> {
+        let address = address_key(headers);
         rate_exceeded(state, &address, LOGIN_FAILURES_PER_ADDRESS)?;
-        rate_exceeded(state, &key, max)?;
-        let under_way = rate_running(state, &key, CHECKS_UNDER_WAY)?.ok_or(BUSY)?;
-        Ok(Self { address, key, max, _under_way: under_way })
+        for (key, max) in &keys {
+            rate_exceeded(state, key, *max)?;
+        }
+        let mut under_way = Vec::with_capacity(places.len());
+        for (key, max) in &places {
+            under_way.push(rate_running(state, key, *max)?.ok_or(BUSY)?);
+        }
+        Ok(Self { address, keys, under_way })
     }
 
     /// Whether `password` matches `hash` (None for a name nobody has, which is never right). A wrong one counts
-    /// against the address, and against the key when there is an account behind it: made-up names keep no window of
-    /// their own, so they cannot crowd the rate table.
+    /// against the address, and against the keys when there is an account behind them: made-up names keep no window
+    /// of their own, so they cannot crowd the rate table.
+    ///
+    /// Once a hashing slot is held, the rest runs to its end on a blocking thread whether or not the request is still
+    /// waiting for it: the hash is checked, a wrong password counts, and only then does the slot go back, so the next
+    /// check waiting for it sees the budget spent and a request given up never frees a slot argon2 still uses.
     async fn verify(self, state: &AppState, hash: Option<String>, password: String) -> ApiResult<bool> {
         let slot = hashing_slot(state).await?;
         rate_exceeded(state, &self.address, LOGIN_FAILURES_PER_ADDRESS)?;
-        rate_exceeded(state, &self.key, self.max)?;
-        let someone = hash.is_some();
-        let right = check_hash(hash, password).await?;
-        if !right {
-            rate_record(state, self.address);
-            if someone {
-                rate_record(state, self.key);
-            }
+        for (key, max) in &self.keys {
+            rate_exceeded(state, key, *max)?;
         }
-        // The slot goes back only once the failure counts, so the next check waiting for it sees the budget spent.
-        drop(slot);
-        Ok(right)
+        let Self { address, keys, under_way } = self;
+        let table = state.attempts.clone();
+        tokio::task::spawn_blocking(move || {
+            let someone = hash.is_some();
+            let right = matches(hash, &password);
+            if !right {
+                rate_record_in(&table, address);
+                if someone {
+                    for (key, _) in keys {
+                        rate_record_in(&table, key);
+                    }
+                }
+            }
+            drop(slot);
+            drop(under_way);
+            right
+        })
+        .await
+        .map_err(internal)
     }
 }
 
@@ -403,17 +561,86 @@ fn device_value(state: &AppState, name: &str, id: &str) -> String {
     format!("{id}.{}", hex::encode(signature))
 }
 
-/// The id of the device the request comes from, when it has signed in to `name` before: its wrong passwords count
-/// against that device alone, so others guessing at the account cannot shut its owner out of the devices they use.
-fn known_device(state: &AppState, headers: &HeaderMap, name: &str) -> Option<String> {
+/// The id in the request's device cookie when it is signed for account `name`. The device is known to the account
+/// while `login_devices` holds it: it was signed in from, recently enough to be among the account's
+/// [`DEVICES_PER_USER`], and not since the password changed (a cookie given before devices were recorded counts until
+/// then, see [`login`]). A known device's wrong passwords count against that device (and the account's known devices
+/// together), not the account, so others guessing at the account cannot shut its owner out of the devices they use.
+fn signed_device(state: &AppState, headers: &HeaderMap, name: &str) -> Option<String> {
     let value = cookie(headers, device_cookie_name(state))?;
     let (id, _) = value.split_once('.')?;
     let well_formed = id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit());
     (well_formed && constant_time_eq(device_value(state, name, id).as_bytes(), value.as_bytes())).then(|| id.to_owned())
 }
 
-/// A new session for `user`, whose password was just checked against `verified`; `device` is the known device it
-/// signed in from. A password changed since the check admits nobody.
+/// 32 random bytes in hex: a session token.
+fn new_token() -> String {
+    let mut random = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut random);
+    hex::encode(random)
+}
+
+/// 16 random bytes in hex: a device's id.
+fn new_device() -> String {
+    let mut id = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut id);
+    hex::encode(id)
+}
+
+/// Puts the device cookie for `device` and account `name` on `response`.
+fn send_device(state: &AppState, response: &mut Response, name: &str, device: &str) -> ApiResult<()> {
+    let value = device_value(state, name, device);
+    add_cookie(response, &cookie_line(state, device_cookie_name(state), &value, DEVICE_MAX_AGE_SECONDS))
+}
+
+/// Opens a session for `user` under `token`, for a full term: one made by the sign-in at `signed_in` (now unless
+/// given), never past [`SESSION_LIFETIME`] from it. The seconds it has.
+async fn open_session(
+    connection: &mut PgConnection,
+    state: &AppState,
+    user: Uuid,
+    token: &str,
+    signed_in: Option<DateTime<Utc>>,
+) -> Result<u32, sqlx::Error> {
+    let seconds: i64 = sqlx::query_scalar(&format!(
+        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, legacy_cookie)
+         SELECT $1, $2, at, least(clock_timestamp() + interval '{SESSION_TERM}', at + interval '{SESSION_LIFETIME}'), $3
+         FROM (SELECT coalesce($4, clock_timestamp()) AS at) signed_in
+         RETURNING floor(extract(epoch FROM expires_at - now()))::int8"
+    ))
+    .bind(token_hash(token))
+    .bind(user)
+    .bind(!state.config.cookie_secure)
+    .bind(signed_in)
+    .fetch_one(connection)
+    .await?;
+    Ok(seconds.clamp(0, i64::from(SESSION_MAX_AGE_SECONDS)) as u32)
+}
+
+/// Marks `device` as one `user` signed in from, and forgets the account's devices past [`DEVICES_PER_USER`], the ones
+/// used least recently first.
+async fn remember_device(connection: &mut PgConnection, user: Uuid, device: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO login_devices (user_id, device_id, seen_at) VALUES ($1, $2, clock_timestamp())
+         ON CONFLICT (user_id, device_id) DO UPDATE SET seen_at = excluded.seen_at",
+    )
+    .bind(user)
+    .bind(device)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "DELETE FROM login_devices WHERE user_id = $1 AND device_id IN
+         (SELECT device_id FROM login_devices WHERE user_id = $1 ORDER BY seen_at DESC, device_id DESC OFFSET $2)",
+    )
+    .bind(user)
+    .bind(DEVICES_PER_USER)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// A new session for `user`, whose password was just checked against `verified`; `device` is the id the device's
+/// cookie carries for the account, which becomes known to it. A password changed since the check admits nobody.
 async fn session(
     state: &AppState,
     headers: &HeaderMap,
@@ -422,9 +649,8 @@ async fn session(
     device: Option<String>,
     status: StatusCode,
 ) -> ApiResult<Response> {
-    let mut random = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut random);
-    let token = hex::encode(random);
+    let token = new_token();
+    let device = device.unwrap_or_else(new_device);
     let mut tx = state.db.begin().await?;
     // Serialize admission and pruning for an account, including concurrent successful logins and password changes.
     let current: Option<String> = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1 FOR UPDATE")
@@ -434,15 +660,7 @@ async fn session(
     if current.as_deref() != Some(verified) {
         return Err(INVALID_CREDENTIALS);
     }
-    sqlx::query(&format!(
-        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, legacy_cookie)
-         VALUES ($1, $2, clock_timestamp(), clock_timestamp() + interval '{SESSION_TERM}', $3)"
-    ))
-    .bind(token_hash(&token))
-    .bind(user.id)
-    .bind(!state.config.cookie_secure)
-    .execute(&mut *tx)
-    .await?;
+    open_session(&mut tx, state, user.id, &token, None).await?;
     // Bound stolen or forgotten sessions per account. A session's expiry moves with its use (see `me`, renewed at most a
     // day apart), so the latest expiries are the devices used most recently and the earliest are the ones that go.
     let expired: Vec<String> = sqlx::query_scalar(
@@ -453,18 +671,13 @@ async fn session(
     .bind(SESSIONS_PER_USER)
     .fetch_all(&mut *tx)
     .await?;
+    remember_device(&mut tx, user.id, &device).await?;
     tx.commit().await?;
     end_sockets(state, &expired);
     let body = with_permissions(state, &user).await?;
     let mut response = (status, Json(json!({"user": body}))).into_response();
     send_session(state, headers, &mut response, &token, SESSION_MAX_AGE_SECONDS)?;
-    let device = device.unwrap_or_else(|| {
-        let mut id = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut id);
-        hex::encode(id)
-    });
-    let value = device_value(state, &user.username, &device);
-    add_cookie(&mut response, &cookie_line(state, device_cookie_name(state), &value, DEVICE_MAX_AGE_SECONDS))?;
+    send_device(state, &mut response, &user.username, &device)?;
     Ok(response)
 }
 
@@ -476,16 +689,102 @@ fn end_sockets(state: &AppState, hashes: &[String]) {
     }
 }
 
-/// Ends every session of `user` but `keep` (a session hash), and the realtime sockets that rode on them; how many.
-async fn end_other_sessions(state: &AppState, user: Uuid, keep: &str) -> ApiResult<usize> {
-    let ended: Vec<String> =
-        sqlx::query_scalar("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2 RETURNING token_hash")
+/// A session started over ([`start_over`]): the hashes of the account's other sessions, which it ended, how many of
+/// them were other devices' (not this browser's own, replaced a moment ago), and how long the new one lasts.
+struct StartedOver {
+    ended: Vec<String>,
+    others: usize,
+    seconds: u32,
+}
+
+/// Starts `user` over from the session `current` (a hash): every other session of the account ends, and `token` opens
+/// in this one's place, so a copy of this browser's cookie taken earlier stops working too. `current` itself is kept
+/// for [`REPLACED_GRACE`], replaced: requests already sent with its cookie, and this browser's other tabs, pass until
+/// the answer brings the new one, but it starts nothing over again; its sign-in time moves back to make its lifetime
+/// end with the grace, so not even a release from before `replaced_at` renews it. The new session belongs to the same
+/// sign-in and ends when the old one would have at the latest ([`SESSION_LIFETIME`]), so starting over cannot keep a
+/// session going. With `device` (a password change), every device of the account but that one is forgotten; signing
+/// the other devices out leaves the devices as they are. Refused (LOGIN_REQUIRED) when `current` had already ended or
+/// been replaced, so a session signed out meanwhile is not opened again. The caller holds the account's row.
+async fn start_over(
+    connection: &mut PgConnection,
+    state: &AppState,
+    user: Uuid,
+    current: &str,
+    token: &str,
+    device: Option<&str>,
+) -> ApiResult<StartedOver> {
+    let signed_in: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT created_at FROM sessions
+         WHERE token_hash = $1 AND user_id = $2 AND expires_at > now() AND replaced_at IS NULL",
+    )
+    .bind(current)
+    .bind(user)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(signed_in) = signed_in else { return Err(LOGIN_REQUIRED) };
+    let ended: Vec<(String, bool)> = sqlx::query_as(
+        "DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2
+         RETURNING token_hash, replaced_at IS NULL AS other",
+    )
+    .bind(user)
+    .bind(current)
+    .fetch_all(&mut *connection)
+    .await?;
+    let others = ended.iter().filter(|(_, other)| *other).count();
+    let ended = ended.into_iter().map(|(hash, _)| hash).collect();
+    sqlx::query(&format!(
+        "UPDATE sessions SET replaced_at = clock_timestamp(),
+           expires_at = least(expires_at, clock_timestamp() + interval '{REPLACED_GRACE}'),
+           created_at = least(expires_at, clock_timestamp() + interval '{REPLACED_GRACE}') - interval '{SESSION_LIFETIME}'
+         WHERE token_hash = $1"
+    ))
+    .bind(current)
+    .execute(&mut *connection)
+    .await?;
+    let seconds = open_session(connection, state, user, token, Some(signed_in)).await?;
+    if let Some(device) = device {
+        sqlx::query("DELETE FROM login_devices WHERE user_id = $1 AND device_id <> $2")
             .bind(user)
-            .bind(keep)
-            .fetch_all(&state.db)
+            .bind(device)
+            .execute(&mut *connection)
             .await?;
-    end_sockets(state, &ended);
-    Ok(ended.len())
+        sqlx::query("UPDATE users SET devices_reset_at = clock_timestamp() WHERE id = $1")
+            .bind(user)
+            .execute(&mut *connection)
+            .await?;
+        remember_device(connection, user, device).await?;
+    }
+    Ok(StartedOver { ended, others, seconds })
+}
+
+/// Once a session was started over: the sockets of the other sessions it ended close now, those of the replaced one
+/// (`current`) a moment later ([`SOCKETS_GRACE`]), once its answer is in.
+fn close_started_over(state: &AppState, ended: &[String], current: String) {
+    end_sockets(state, ended);
+    let state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(SOCKETS_GRACE).await;
+        end_sockets(&state, &[current]);
+    });
+}
+
+/// The answer that carries a session started over ([`start_over`]): its new cookie, and the device's when one was
+/// kept.
+fn started_over(
+    state: &AppState,
+    headers: &HeaderMap,
+    mut response: Response,
+    user: &User,
+    token: &str,
+    seconds: u32,
+    device: Option<&str>,
+) -> ApiResult<Response> {
+    send_session(state, headers, &mut response, token, seconds)?;
+    if let Some(device) = device {
+        send_device(state, &mut response, &user.username, device)?;
+    }
+    Ok(response)
 }
 
 pub async fn register(
@@ -495,14 +794,23 @@ pub async fn register(
 ) -> ApiResult<Response> {
     let name = username(&body.username)?;
     new_password(&body.password)?;
-    let display = display_name(body.display_name.as_deref(), &name)?;
-    if RESERVED_NAMES.iter().any(|reserved| reserved.eq_ignore_ascii_case(&name)) {
+    if reserved(&name) {
         return Err(USERNAME_TAKEN);
     }
+    let display = display_name(body.display_name.as_deref(), &name)?;
     // Attempts are limited per address; the site-wide cap counts only created accounts, so rejected requests cannot
     // close sign-up for everyone.
     rate_limit(&state, format!("register-address:{}", client_address(&headers)), 20)?;
     rate_limit(&state, format!("register:{name}"), 5)?;
+    // Nor may a display name pass for an account the server reserved (its operator's).
+    let reserved_account: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM auth_reserved_usernames WHERE username = $1)")
+            .bind(name_key(&display))
+            .fetch_one(&state.db)
+            .await?;
+    if reserved_account && name_key(&display) != name {
+        return Err(RESERVED_NAME);
+    }
     let created = rate_reserve(&state, &[("register-created".into(), 600)])?;
     let hash = hash_password(&state, body.password).await?;
     let user = User { id: Uuid::new_v4(), username: name, display_name: display, role: "user".into() };
@@ -522,26 +830,49 @@ pub async fn login(
     if !plausible_password(&body.password) {
         return Err(bad("invalid_password", "비밀번호를 확인해 주세요."));
     }
-    // Only wrong passwords count, per address and per account (see `PasswordCheck`); a limit shared by everyone would
-    // let one client lock all players out. A device that signed in to the account before has a budget of its own.
-    let device = known_device(&state, &headers, &name);
-    let (key, max) = match &device {
-        Some(id) => (format!("login-failed-device:{id}"), LOGIN_FAILURES_PER_DEVICE),
-        None => (format!("login-failed:{name}"), LOGIN_FAILURES_PER_ACCOUNT),
-    };
-    let check = PasswordCheck::start(&state, &headers, key, max)?;
+    // An address out of guesses is turned away before the database is asked anything.
+    rate_exceeded(&state, &address_key(&headers), LOGIN_FAILURES_PER_ADDRESS)?;
+    let signed = signed_device(&state, &headers, &name);
+    // A device is known while `login_devices` holds it. Devices were not recorded before that table came, so a cookie
+    // signed for the account that the table never held is known too until the account first changes its password
+    // (which forgets its devices) or holds its full count of them (past which the oldest are forgotten): every cookie
+    // given since is recorded as it is given, so only one from before can be signed and not recorded then. Signing in
+    // with it records it.
     let row = sqlx::query(&format!(
-        "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, u.password_hash FROM users u WHERE u.username = $1"
+        "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, u.password_hash,
+           $2::text IS NOT NULL AND (
+             EXISTS (SELECT 1 FROM login_devices d WHERE d.user_id = u.id AND d.device_id = $2)
+             OR (u.devices_reset_at IS NULL AND (SELECT count(*) FROM login_devices d WHERE d.user_id = u.id) < $3)
+           ) AS known_device
+         FROM users u WHERE u.username = $1"
     ))
     .bind(&name)
+    .bind(signed.as_deref())
+    .bind(DEVICES_PER_USER)
     .fetch_optional(&state.db)
     .await?;
+    // Only wrong passwords count, per address and per account (see `PasswordCheck`); a limit shared by everyone would
+    // let one client lock all players out. A device the account knows has a budget of its own, and its known devices
+    // one together: cookies kept from several devices do not multiply the guesses.
+    let known = row.as_ref().is_some_and(|row| row.get::<bool, _>("known_device"));
+    let keys = match signed.as_deref().filter(|_| known) {
+        Some(id) => vec![
+            (format!("login-failed-device:{id}"), LOGIN_FAILURES_PER_DEVICE),
+            (format!("login-failed-devices:{name}"), LOGIN_FAILURES_PER_KNOWN_DEVICES),
+        ],
+        None => vec![(format!("login-failed:{name}"), LOGIN_FAILURES_PER_ACCOUNT)],
+    };
+    let check = if row.is_some() {
+        PasswordCheck::start(&state, &headers, keys)?
+    } else {
+        PasswordCheck::start_unknown(&state, &headers)?
+    };
     let hash = row.as_ref().map(|r| r.get::<String, _>("password_hash"));
     if !check.verify(&state, hash.clone(), body.password).await? {
         return Err(INVALID_CREDENTIALS);
     }
     let (Some(row), Some(hash)) = (row, hash) else { return Err(INVALID_CREDENTIALS) };
-    session(&state, &headers, User::from_row(&row), &hash, device, StatusCode::OK).await
+    session(&state, &headers, User::from_row(&row), &hash, signed, StatusCode::OK).await
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
@@ -556,11 +887,24 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
 }
 
 /// `POST /api/auth/logout-others`: ends every other session of the signed-in account (other devices and browsers) and
-/// closes their realtime sockets; this one stays. Answers `{"ended": <sessions ended>}`.
-pub async fn logout_others(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+/// closes their realtime sockets. The devices the account knows stay known: someone holding a session cannot shut the
+/// owner's devices out of their own budget this way. This browser stays signed in under a new session cookie (see
+/// [`start_over`]). At most [`LOGOUT_OTHERS_PER_USER`] per account in the rate window. Answers
+/// `{"ended": <other sessions ended>}`.
+pub async fn logout_others(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
     let (user, session) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
-    let ended = end_other_sessions(&state, user.id, &session).await?;
-    Ok(Json(json!({"ended": ended})))
+    if session.replaced {
+        return Err(LOGIN_REQUIRED);
+    }
+    rate_limit(&state, format!("logout-others:{}", user.id), LOGOUT_OTHERS_PER_USER)?;
+    let token = new_token();
+    let mut tx = state.db.begin().await?;
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE").bind(user.id).execute(&mut *tx).await?;
+    let started = start_over(&mut tx, &state, user.id, &session.hash, &token, None).await?;
+    tx.commit().await?;
+    let response = Json(json!({"ended": started.others})).into_response();
+    close_started_over(&state, &started.ended, session.hash);
+    started_over(&state, &headers, response, &user, &token, started.seconds, None)
 }
 
 #[derive(Deserialize)]
@@ -571,31 +915,36 @@ pub struct PasswordChange {
 }
 
 /// `POST /api/auth/password` with `{currentPassword, newPassword}`: the signed-in account's new password, once the
-/// current one is checked. Every other session of the account ends with its realtime sockets; this one stays. 204.
-/// A wrong current password counts against this session and the address, not the account, so a stolen session cannot
-/// shut the owner out of signing in.
+/// current one is checked. Every other session of the account ends with its realtime sockets, and every device but
+/// this one is forgotten; this browser stays signed in under a new session cookie (see [`start_over`]), so a copy of
+/// the old one is worth nothing either once its grace is over. 204. A wrong current password counts against this
+/// sign-in (every session it started over together) and the address, not the account, so a stolen session cannot shut
+/// the owner out of signing in. At most [`PASSWORD_CHANGES_PER_USER`] changes per account in the rate window.
 pub async fn change_password(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<PasswordChange>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Response> {
     let (user, session) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
+    if session.replaced {
+        return Err(LOGIN_REQUIRED);
+    }
     if !plausible_password(&body.current_password) {
         return Err(WRONG_PASSWORD);
     }
     new_password(&body.new_password)?;
-    let check = PasswordCheck::start(
-        &state,
-        &headers,
-        format!("login-failed-session:{session}"),
-        PASSWORD_FAILURES_PER_SESSION,
-    )?;
+    let changes = format!("password-changed:{}", user.id);
+    rate_exceeded(&state, &changes, PASSWORD_CHANGES_PER_USER)?;
+    let budget = vec![(session.password_budget(&user), PASSWORD_FAILURES_PER_SIGN_IN)];
+    let check = PasswordCheck::start(&state, &headers, budget)?;
     let current: String =
         sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1").bind(user.id).fetch_one(&state.db).await?;
     if !check.verify(&state, Some(current.clone()), body.current_password).await? {
         return Err(WRONG_PASSWORD);
     }
     let hash = hash_password(&state, body.new_password).await?;
+    let device = signed_device(&state, &headers, &user.username).unwrap_or_else(new_device);
+    let token = new_token();
     let mut tx = state.db.begin().await?;
     // Only over the password just checked: of two changes at once, the second finds it gone.
     let changed = sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1 AND password_hash = $3")
@@ -607,21 +956,20 @@ pub async fn change_password(
     if changed.rows_affected() == 0 {
         return Err(PASSWORD_CHANGED);
     }
-    let ended: Vec<String> =
-        sqlx::query_scalar("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2 RETURNING token_hash")
-            .bind(user.id)
-            .bind(&session)
-            .fetch_all(&mut *tx)
-            .await?;
+    let started = start_over(&mut tx, &state, user.id, &session.hash, &token, Some(&device)).await?;
     tx.commit().await?;
-    end_sockets(&state, &ended);
-    Ok(StatusCode::NO_CONTENT)
+    rate_record(&state, changes);
+    close_started_over(&state, &started.ended, session.hash);
+    let response = StatusCode::NO_CONTENT.into_response();
+    started_over(&state, &headers, response, &user, &token, started.seconds, Some(&device))
 }
 
 /// `GET /api/auth/me`, which the app asks each time it opens: who is signed in. A session whose expiry has come closer
 /// than [`SESSION_RENEW_BELOW`] is renewed to a full term here (never past [`SESSION_LIFETIME`] from its sign-in), and
 /// its cookie sent again with the new Max-Age, so a device in use stays signed in. A session presented under the
-/// cookie's old name is sent again under the new one. Other reads of the session ([`optional_user`]) only read it.
+/// cookie's old name is sent again under the new one. A session started over answers through its grace, and is neither
+/// renewed nor sent again: its successor's cookie is on its way. Other reads of the session ([`optional_user`]) only
+/// read it.
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
     let nobody = || Json(json!({"user": null})).into_response();
     let Some(presented) = presented(&state, &headers) else { return Ok(nobody()) };
@@ -632,11 +980,12 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         "WITH renewed AS (
            UPDATE sessions
            SET expires_at = least(clock_timestamp() + interval '{SESSION_TERM}', created_at + interval '{SESSION_LIFETIME}')
-           WHERE token_hash = $1 AND expires_at > now() AND (legacy_cookie OR NOT $2)
+           WHERE token_hash = $1 AND expires_at > now() AND (legacy_cookie OR NOT $2) AND replaced_at IS NULL
              AND expires_at < now() + interval '{SESSION_RENEW_BELOW}'
              AND expires_at < created_at + interval '{SESSION_LIFETIME}'
            RETURNING expires_at)
          SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, EXISTS (SELECT 1 FROM renewed) AS renewed,
+           s.replaced_at IS NOT NULL AS replaced,
            floor(extract(epoch FROM coalesce((SELECT expires_at FROM renewed), s.expires_at) - now()))::int8 AS seconds_left
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)"
@@ -648,6 +997,9 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
     let Some(row) = row else { return Ok(nobody()) };
     let user = with_permissions(&state, &User::from_row(&row)).await?;
     let mut response = Json(json!({"user": user})).into_response();
+    if row.get::<bool, _>("replaced") {
+        return Ok(response);
+    }
     if presented.legacy {
         // Moved to the new name: the old one no longer carries this session.
         sqlx::query("UPDATE sessions SET legacy_cookie = false WHERE token_hash = $1")
@@ -663,11 +1015,11 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
 }
 
 pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let (user, hash) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
+    let (user, session) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
     // A page asks for one when its room connects and again each time the connection drops (checked every second, with
     // waits that double up to 30 seconds), so several tabs or a reconnect loop still fit.
     rate_limit(&state, format!("realtime-ticket:{}", user.id), 90)?;
-    let (ticket, expires_at) = crate::rooms::issue_ticket(&state.config.ticket_secret, &user, &hash);
+    let (ticket, expires_at) = crate::rooms::issue_ticket(&state.config.ticket_secret, &user, &session.hash);
     Ok(Json(json!({"ticket": ticket, "expiresAt": expires_at, "user": user})))
 }
 
@@ -799,6 +1151,39 @@ mod tests {
         assert!(username("ab").is_err());
         assert!(username("has space").is_err());
         assert!(username(&"a".repeat(21)).is_err());
+    }
+
+    #[test]
+    fn display_names_hide_nothing_and_cannot_pass_for_staff() {
+        let refused = |name: &str| display_name(Some(name), "fallback").unwrap_err().message;
+        // 운영자 drawn backwards behind a right-to-left override, and with a Hangul filler, a variation selector, a
+        // zero-width space, a word joiner or a left-to-right mark in it.
+        for hidden in [
+            "\u{202e}자영운",
+            "운영자\u{3164}",
+            "\u{115f}운영자",
+            "운영자\u{fe0f}",
+            "운\u{200b}영자",
+            "운영\u{2060}자",
+            "\u{200e}운영자",
+            "운영자\u{ffa0}",
+        ] {
+            assert_eq!(refused(hidden), HIDDEN_IN_NAME.message, "{hidden:?}");
+        }
+        // Full-width letters and Hangul written in its decomposed form read as what they show.
+        let decomposed: String = "운영자".nfd().collect();
+        assert_ne!(decomposed, "운영자");
+        for staff in ["ＡＤＭＩＮ", "Ａｄｍｉｎ", decomposed.as_str(), "관 리 자", "Mo Gae Sup", "ｍｏｇａｅｓｕｐ"]
+        {
+            assert_eq!(refused(staff), RESERVED_NAME.message, "{staff:?}");
+        }
+        // Emoji keep the selectors and joiners they are made of, and names that only hold a reserved one are free.
+        for kept in ["고양이❤️", "👩\u{200d}💻개발", "🏳️\u{200d}🌈", "운영자님", "ㅋㅋ왕", "admin_fan"]
+        {
+            assert_eq!(display_name(Some(kept), "fallback").unwrap(), kept, "{kept:?}");
+        }
+        assert_eq!(display_name(Some("  "), "fallback").unwrap(), "fallback");
+        assert_eq!(refused("a\u{7}b"), HIDDEN_IN_NAME.message);
     }
 
     #[test]

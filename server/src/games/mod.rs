@@ -16,28 +16,60 @@
 //!   host's page computed from the island it has loaded (open spots, say), in the game's own shape; the game checks it.
 //! - `{"type":"Act","action":{…}}`: a player's move, in the game's own shape (from someone watching, see
 //!   [`Game::watch`]).
-//! - `{"type":"Close"}`: the host, or the island's owner, ends the session for everyone.
+//! - `{"type":"Close"}`: the host, or the island's owner, ends the session for everyone. Once the owner has closed
+//!   someone else's session, whoever hosted or opened it may not open another for three minutes.
 //! - `{"type":"Ping","ts":n}`: answered with `{"type":"Pong","ts":n}`.
+//! - `{"type":"Pet","pet":{…}|null}`: the island's owner relays where their pet is (see Pets).
 //!
 //! Server → client:
 //! - `{"type":"Session","session":null|{…}}` on connecting and whenever what this viewer may see changes:
-//!   `kind`, `phase` (`lobby`|`playing`|`ended`), `host` (user id; the first of `players`), `players`
-//!   (`[{id, name, peer}]` in the order they joined; `peer` is the player's live-room `client_id`, null while they are
-//!   not in the room), `you` (the viewer's user id), `game` (the game's view for this viewer, null in the lobby),
-//!   `result` (once ended), `seq` (rises with every update the session sends) and `now` (the server's clock in ms, for
-//!   countdowns).
+//!   `id` (the session's), `kind`, `phase` (`lobby`|`playing`|`ended`), `startedAt` (when its game started, on the
+//!   server's clock; null before one has), `canClose` (whether the viewer may close it: its host and the island's
+//!   owner), `host` (user id; the first of `players`), `players` (`[{id, name, peer}]` in the order they joined;
+//!   `peer` is the player's live-room `client_id`, null while they are not in the room), `you` (the viewer's user id),
+//!   `home` (where the viewer stood in the live room when the game started, or before it took them to its stand, the
+//!   place a trip back lands near; null when the game took them nowhere), `stand` (where the viewer watches from while
+//!   a game whose map has taken the island's place plays, when they do not play it; null otherwise, see
+//!   [`Game::stand`]), `game` (the game's view for this viewer, null in the lobby), `result` (once ended), `seq`
+//!   (rises with every update the session sends) and `now` (the server's clock in ms, for countdowns).
 //! - `{"type":"Event","kind":"impostor","event":{…}}`: something a game announced ([`Ctx::emit`]).
 //! - `{"type":"Error","code":"not_host","message":"…"}`: why a message was refused, to its sender only; and
 //!   `game_failed`, to everyone, when a game's code failed and its session ended.
 //! - `{"type":"Pong","ts":n}`.
+//! - `{"type":"Pet","pet":{…}|null}`: the island's pet as its owner's page relays it, or null once it rests.
+//!
+//! A socket there is no seat for (the island's 30, this account's or this place's sockets, the server's) is opened and
+//! closed at once with code 4409 and why as its reason, a sentence for the page.
 //!
 //! # Lifetime
 //!
 //! `Lobby` → `Playing` (a [`Game`] runs, ticked at its kind's rate) → `Ended` (the result stays until the host opens
 //! again or closes). A host who leaves hands the session to the earliest player left; the last player leaving closes
-//! it, and so does nobody touching it for ten minutes (a game that plays on while its players are in the live room is
-//! being played). A player out of the live room for ten seconds leaves. A game whose code panics ends its session:
-//! everyone watching is told `game_failed`, and every other island plays on.
+//! it, and so does nobody touching it for ten minutes (what its players do touches it, and while a game plays, their
+//! moving about the live room). A player out of the live room for ten seconds leaves. A game whose code panics ends its
+//! session: everyone watching is told `game_failed`, and every other island plays on.
+//!
+//! # The live room
+//!
+//! The room keeps everyone to a speed and takes their word for where they stand only that far ([`Movement`]). While a
+//! game plays it asks the room, after every call, how each player may move ([`Game::movement`]: their speed and burst,
+//! whether they settle where they stand still, a place they are held at, the jumps it sends them on) and whom the
+//! room hides from whom ([`Game::hidden`]); the room takes each answer before the island hears anything later. When the
+//! game ends or a player leaves it, its players may jump back to where they stood when it started (the view's
+//! `home`), for two minutes; a game started before then keeps that place as their home. A game whose map takes the
+//! island's place has a stand ([`Game::stand`]): whoever is here and does not play it (a player who left it too)
+//! may jump there once while it plays, and back home once it is over, as its players do.
+//!
+//! # Pets
+//!
+//! An island's pet ([`crate::pets`]) runs in its owner's page, which relays where it is over this socket, apart from
+//! any session: `{"type":"Pet","pet":{id, t, at, ry, move, speed, clip, gesture, ball}}` (checked by
+//! `pets::relay_frame`; up to `PET_FRAMES_PER_WINDOW` every three seconds, more are dropped). Only the owner's
+//! sockets may (`not_owner`), and one at a time: the first to send relays it until it sends `null` or closes, when
+//! everyone is sent `{"type":"Pet","pet":null}` (the pet rests at home); another of the owner's sockets is refused
+//! `pet_busy` meanwhile, unless that one has sent nothing for `PET_STALE` (ten seconds: a page in a background tab).
+//! Every other socket is sent each frame, and a socket that connects is sent the last one, unless it is that old.
+//! A frame that is not one is refused `bad_pet`.
 //!
 //! # Adding a game
 //!
@@ -77,9 +109,15 @@ use crate::{
     auth::{self, User},
     error::{ApiError, ApiResult, conflict},
     homes::visible_home,
-    rooms::{BAD_TICKET, MESSAGE_WINDOW, RateWindow, RoomPeer, Standing, seat, send, send_queued, standing},
+    rooms::{
+        ADDRESS_CAPACITY, BAD_TICKET, MESSAGE_WINDOW, RateWindow, RoomPeer, Rooms, Standing, refuse, seat, send,
+        send_queued, standing,
+    },
     security::{FOREIGN_ORIGIN, client_address, same_origin},
 };
+
+/// What a game may ask of its island's live room about its players (see [`Game::movement`] and [`Game::hidden`]).
+pub use crate::rooms::{GAME_BURST, Governance, Hold, Movement, Teleport};
 
 /// Declares each listed game's module (`games/<name>.rs`) and lists its `KIND` in `KINDS`, in that order.
 macro_rules! registry {
@@ -127,11 +165,28 @@ pub const MAX_TICK_HZ: u32 = 30;
 const IDLE_TICK: Duration = Duration::from_secs(1);
 /// How long a player may be out of the island's live room before they leave the game.
 const AWAY_LIMIT: Millis = 10_000;
-/// A session nobody has touched for this long closes; a game playing while its players are in the live room is
-/// touched by every tick.
+/// A session nobody has touched for this long closes: touched by what its players do, and while a game plays, by their
+/// moving about the live room.
 const IDLE_LIMIT: Millis = 10 * 60_000;
+/// How far a player moves between two beats to count as playing, in meters.
+const STIRRED: f64 = 0.5;
+/// How long after the island's owner closed someone's session that someone may open another.
+const REOPEN_WAIT: Millis = 3 * 60_000;
+/// How long after a game the players it took somewhere may jump back to where they stood when it started, and how
+/// near that place they land, in meters: a page that took its own place a moment after the start (one from before the
+/// view said `home`) had run on a few meters by then.
+const RETURN_WINDOW: Millis = 2 * 60_000;
+const RETURN_RADIUS: f64 = 10.0;
+/// How near a game's stand ([`Stand`]) a watcher lands: their page spreads watchers up to a meter and a half around it
+/// and sets each a meter over the floor.
+pub const STAND_REACH: f64 = 2.5;
 const MAX_KIND: usize = 32;
 const MAX_PEER: usize = 64;
+/// Pet frames a socket may relay over [`MESSAGE_WINDOW`] (three seconds): its page sends at most ten a second.
+const PET_FRAMES_PER_WINDOW: usize = 36;
+/// How long a relayed pet frame stands: a socket that connects is not sent an older one, and another of the owner's
+/// sockets may take the pet over from one that has sent nothing for this long.
+const PET_STALE: Millis = 10_000;
 
 /// A refusal, sent to whoever asked as `{"type":"Error","code","message"}`: a stable code and a message for the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +212,10 @@ const IN_PROGRESS: GameError = GameError::new("in_progress", "게임이 진행 �
 const FULL: GameError = GameError::new("full", "자리가 다 찼어요.");
 const TOO_FEW: GameError = GameError::new("too_few", "사람이 더 있어야 시작할 수 있어요.");
 const NOT_IN_ROOM_GAME: GameError = GameError::new("not_in_room", "섬에 들어와 있어야 해요.");
+const NOT_OWNER: GameError = GameError::new("not_owner", "섬 주인만 할 수 있어요.");
+const PET_BUSY: GameError = GameError::new("pet_busy", "다른 창에서 펫과 함께 있어요.");
+const BAD_PET: GameError = GameError::new("bad_pet", "펫 위치를 보내지 못했어요.");
+const CLOSED_BY_OWNER: GameError = GameError::new("closed_by_owner", "섬 주인이 닫은 게임이라 잠시 뒤에 열 수 있어요.");
 /// Sent to everyone watching when a game's code failed and its session ended.
 const GAME_FAILED: GameError = GameError::new("game_failed", "게임에 문제가 생겨 끝났어요.");
 /// For games: a layout that is not what the game asked for.
@@ -305,6 +364,40 @@ pub trait Game: Send {
 
     /// Some once the game is over: the result everyone sees, and the session ends with it.
     fn result(&self) -> Option<Value>;
+
+    /// How the live room lets `player` move now: their speed and how far past it they may catch up at once (start from
+    /// `Movement::default()`, a game's [`GAME_BURST`]), whether they settle where they stand still (off for a game that
+    /// counts the way they go), a place they are held at, and the jumps the game sends them on (to a map of its own,
+    /// say). None leaves them to the room's own limits. Asked after every call.
+    fn movement(&self, _player: Uuid, _now: Millis) -> Option<Movement> {
+        None
+    }
+
+    /// Players the live room hides now, each with the players who still see them: the others are never sent where
+    /// they are (they are told it is far under the island, the same place for everyone hidden), nor what they say
+    /// there. Someone who has left the game is no longer the game's to hide.
+    fn hidden(&self) -> Vec<(Uuid, Vec<Uuid>)> {
+        Vec::new()
+    }
+
+    /// Where whoever watches stands while the game plays, for a game whose map takes the island's place (the pages
+    /// draw it there instead of the island): the island sends each of them there once and back to where they stood
+    /// once it is over (see [`Stand`]). None (the default) leaves them where they are.
+    fn stand(&self) -> Option<Stand> {
+        None
+    }
+}
+
+/// Where someone watching a game stands while it plays ([`Game::stand`]): a safe place on its map, which takes the
+/// island's place on the pages. Everyone in the island's live room with a game socket who does not play watches,
+/// and so does a player who has left the game until it is over.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stand {
+    /// A point on the map's floor; each page stands its viewer within [`STAND_REACH`] of it.
+    pub at: [f64; 3],
+    /// Kept out of the players' sight (and so their hearing in the room) until the game is over: the watchers see
+    /// each other and the players, the players none of them (an impostor's crew must hear nothing from outside).
+    pub apart: bool,
 }
 
 /// A game the server offers: its registry entry. Make one with [`Kind::new`] (and [`Kind::ticking`]), whose checks run
@@ -356,6 +449,11 @@ pub fn distance_xz(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// Whether `point` lies within `radius` of `center` on the ground.
 pub fn within(center: [f64; 3], point: [f64; 3], radius: f64) -> bool {
     distance_xz(center, point) <= radius
+}
+
+/// Distance in the air: x, y and z.
+pub fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    distance_xz(a, b).hypot(a[1] - b[1])
 }
 
 /// One of `items` at random; None when there are none.
@@ -459,18 +557,34 @@ struct Session {
     id: u64,
     kind: &'static Kind,
     phase: Phase,
+    /// Who opened it.
+    opener: Uuid,
     /// In the order they joined; the first is the host.
     players: Vec<Player>,
     game: Option<Box<dyn Game>>,
     result: Option<Value>,
     rng: StdRng,
     seq: u64,
-    /// When someone last did something with the session, its game started or ended, or it ticked with players in the
-    /// live room.
+    /// When the game now playing (or last played) started.
+    started_at: Option<Millis>,
+    /// Where each player stood in the live room when it started: where its trips bring them back to.
+    homes: HashMap<Uuid, [f64; 3]>,
+    /// Who watches a game that has a stand ([`Game::stand`]) while it plays, each with where they stood in the live
+    /// room before it took them there (a player who left it, where they stood when it started): where they go back to.
+    watching: HashMap<Uuid, [f64; 3]>,
+    /// Where each player stood at the last beat of a game, to tell who is still playing.
+    stirred: HashMap<Uuid, [f64; 3]>,
+    /// When someone last did something with the session, its game started or ended, or a player moved during it.
     active_at: Millis,
+    /// Players out of its game who may jump back home (see [`Returns`]).
+    returns: Returns,
     /// Wakes the ticker when the game starts, so it ticks at once instead of after its idle wait.
     wake: Arc<Notify>,
 }
+
+/// Players a game took somewhere and has let go (it ended, or they left it), by user: where they stood when it
+/// started, since when they may jump back there, and the jump's tag (the session's id).
+type Returns = HashMap<Uuid, ([f64; 3], Millis, u64)>;
 
 impl Session {
     fn host(&self) -> Option<Uuid> {
@@ -485,7 +599,29 @@ impl Session {
         self.players.iter().map(|player| Member { id: player.id, name: player.name.clone() }).collect()
     }
 
-    /// Ends the game once it has a result.
+    /// Lets `user` go back to where they stood when the game started.
+    fn release(&mut self, user: Uuid, now: Millis) {
+        if let Some(home) = self.homes.remove(&user) {
+            self.returns.insert(user, (home, now, self.id));
+        }
+    }
+
+    /// Lets everyone watching from the game's stand go back to where they stood before it took them there.
+    fn release_watching(&mut self, now: Millis) {
+        for (user, home) in self.watching.drain() {
+            self.returns.insert(user, (home, now, self.id));
+        }
+    }
+
+    /// The game's stand while it plays ([`Game::stand`]). It calls the game.
+    fn stand(&self) -> Result<Option<Stand>, Refused> {
+        match (self.phase, self.game.as_ref()) {
+            (Phase::Playing, Some(game)) => guarded(|| game.stand()),
+            _ => Ok(None),
+        }
+    }
+
+    /// Ends the game once it has a result: everyone in it may go back.
     fn settle(&mut self, now: Millis) -> Result<(), Refused> {
         if self.phase != Phase::Playing {
             return Ok(());
@@ -495,13 +631,30 @@ impl Session {
             self.phase = Phase::Ended;
             self.result = Some(result);
             self.active_at = now;
+            let players: Vec<Uuid> = self.homes.keys().copied().collect();
+            for user in players {
+                self.release(user, now);
+            }
+            self.release_watching(now);
         }
         Ok(())
     }
 
-    /// Takes `user` out of the session, and out of its game when one is playing.
+    /// Takes `user` out of the session, and out of its game when one is playing: out of one whose map has taken the
+    /// island's place, they watch it from its stand until it is over.
     fn remove(&mut self, user: Uuid, room: &[RoomPeer], now: Millis) -> Result<Vec<(Audience, Value)>, Refused> {
+        let stand = self.stand()?;
         self.players.retain(|player| player.id != user);
+        self.stirred.remove(&user);
+        match self.homes.remove(&user) {
+            Some(home) if stand.is_some() => {
+                self.watching.insert(user, home);
+            }
+            Some(home) => {
+                self.returns.insert(user, (home, now, self.id));
+            }
+            None => {}
+        }
         let mut events = Vec::new();
         if self.phase == Phase::Playing {
             let members = self.members();
@@ -516,13 +669,32 @@ impl Session {
         Ok(events)
     }
 
-    /// The session as `viewer` may see it, without `seq` and `now` (which change on every send). It calls the game, so
-    /// only ever through [`guarded`].
-    fn view(&self, viewer: Uuid, now: Millis) -> Value {
+    /// Where `user` goes back to: where they stood when the game started (or took them to its stand), while it has
+    /// them or lets them go back.
+    fn home(&self, user: Uuid) -> Option<[f64; 3]> {
+        let returning = || self.returns.get(&user).map(|(home, _, _)| home);
+        self.homes.get(&user).or_else(|| self.watching.get(&user)).or_else(returning).copied()
+    }
+
+    /// Where `viewer` stands while the game plays, when they watch one that has a stand. It calls the game.
+    fn stand_for(&self, viewer: Uuid) -> Option<[f64; 3]> {
+        if self.phase != Phase::Playing || !self.watching.contains_key(&viewer) {
+            return None;
+        }
+        self.game.as_ref()?.stand().map(|stand| stand.at)
+    }
+
+    /// The session as `viewer` (the island's `owner`, or not) may see it, without `seq` and `now` (which change on every
+    /// send). It calls the game, so only ever through [`guarded`].
+    fn view(&self, viewer: Uuid, owner: bool, now: Millis) -> Value {
         let playing = self.has(viewer).then_some(viewer);
         json!({
+            "id": self.id,
             "kind": self.kind.kind,
             "phase": self.phase.name(),
+            "startedAt": self.started_at,
+            // The host closes it, and the island's owner whoever hosts it.
+            "canClose": owner || self.host() == Some(viewer),
             "host": self.host(),
             "players": self.players.iter().map(|player| json!({
                 "id": player.id,
@@ -530,6 +702,8 @@ impl Session {
                 "peer": player.peer,
             })).collect::<Vec<_>>(),
             "you": viewer,
+            "home": self.home(viewer),
+            "stand": self.stand_for(viewer),
             "game": self.game.as_ref().map(|game| game.view(playing, now)),
             "result": self.result,
         })
@@ -569,6 +743,8 @@ struct Watcher {
     shown: Option<String>,
     messages: RateWindow,
     invalid: RateWindow,
+    /// Pet frames this socket relayed lately (see the module's Pets).
+    pets: RateWindow,
 }
 
 fn text(message: &Value) -> Message {
@@ -591,6 +767,37 @@ fn refusal(error: GameError) -> Message {
 struct Island {
     watchers: HashMap<String, Watcher>,
     session: Option<Session>,
+    /// Players of sessions that have closed who may still jump back home (see [`Returns`]).
+    returns: Returns,
+    /// Taken out of the hub, or being taken: whoever finds it so asks the hub for the island again.
+    retired: bool,
+    /// The island's pet as one of its owner's sockets relays it (see the module's Pets).
+    pet: Option<PetRelay>,
+}
+
+/// Who may not open a session on an island for a while, by island and user, and until when: those whose session the
+/// island's owner closed. Kept apart from the islands, so an island that emptied meanwhile still holds them back.
+#[derive(Default)]
+struct Blocks(Mutex<HashMap<(String, Uuid), Millis>>);
+
+impl Blocks {
+    fn held(&self) -> MutexGuard<'_, HashMap<(String, Uuid), Millis>> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Holds `users` back from opening a session on `island` until `until`, each as long as their own latest says.
+    fn block(&self, island: &str, users: &[Uuid], until: Millis, now: Millis) {
+        let mut held = self.held();
+        held.retain(|_, blocked| now < *blocked);
+        for user in users {
+            let blocked = held.entry((island.to_owned(), *user)).or_insert(until);
+            *blocked = (*blocked).max(until);
+        }
+    }
+
+    fn blocked(&self, island: &str, user: Uuid, now: Millis) -> bool {
+        self.held().get(&(island.to_owned(), user)).is_some_and(|until| now < *until)
+    }
 }
 
 impl Island {
@@ -599,11 +806,95 @@ impl Island {
         let mut views: HashMap<Uuid, (String, Value)> = HashMap::new();
         for watcher in self.watchers.values() {
             views.entry(watcher.user.id).or_insert_with(|| {
-                let view = self.session.as_ref().map_or(Value::Null, |session| session.view(watcher.user.id, now));
+                let view = self
+                    .session
+                    .as_ref()
+                    .map_or(Value::Null, |session| session.view(watcher.user.id, watcher.owner, now));
                 (view.to_string(), view)
             });
         }
         views
+    }
+
+    fn empty(&self) -> bool {
+        self.watchers.is_empty() && self.session.is_none()
+    }
+
+    /// Closes the session: whoever its game still had (or had let go, or watched it from its stand) may jump back home
+    /// a while longer.
+    fn drop_session(&mut self, now: Millis) {
+        let Some(mut session) = self.session.take() else { return };
+        let players: Vec<Uuid> = session.homes.keys().copied().collect();
+        for user in players {
+            session.release(user, now);
+        }
+        session.release_watching(now);
+        self.returns.extend(session.returns);
+    }
+
+    /// While a game with a stand plays, everyone with a game socket here who neither plays it nor watches it yet
+    /// starts watching, from where they stand in the live room (or where an earlier game took them from, while they
+    /// may still go back there). Someone not standing anywhere in the room yet waits for a later call. It calls the
+    /// game.
+    fn gather(&mut self, room: &[RoomPeer], now: Millis) -> Result<(), Refused> {
+        let Some(session) = self.session.as_mut() else { return Ok(()) };
+        if session.stand()?.is_none() {
+            return Ok(());
+        }
+        for watcher in self.watchers.values() {
+            let user = watcher.user.id;
+            if session.has(user) || session.watching.contains_key(&user) {
+                continue;
+            }
+            let kept = self.returns.get(&user).filter(|(_, since, _)| now.saturating_sub(*since) < RETURN_WINDOW);
+            let standing = || room.iter().filter(|peer| peer.user == user).find_map(|peer| peer.position);
+            let Some(home) = kept.map(|(home, _, _)| *home).or_else(standing) else { continue };
+            session.watching.insert(user, home);
+            self.returns.remove(&user);
+        }
+        Ok(())
+    }
+
+    /// What the island's game asks of its live room now (see [`Governance`]): how its players move and who is hidden,
+    /// the jump to its stand of those who watch it, and the jumps home of those it has let go. It calls the game.
+    fn governance(&mut self, now: Millis) -> Governance {
+        let fresh = |(_, since, _): &([f64; 3], Millis, u64)| now.saturating_sub(*since) < RETURN_WINDOW;
+        self.returns.retain(|_, entry| fresh(entry));
+        let mut governance = Governance::default();
+        let mut returns: Vec<(Uuid, [f64; 3], u64)> =
+            self.returns.iter().map(|(user, (home, _, tag))| (*user, *home, *tag)).collect();
+        if let Some(session) = self.session.as_mut() {
+            session.returns.retain(|_, entry| fresh(entry));
+            returns.extend(session.returns.iter().map(|(user, (home, _, tag))| (*user, *home, *tag)));
+            if let (Phase::Playing, Some(game)) = (session.phase, session.game.as_ref()) {
+                for player in &session.players {
+                    if let Some(movement) = game.movement(player.id, now) {
+                        governance.players.insert(player.id, movement);
+                    }
+                }
+                for (user, mut allowed) in game.hidden() {
+                    allowed.sort_unstable();
+                    allowed.dedup();
+                    governance.hidden.insert(user, allowed);
+                }
+                if let Some(stand) = game.stand() {
+                    let mut watchers: Vec<Uuid> = session.watching.keys().copied().collect();
+                    watchers.sort_unstable();
+                    for user in &watchers {
+                        let jump = Teleport { tag: session.id, to: stand.at, radius: STAND_REACH };
+                        governance.players.insert(*user, Movement { teleports: vec![jump], ..Movement::default() });
+                        if stand.apart {
+                            governance.hidden.insert(*user, watchers.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for (user, home, tag) in returns {
+            let movement = governance.players.entry(user).or_default();
+            movement.teleports.push(Teleport { tag, to: home, radius: RETURN_RADIUS });
+        }
+        governance
     }
 
     /// Sends each watcher whose view changed the new one. A game whose view panics ends its session first.
@@ -611,7 +902,7 @@ impl Island {
         let views = match guarded(|| self.views(now)) {
             Ok(views) => views,
             Err(_) => {
-                self.crash();
+                self.crash(now);
                 self.views(now)
             }
         };
@@ -654,12 +945,76 @@ impl Island {
     }
 
     /// Ends the session whose game's code panicked (or stopped being ticked), telling everyone watching.
-    fn crash(&mut self) {
-        let kind = self.session.take().map(|session| session.kind.kind);
+    fn crash(&mut self, now: Millis) {
+        let kind = self.session.as_ref().map(|session| session.kind.kind);
+        self.drop_session(now);
         tracing::error!(kind, "A game failed; its session ended");
         let frame = refusal(GAME_FAILED);
         for watcher in self.watchers.values() {
             deliver(watcher, frame.clone());
+        }
+    }
+}
+
+// ---- Pets
+
+/// The socket relaying the island's pet, its last frame as sent on, and when that came.
+struct PetRelay {
+    socket: String,
+    frame: Message,
+    at: Millis,
+}
+
+impl Island {
+    /// `Pet` from socket `id`: a frame of the island's pet sent on to every other socket, or `null` letting go of it.
+    fn relay_pet(&mut self, id: &str, pet: &Value, instant: Instant, now: Millis) {
+        let busy =
+            self.pet.as_ref().is_some_and(|relay| relay.socket != id && now.saturating_sub(relay.at) < PET_STALE);
+        let Some(watcher) = self.watchers.get_mut(id) else { return };
+        let refused = if !watcher.owner {
+            NOT_OWNER
+        } else if busy {
+            PET_BUSY
+        } else if !watcher.pets.allow(instant, PET_FRAMES_PER_WINDOW) {
+            return;
+        } else if pet.is_null() {
+            self.let_go_of_pet(id);
+            return;
+        } else if let Some(frame) = crate::pets::relay_frame(pet) {
+            let frame = text(&json!({"type": "Pet", "pet": frame}));
+            for (other, watcher) in &self.watchers {
+                if other != id {
+                    deliver(watcher, frame.clone());
+                }
+            }
+            self.pet = Some(PetRelay { socket: id.to_owned(), frame, at: now });
+            return;
+        } else {
+            BAD_PET
+        };
+        deliver(watcher, refusal(refused));
+    }
+
+    /// Lets go of the pet if `socket` relays it: everyone else is told it rests.
+    fn let_go_of_pet(&mut self, socket: &str) {
+        if self.pet.as_ref().is_none_or(|relay| relay.socket != socket) {
+            return;
+        }
+        self.pet = None;
+        let frame = text(&json!({"type": "Pet", "pet": null}));
+        for (other, watcher) in &self.watchers {
+            if other != socket {
+                deliver(watcher, frame.clone());
+            }
+        }
+    }
+
+    /// Sends socket `id` the pet's last frame, unless it is older than [`PET_STALE`].
+    fn show_pet(&self, id: &str, now: Millis) {
+        if let Some(relay) = self.pet.as_ref().filter(|relay| now.saturating_sub(relay.at) < PET_STALE)
+            && let Some(watcher) = self.watchers.get(id)
+        {
+            deliver(watcher, relay.frame.clone());
         }
     }
 }
@@ -669,12 +1024,14 @@ fn lock(island: &Mutex<Island>) -> MutexGuard<'_, Island> {
 }
 
 /// Every island with game sockets or a session, each behind a lock of its own: one island's game never waits on
-/// another's. The hub's lock is taken before an island's, never the other way round.
+/// another's. The hub's lock is held only briefly, and never while an island's is awaited.
 struct Hub {
     islands: HashMap<String, Arc<Mutex<Island>>>,
     connections: usize,
     /// Open game sockets per account.
     accounts: HashMap<Uuid, usize>,
+    /// Open game sockets per address.
+    addresses: HashMap<String, usize>,
 }
 
 /// How a received frame leaves its socket.
@@ -736,6 +1093,11 @@ enum ClientMessage {
         // Echoed untouched, so the sender's `Date.now()` comes back as the integer it sent.
         ts: Option<serde_json::Number>,
     },
+    /// The island's pet, from its owner's page (see the module's Pets); null lets go of it.
+    Pet {
+        #[serde(default)]
+        pet: Value,
+    },
 }
 
 impl ClientMessage {
@@ -772,6 +1134,8 @@ struct Inner {
     seeds: Mutex<StdRng>,
     kinds: &'static [Kind],
     clock: Clock,
+    /// Taken while an island's lock is held, and holding no other.
+    blocks: Blocks,
 }
 
 /// Every island's game sockets and sessions.
@@ -800,7 +1164,7 @@ impl Games {
     /// The server's games over `kinds`; with a `seed`, every session's random numbers are reproducible.
     pub(crate) fn new(kinds: &'static [Kind], seed: Option<u64>) -> Self {
         let seeds = seed.map_or_else(StdRng::from_entropy, StdRng::seed_from_u64);
-        let hub = Hub { islands: HashMap::new(), connections: 0, accounts: HashMap::new() };
+        let hub = Hub { islands: HashMap::new(), connections: 0, accounts: HashMap::new(), addresses: HashMap::new() };
         Self {
             inner: Arc::new(Inner {
                 hub: Mutex::new(hub),
@@ -808,6 +1172,7 @@ impl Games {
                 seeds: Mutex::new(seeds),
                 kinds,
                 clock: Clock::new(),
+                blocks: Blocks::default(),
             }),
         }
     }
@@ -851,82 +1216,130 @@ impl Games {
         now: Millis,
     ) -> ApiResult<Registration> {
         let Arrival { user, session, peer, standing, address } = arrival;
-        let mut hub = self.hub();
-        if hub.connections >= SERVER_CAPACITY {
-            return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "game", "게임 서버가 가득 찼어요."));
-        }
-        if hub.accounts.get(&user.id).is_some_and(|open| *open >= ACCOUNT_CAPACITY) {
-            return Err(ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "game",
-                "이 계정으로 열어 둔 게임 연결이 너무 많아요. 다른 탭을 닫고 다시 시도해 주세요.",
-            ));
-        }
-        let shared = hub.islands.entry(island.to_owned()).or_default().clone();
-        let mut place = lock(&shared);
-        let seated = place.watchers.values().map(|watcher| (watcher.user.id, watcher.address.as_str(), watcher.owner));
-        if let Err(refused) = seat(standing, user.id, &address, seated, ISLAND_CAPACITY, "game") {
-            if place.watchers.is_empty() && place.session.is_none() {
-                hub.islands.remove(island);
+        // The server's counts are taken first, at once: the hub is never held while an island's lock is awaited.
+        {
+            let mut hub = self.hub();
+            if hub.connections >= SERVER_CAPACITY {
+                return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "game", "게임 서버가 가득 찼어요."));
             }
-            return Err(refused);
+            if hub.accounts.get(&user.id).is_some_and(|open| *open >= ACCOUNT_CAPACITY) {
+                return Err(ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "game",
+                    "이 계정으로 열어 둔 게임 연결이 너무 많아요. 다른 탭을 닫고 다시 시도해 주세요.",
+                ));
+            }
+            if hub.addresses.get(&address).is_some_and(|open| *open >= ADDRESS_CAPACITY) {
+                return Err(ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "game",
+                    "같은 곳에서 열린 게임 연결이 너무 많아요.",
+                ));
+            }
+            hub.connections += 1;
+            *hub.accounts.entry(user.id).or_default() += 1;
+            *hub.addresses.entry(address.clone()).or_default() += 1;
         }
-        let id = Uuid::new_v4().to_string();
-        let viewer = user.clone();
-        let name = if user.display_name.is_empty() { user.username.clone() } else { user.display_name.clone() };
-        let (close, cancelled) = watch::channel(None);
-        place.watchers.insert(
-            id.clone(),
-            Watcher {
-                tx,
-                close,
-                user,
-                name,
-                session: session.clone(),
-                peer,
-                owner: standing.owner(),
-                address,
-                shown: None,
-                messages: RateWindow::over(MESSAGE_WINDOW),
-                invalid: RateWindow::new(),
-            },
-        );
-        hub.connections += 1;
-        *hub.accounts.entry(viewer.id).or_default() += 1;
-        // Other islands need not wait while this one's views are built.
-        drop(hub);
-        // The new socket learns the session at once.
-        place.publish(now);
-        Ok(Registration { games: self.clone(), island: island.to_owned(), id, viewer, session, cancelled })
+        loop {
+            let shared = self.hub().islands.entry(island.to_owned()).or_default().clone();
+            let mut place = lock(&shared);
+            if place.retired {
+                // Being taken out of the hub as it emptied: the hub gets a fresh one.
+                drop(place);
+                self.unlink(island, &shared);
+                continue;
+            }
+            let seated =
+                place.watchers.values().map(|watcher| (watcher.user.id, watcher.address.as_str(), watcher.owner));
+            if let Err(refused) = seat(standing, user.id, &address, seated, ISLAND_CAPACITY, "game") {
+                drop(place);
+                self.forget_if_empty(island);
+                self.release(user.id, &address);
+                return Err(refused);
+            }
+            let id = Uuid::new_v4().to_string();
+            let viewer = user.clone();
+            let name = if user.display_name.is_empty() { user.username.clone() } else { user.display_name.clone() };
+            let (close, cancelled) = watch::channel(None);
+            place.watchers.insert(
+                id.clone(),
+                Watcher {
+                    tx,
+                    close,
+                    user,
+                    name,
+                    session: session.clone(),
+                    peer,
+                    owner: standing.owner(),
+                    address,
+                    shown: None,
+                    messages: RateWindow::over(MESSAGE_WINDOW),
+                    invalid: RateWindow::new(),
+                    pets: RateWindow::over(MESSAGE_WINDOW),
+                },
+            );
+            // The new socket learns the session at once, and where the island's pet is.
+            place.publish(now);
+            place.show_pet(&id, now);
+            return Ok(Registration { games: self.clone(), island: island.to_owned(), id, viewer, session, cancelled });
+        }
+    }
+
+    /// Gives back a socket's place in the server's counts.
+    fn release(&self, user: Uuid, address: &str) {
+        let mut hub = self.hub();
+        hub.connections -= 1;
+        if let Some(open) = hub.accounts.get_mut(&user) {
+            *open -= 1;
+            if *open == 0 {
+                hub.accounts.remove(&user);
+            }
+        }
+        if let Some(open) = hub.addresses.get_mut(address) {
+            *open -= 1;
+            if *open == 0 {
+                hub.addresses.remove(address);
+            }
+        }
+    }
+
+    /// Takes `shared` out of the hub, if it is still `island` there.
+    fn unlink(&self, island: &str, shared: &Arc<Mutex<Island>>) {
+        let mut hub = self.hub();
+        if hub.islands.get(island).is_some_and(|linked| Arc::ptr_eq(linked, shared)) {
+            hub.islands.remove(island);
+        }
     }
 
     fn remove(&self, island: &str, id: &str) {
-        let mut hub = self.hub();
-        let Some(shared) = hub.islands.get(island).cloned() else { return };
-        let mut place = lock(&shared);
-        let Some(watcher) = place.watchers.remove(id) else { return };
-        if place.watchers.is_empty() && place.session.is_none() {
-            hub.islands.remove(island);
-        }
-        drop(place);
-        hub.connections -= 1;
-        if let Some(open) = hub.accounts.get_mut(&watcher.user.id) {
-            *open -= 1;
-            if *open == 0 {
-                hub.accounts.remove(&watcher.user.id);
+        let Some(shared) = self.island(island) else { return };
+        let (watcher, retired) = {
+            let mut place = lock(&shared);
+            let Some(watcher) = place.watchers.remove(id) else { return };
+            place.let_go_of_pet(id);
+            if place.empty() {
+                place.retired = true;
             }
+            (watcher, place.retired)
+        };
+        if retired {
+            self.unlink(island, &shared);
         }
+        self.release(watcher.user.id, &watcher.address);
     }
 
     /// Drops `island` from the hub once it has neither sockets nor a session.
     fn forget_if_empty(&self, island: &str) {
-        let mut hub = self.hub();
-        let empty = hub.islands.get(island).is_some_and(|shared| {
-            let place = lock(shared);
-            place.watchers.is_empty() && place.session.is_none()
-        });
-        if empty {
-            hub.islands.remove(island);
+        let Some(shared) = self.island(island) else { return };
+        let retired = {
+            let mut place = lock(&shared);
+            if place.empty() {
+                place.retired = true;
+            }
+            place.retired
+        };
+        if retired {
+            self.unlink(island, &shared);
         }
     }
 
@@ -990,13 +1403,34 @@ impl Games {
         if place.session.as_ref().is_none_or(|session| session.id != id) {
             return;
         }
-        place.crash();
+        place.crash(now);
         place.publish(now);
         let empty = place.watchers.is_empty();
         drop(place);
         if empty {
             self.forget_if_empty(island);
         }
+    }
+
+    /// Tells `island`'s live room what its game asks of it now (see [`Island::governance`]); a game whose code fails
+    /// there ends its session. The room takes it while the island is still held: an answer worked out later (by the
+    /// ticker, or by another socket's frame) never reaches the room before this one. The room's lock is the only one
+    /// taken inside an island's, and nothing takes an island's inside the room's.
+    pub(crate) fn govern(&self, island: &str, rooms: &Rooms, now: Millis) {
+        let Some(shared) = self.island(island) else {
+            rooms.govern(island, Governance::default());
+            return;
+        };
+        let mut place = lock(&shared);
+        let governance = match guarded(|| place.governance(now)) {
+            Ok(governance) => governance,
+            Err(_) => {
+                place.crash(now);
+                place.publish(now);
+                place.governance(now)
+            }
+        };
+        rooms.govern(island, governance);
     }
 
     /// Handles one frame from socket `id` on `island`, with the island's live room as `room` shows it now.
@@ -1030,15 +1464,23 @@ impl Games {
                 deliver(watcher, text(&json!({"type": "Pong", "ts": ts})));
                 return Flow::Continue;
             }
+            ClientMessage::Pet { pet } => {
+                place.relay_pet(id, &pet, instant, now);
+                return Flow::Continue;
+            }
             ClientMessage::Open { kind } => {
                 let kind = self.inner.kinds.iter().find(|known| known.kind == kind);
-                open(place, &caller, kind, room, now, || self.next_session())
+                let blocked = self.inner.blocks.blocked(island, caller.user, now);
+                open(place, &caller, kind, room, now, blocked, || self.next_session())
             }
             ClientMessage::Join => join(place, &caller, room, now),
             ClientMessage::Leave => leave(place, &caller, room, now),
             ClientMessage::Start { layout } => start(place, &caller, &layout, room, now),
             ClientMessage::Act { action } => act(place, &caller, &action, room, now),
-            ClientMessage::Close => close(place, &caller),
+            ClientMessage::Close => close(place, &caller, now).map(|(outcome, blocked)| {
+                self.inner.blocks.block(island, &blocked, now + REOPEN_WAIT, now);
+                outcome
+            }),
         };
         match done {
             Ok(outcome) if outcome.unchanged => Flow::Continue,
@@ -1055,7 +1497,7 @@ impl Games {
                 Flow::Continue
             }
             Err(Refused::Crashed) => {
-                place.crash();
+                place.crash(now);
                 place.publish(now);
                 Flow::Continue
             }
@@ -1070,17 +1512,19 @@ impl Games {
         let mut place = lock(&shared);
         let session = place.session.as_mut().filter(|session| session.id == id)?;
         let kind = session.kind.kind;
-        let wait = match beat(session, room, now) {
+        // Someone who has come since the last beat watches it too.
+        let beaten = beat(session, room, now).and_then(|beaten| place.gather(room, now).map(|()| beaten));
+        let wait = match beaten {
             Ok((wait, events)) => {
                 if wait.is_none() {
-                    place.session = None;
+                    place.drop_session(now);
                 }
                 place.publish(now);
                 place.announce(kind, events);
                 wait
             }
             Err(_) => {
-                place.crash();
+                place.crash(now);
                 place.publish(now);
                 None
             }
@@ -1122,10 +1566,17 @@ fn beat(session: &mut Session, room: &[RoomPeer], now: Millis) -> Result<(Option
     for user in gone {
         events.extend(session.remove(user, room, now)?);
     }
-    // A game that plays on while its players are in the live room is being played, whether or not anyone acts (a bot
-    // round, a vote they sit out).
-    if session.phase == Phase::Playing && session.players.iter().any(|player| player.peer.is_some()) {
-        session.active_at = now;
+    // A game is being played while its players move about the live room, as when they act (see `act`): bots playing
+    // on for people who have stopped do not keep it open.
+    if session.phase == Phase::Playing {
+        let standing = positions(&session.players, room);
+        let stirred = standing
+            .iter()
+            .any(|(user, at)| session.stirred.get(user).is_some_and(|before| distance(*before, *at) > STIRRED));
+        if stirred {
+            session.active_at = now;
+        }
+        session.stirred = standing;
     }
     if session.players.is_empty() || now.saturating_sub(session.active_at) >= IDLE_LIMIT {
         return Ok((None, events));
@@ -1143,30 +1594,41 @@ fn beat(session: &mut Session, room: &[RoomPeer], now: Millis) -> Result<(Option
     Ok((Some(if session.phase == Phase::Playing { session.kind.tick() } else { IDLE_TICK }), events))
 }
 
-/// `Open`: a new lobby, or the host's lobby again (of `kind`) after a game or in place of another.
+/// `Open`: a new lobby, or the host's lobby again (of `kind`) after a game or in place of another. Someone whose session
+/// the island's owner closed a moment ago (`blocked`) opens no new one.
 fn open(
     place: &mut Island,
     caller: &Caller,
     kind: Option<&'static Kind>,
     room: &[RoomPeer],
     now: Millis,
+    blocked: bool,
     next: impl FnOnce() -> (u64, StdRng),
 ) -> Result<Outcome, Refused> {
     let kind = kind.ok_or(UNKNOWN_GAME)?;
     let peer = caller.peer_in(room).ok_or(NOT_IN_ROOM_GAME)?;
     match place.session.as_mut() {
         None => {
+            if blocked {
+                return Err(CLOSED_BY_OWNER.into());
+            }
             let (id, rng) = next();
             place.session = Some(Session {
                 id,
                 kind,
                 phase: Phase::Lobby,
+                opener: caller.user,
                 players: vec![caller.player(peer)],
                 game: None,
                 result: None,
                 rng,
                 seq: 0,
+                started_at: None,
+                homes: HashMap::new(),
+                watching: HashMap::new(),
+                stirred: HashMap::new(),
                 active_at: now,
+                returns: HashMap::new(),
                 wake: Arc::new(Notify::new()),
             });
             Ok(Outcome { opened: Some(id), ..Outcome::default() })
@@ -1210,7 +1672,7 @@ fn leave(place: &mut Island, caller: &Caller, room: &[RoomPeer], now: Millis) ->
     let events = session.remove(caller.user, room, now)?;
     session.active_at = now;
     if session.players.is_empty() {
-        place.session = None;
+        place.drop_session(now);
     }
     Ok(Outcome { events, ..Outcome::default() })
 }
@@ -1244,8 +1706,30 @@ fn start(
     session.game = Some(game);
     session.phase = Phase::Playing;
     session.active_at = now;
+    session.started_at = Some(now);
+    // Where each stands now is where the game's trips bring them back to; someone a game took away who has not gone
+    // back yet keeps the place that one took them from.
+    let fresh =
+        |(home, since, _): &([f64; 3], Millis, u64)| (now.saturating_sub(*since) < RETURN_WINDOW).then_some(*home);
+    let away: HashMap<Uuid, [f64; 3]> = members
+        .iter()
+        .filter_map(|member| {
+            let kept = place.returns.get(&member.id).or_else(|| session.returns.get(&member.id));
+            Some((member.id, kept.and_then(fresh)?))
+        })
+        .collect();
+    session.homes = positions.iter().map(|(user, at)| (*user, away.get(user).copied().unwrap_or(*at))).collect();
+    session.stirred = positions;
+    // The others the last game let go keep their way back (watchers of this one start from there too).
+    place.returns.extend(session.returns.drain());
+    session.watching.clear();
     session.settle(now)?;
     session.wake.notify_one();
+    for member in &members {
+        place.returns.remove(&member.id);
+    }
+    // Everyone else here watches it, from its stand when it has one.
+    place.gather(room, now)?;
     Ok(Outcome { events, ..Outcome::default() })
 }
 
@@ -1278,14 +1762,21 @@ fn act(
     Ok(Outcome { events, ..Outcome::default() })
 }
 
-/// `Close`: the host ends the session; so may the island's owner, whoever hosts it.
-fn close(place: &mut Island, caller: &Caller) -> Result<Outcome, Refused> {
+/// `Close`: the host ends the session; so may the island's owner, whoever hosts it, and then whoever hosted or opened
+/// it may not open another for a while: those are returned with the outcome, for the island's [`Blocks`].
+fn close(place: &mut Island, caller: &Caller, now: Millis) -> Result<(Outcome, Vec<Uuid>), Refused> {
     let session = place.session.as_ref().ok_or(NO_GAME)?;
-    if session.host() != Some(caller.user) && !caller.owner {
+    let host = session.host();
+    if host != Some(caller.user) && !caller.owner {
         return Err(NOT_HOST.into());
     }
-    place.session = None;
-    Ok(Outcome::default())
+    let mut blocked = Vec::new();
+    if host != Some(caller.user) {
+        blocked = host.into_iter().chain([session.opener]).filter(|user| *user != caller.user).collect();
+        blocked.dedup();
+    }
+    place.drop_session(now);
+    Ok((Outcome::default(), blocked))
 }
 
 /// Holds a socket's place on its island; the socket task owns it, so the place never outlives the socket.
@@ -1343,7 +1834,11 @@ async fn upgrade(
     let standing = standing(&state, home.owner_id, viewer.id).await?;
     let (tx, rx) = mpsc::channel(OUTBOUND_CAPACITY);
     let arrival = Arrival { user: viewer, session: claims.session, peer, standing, address: client_address(&headers) };
-    let registration = state.games.register(&home.username, arrival, tx, state.games.now())?;
+    let registration = match state.games.register(&home.username, arrival, tx, state.games.now()) {
+        Ok(registration) => registration,
+        // No seat: told in the close frame, which a refused upgrade could not (see `rooms::NO_SEAT`).
+        Err(refused) => return Ok(ws.on_upgrade(move |socket| refuse(socket, refused))),
+    };
     Ok(ws
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
@@ -1374,23 +1869,30 @@ pub async fn revalidate(state: &AppState, owner: &str) {
 /// nothing ticks would sit on its island, `playing`, until everyone left.
 struct Ticker {
     games: Games,
+    rooms: Rooms,
     island: String,
     id: u64,
 }
 
 impl Drop for Ticker {
     fn drop(&mut self) {
-        self.games.end(&self.island, self.id, self.games.now());
+        let now = self.games.now();
+        self.games.end(&self.island, self.id, now);
+        self.games.govern(&self.island, &self.rooms, now);
     }
 }
 
-/// Beats session `id` until it is gone: at its kind's tick rate while it plays, once a second otherwise.
+/// Beats session `id` until it is gone: at its kind's tick rate while it plays, once a second otherwise. After each
+/// beat the island's live room hears what the game asks of it.
 async fn run(state: AppState, island: String, id: u64) {
     let Some(wake) = state.games.wake(&island, id) else { return };
-    let _ticker = Ticker { games: state.games.clone(), island: island.clone(), id };
+    let _ticker = Ticker { games: state.games.clone(), rooms: state.rooms.clone(), island: island.clone(), id };
     loop {
         let room = state.rooms.peers(&island);
-        let Some(wait) = state.games.step(&island, id, &room, state.games.now()) else { return };
+        let now = state.games.now();
+        let beat = state.games.step(&island, id, &room, now);
+        state.games.govern(&island, &state.rooms, now);
+        let Some(wait) = beat else { return };
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             _ = wake.notified() => {}
@@ -1422,13 +1924,9 @@ async fn connection(
                 Some(Ok(Message::Text(raw))) => {
                     last_seen = Instant::now();
                     let room = state.rooms.peers(&registration.island);
-                    let flow = state.games.receive(
-                        &registration.island,
-                        &registration.id,
-                        raw.as_str(),
-                        &room,
-                        state.games.now(),
-                    );
+                    let now = state.games.now();
+                    let flow = state.games.receive(&registration.island, &registration.id, raw.as_str(), &room, now);
+                    state.games.govern(&registration.island, &state.rooms, now);
                     match flow {
                         Flow::Continue => {}
                         Flow::Close(code, reason) => break Some((code, reason)),

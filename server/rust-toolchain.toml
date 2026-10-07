@@ -1,0 +1,6 @@
+# The compiler the pipeline checks and builds the release with (.github/workflows/pipeline.yml RUST_VERSION and
+# RUST_IMAGE); raise the three together. The pipeline's jobs name it in RUSTUP_TOOLCHAIN, which takes precedence.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -34,15 +34,41 @@ const SWEEP_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Files one sweep deletes at most.
 const SWEEP_MOST: usize = 1000;
 
-/// Every stored file's site path the database refers to: catalog items and every version kept of them, members' looks,
-/// islands' link pictures, and the models placed on saved islands.
+/// Every stored file's site path the database refers to: catalog items and every version kept of them, pet breeds,
+/// members' looks, islands' link pictures, and the models placed on saved islands. A world's are the ones read from it
+/// as it was saved (`model_refs`, see `homes::model_refs`) while they are still its revision's; a world saved by a
+/// release that did not read them is searched as text, as [`model_refs`] would read it.
 const REFERENCED: &str = r"SELECT url FROM (
     SELECT model_url AS url FROM catalog_items UNION SELECT thumbnail_url FROM catalog_items
     UNION SELECT model_url FROM catalog_versions UNION SELECT thumbnail_url FROM catalog_versions
+    UNION SELECT model_url FROM pet_breeds UNION SELECT thumbnail_url FROM pet_breeds
     UNION SELECT model_url FROM user_looks UNION SELECT thumbnail_url FROM homes
+    UNION SELECT unnest(model_refs) FROM home_worlds WHERE model_refs_revision = revision
     UNION SELECT '/models/' || found[1]
-      FROM home_worlds, regexp_matches(data::text, '/models/([0-9a-f]{64}\.[a-z]+)', 'g') AS found
+      FROM (SELECT data FROM home_worlds WHERE model_refs_revision IS DISTINCT FROM revision) unread,
+        regexp_matches(unread.data::text, '/models/([0-9a-f]{64}\.[a-z]+)', 'g') AS found
   ) refs WHERE url LIKE '/models/%'";
+
+/// Where the site serves stored files, with the slash after it: what a reference to one starts with.
+const REFERENCE_PREFIX: &str = "/models/";
+
+/// The site paths of stored files `text` names, as the sweep reads a world's text: `/models/`, 64 lowercase hex digits,
+/// a dot and the lowercase letters after it. Added to `into`.
+pub(crate) fn model_refs(text: &str, into: &mut std::collections::BTreeSet<String>) {
+    let mut rest = text;
+    while let Some(at) = rest.find(REFERENCE_PREFIX) {
+        let tail = &rest[at + REFERENCE_PREFIX.len()..];
+        let bytes = tail.as_bytes();
+        let hex = bytes.iter().take(64).take_while(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)).count();
+        if hex == 64 && bytes.get(64) == Some(&b'.') {
+            let letters = bytes[65..].iter().take_while(|b| b.is_ascii_lowercase()).count();
+            if letters > 0 {
+                into.insert(format!("{REFERENCE_PREFIX}{}", &tail[..65 + letters]));
+            }
+        }
+        rest = &rest[at + 1..];
+    }
+}
 
 /// Where the site serves stored files.
 const URL_PREFIX: &str = "/models";
@@ -167,9 +193,15 @@ impl Models {
     }
 }
 
-/// Sweeps the model store ([`Models::sweep`]) a while after the server starts and then every few hours. A sweep that
-/// fails (the database or the store unreachable) deletes nothing and is tried again at the next.
+/// Sweeps the model store ([`Models::sweep`]) a while after the server starts and then every few hours, where
+/// `MODEL_SWEEP=on` (see `Config::model_sweep`); otherwise nothing is ever deleted. A sweep that fails (the database or
+/// the store unreachable, or the store refusing the listing or a deletion) deletes nothing more and is tried again at
+/// the next.
 pub fn spawn_sweep(state: AppState) {
+    if !state.config.model_sweep {
+        tracing::info!("MODEL_SWEEP is not on: stored files nothing refers to are kept");
+        return;
+    }
     tokio::spawn(async move {
         tokio::time::sleep(SWEEP_FIRST).await;
         loop {
@@ -204,6 +236,21 @@ mod tests {
         assert!(stored_name(&format!("{sha}.exe")).is_none());
         assert!(stored_name(&format!("{}.glb", "A".repeat(64))).is_none());
         assert!(stored_name("../secret.glb").is_none());
+    }
+
+    #[test]
+    fn references_are_read_from_text_as_the_sweep_searched_it() {
+        let sha = "0123456789abcdef".repeat(4);
+        let mut found = std::collections::BTreeSet::new();
+        model_refs(&format!("x/models/{sha}.glb y /models/{sha}.png/models/{sha}.webpZ"), &mut found);
+        // Too short, capitals, no extension, or not after `/models/`: not a stored file's name.
+        model_refs(
+            &format!("/models/{}.glb /models/{}.glb /models/{sha}. /model/{sha}.glb", &sha[1..], sha.to_uppercase()),
+            &mut found,
+        );
+        let expected: Vec<String> =
+            ["glb", "png", "webp"].iter().map(|extension| format!("/models/{sha}.{extension}")).collect();
+        assert_eq!(found.into_iter().collect::<Vec<_>>(), expected);
     }
 
     #[tokio::test]

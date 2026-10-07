@@ -3,7 +3,7 @@ mod common;
 use axum::http::StatusCode;
 use common::{ORIGIN, TestApp};
 use futures_util::{SinkExt, StreamExt};
-use mogaesup_server::auth::SESSIONS_PER_USER;
+use mogaesup_server::{auth::SESSIONS_PER_USER, rooms::Rooms};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -127,9 +127,12 @@ async fn 데이터베이스에서_만료된_세션은_연결_중에도_끝난다
 }
 
 async fn serve(app: &TestApp) -> String {
+    serve_router(app.router.clone()).await
+}
+
+async fn serve_router(router: axum::Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let router = app.router.clone();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     format!("ws://{address}")
 }
@@ -342,14 +345,19 @@ async fn 다른_곳의_모델_주소와_스타일로_번질_색은_받지_않는
     ] {
         send(&mut guest_socket, json!({"type": "Update", "state": state})).await;
     }
+    let changed = "http://test.local/gltf/woman.glb";
     send(
         &mut guest_socket,
-        json!({"type": "Update", "state": {"color": "#2bb3a3", "modelUrl": model, "animation": "walk"}}),
+        json!({"type": "Update", "state": {"color": "#2bb3a3", "modelUrl": changed, "animation": "walk"}}),
     )
     .await;
     let update = next(&mut host_socket, "PlayerUpdate").await.unwrap();
     assert_eq!(update["state"]["color"], "#2bb3a3");
-    assert_eq!(update["state"]["modelUrl"], model);
+    assert_eq!(update["state"]["modelUrl"], changed);
+    // The same model sent again is not relayed again (it is up to 2 KB, with every move).
+    send(&mut guest_socket, json!({"type": "Update", "state": {"modelUrl": changed, "animation": "run"}})).await;
+    let update = next(&mut host_socket, "PlayerUpdate").await.unwrap();
+    assert_eq!(update["state"], json!({"animation": "run"}));
 
     // Whoever comes later is told the state the room really holds.
     let late = app.register("late_x", "늦은 손님").await;
@@ -358,7 +366,7 @@ async fn 다른_곳의_모델_주소와_스타일로_번질_색은_받지_않는
     let welcome = next(&mut late_socket, "Welcome").await.unwrap();
     let states: Vec<Value> = welcome["room_state"].as_object().unwrap().values().cloned().collect();
     let guest_state = states.iter().find(|state| state["name"] == "손님").unwrap();
-    assert_eq!((guest_state["color"].as_str(), guest_state["modelUrl"].as_str()), (Some("#2bb3a3"), Some(model)));
+    assert_eq!((guest_state["color"].as_str(), guest_state["modelUrl"].as_str()), (Some("#2bb3a3"), Some(changed)));
     app.cleanup().await;
 }
 
@@ -373,15 +381,22 @@ async fn 한_계정은_실시간_연결을_네_개까지만_열고_닫으면_다
     for island in ["host_k", "host_k", "guest_k", "guest_k"] {
         sockets.push(connect(&base, island, &ticket(&app, &guest).await, ORIGIN).await.unwrap());
     }
-    // The fifth is turned away whichever island it asks for; another account is not held back.
-    assert!(connect(&base, "host_k", &ticket(&app, &guest).await, ORIGIN).await.is_err());
-    assert!(connect(&base, "guest_k", &ticket(&app, &guest).await, ORIGIN).await.is_err());
-    assert!(connect(&base, "host_k", &ticket(&app, &host).await, ORIGIN).await.is_ok());
+    // The fifth is told it has no seat, and why, whichever island it asks for (a refused upgrade would tell its page
+    // nothing); another account is not held back.
+    for island in ["host_k", "guest_k"] {
+        let mut fifth = connect(&base, island, &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+        let (code, reason) = seat(&mut fifth, island).await.unwrap_err();
+        assert_eq!(code, 4409);
+        assert!(reason.contains("다른 탭을 닫고"), "{reason}");
+    }
+    let mut other = connect(&base, "host_k", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    assert!(seat(&mut other, "host_k").await.is_ok());
 
     sockets.pop().unwrap().close(None).await.unwrap();
     let mut reopened = false;
     for _ in 0..40 {
-        if connect(&base, "guest_k", &ticket(&app, &guest).await, ORIGIN).await.is_ok() {
+        let mut again = connect(&base, "guest_k", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+        if seat(&mut again, "guest_k").await.is_ok() {
             reopened = true;
             break;
         }
@@ -389,6 +404,24 @@ async fn 한_계정은_실시간_연결을_네_개까지만_열고_닫으면_다
     }
     assert!(reopened, "a closed socket gives its place back");
     app.cleanup().await;
+}
+
+/// Joins `room` on `stream`: Ok once the room welcomes it, or the code and reason of the close frame that came instead.
+async fn seat(stream: &mut Stream, room: &str) -> Result<(), (u16, String)> {
+    send(stream, json!({"type": "Join", "room_id": room, "color": "#ffffff"})).await;
+    let seated = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(message)) = stream.next().await {
+            match message {
+                Message::Text(text) if serde_json::from_str::<Value>(&text).unwrap()["type"] == "Welcome" => {
+                    return Ok(());
+                }
+                Message::Close(Some(frame)) => return Err((u16::from(frame.code), frame.reason.to_string())),
+                _ => {}
+            }
+        }
+        Err((0, String::new()))
+    });
+    seated.await.unwrap_or(Err((0, "nothing came".into())))
 }
 
 #[tokio::test]
@@ -480,18 +513,10 @@ async fn 끊겼던_링크가_한꺼번에_보낸_움직임은_연결을_끊지_�
     app.cleanup().await;
 }
 
-#[tokio::test]
-async fn 들어오기만_하고_참가하지_않는_소켓은_자리를_오래_잡지_못한다() {
-    let app = TestApp::new(None).await;
-    let host = app.register("host_j", "호스트").await;
-    let guest = app.register("guest_j", "손님").await;
-    let base = serve(&app).await;
-    let mut idle = connect(&base, "host_j", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
-    let mut joined = connect(&base, "host_j", &ticket(&app, &host).await, ORIGIN).await.unwrap();
-    send(&mut joined, json!({"type": "Join", "room_id": "host_j", "color": "#ff7a59"})).await;
-    next(&mut joined, "Welcome").await.unwrap();
-    let code = tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(Ok(message)) = idle.next().await {
+/// The code of the close frame the server sends within `limit`, skipping everything else.
+async fn closed_within(stream: &mut Stream, limit: Duration) -> Option<u16> {
+    tokio::time::timeout(limit, async {
+        while let Some(Ok(message)) = stream.next().await {
             if let Message::Close(frame) = message {
                 return frame.map(|frame| u16::from(frame.code));
             }
@@ -499,10 +524,37 @@ async fn 들어오기만_하고_참가하지_않는_소켓은_자리를_오래_�
         None
     })
     .await
-    .unwrap();
-    assert_eq!(code, Some(4408));
-    send(&mut joined, json!({"type": "Ping", "ts": 3})).await;
-    assert_eq!(next(&mut joined, "Pong").await.unwrap()["ts"], 3, "a joined socket stays");
+    .unwrap_or(None)
+}
+
+#[tokio::test]
+async fn 들어오기만_하고_참가하지_않는_소켓은_자리를_오래_잡지_못한다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_j", "호스트").await;
+    let guest = app.register("guest_j", "손님").await;
+    // The production wait to stand somewhere is a minute from the first Join; here it is three seconds.
+    let mut state = app.state.clone();
+    state.rooms = Rooms::placing_within(Duration::from_secs(3));
+    let base = serve_router(mogaesup_server::router(state)).await;
+    let mut idle = connect(&base, "host_j", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    let mut late = connect(&base, "host_j", &ticket(&app, &guest).await, ORIGIN).await.unwrap();
+    let mut placed = connect(&base, "host_j", &ticket(&app, &host).await, ORIGIN).await.unwrap();
+    send(&mut placed, json!({"type": "Join", "room_id": "host_j", "color": "#ff7a59"})).await;
+    next(&mut placed, "Welcome").await.unwrap();
+    send(&mut placed, json!({"type": "Update", "state": {"position": [1.0, 0.0, 1.0]}})).await;
+    // A slow phone joins two seconds after its socket opened, and its character takes long to come up: the wait to
+    // stand somewhere counts from its Join, not from the socket.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    send(&mut late, json!({"type": "Join", "room_id": "host_j", "color": "#ff7a59"})).await;
+    next(&mut late, "Welcome").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    send(&mut late, json!({"type": "Ping", "ts": 2})).await;
+    assert_eq!(next(&mut late, "Pong").await.unwrap()["ts"], 2, "joined: a while longer");
+    // Joined but standing nowhere, it hears everyone and nobody sees it: not for long either.
+    assert_eq!(closed_within(&mut late, Duration::from_secs(5)).await, Some(4408), "never stood anywhere");
+    assert_eq!(closed_within(&mut idle, Duration::from_secs(15)).await, Some(4408), "never joined");
+    send(&mut placed, json!({"type": "Ping", "ts": 3})).await;
+    assert_eq!(next(&mut placed, "Pong").await.unwrap()["ts"], 3, "a socket that stands somewhere stays");
     app.cleanup().await;
 }
 
@@ -520,20 +572,23 @@ async fn 붐비는_공개_섬에도_주인은_들어오고_한_주소는_자리�
             request
         }
     };
-    // One address (a /64) fills only part of the room, whatever accounts it signs up.
+    // One address (a /64) fills only part of the room, whatever accounts it signs up; the others are told why.
     let mut crowd = Vec::new();
-    let mut refused = 0;
+    let mut refused = Vec::new();
     for at in 0..12 {
         let cookie = app.register(&format!("crowd_{at}"), "방문객").await;
         let request = from("2001:db8:1:2::9")(&base, &ticket(&app, &cookie).await);
-        match connect_async(request).await {
-            Ok((stream, _)) => crowd.push(stream),
-            Err(_) => refused += 1,
+        let (mut stream, _) = connect_async(request).await.unwrap();
+        match seat(&mut stream, "host_f").await {
+            Ok(()) => crowd.push(stream),
+            Err(refusal) => refused.push(refusal),
         }
     }
-    assert_eq!((crowd.len(), refused), (10, 2));
+    assert_eq!(crowd.len(), 10);
+    assert_eq!(refused, vec![(4409, "같은 곳에서 이 섬에 들어온 연결이 너무 많습니다.".to_owned()); 2]);
     // The owner gets in from that very address.
     let request = from("2001:db8:1:2::77")(&base, &ticket(&app, &host).await);
-    assert!(connect_async(request).await.is_ok());
+    let (mut owner, _) = connect_async(request).await.unwrap();
+    assert!(seat(&mut owner, "host_f").await.is_ok());
     app.cleanup().await;
 }

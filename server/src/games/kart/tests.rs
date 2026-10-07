@@ -3,13 +3,14 @@ use crate::games::{Audience, Member};
 use rand::SeedableRng;
 
 const START: Millis = 1_000_000;
-const Y: f64 = 80.0;
+/// The track's height: the island's ground, which its map takes the place of.
+const Y: f64 = 0.0;
 
 fn spot(x: f64, z: f64) -> [f64; 3] {
     [x, Y, z]
 }
 
-/// An 80 by 80 m loop 80 m up, a gate every 40 m, the line in the middle of its first side, running along +x first.
+/// An 80 by 80 m loop on the ground, a gate every 40 m, the line in the middle of its first side, running along +x first.
 fn gates() -> Vec<[f64; 3]> {
     [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (40.0, 80.0), (0.0, 80.0), (-40.0, 80.0), (-40.0, 40.0), (-40.0, 0.0)]
         .map(|(x, z)| spot(x, z))
@@ -272,14 +273,54 @@ fn gates_count_only_in_order_from_the_start_and_the_first_after_the_last_ends_a_
     play.drive(me, &[gates[0]], 500);
     assert_eq!((play.racer(me).lap, play.racer(me).next), (1, 1));
     assert_eq!(play.view(me)["me"], json!({"lap": 1, "next": 1, "item": null}));
-    // The island right under the track is not the track; a teleport is not a drive past the gates under its way.
-    play.stand(me, [gates[1][0], 0.0, gates[1][2]]);
+    // High over the track is not on it; a teleport is not a drive past the gates under its way.
+    play.stand(me, [gates[1][0], Y + 20.0, gates[1][2]]);
     play.tick(play.now - START + 500);
     play.stand(me, gates[3]);
     play.tick(play.now - START + 500);
     play.stand(me, spot(-40.0, 0.0));
     play.tick(play.now - START + 500);
     assert_eq!(play.racer(me).next, 1);
+}
+
+/// A loop whose second to fourth gates stand 15 m off the straight from the first to the fifth (radius 6).
+fn zigzag() -> Vec<[f64; 3]> {
+    [(0.0, 0.0), (10.0, 0.0), (20.0, 15.0), (30.0, 15.0), (40.0, 15.0), (50.0, 0.0), (50.0, 40.0), (0.0, 40.0)]
+        .map(|(x, z)| spot(x, z))
+        .to_vec()
+}
+
+#[test]
+fn a_kart_that_drove_past_a_gate_or_two_without_coming_near_them_passes_them_with_the_next_and_no_more() {
+    let gates = zigzag();
+    let layout = with(json!({"checkpoints": gates, "laps": 1}));
+    let racing = |layout: &Value| {
+        let mut play = Play::new(1, layout.clone());
+        let me = play.ids()[0];
+        play.tick(3_000);
+        play.drive(me, &[gates[1]], 300);
+        assert_eq!(play.racer(me).next, 2);
+        (play, me)
+    };
+    // By gate 4 without coming within 6 m of 2 or 3 (a stalled link's steps cut across them between two ticks):
+    // all three pass, in order.
+    let (mut play, me) = racing(&layout);
+    play.drive(me, &[spot(40.0, 10.0)], 300);
+    assert_eq!(play.racer(me).next, 5);
+    // By gate 3 alone: 2 passes with it.
+    let (mut play, me) = racing(&layout);
+    play.drive(me, &[spot(32.0, 11.0)], 300);
+    assert_eq!(play.racer(me).next, 4);
+    // Straight on to gate 5, by none of the three between: too many to have driven by.
+    let (mut play, me) = racing(&layout);
+    play.drive(me, &[gates[5]], 300);
+    assert_eq!(play.racer(me).next, 2);
+    // From high over gate 1 down onto gate 3: a jump passes nothing on its way, not even the gate after the next.
+    let (mut play, me) = racing(&layout);
+    play.stand(me, [gates[1][0], Y + 20.0, gates[1][2]]);
+    play.tick(play.now - START + 300);
+    play.drive(me, &[gates[3]], 300);
+    assert_eq!(play.racer(me).next, 2);
 }
 
 #[test]
@@ -531,4 +572,60 @@ fn karts_side_by_side_keep_their_order_until_one_is_a_step_nearer_the_next_gate(
     play.stand(b, spot(30.5, 1.0));
     play.tick(3_150);
     assert_eq!(play.order(), vec![b, a]);
+}
+
+#[test]
+fn the_live_room_holds_karts_on_the_grid_and_where_a_bubble_caught_them_and_keeps_them_to_a_karts_speed() {
+    let mut play = Play::new(2, layout());
+    let [a, b] = play.ids()[..] else { panic!() };
+    let (slot_a, slot_b) = (play.racer(a).slot, play.racer(b).slot);
+    let back = |slot: [f64; 3]| vec![Teleport { tag: 0, to: slot, radius: LANDING }];
+    // Through the countdown, on the slot: no driving off before the start.
+    let held = play.game.movement(a, START).unwrap();
+    assert_eq!(held.hold, Some(Hold { at: slot_a, radius: GRID_HOLD }));
+    assert_eq!((held.speed, held.teleports, held.mute), (DRIVE_SPEED, back(slot_a), false));
+    // Catching up a game's burst after a stall, and the rest along the way it went: never at once where it stops.
+    assert_eq!((held.burst, held.settle), (GAME_BURST, false));
+    assert_eq!(play.game.movement(a, START + COUNTDOWN).unwrap().hold, None);
+    // A bubble holds its kart where it was caught, for as long as it lasts.
+    play.tick(COUNTDOWN);
+    let gates = gates();
+    play.drive(a, &gates[1..3], 300);
+    play.drive(b, &gates[1..2], 300);
+    let caught = play.standing[&a];
+    play.racer_mut(b).item = Some(Item::Bubble);
+    play.act(b, item()).unwrap();
+    let trapped = play.game.movement(a, play.now).unwrap();
+    assert_eq!(trapped.hold, Some(Hold { at: caught, radius: TRAP_HOLD }));
+    assert_eq!(play.game.movement(a, play.now + TRAP).unwrap().hold, None);
+    // A booster, or a boost pad driven over, lets a kart go faster for a moment.
+    assert_eq!(play.game.movement(b, play.now).unwrap().speed, DRIVE_SPEED);
+    play.racer_mut(b).item = Some(Item::Booster);
+    play.act(b, item()).unwrap();
+    assert_eq!(play.game.movement(b, play.now).unwrap().speed, BOOSTED_SPEED);
+    assert_eq!(play.game.movement(b, play.now + BOOST).unwrap().speed, DRIVE_SPEED);
+    play.drive(a, &[spot(0.0, 80.0 + 2.0)], 300);
+    assert_eq!(play.game.movement(a, play.now).unwrap().speed, BOOSTED_SPEED);
+    assert_eq!(play.game.movement(a, play.now + PAD_TIME).unwrap().speed, DRIVE_SPEED);
+    assert_eq!(play.game.movement(b, play.now).unwrap().teleports, back(slot_b));
+    // Bots, onlookers and everyone once the race is over are left to the room.
+    let alone = Play::new(1, with(json!({"bots": 1})));
+    assert_eq!(alone.game.movement(alone.bots()[0], START), None);
+    assert_eq!(alone.game.movement(Uuid::new_v4(), START), None);
+    play.game.over = true;
+    assert_eq!(play.game.movement(a, play.now), None);
+}
+
+#[test]
+fn whoever_watches_stands_where_the_layout_says_in_sight_of_the_racers_until_the_race_is_over() {
+    let beside = spot(-10.0, 12.0);
+    let mut play = Play::new(1, with(json!({"stand": beside})));
+    assert_eq!(play.game.stand(), Some(Stand { at: beside, apart: false }));
+    // Without one, watchers stay where they are; one that is not a point refuses the layout.
+    assert_eq!(Play::new(1, layout()).game.stand(), None);
+    assert_eq!(Play::new(1, with(json!({"stand": null}))).game.stand(), None);
+    assert_eq!(refused(with(json!({"stand": [0.0, 0.0]})), 1), Some(BAD_LAYOUT));
+    assert_eq!(refused(with(json!({"stand": [0.0, 0.0, 201.0]})), 1), Some(BAD_LAYOUT));
+    play.game.over = true;
+    assert_eq!(play.game.stand(), None);
 }

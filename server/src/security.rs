@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     AppState,
@@ -226,7 +227,12 @@ pub fn rate_exceeded(state: &AppState, key: &str, max: u32) -> ApiResult<()> {
 }
 
 pub fn rate_record(state: &AppState, key: String) {
-    if let Ok(mut table) = state.attempts.lock() {
+    rate_record_in(&state.attempts, key);
+}
+
+/// [`rate_record`] on the table itself, for work that outlives its request (a password check on a blocking thread).
+pub fn rate_record_in(table: &Mutex<RateTable>, key: String) {
+    if let Ok(mut table) = table.lock() {
         table.record(key);
     }
 }
@@ -263,6 +269,57 @@ pub fn rate_running(state: &AppState, key: &str, max: u32) -> ApiResult<Option<R
     }
     *running += 1;
     Ok(Some(Running { table: state.attempts.clone(), key: key.to_owned() }))
+}
+
+/// A few places per key (an address, a member) for work under way, waited for: past them a request waits its turn
+/// instead of being turned away, so a burst from one key is slowed down rather than refused, and cannot take every place
+/// of a site-wide pool. A key is kept only while one of its places is held or waited for.
+#[derive(Clone)]
+pub struct KeyedSlots {
+    per_key: usize,
+    keys: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+}
+
+/// One of a key's places (see [`KeyedSlots`]), given back when dropped.
+pub struct KeyedSlot {
+    permit: Option<OwnedSemaphorePermit>,
+    key: String,
+    slots: KeyedSlots,
+}
+
+impl KeyedSlots {
+    pub fn new(per_key: usize) -> Self {
+        Self { per_key, keys: Default::default() }
+    }
+
+    /// One of `key`'s places, waited for at most `wait`; None when none came free in time.
+    pub async fn acquire(&self, key: &str, wait: Duration) -> Option<KeyedSlot> {
+        let semaphore = {
+            let mut keys = self.keys.lock().unwrap_or_else(|error| error.into_inner());
+            keys.entry(key.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(self.per_key))).clone()
+        };
+        // Held from here on, so a key given up while this waits is put away by the last one to let go of it.
+        let mut slot = KeyedSlot { permit: None, key: key.to_owned(), slots: self.clone() };
+        let permit = tokio::time::timeout(wait, semaphore.acquire_owned()).await.ok()?.ok()?;
+        slot.permit = Some(permit);
+        Some(slot)
+    }
+
+    /// Keys with a place held or waited for.
+    pub fn keys(&self) -> usize {
+        self.keys.lock().unwrap_or_else(|error| error.into_inner()).len()
+    }
+}
+
+impl Drop for KeyedSlot {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        let mut keys = self.slots.keys.lock().unwrap_or_else(|error| error.into_inner());
+        // The table's own handle is the last one: nobody holds or waits for this key's places.
+        if keys.get(&self.key).is_some_and(|semaphore| Arc::strong_count(semaphore) == 1) {
+            keys.remove(&self.key);
+        }
+    }
 }
 
 /// The viewer address CloudFront appended to X-Forwarded-For. Earlier entries come from the client and are ignored;
@@ -398,6 +455,28 @@ mod tests {
         table.record("login-failed:new".into());
         assert!(table.windows.len() < RATE_KEYS);
         assert_eq!(table.count("login-failed:locked"), 50);
+    }
+
+    #[tokio::test]
+    async fn keyed_slots_make_a_key_wait_its_turn_and_keep_nothing_once_let_go() {
+        let slots = KeyedSlots::new(2);
+        let wait = Duration::from_millis(50);
+        let first = slots.acquire("a", wait).await.unwrap();
+        let second = slots.acquire("a", wait).await.unwrap();
+        // The key's places are taken: a third waits its time and gets none; another key has places of its own.
+        assert!(slots.acquire("a", wait).await.is_none());
+        let other = slots.acquire("b", wait).await.unwrap();
+        assert_eq!(slots.keys(), 2);
+        // A place let go goes to the one waiting.
+        let waiting = tokio::spawn({
+            let slots = slots.clone();
+            async move { slots.acquire("a", Duration::from_secs(10)).await.is_some() }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(first);
+        assert!(waiting.await.unwrap());
+        drop((second, other));
+        assert_eq!(slots.keys(), 0, "keys nobody holds or waits for are put away");
     }
 
     #[test]

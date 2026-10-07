@@ -17,15 +17,19 @@ use crate::{
     error::{ApiResult, bad, conflict, forbidden, not_found},
     homes::{Page, plain_text, visible_home},
     rebac::{Checker, MODERATOR, Subject},
-    security::{client_address, rate_limit},
+    security::{client_address, hmac_sha256, rate_limit},
 };
 
 const MAX_GUESTBOOK_ENTRIES: i64 = 2_000;
-/// One member's entries standing in one guestbook, and written there in a day (deleted ones too). A few accounts cannot
-/// fill someone's guestbook to its cap in a day, and the owner clears one writer's entries at once (`clear_author`).
-/// The owner's own entries are not limited.
+/// One member's entries standing in one guestbook, and written there in the last 24 hours (deleted ones too). A few
+/// accounts cannot fill someone's guestbook to its cap in a day, and the owner clears one writer's entries at once
+/// (`clear_author`). The owner's own entries are not limited.
 const ENTRIES_PER_AUTHOR: i64 = 100;
 const ENTRIES_PER_AUTHOR_A_DAY: i64 = 10;
+/// Entries written in one guestbook from one address in the last 24 hours (deleted ones too), but the owner's and their
+/// 일촌's, which neither count nor are limited: accounts made in bulk from a few addresses cannot fill a guestbook to its
+/// cap, as two hundred of them could in a day, and the owner's 일촌 at the same address take nobody's share.
+const ENTRIES_PER_ADDRESS_A_DAY: i64 = 30;
 /// Pending 일촌 requests one account has sent, and has received. Each is capped on its own: requests piling up from
 /// others never stop someone sending their own, and the received ones are dismissed at once (`dismiss_received`).
 const MAX_SENT_REQUESTS: i64 = 100;
@@ -153,7 +157,10 @@ async fn write(
         return Err(bad("invalid_body", "방명록에 쓸 수 없는 문자가 들어 있어요."));
     }
     let (home, _) = visible_home(&state, &name, Some(&author)).await?;
-    rate_limit(&state, format!("guestbook-address:{}", client_address(&headers)), ENTRIES_PER_ADDRESS)?;
+    let address = client_address(&headers);
+    rate_limit(&state, format!("guestbook-address:{address}"), ENTRIES_PER_ADDRESS)?;
+    // Kept as a keyed hash: entries can be counted by where they came from, but the address is not stored.
+    let from = hex::encode(hmac_sha256(&state.config.ticket_secret, format!("guestbook\0{address}").as_bytes()));
     let id = Uuid::new_v4();
     let mut tx = state.db.begin().await?;
     sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(home.owner_id).execute(&mut *tx).await?;
@@ -178,20 +185,37 @@ async fn write(
             return Err(conflict("guestbook_author_full", "이 방명록에 남긴 글이 너무 많아요."));
         }
         if today >= ENTRIES_PER_AUTHOR_A_DAY {
+            return Err(conflict("guestbook_author_full", "이 방명록에는 24시간에 10개까지 남길 수 있어요."));
+        }
+        let (from_address, ilchon): (i64, bool) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM guestbook_entries g
+                     WHERE g.home_owner_id = $1 AND g.author_address = $2 AND g.author_id <> $1
+                       AND g.created_at > now() - interval '1 day'
+                       AND NOT EXISTS (SELECT 1 FROM ilchons i WHERE i.user_id = $1 AND i.friend_id = g.author_id)),
+                    EXISTS (SELECT 1 FROM ilchons WHERE user_id = $1 AND friend_id = $3)",
+        )
+        .bind(home.owner_id)
+        .bind(&from)
+        .bind(author.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if from_address >= ENTRIES_PER_ADDRESS_A_DAY && !ilchon {
             return Err(conflict(
-                "guestbook_author_full",
-                "오늘은 이 방명록에 더 남길 수 없어요. 내일 다시 남겨 주세요.",
+                "guestbook_address_full",
+                "이 방명록에는 같은 곳에서 24시간에 30개까지 남길 수 있어요.",
             ));
         }
     }
     sqlx::query(
-        "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body, secret) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body, secret, author_address)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(id)
     .bind(home.owner_id)
     .bind(author.id)
     .bind(body)
     .bind(entry.secret)
+    .bind(&from)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

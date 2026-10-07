@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{OriginalUri, RawQuery, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::Response,
@@ -11,9 +11,13 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgExecutor};
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     AppState,
@@ -21,7 +25,7 @@ use crate::{
     config::{Factory, FactoryAccess, FactoryToken},
     error::{ApiError, ApiResult, forbidden, internal, not_found},
     rebac::{ADMIN, Checker, OPERATOR, PAID_OPERATOR, STUDIO_VIEWER, Subject},
-    security::{epoch_seconds, hmac_sha256},
+    security::{KeyedSlot, KeyedSlots, client_address, epoch_seconds, hmac_sha256, rate_limit},
 };
 
 const OPERATOR_TOKEN_SECONDS: u64 = 300;
@@ -34,6 +38,29 @@ const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 const JSON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a member's wardrobe read or part download may take in all, slow phone networks included.
 const MEMBER_TIMEOUT: Duration = Duration::from_secs(300);
+/// A member's wardrobe reads and part downloads counted in the rate window (ten minutes): per member, and per address.
+/// A wardrobe opened asks for a picture of every part (kept by the browser afterwards: the character server marks a
+/// sealed version's files, previews and masks immutable, and their answers pass here as they came), so these are far
+/// above a member's own use; the address's is room for a class or a café behind one address opening it for the first
+/// time together.
+const MEMBER_READS_PER_WINDOW: u32 = 1500;
+const MEMBER_READS_PER_ADDRESS: u32 = 6000;
+/// Members' wardrobe reads and part downloads waiting for the character server to answer, at once: per member, and
+/// site-wide. Past either a read waits its turn, both places together within [`MEMBER_WAIT`]; it holds them until its
+/// answer starts (the character server's work is done then), and its body streams on without them.
+const MEMBER_READS_AT_ONCE: usize = 6;
+const MEMBER_READS_SITE: usize = 64;
+/// The waits of a member's read, which no deadline of the API covers (the studio's routes keep their own): for its
+/// places, then for the character server to start answering. Together they stay under CloudFront's 30 seconds for an
+/// origin's answer to start (frontend/infra/aws-static.yaml), so the member gets `wardrobe_busy` or `factory_timeout`
+/// from here rather than CloudFront's page; the app's own timeouts for these reads are longer than both.
+const MEMBER_WAIT: Duration = Duration::from_secs(6);
+const MEMBER_FIRST_BYTE: Duration = Duration::from_secs(18);
+/// How long a rig transfer waits for its state, read to learn whether it costs money ([`transfer_paid`]), before the
+/// transfer itself is sent.
+const TRANSFER_STATE_WAIT: Duration = Duration::from_secs(10);
+/// How long a studio upload may stall between two pieces of its body before it is given up.
+const BODY_IDLE: Duration = Duration::from_secs(60);
 /// The largest JSON answer read: the job listing is the biggest and stays far below this.
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const LISTING_ATTEMPTS: u32 = 3;
@@ -67,13 +94,92 @@ const FORWARDED_RESPONSE_HEADERS: [HeaderName; 9] = [
 const UNAVAILABLE: ApiError =
     ApiError::new(StatusCode::BAD_GATEWAY, "factory_unavailable", "캐릭터 서버에 연결하지 못했습니다.");
 /// The character server took the request but did not answer in time: unlike [`UNAVAILABLE`], it may have started it.
-const TIMED_OUT: ApiError =
+pub(crate) const TIMED_OUT: ApiError =
     ApiError::new(StatusCode::GATEWAY_TIMEOUT, "factory_timeout", "캐릭터 서버가 제때 답하지 않았습니다.");
 const TOO_LARGE: ApiError = ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "model_too_large", "모델 파일이 너무 큽니다.");
 /// The character server refused this server's own credentials (401 or 403): its operator token, API key or gateway key
 /// is wrong. Not passed on as it came, since the app reads a 401 as its own sign-in having ended.
 const FACTORY_AUTH: ApiError =
     ApiError::new(StatusCode::BAD_GATEWAY, "factory_auth", "캐릭터 서버가 이 서버의 인증을 받지 않았습니다.");
+const WARDROBE_BUSY: ApiError = ApiError::new(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "wardrobe_busy",
+    "지금 옷장을 여는 사람이 많아요. 잠시 뒤에 다시 시도해 주세요.",
+);
+
+/// Members' wardrobe reads and part downloads waiting for the character server's answer (see
+/// [`MEMBER_READS_AT_ONCE`]), and how long they wait.
+#[derive(Clone)]
+pub struct Wardrobe {
+    members: KeyedSlots,
+    site: Arc<Semaphore>,
+    wait: Duration,
+    first_byte: Duration,
+}
+
+impl Default for Wardrobe {
+    fn default() -> Self {
+        Self::new(MEMBER_READS_AT_ONCE, MEMBER_READS_SITE, MEMBER_WAIT, MEMBER_FIRST_BYTE)
+    }
+}
+
+/// The places a member's read holds until its answer starts.
+struct WardrobePlaces {
+    _member: KeyedSlot,
+    _site: OwnedSemaphorePermit,
+}
+
+impl Wardrobe {
+    /// `per_member` and `site` places; a read waits at most `wait` for both, then at most `first_byte` for the character
+    /// server to start answering.
+    pub fn new(per_member: usize, site: usize, wait: Duration, first_byte: Duration) -> Self {
+        Self { members: KeyedSlots::new(per_member), site: Arc::new(Semaphore::new(site)), wait, first_byte }
+    }
+
+    /// Admits one wardrobe read or part download of `user` from `address`: within their budgets, then in one of the
+    /// member's places and one of the site's, both waited for within the wardrobe's wait.
+    async fn admit(&self, state: &AppState, user: &User, address: &str) -> ApiResult<WardrobePlaces> {
+        rate_limit(state, format!("wardrobe:{}", user.id), MEMBER_READS_PER_WINDOW)?;
+        rate_limit(state, format!("wardrobe-address:{address}"), MEMBER_READS_PER_ADDRESS)?;
+        let until = tokio::time::Instant::now() + self.wait;
+        let member = self.members.acquire(&user.id.to_string(), self.wait).await.ok_or(WARDROBE_BUSY)?;
+        let site = tokio::time::timeout_at(until, self.site.clone().acquire_owned())
+            .await
+            .map_err(|_| WARDROBE_BUSY)?
+            .map_err(internal)?;
+        Ok(WardrobePlaces { _member: member, _site: site })
+    }
+
+    /// Sends a member's read once it is admitted, and lets its places go as soon as the answer starts: its body,
+    /// however slowly the member's network takes it, holds none of them.
+    async fn read(&self, state: &AppState, user: &User, call: Call) -> ApiResult<Response> {
+        let places = self.admit(state, user, &client_address(&call.headers)).await?;
+        let started =
+            tokio::time::timeout(self.first_byte, forward(state, &user.username, call, Some(MEMBER_TIMEOUT), true))
+                .await;
+        drop(places);
+        started.unwrap_or(Err(TIMED_OUT))
+    }
+
+    /// Members with a wardrobe read waiting for its places or for the character server's answer to start.
+    pub fn members_reading(&self) -> usize {
+        self.members.keys()
+    }
+}
+
+/// A request body for the character server that fails once it stalls longer than [`BODY_IDLE`] between two pieces, so
+/// an upload that stops coming does not hold the request forever.
+fn paced(body: Body) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
+    futures_util::stream::unfold(Some(body.into_data_stream()), |stream| async move {
+        let mut stream = stream?;
+        match tokio::time::timeout(BODY_IDLE, stream.next()).await {
+            Ok(Some(Ok(chunk))) => Some((Ok(chunk), Some(stream))),
+            Ok(Some(Err(error))) => Some((Err(std::io::Error::other(error)), None)),
+            Ok(None) => None,
+            Err(_) => Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the upload stalled")), None)),
+        }
+    })
+}
 
 /// The HMAC key exactly as the character server's `auth.py` (backend/src) derives it: the stripped secret, used decoded when Python's
 /// `base64.b64decode(secret, validate=False)` yields at least 32 bytes, otherwise as its UTF-8 bytes.
@@ -276,8 +382,9 @@ enum Need {
 /// Uploads, selections, and work the character server does on its own machine (Blender fitting, image crops, procedural
 /// textures, tracing, 2D rigs and motions, baking saved faces), none of which asks a paid provider for anything. Every
 /// other POST is treated as paid: the character server starts generation, rigging, retries and resumes with POSTs, and
-/// a new one must not slip through as free. Rig transfer stays paid although its own step is local: the assembly after
-/// it requests the job's default faces from the image provider when they were never made.
+/// a new one must not slip through as free. A rig transfer ([`RIG_TRANSFER`]) is local work too, but the assembly after
+/// it requests the job's default faces from the image provider when they were never made: it is paid exactly when the
+/// character server says so ([`transfer_paid`]).
 const FREE_POSTS: [&[&str]; 23] = [
     &["avatar-factory", "jobs", "*", "native-parts", "select"],
     // Fitting the generated parts to the body, and fitting one again, without a provider request.
@@ -329,11 +436,31 @@ const KEYED_POSTS: [&[&str]; 17] = [
     &["studio", "glb-assets", "*", "prepare"],
 ];
 
+/// A job's rig transfer, which [`need`] counts paid until the character server says otherwise ([`transfer_paid`]).
+const RIG_TRANSFER: &[&str] = &["avatar-factory", "jobs", "*", "rig-transfer"];
+
 /// Whether `segments` are one of `patterns`, a `*` standing for any one segment.
 fn listed(patterns: &[&[&str]], segments: &[&str]) -> bool {
     patterns.iter().any(|pattern| {
         pattern.len() == segments.len() && pattern.iter().zip(segments).all(|(want, got)| *want == "*" || want == got)
     })
+}
+
+/// Whether `call` starts a rig transfer.
+fn is_transfer(call: &Call) -> bool {
+    let segments: Vec<&str> = call.segments.iter().map(String::as_str).collect();
+    call.method == Method::POST && listed(&[RIG_TRANSFER], &segments)
+}
+
+/// Whether the rig transfer at `segments` costs money: the `paid` of the transfer's state on the character server
+/// (whether the assembly after it will make the job's default faces), the very field its screen shows the cost by, read
+/// as the operator right before the transfer is sent, within [`TRANSFER_STATE_WAIT`]. A state without a clear `false`
+/// is paid.
+async fn transfer_paid(state: &AppState, username: &str, segments: &[String]) -> ApiResult<bool> {
+    let status = tokio::time::timeout(TRANSFER_STATE_WAIT, fetch_json(state, username, &segments.join("/")))
+        .await
+        .unwrap_or(Err(TIMED_OUT))?;
+    Ok(status.as_ref().and_then(|status| status["paid"].as_bool()) != Some(false))
 }
 
 /// The policy for one studio request; `segments` are its path below `/api/`, read by [`path_segments`], e.g.
@@ -356,11 +483,17 @@ const PAID_OFF: ApiError = forbidden("factory_paid_off", "이 서버에서는 �
 const BUDGET_SPENT: ApiError =
     ApiError::new(StatusCode::TOO_MANY_REQUESTS, "factory_budget", "이번 달 유료 캐릭터 작업 한도를 다 썼습니다.");
 
-/// The paid requests of this month (UTC) that count against its budget: every one that may have started work. One the
-/// character server answered with an error of its own (5xx), or that never reached it (asleep, no connection), started
-/// nothing; one still in flight, or whose answer was never recorded, counts; one that timed out (504) may have started.
+/// The paid requests of this month (UTC) that count against its budget: every one that may have started work. One
+/// still in flight, or whose answer was never recorded, counts, and so does one that timed out (504). One the character
+/// server refused before starting anything started nothing: as it came (400, 404, 405, 413, 422, 429), against the state
+/// it found (409: a stage already running or changed, a job changed, a transfer unavailable, a key reused for another
+/// request), or unstarted (503); nor did one this server never got to it or whose credentials it refused (this server's
+/// own errors, `upstream` false). Any other answer of the character server's counts, its server errors too: its work
+/// may have reached a provider before it failed. Rows recorded before `upstream` was kept (NULL) count no server error
+/// but a timeout, as they did then.
 const COUNTED: &str = "paid AND created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-    AND (status IS NULL OR status < 500 OR status = 504)";
+    AND (status IS NULL OR status = 504
+      OR (status NOT IN (400, 404, 405, 409, 413, 422, 429, 503) AND (status < 500 OR upstream)))";
 
 /// Paid studio requests counted this month. Requests sent again with the same `Idempotency-Key` to the same path are
 /// one: only requests to [`KEYED_POSTS`] keep their key, and the character server answers their replays with the work
@@ -475,11 +608,19 @@ async fn studio(
 ) -> ApiResult<Response> {
     let call = Call::read(method, headers, uri.path().strip_prefix("/api/").unwrap_or_default(), query, body)?;
     let need = need(&call.method, &call.segments);
+    let transfer = is_transfer(&call);
     let user = match need {
         Need::Member => current_user(&state, &call.headers).await?,
         Need::Read => require(&state, &call.headers, STUDIO_VIEWER).await?,
         Need::Write => require(&state, &call.headers, OPERATOR).await?,
+        // An operator may ask for a rig transfer: it takes a paid operator only once it turns out to cost money.
+        Need::Paid if transfer => require(&state, &call.headers, OPERATOR).await?,
         Need::Paid => require(&state, &call.headers, PAID_OPERATOR).await?,
+    };
+    let need = match transfer {
+        true if !transfer_paid(&state, &user.username, &call.segments).await? => Need::Write,
+        true => require(&state, &call.headers, PAID_OPERATOR).await.map(|_| Need::Paid)?,
+        false => need,
     };
     relay(&state, &user, need, call).await
 }
@@ -498,7 +639,12 @@ async fn proxy(
     let call = Call::read(method, headers, uri.path().strip_prefix("/api/factory/").unwrap_or_default(), query, body)?;
     let read = matches!(call.method, Method::GET | Method::HEAD);
     let user = require(&state, &call.headers, if read { STUDIO_VIEWER } else { ADMIN }).await?;
-    let need = need(&call.method, &call.segments);
+    let need = match need(&call.method, &call.segments) {
+        Need::Paid if is_transfer(&call) && !transfer_paid(&state, &user.username, &call.segments).await? => {
+            Need::Write
+        }
+        need => need,
+    };
     relay(&state, &user, need, call).await
 }
 
@@ -530,17 +676,23 @@ async fn relay(state: &AppState, user: &User, need: Need, call: Call) -> ApiResu
     } else {
         None
     };
-    let timeout = (need == Need::Member).then_some(MEMBER_TIMEOUT);
-    // A member's wardrobe read goes out member-scoped; studio staff keep the operator's full view on the same routes.
+    // A member's wardrobe read goes out member-scoped when `FACTORY_JWT_SECRET` is set (see `member_scoped`), under the
+    // wardrobe's places and waits; studio staff keep the operator's full view on the same routes.
     let member = need == Need::Member
         && !Checker::new(&state.db).allows(Subject::User(user.id), &STUDIO_VIEWER).await.unwrap_or(false);
-    let response = forward(state, &user.username, call, timeout, member).await;
+    let response = if member {
+        state.wardrobe.read(state, user, call).await
+    } else {
+        let timeout = (need == Need::Member).then_some(MEMBER_TIMEOUT);
+        forward(state, &user.username, call, timeout, false).await
+    };
     if let Some(id) = record {
         let status =
             response.as_ref().map_or_else(|error| error.status.as_u16(), |response| response.status().as_u16());
-        let saved = sqlx::query("UPDATE factory_requests SET status = $2 WHERE id = $1")
+        let saved = sqlx::query("UPDATE factory_requests SET status = $2, upstream = $3 WHERE id = $1")
             .bind(id)
             .bind(status as i16)
+            .bind(response.is_ok())
             .execute(&state.db)
             .await;
         if let Err(error) = saved {
@@ -550,7 +702,15 @@ async fn relay(state: &AppState, user: &User, need: Need, call: Call) -> ApiResu
     response
 }
 
-/// `GET /api/catalog/admin/factory-usage`: how far the studio reaches from here, and this month's paid requests.
+/// Whether members' wardrobe reads go out scoped to what members may see: with `FACTORY_JWT_SECRET`, as the operator's
+/// token marked `MEMBER`. Without it they go as every request does, with the server's keys alone (the character server
+/// then answers them as its operator's, as before member scoping came); the server warns about it as it starts.
+pub fn member_scoped(factory: &Factory) -> bool {
+    factory.token.is_some()
+}
+
+/// `GET /api/catalog/admin/factory-usage`: how far the studio reaches from here, whether members' wardrobe reads are
+/// scoped (`memberScope`), and this month's paid requests.
 pub async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     require(&state, &headers, STUDIO_VIEWER).await?;
     let Some(factory) = state.config.factory.as_ref() else {
@@ -559,6 +719,7 @@ pub async fn usage(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     Ok(Json(json!({
         "connected": true,
         "access": factory.access,
+        "memberScope": member_scoped(factory),
         "paidThisMonth": paid_this_month(&state.db).await?,
         "paidMonthly": factory.paid_monthly,
     })))
@@ -641,7 +802,7 @@ async fn forward(
         request = request.timeout(timeout);
     }
     if !read {
-        request = request.body(reqwest::Body::wrap_stream(call.body.into_data_stream()));
+        request = request.body(reqwest::Body::wrap_stream(paced(call.body)));
     }
     for name in FORWARDED_REQUEST_HEADERS {
         if let Some(value) = call.headers.get(&name) {
@@ -786,12 +947,13 @@ async fn fetch_json_but(
     username: &str,
     api_path: &str,
     absent: &[reqwest::StatusCode],
+    member: bool,
 ) -> ApiResult<Option<Value>> {
     let factory = factory(state)?;
     let url = api_url(factory, api_path)?;
     for attempt in 1..=LISTING_ATTEMPTS {
-        let response =
-            send(state, signed(state.http.get(url.clone()), factory, username).timeout(JSON_TIMEOUT)).await?;
+        let request = signed_as(state.http.get(url.clone()), factory, username, member).timeout(JSON_TIMEOUT);
+        let response = send(state, request).await?;
         match response.status() {
             status if absent.contains(&status) => return Ok(None),
             status if status.is_success() => return read_json(response).await.map(Some),
@@ -809,14 +971,20 @@ async fn fetch_json_but(
 
 /// JSON from the character server's `/api/`, at most [`MAX_JSON_BYTES`]; None for a 404.
 pub async fn fetch_json(state: &AppState, username: &str, api_path: &str) -> ApiResult<Option<Value>> {
-    fetch_json_but(state, username, api_path, &[reqwest::StatusCode::NOT_FOUND]).await
+    fetch_json_but(state, username, api_path, &[reqwest::StatusCode::NOT_FOUND], false).await
 }
 
 /// Like [`fetch_json`], and None for a 422 as well: the request was understood but does not apply (a colour palette
 /// for a part without a texture).
 pub async fn fetch_json_if_applicable(state: &AppState, username: &str, api_path: &str) -> ApiResult<Option<Value>> {
     let absent = [reqwest::StatusCode::NOT_FOUND, reqwest::StatusCode::UNPROCESSABLE_ENTITY];
-    fetch_json_but(state, username, api_path, &absent).await
+    fetch_json_but(state, username, api_path, &absent, false).await
+}
+
+/// Like [`fetch_json`], read as a member reads the wardrobe: scoped to what members may see when the server can scope
+/// it ([`member_scoped`]), the operator's answer otherwise.
+pub async fn fetch_wardrobe_json(state: &AppState, username: &str, api_path: &str) -> ApiResult<Option<Value>> {
+    fetch_json_but(state, username, api_path, &[reqwest::StatusCode::NOT_FOUND], true).await
 }
 
 #[cfg(test)]

@@ -609,7 +609,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     let seen = Seen::default();
     let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_f", "회원").await;
-    let admin = app.register("operator_f", "운영자").await;
+    let admin = app.register("operator_f", "스튜디오 담당").await;
     app.make_admin("operator_f").await;
     assert_eq!(
         app.call("GET", "/api/catalog/items?kind=minime", None, None).await.body["items"].as_array().unwrap().len(),
@@ -735,7 +735,7 @@ async fn 다시_가져와도_공개_상태와_이름을_지키고_버전을_되�
     let studio = Studio::standard();
     studio.slow("job_1", Duration::from_millis(400));
     let app = factory_app(&seen, studio.clone()).await;
-    let admin = app.register("operator_v", "운영자").await;
+    let admin = app.register("operator_v", "스튜디오 담당").await;
     app.make_admin("operator_v").await;
 
     let queued = app.call("POST", IMPORT, Some(import_body("job_1", "hero", "영웅")), Some(&admin)).await;
@@ -831,7 +831,7 @@ async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변�
     let studio = Studio::with(vec![factory_job("textured", "c_tex", "2026-09-05T00:00:00Z")]);
     studio.stage("textured", "expressions");
     let app = factory_app(&seen, studio.clone()).await;
-    let admin = app.register("operator_r", "운영자").await;
+    let admin = app.register("operator_r", "스튜디오 담당").await;
     app.make_admin("operator_r").await;
 
     let done = import(&app, &admin, import_body("textured", "tex", "텍스처")).await;
@@ -876,7 +876,7 @@ async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_�
     // Long enough that the sweep below lands while the model is still downloading, even on a slow runner.
     studio.slow("job_1", Duration::from_millis(3000));
     let app = factory_app(&seen, studio).await;
-    let admin = app.register("operator_z", "운영자").await;
+    let admin = app.register("operator_z", "스튜디오 담당").await;
     app.make_admin("operator_z").await;
     let queued = app.call("POST", IMPORT, Some(import_body("job_1", "late", "늦은 영웅")), Some(&admin)).await;
     assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
@@ -935,7 +935,7 @@ async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_�
 #[tokio::test]
 async fn 서버가_다시_뜨면_멈춘_가져오기를_실패로_적는다() {
     let app = TestApp::new(None).await;
-    let admin = app.register("operator_i", "운영자").await;
+    let admin = app.register("operator_i", "스튜디오 담당").await;
     app.make_admin("operator_i").await;
     for (item, status) in [("a1", "running"), ("a2", "queued"), ("a3", "done")] {
         sqlx::query(
@@ -1020,7 +1020,7 @@ async fn 버전을_두기_전에_가져온_항목은_지금_모델이_첫_버전
 async fn 미니미는_공개된_카탈로그나_기본_미니미만_고른다() {
     let app = TestApp::new(None).await;
     let member = app.register("member_m", "회원").await;
-    let admin = app.register("operator_m", "운영자").await;
+    let admin = app.register("operator_m", "스튜디오 담당").await;
     app.make_admin("operator_m").await;
     sqlx::query(
         "INSERT INTO catalog_items (id, kind, label, emoji, model_url, source, status) VALUES
@@ -1076,7 +1076,7 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
     let seen = Seen::default();
     let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_g", "회원").await;
-    let admin = app.register("operator_g", "운영자").await;
+    let admin = app.register("operator_g", "스튜디오 담당").await;
     app.make_admin("operator_g").await;
     let path = "/api/factory/avatar-factory/capabilities?probe=1";
     assert_eq!(app.call("GET", path, None, None).await.status, StatusCode::UNAUTHORIZED);
@@ -1101,7 +1101,7 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     let seen = Seen::default();
     let app = studio_app(&seen, FactoryAccess::Read, 0).await;
     let member = app.register("member_s", "회원").await;
-    let admin = app.register("operator_s", "운영자").await;
+    let admin = app.register("operator_s", "스튜디오 담당").await;
     app.make_admin("operator_s").await;
 
     let wardrobe = "/api/avatar-factory/wardrobe/bodies";
@@ -1124,7 +1124,7 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     app.cleanup().await;
 
     let app = studio_app(&seen, FactoryAccess::Paid, 1).await;
-    let admin = app.register("operator_p", "운영자").await;
+    let admin = app.register("operator_p", "스튜디오 담당").await;
     app.make_admin("operator_p").await;
     let select = "/api/avatar-factory/jobs/job_1/native-parts/select";
     assert_eq!(app.call("POST", select, Some(json!({})), Some(&admin)).await.status, StatusCode::OK);
@@ -1133,7 +1133,10 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     let second = app.call("POST", "/api/studio/generations", Some(json!({"kind": "prop"})), Some(&admin)).await;
     assert_eq!((second.status, second.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("factory_budget")));
     let usage = app.call("GET", "/api/catalog/admin/factory-usage", None, Some(&admin)).await;
-    assert_eq!(usage.body, json!({"connected": true, "access": "paid", "paidThisMonth": 1, "paidMonthly": 1}));
+    assert_eq!(
+        usage.body,
+        json!({"connected": true, "access": "paid", "memberScope": true, "paidThisMonth": 1, "paidMonthly": 1})
+    );
     let recorded: Vec<(String, bool, Option<i16>)> =
         sqlx::query_as("SELECT path, paid, status FROM factory_requests ORDER BY id")
             .fetch_all(&app.state.db)

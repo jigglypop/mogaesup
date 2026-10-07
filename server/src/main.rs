@@ -1,5 +1,7 @@
 use anyhow::Context;
-use mogaesup_server::{AppState, auth, config::Config, imports, looks, models, router, runtime::ProcessLock};
+use mogaesup_server::{
+    AppState, auth, config::Config, factory, homes, imports, looks, models, router, runtime::ProcessLock,
+};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 
@@ -9,6 +11,12 @@ async fn main() -> anyhow::Result<()> {
     let database_url = env::var("DATABASE_URL").context("DATABASE_URL is required")?;
     // A bad setting stops the start before the database is connected or migrated.
     let config = Config::from_env()?;
+    if config.factory.as_ref().is_some_and(|factory| !factory::member_scoped(factory)) {
+        tracing::warn!(
+            "FACTORY_JWT_SECRET is not set: members' wardrobe reads reach the character server with the server's keys \
+             alone, as its operator's (unscoped); set it on both servers with server/scripts/set-factory-jwt.py"
+        );
+    }
     let db = PgPoolOptions::new()
         .max_connections(12)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -44,6 +52,14 @@ async fn run(db: PgPool, config: Config) -> anyhow::Result<()> {
     let interrupted = looks::interrupt_unfinished(&db).await.context("interrupted looks")?;
     if interrupted > 0 {
         tracing::warn!(interrupted, "Looks cut short by the last shutdown were marked failed");
+    }
+    match homes::search_indexed(&db).await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            "Island search runs without its trigram indexes: as the database's owner, CREATE EXTENSION pg_trgm and \
+             create the indexes in migrations/20261005130000_island_search.sql"
+        ),
+        Err(error) => tracing::warn!(%error, "Could not check the island search indexes"),
     }
     let state = AppState::new(db.clone(), config);
     if let Some((username, password)) = bootstrap {

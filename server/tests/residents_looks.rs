@@ -166,7 +166,8 @@ fn standing_glb() -> Vec<u8> {
 /// What the fake character server knows: two finished characters, and a wardrobe with one body and parts that each go
 /// wrong in their own way: `bare` has no coverage record, `twisted` one that is not base64, `plain` no colour regions,
 /// `flat` a 422 for them (no texture), `blurred` a mask that is not a picture, `heavy` too many triangles. `pants` is a
-/// bottom that hides all of the body's skin.
+/// bottom that hides all of the body's skin. The operator's listing also has `binned`, a hat members are not offered,
+/// and `marked`, one it lists as put in the bin.
 struct Studio {
     body: Vec<u8>,
     hat: Vec<u8>,
@@ -176,6 +177,8 @@ struct Studio {
     standing: Vec<u8>,
     /// Wardrobe requests seen, by path.
     seen: Mutex<Vec<String>>,
+    /// The wardrobe listings asked for, by path, and whether each came member-scoped.
+    listings: Mutex<Vec<(String, bool)>>,
 }
 
 fn job(id: &str, model: &[u8]) -> Value {
@@ -194,23 +197,32 @@ impl Studio {
             pants: part_glb("bottom", 0.5),
             standing: standing_glb(),
             seen: Mutex::default(),
+            listings: Mutex::default(),
         })
     }
 
-    fn parts(&self) -> Value {
+    fn parts(&self, member: bool) -> Value {
         let part = |job: &str, bytes: &[u8]| json!({"job_id": job, "version": "v2", "slot": "hat", "name": format!("{job} 모자"), "sha256": sha256(bytes)});
         let plain: Vec<Value> =
             ["hats", "bare", "twisted", "plain", "flat", "blurred"].iter().map(|job| part(job, &self.hat)).collect();
         let pants = json!({"job_id": "pants", "version": "v2", "slot": "bottom", "name": "바지", "sha256": sha256(&self.pants)});
-        let others = [part("tall", &self.tall_hat), part("heavy", &self.heavy_hat), pants];
-        let parts = [plain, others.to_vec()].concat();
+        let mut others = vec![part("tall", &self.tall_hat), part("heavy", &self.heavy_hat), pants];
+        if !member {
+            let mut marked = part("marked", &self.hat);
+            marked["deleted"] = json!(true);
+            others.extend([part("binned", &self.hat), marked]);
+        }
+        let parts = [plain, others].concat();
         json!({"body": {"job_id": "body", "version": "v1"}, "parts": parts})
     }
 
-    fn answer(&self, path: &str) -> axum::response::Response {
+    fn answer(&self, path: &str, member: bool) -> axum::response::Response {
         self.seen.lock().unwrap().push(path.to_owned());
         let file = |bytes: &[u8]| bytes.to_vec().into_response();
         let segments: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
+        if segments.starts_with(&["avatar-factory", "wardrobe", "bodies"]) && !segments.contains(&"coverage") {
+            self.listings.lock().unwrap().push((path.to_owned(), member));
+        }
         match segments.as_slice() {
             ["avatar-factory", "jobs"] => Json(json!({"jobs": [job("resident", &self.standing)]})).into_response(),
             ["avatar-factory", "jobs", "resident"] => Json(job("resident", &self.standing)).into_response(),
@@ -219,7 +231,7 @@ impl Studio {
             ["avatar-factory", "wardrobe", "bodies"] => Json(json!({"revision": "1", "bodies": [
                 {"job_id": "body", "version": "v1", "body_sha256": sha256(&self.body), "name": "기본 몸", "is_default": true}]}))
             .into_response(),
-            ["avatar-factory", "wardrobe", "bodies", "body", "parts"] => Json(self.parts()).into_response(),
+            ["avatar-factory", "wardrobe", "bodies", "body", "parts"] => Json(self.parts(member)).into_response(),
             ["avatar-factory", "jobs", "body", "native-parts", "v1", "body.glb"] => file(&self.body),
             ["avatar-factory", "jobs", "tall", "native-parts", "v2", "hat.glb"] => file(&self.tall_hat),
             ["avatar-factory", "jobs", "heavy", "native-parts", "v2", "hat.glb"] => file(&self.heavy_hat),
@@ -258,12 +270,26 @@ impl Studio {
     }
 }
 
+/// Whether a request came with a token marked `MEMBER` (unchecked: the fake trusts its one caller).
+fn member_scoped(request: &Request) -> bool {
+    use base64::Engine;
+    let claims = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(|token| token.split('.').nth(1))
+        .and_then(|payload| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok())
+        .and_then(|payload| serde_json::from_slice::<Value>(&payload).ok());
+    claims.is_some_and(|claims| claims["roles"].as_array().is_some_and(|roles| roles.contains(&json!("MEMBER"))))
+}
+
 async fn fake_factory(studio: Arc<Studio>) -> Factory {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let app = Router::new().fallback(move |request: Request| {
         let studio = studio.clone();
-        async move { studio.answer(request.uri().path()) }
+        async move { studio.answer(request.uri().path(), member_scoped(&request)) }
     });
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let token =
@@ -369,7 +395,7 @@ async fn 포장된_미니미는_기본_하나만_남고_고른_섬은_기본으�
 async fn resident_app() -> (TestApp, Arc<Studio>, String, String) {
     let studio = Studio::new();
     let app = TestApp::new(Some(fake_factory(studio.clone()).await)).await;
-    let admin = app.register("operator_r", "운영자").await;
+    let admin = app.register("operator_r", "스튜디오 담당").await;
     app.make_admin("operator_r").await;
     let owner = app.register("owner_r", "주인").await;
     (app, studio, admin, owner)
@@ -571,6 +597,34 @@ async fn 옷장에서_꾸민_모습을_저장하면_한_모델로_조립되어_�
     );
     assert_eq!(app.call("GET", "/api/looks/me", None, Some(&other)).await.body, json!({"look": null}));
     assert_eq!(app.call("GET", "/api/looks/member_x", None, Some(&other)).await.status, StatusCode::NOT_FOUND);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 모습은_회원이_입을_수_있는_파츠로만_저장된다() {
+    // With FACTORY_JWT_SECRET the wardrobe is read as members read it: a part the operator still lists but members are
+    // not offered cannot be saved in a look, whoever saves it.
+    let (app, studio, admin, member) = resident_app().await;
+    for cookie in [&member, &admin] {
+        let refused = app.call("PUT", "/api/looks/me", Some(look("binned")), Some(cookie)).await;
+        assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::CONFLICT, Some("look_part_changed")));
+    }
+    let listings = studio.listings.lock().unwrap().clone();
+    assert_eq!(listings.len(), 4, "{listings:?}");
+    assert!(listings.iter().all(|(_, member)| *member), "{listings:?}");
+    app.cleanup().await;
+
+    // Without it the operator's listing is all there is to check against: a part it marks as put in the bin is refused
+    // all the same, and the parts it offers are saved.
+    let studio = Studio::new();
+    let app = TestApp::new(Some(Factory { token: None, ..fake_factory(studio.clone()).await })).await;
+    let member = app.register("unscoped_l", "회원").await;
+    let refused = app.call("PUT", "/api/looks/me", Some(look("marked")), Some(&member)).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::CONFLICT, Some("look_part_changed")));
+    assert!(studio.listings.lock().unwrap().iter().all(|(_, member)| !*member));
+    let saved = app.call("PUT", "/api/looks/me", Some(look("hats")), Some(&member)).await;
+    assert_eq!(saved.status, StatusCode::ACCEPTED, "{:?}", saved.body);
+    assert_eq!(settled(&app, &member).await["status"], "ready");
     app.cleanup().await;
 }
 
@@ -851,5 +905,37 @@ async fn 마지막으로_입힌_모습을_다시_저장하면_다시_굽지_않�
     assert_eq!(other.status, StatusCode::ACCEPTED);
     assert_eq!(settled(&app, &member).await["status"], "ready");
     assert_eq!(stored_models(&app), 2);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 이전_굽기_방식의_모습은_같은_요청이어도_새로_굽고_다음부터_재사용한다() {
+    let (app, studio, _admin, member) = resident_app().await;
+    let request = look("hats");
+    assert_eq!(
+        app.call("PUT", "/api/looks/me", Some(request.clone()), Some(&member)).await.status,
+        StatusCode::ACCEPTED
+    );
+    let ready = settled(&app, &member).await;
+    assert_eq!(ready["report"]["bakeRevision"], mogaesup_server::look_bake::REVISION);
+    let user = app.user_id("owner_r").await;
+    // Looks stored before the revision marker (the old hair colour) keep their model until a new bake replaces it.
+    sqlx::query("UPDATE user_looks SET report = report - 'bakeRevision' WHERE user_id = $1")
+        .bind(user)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    let fetched = studio.seen.lock().unwrap().len();
+    let changed = app.call("PUT", "/api/looks/me", Some(request.clone()), Some(&member)).await;
+    assert_eq!(changed.status, StatusCode::ACCEPTED, "{:?}", changed.body);
+    let updated = settled(&app, &member).await;
+    assert_eq!(updated["status"], "ready", "{updated}");
+    assert_eq!(updated["report"]["bakeRevision"], mogaesup_server::look_bake::REVISION);
+    assert!(studio.seen.lock().unwrap().len() > fetched, "the old bake was worn instead of a new one");
+    let fetched = studio.seen.lock().unwrap().len();
+    let same = app.call("PUT", "/api/looks/me", Some(request), Some(&member)).await;
+    assert_eq!(same.status, StatusCode::OK, "{:?}", same.body);
+    assert_eq!(same.body["look"]["modelUrl"], updated["modelUrl"]);
+    assert_eq!(studio.seen.lock().unwrap().len(), fetched, "a current bake is worn again as it is");
     app.cleanup().await;
 }

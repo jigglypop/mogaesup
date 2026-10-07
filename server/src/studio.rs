@@ -223,6 +223,54 @@ pub async fn source(state: &AppState, username: &str, job_id: &str) -> ApiResult
     source_of(job_id, &job, expressions.as_ref())
 }
 
+pub const ANIMAL_NOT_FOUND: ApiError = not_found("animal_not_found", "캐릭터 서버에 없는 동물입니다.");
+pub const ANIMAL_NOT_READY: ApiError =
+    conflict("animal_not_ready", "표준 동작(standard)까지 끝난 강아지만 펫 품종으로 가져올 수 있습니다.");
+
+/// A studio animal's id as the character server hands them out: 24 lowercase hex digits.
+pub fn animal_id(value: &str) -> ApiResult<&str> {
+    let valid = value.len() == 24 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if valid { Ok(value) } else { Err(ANIMAL_NOT_FOUND) }
+}
+
+/// A studio dog in an animal listing (`studio/animals`) as a pet breed's source: its `motions-standard.glb` (the
+/// standard skeleton and its clips) once the `standard` stage is complete, with the SHA-256 the listing records, and
+/// its front view (else its reference picture) for the breed's picture. `version` is the model's hash, cut to 12.
+fn animal_source_of(listing: &Value, animal_id: &str) -> ApiResult<Source> {
+    let animal = listing["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| text(item, "id") == Some(animal_id))
+        .ok_or(ANIMAL_NOT_FOUND)?;
+    let artifacts = animal.get("artifacts");
+    let model_sha256 = artifact_sha256(artifacts, "motions-standard.glb")
+        .filter(|sha| crate::models::is_sha256(sha))
+        .filter(|_| text(animal, "species") == Some("dog") && animal["stages"]["standard"]["status"] == "complete")
+        .ok_or(ANIMAL_NOT_READY)?;
+    let picture = ["front.png", "reference.png"]
+        .into_iter()
+        .find(|name| artifact_sha256(artifacts, name).is_some())
+        .unwrap_or("front.png");
+    Ok(Source {
+        job_id: animal_id.to_owned(),
+        character_id: None,
+        stage: Some("standard".into()),
+        version: model_sha256[..12].to_owned(),
+        expression: None,
+        model_path: format!("studio/animals/{animal_id}/motions-standard.glb"),
+        model_sha256: Some(model_sha256),
+        thumbnail_path: format!("studio/animals/{animal_id}/{picture}"),
+    })
+}
+
+/// The studio dog `animal_id` as a pet breed's source (see [`animal_source_of`]).
+pub async fn animal_source(state: &AppState, username: &str, animal_id: &str) -> ApiResult<Source> {
+    let animal_id = self::animal_id(animal_id)?;
+    let listing = fetch_json(state, username, "studio/animals").await?.ok_or(ANIMAL_NOT_FOUND)?;
+    animal_source_of(&listing, animal_id)
+}
+
 /// How a catalog copy compares with its character's newest finished state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -335,5 +383,35 @@ mod tests {
         assert_eq!(check("j1/v2/smile", Some("complete"), None, "complete"), Current);
         assert_eq!(check("j1/v2", Some("expressions"), Some(None), "complete"), NewStage);
         assert_eq!(check("j1/v2", None, Some(None), "complete"), Current);
+    }
+
+    #[test]
+    fn a_studio_dog_is_a_breed_source_once_its_standard_motions_are_done() {
+        let sha = "ab".repeat(32);
+        let dog = |id: &str, standard: Value, files: &[&str]| {
+            json!({"id": id, "species": "dog", "stages": {"standard": standard},
+                "artifacts": files.iter().map(|name| json!({"name": name, "sha256": sha})).collect::<Vec<_>>()})
+        };
+        let done = json!({"status": "complete"});
+        let listing = json!({"items": [
+            dog("0123456789abcdef01234567", done.clone(), &["motions-standard.glb", "front.png", "reference.png"]),
+            dog("aaaaaaaaaaaaaaaaaaaaaaaa", done.clone(), &["motions-standard.glb", "reference.png"]),
+            dog("bbbbbbbbbbbbbbbbbbbbbbbb", json!({"status": "running"}), &["motions-standard.glb"]),
+            dog("cccccccccccccccccccccccc", done, &["model.glb"]),
+            dog("dddddddddddddddddddddddd", Value::Null, &[]),
+        ]});
+        let source = animal_source_of(&listing, "0123456789abcdef01234567").unwrap();
+        assert_eq!(source.model_path, "studio/animals/0123456789abcdef01234567/motions-standard.glb");
+        assert_eq!(source.thumbnail_path, "studio/animals/0123456789abcdef01234567/front.png");
+        assert_eq!((source.model_sha256.as_deref(), source.version.as_str()), (Some(sha.as_str()), "abababababab"));
+        assert_eq!(source.stage.as_deref(), Some("standard"));
+        let reference = animal_source_of(&listing, "aaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        assert!(reference.thumbnail_path.ends_with("/reference.png"));
+        for unfinished in ["bbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccc", "dddddddddddddddddddddddd"] {
+            assert_eq!(animal_source_of(&listing, unfinished).unwrap_err().code, "animal_not_ready", "{unfinished}");
+        }
+        assert_eq!(animal_source_of(&listing, "eeeeeeeeeeeeeeeeeeeeeeee").unwrap_err().code, "animal_not_found");
+        assert!(animal_id("0123456789abcdef01234567").is_ok());
+        assert!(animal_id("../animals").is_err() && animal_id("0123456789ABCDEF01234567").is_err());
     }
 }
