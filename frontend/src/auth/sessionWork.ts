@@ -78,16 +78,37 @@ export function onSessionDoubt(listener: () => void): () => void {
   return () => { doubtListeners.delete(listener); };
 }
 
-const unsavedChecks = new Set<() => boolean>();
+/** How long signing out waits for unsaved edits to be saved before asking whether to go without them. */
+export const SIGN_OUT_SAVE_MS = 8_000;
+
+/** Each check for unsaved edits, with what saves them. */
+const unsavedWork = new Map<() => boolean, (() => Promise<unknown>) | undefined>();
 
 /**
  * Registers a check for edits of the session's owner that are not saved yet (an island being decorated, or one left
- * while its save kept failing); signing out asks before dropping them. Returns the stop for it.
+ * while its save kept failing), and `save`, which saves them; signing out saves them first and asks before dropping
+ * what is still unsaved. Returns the stop for it.
  */
-export function trackUnsaved(check: () => boolean): () => void {
-  unsavedChecks.add(check);
-  return () => { unsavedChecks.delete(check); };
+export function trackUnsaved(check: () => boolean, save?: () => Promise<unknown>): () => void {
+  unsavedWork.set(check, save);
+  return () => { unsavedWork.delete(check); };
 }
 
 /** Whether signing out now would drop edits nobody saved. */
-export const hasUnsavedWork = () => [...unsavedChecks].some((check) => check());
+export const hasUnsavedWork = () => [...unsavedWork.keys()].some((check) => check());
+
+/**
+ * Saves the tracked edits before signing out, waiting up to `ms` for every save to end; resolves whether nothing is left
+ * unsaved then.
+ */
+export function saveUnsavedWork(ms: number = SIGN_OUT_SAVE_MS): Promise<boolean> {
+  const saves = [...unsavedWork.values()].flatMap((save) => (save ? [Promise.resolve().then(save).catch(() => undefined)] : []));
+  if (!saves.length) return Promise.resolve(!hasUnsavedWork());
+  return new Promise((done) => {
+    const timer = setTimeout(() => done(!hasUnsavedWork()), ms);
+    void Promise.all(saves).then(() => {
+      clearTimeout(timer);
+      done(!hasUnsavedWork());
+    });
+  });
+}

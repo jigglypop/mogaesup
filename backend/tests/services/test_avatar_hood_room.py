@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import tracemalloc
+
 import numpy as np
 
-from src.services.avatar_hood_room import ROOM_M, hood_room
+from src.services.avatar_hood_room import BLOCK_BYTES, NEAREST, REACH_SCALP_M, ROOM_M, _nearest, hood_room
 
 
 def sphere(radius, centre, count=1600):
@@ -56,3 +58,35 @@ def test_a_hood_with_room_already_is_left_as_it_is():
     hood = scalp[upper] + .08*normals[upper]
     moves, _ = hood_room(hood, scalp, normals, neighbours, np.zeros((0, 3)), .85)
     assert np.abs(moves).max() < 1e-6
+
+
+def test_the_nearest_scalp_points_come_nearest_first_whatever_the_block_size():
+    rng = np.random.default_rng(7)
+    points, targets = rng.uniform(-.2, .2, (700, 3)), rng.uniform(-.3, .3, (3000, 3))
+    pairs = np.sqrt(((points[:, None, :] - targets[None, :, :])**2).sum(axis=2))
+    expected = np.sort(pairs, axis=1)[:, :NEAREST]
+    expected[expected > REACH_SCALP_M] = np.inf
+    # One block for a whole chunk, and blocks of only NEAREST targets.
+    for block_bytes in (BLOCK_BYTES, 1):
+        distance, index = _nearest(points, targets, NEAREST, 2, block_bytes=block_bytes)
+        # The gate reads column 0 as the nearest scalp point.
+        assert np.array_equal(distance, expected)
+        found = np.isfinite(distance)
+        assert np.array_equal(np.take_along_axis(pairs, index, axis=1)[found], distance[found])
+
+
+def test_a_detailed_body_does_not_take_more_memory_to_lift_the_hood():
+    scalp, normals, neighbours = sphere(.2, (0, 0, 1))
+    upper = scalp[:, 2] > .95
+    hood = scalp[upper] + .003*normals[upper]
+    # Shoulders and arms of a body of many vertices, all within reach of the hood.
+    rng = np.random.default_rng(3)
+    rest = np.c_[rng.uniform(-.4, .4, (20000, 2)), rng.uniform(.7, .8, 20000)]
+    tracemalloc.start()
+    try:
+        hood_room(hood, scalp, normals, neighbours, rest, .85)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # Every hood vertex of a chunk against every body vertex at once took some 300 MB here, and grew with the body.
+    assert peak < 100*1024*1024

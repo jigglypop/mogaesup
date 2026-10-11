@@ -8,10 +8,12 @@
     python3 check_csp.py --html frontend/dist/index.html --live https://mogaesup.com [--template ...]
         warns when the site's policy lacks a script's hash, and, given the template, when the site's policy differs from
         it: the stack was not applied yet (the pipeline never applies it), and until it is, browsers follow the old one.
+        A site that does not answer, or answers with an error, only warns too; a template without a policy fails.
 """
 import argparse
 import base64
 import hashlib
+import http.client
 import re
 import sys
 import urllib.parse
@@ -96,16 +98,23 @@ def main(argv=None):
         if not missing and not outside:
             print(f'{args.html}: {len(wanted)}개 인라인 스크립트의 해시가 CSP에 있고 다른 출처의 자원이 없습니다')
         return 1 if missing or outside else 0
-    policy = live_policy(args.live)
-    for value in wanted:
-        if value not in policy:
-            print(f'::warning::{args.live}의 CSP에 인라인 스크립트 해시 {value}가 없습니다. '
-                  'frontend/infra/aws-static.yaml을 적용(-ProvisionOnly)하기 전까지 브라우저가 그 스크립트를 건너뜁니다')
+    expected = None
     if template is not None:
         expected = template_policy(template, urllib.parse.urlsplit(args.live).hostname)
         if expected is None:
             print(f'::error file={args.template}::템플릿에서 CSP를 찾지 못했습니다')
             return 1
+    try:
+        policy = live_policy(args.live)
+    except (OSError, http.client.HTTPException) as error:
+        # A site that is down or answers with an error may be what this deploy fixes.
+        print(f'::warning::{args.live}의 CSP를 확인하지 못했습니다: {error}')
+        return 0
+    for value in wanted:
+        if value not in policy:
+            print(f'::warning::{args.live}의 CSP에 인라인 스크립트 해시 {value}가 없습니다. '
+                  'frontend/infra/aws-static.yaml을 적용(-ProvisionOnly)하기 전까지 브라우저가 그 스크립트를 건너뜁니다')
+    if expected is not None:
         have, want = directives(policy), directives(expected)
         changed = sorted(name for name in set(have) | set(want) if have.get(name) != want.get(name))
         if changed:

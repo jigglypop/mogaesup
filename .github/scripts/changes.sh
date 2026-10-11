@@ -5,6 +5,8 @@
 # empty when there is none) and BASE_SERVER, BASE_WEB, BASE_STUDIO (the commit each part was last deployed from, found by
 # deploy_bases.py; empty when unknown). Writes name=true|false lines to $GITHUB_OUTPUT.
 set -euo pipefail
+# The associative arrays below need bash 4 or later; macOS's /bin/bash is 3.2.
+((BASH_VERSINFO[0] >= 4)) || { echo "changes.sh needs bash 4 or later, not $BASH_VERSION" >&2; exit 2; }
 
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"

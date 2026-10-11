@@ -7,8 +7,10 @@ import pytest
 from PIL import Image
 
 from api.test_characters import rigged_glb
+from src.services import character_actions
 from src.services.asset_delivery import inspect_glb
-from src.services.character_motion import DEFAULT_ACTIONS, prepare
+from src.services.character_motion import DEFAULT_ACTIONS, prepare, read_pack
+from src.services.character_pipeline import CharacterPipeline
 from src.services.character_segmentation import split_faces, triangle_indices
 from src.services.glb import build_glb, parse_glb
 from src.services.character_jobs import generate
@@ -55,9 +57,12 @@ def test_reject_invalid_or_duplicate_selections(faces):
         split_faces(source, '0' * 64, [{'node_index': 0, 'primitive_index': 0, 'role': 'hat', 'faces': [0]}])
 
 
-def provider(tmp_path, *, lose_post=False, pending=False, basic=True):
+def meshy(tmp_path, *, lose_post=False, pending=False, basic=True):
+    """The Meshy API and its CDN: (handler, the POSTs it received)."""
     calls = []
     def handler(request):
+        if request.url.host == 'assets.meshy.ai':
+            return httpx.Response(200, content=animated_fixture())
         path = request.url.path
         if path.endswith('/library'):
             return httpx.Response(200, json=[{'action_id': value, 'name': slot, 'key': slot} for slot, value in DEFAULT_ACTIONS.items()])
@@ -74,6 +79,11 @@ def provider(tmp_path, *, lose_post=False, pending=False, basic=True):
             if basic:
                 result['basic_animations'] = {'walking_glb_url': 'https://assets.meshy.ai/walk.glb', 'running_glb_url': 'https://assets.meshy.ai/run.glb'}
         return httpx.Response(200, json={'status': 'PENDING' if pending and '/animations/' in path else 'SUCCEEDED', 'result': result})
+    return handler, calls
+
+
+def provider(tmp_path, **kwargs):
+    handler, calls = meshy(tmp_path, **kwargs)
     return httpx.Client(base_url='https://api.meshy.ai', transport=httpx.MockTransport(handler)), calls
 
 
@@ -120,6 +130,27 @@ def test_restart_polls_saved_animation_ids_and_cannot_increase_budget(tmp_path):
         result = prepare(tmp_path, model, 1.7, DEFAULT_ACTIONS, 6, client, timeout=0, download_model=download)
     assert result['status'] == 'complete' and result['max_new_tasks'] == 4
     assert resumed_posts == []
+
+
+def test_a_pack_started_from_the_generation_task_resumes_after_its_model_is_downloaded(tmp_path, monkeypatch):
+    # The generation succeeded before its model was downloaded: the pack rigs the generation task.
+    (tmp_path / 'character.json').write_text(json.dumps({'stage': 'generation', 'status': 'SUCCEEDED', 'task_id': 'generation-id'}))
+    client, calls = provider(tmp_path, pending=True)
+    with client:
+        started = prepare(tmp_path, None, 1.7, DEFAULT_ACTIONS, 6, client, timeout=0, download_model=download)
+    assert started['status'] == 'awaiting_provider' and started['input_sha256'] is None and len(calls) == 4
+    # download_generation saves the generated model; the resume runs as the API runs it.
+    (tmp_path / 'generated.glb').write_bytes(rigged_glb())
+    monkeypatch.setenv('MESHY_API_KEY', 'fixture-key')
+    handler, resumed_posts = meshy(tmp_path)
+    real_client = httpx.Client
+    monkeypatch.setattr(character_actions.httpx, 'Client', lambda **kwargs: real_client(**kwargs, transport=httpx.MockTransport(handler)))
+    operation = {'id': 'resume', 'action_id': 'resume_character', 'payload': {},
+                 'input_sha256': hashlib.sha256(rigged_glb()).hexdigest()}
+    character_actions.perform(CharacterPipeline(tmp_path), {'height_meters': 1.7}, tmp_path, {}, operation)
+    # The saved rig and animation tasks finish the pack; nothing is submitted again.
+    assert read_pack(tmp_path)['status'] == 'complete' and resumed_posts == []
+    assert json.loads((tmp_path / 'control.json').read_text())['rig_origin'] == 'meshy'
 
 
 def test_missing_basic_animations_obeys_submission_budget(tmp_path):

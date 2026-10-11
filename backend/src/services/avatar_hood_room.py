@@ -20,6 +20,7 @@ NEAREST = 4              # scalp points a hood vertex takes its lift from
 SMOOTH_ROUNDS = 10       # averaging rounds that spread the lift over the scalp
 REACH_SCALP_M = .25      # a hood vertex farther than this from the scalp is not lifted
 GATE_M = .04             # a vertex this much nearer the scalp than the rest of the body takes the whole lift
+BLOCK_BYTES = 64 << 20   # the most temporary memory one block of point-to-target distances may take
 
 
 def _near_along(points, normals, cloud, up, reach=REACH_M, above=ABOVE_M):
@@ -43,12 +44,15 @@ def _near_along(points, normals, cloud, up, reach=REACH_M, above=ABOVE_M):
     return lowest
 
 
-def _nearest(points, targets, k, up, reach=REACH_SCALP_M):
-    """Per point, the distances (inf where none) and indices of its k nearest targets within reach.
-    Chunks follow height, and each chunk only meets the targets inside its padded box."""
+def _nearest(points, targets, k, up, reach=REACH_SCALP_M, *, block_bytes=BLOCK_BYTES):
+    """Per point, the distances (inf where none) and indices of its k nearest targets within reach, nearest first.
+    Chunks follow height, and each chunk only meets the targets inside its padded box. A chunk's box can hold
+    most of a body, and a pair takes 56 bytes (offsets, their squares and their sum), so the box's targets are
+    met in blocks whose temporaries stay within block_bytes; the k nearest of each block hold the k nearest of all."""
     distance = np.full((len(points), k), np.inf)
     index = np.zeros((len(points), k), np.int64)
     order = np.argsort(points[:, up], kind='stable')
+    columns = max(k, block_bytes//(56*512))
     for start in range(0, len(order), 512):
         rows = order[start:start+512]
         chunk = points[rows]
@@ -56,13 +60,21 @@ def _nearest(points, targets, k, up, reach=REACH_SCALP_M):
         near = np.flatnonzero(np.all((targets >= low) & (targets <= high), axis=1))
         if not len(near):
             continue
-        squared = ((chunk[:, None, :] - targets[near][None, :, :])**2).sum(axis=2)
-        take = min(k, len(near))
-        best = np.argpartition(squared, take - 1, axis=1)[:, :take]
+        found, which = [], []
+        for block in range(0, len(near), columns):
+            part = near[block:block+columns]
+            squared = ((chunk[:, None, :] - targets[part][None, :, :])**2).sum(axis=2)
+            take = min(k, len(part))
+            best = np.argpartition(squared, take - 1, axis=1)[:, :take]
+            found.append(np.take_along_axis(squared, best, axis=1))
+            which.append(part[best])
+        squared, which = np.concatenate(found, axis=1), np.concatenate(which, axis=1)
+        best = np.argsort(squared, axis=1, kind='stable')[:, :k]
         values = np.sqrt(np.take_along_axis(squared, best, axis=1))
         values[values > reach] = np.inf
+        take = values.shape[1]
         distance[rows, :take] = values
-        index[rows, :take] = near[best]
+        index[rows, :take] = np.take_along_axis(which, best, axis=1)
     return distance, index
 
 

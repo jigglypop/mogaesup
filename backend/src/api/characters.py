@@ -115,6 +115,7 @@ ACTION_INPUTS = {"inspect_model": StrictModel, "separate_materials": StrictModel
                  "prepare_character": PrepareInput, "resume_character": StrictModel, "recover_motion_task": MotionRecovery,
                  "refresh_provider": StrictModel, "recover_task": RecoverInput,
                  "submit_generation": GenerationInput, "submit_rigging": StrictModel,
+                 "retry_generation": GenerationInput, "retry_rigging": StrictModel,
                  "download_generation": StrictModel, "download_rigging": StrictModel}
 
 

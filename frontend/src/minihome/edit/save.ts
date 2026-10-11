@@ -29,6 +29,8 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
   }
   if (error instanceof ApiRequestError) {
     if (error.code === 'owner_changed') return { kind: 'auth', message: error.message };
+    // Only part of the island reached the server: the line dropped while it was sent, and the same island goes through.
+    if (error.code === 'incomplete_world') return { kind: 'network', message: '섬을 끝까지 보내지 못했어요. 곧 다시 저장해 볼게요.' };
     if (error.status === 409) return 'conflict';
     if (error.status === 401 && error.code === SESSION_REFUSED) return { kind: 'session', message: '로그인이 풀려 저장하지 못했어요. 다시 로그인하면 이어서 저장해요.' };
     if (error.status === 401 || error.status === 403) return { kind: 'auth', message: '이 섬을 저장할 권한이 없어요.' };
@@ -115,7 +117,7 @@ export type IslandSaver = {
   subscribe: (listener: () => void) => () => void;
   /** Reads the stored island into the world; call once the runtime is set up. */
   load: () => Promise<boolean>;
-  /** Saves now, changed or not (the 저장 button). */
+  /** Saves now, changed or not (the 저장 button); true once every change made before it was asked for is saved. */
   save: () => Promise<boolean>;
   /** Saves when there is something unsaved that saving can fix (leaving, hiding the page, the autosave timer). */
   flush: () => Promise<boolean>;
@@ -169,7 +171,8 @@ export function createIslandSaver({
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retries = 0;
   let inflight: Promise<boolean> | null = null;
-  let again = false;
+  /** A save asked for while another was on its way: it goes once that one is done. */
+  let queued: Promise<boolean> | null = null;
   let disposed = false;
   /** Counts loads, so one that a newer load has overtaken leaves the state to it. */
   let loads = 0;
@@ -254,17 +257,20 @@ export function createIslandSaver({
   const save = (): Promise<boolean> => {
     if (disposed || !writable || state.phase !== 'ready' || state.conflict) return Promise.resolve(false);
     if (inflight) {
-      again = true;
-      return inflight;
+      // The save on its way holds the island as it was when it started. What is still unsaved once it is done goes in
+      // one more, whose answer is this one's: it covers every change made before it was asked for.
+      const next = () => {
+        queued = null;
+        return flush();
+      };
+      queued ??= inflight.then(next, next);
+      return queued;
     }
     stopTimer();
     stopRetry();
     const run = attempt().finally(() => {
       inflight = null;
-      const next = again;
-      again = false;
-      if (next && isDirty()) void save();
-      else schedule();
+      if (!queued) schedule();
     });
     inflight = run;
     return run;
@@ -333,12 +339,12 @@ export function createIslandSaver({
     async reloadLatest() {
       if (disposed) return false;
       // The edits are dropped from now on, even while a save already on its way finishes first: nothing sends them again
-      // after it, autosaves them or takes new ones.
-      again = false;
+      // after it (a save asked for meanwhile finds the island loading), autosaves them or takes new ones.
       stopTimer();
       stopRetry();
       set({ phase: 'loading' });
       if (inflight) await inflight;
+      if (queued) await queued;
       return load();
     },
     changed() {
@@ -354,7 +360,6 @@ export function createIslandSaver({
       if (disposed) return;
       disposed = true;
       loads++;
-      again = false;
       stopTimer();
       stopRetry();
       set({ saving: false });

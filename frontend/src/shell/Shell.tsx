@@ -10,7 +10,7 @@ import type { IlchonRequest } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { can } from '../auth/can';
-import { hasUnsavedWork } from '../auth/sessionWork';
+import { saveUnsavedWork } from '../auth/sessionWork';
 import { Icon, type IconName } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
 import { PasswordDialog, type PasswordAction } from './PasswordDialog';
@@ -99,6 +99,8 @@ export function Rail() {
   const { user } = useAuth();
   const { pathname } = useLocation();
   const home = user ? `/@${user.username}` : '/';
+  // 운영 opens on the import board; an operator who does not edit the catalog has only the character factory there.
+  const admin = can(user, 'catalog_editor') ? '/admin' : can(user, 'operator') ? '/admin/studio' : null;
   const items: RailItem[] = [
     { label: '섬', icon: 'island', to: home, active: !!user && pathname === home },
     ...(user
@@ -108,9 +110,7 @@ export function Rail() {
         ]
       : []),
     { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
-    ...(can(user, 'catalog_editor')
-      ? [{ label: '운영', icon: 'shield' as const, to: '/admin', active: pathname.startsWith('/admin'), divided: true }]
-      : []),
+    ...(admin ? [{ label: '운영', icon: 'shield' as const, to: admin, active: pathname.startsWith('/admin'), divided: true }] : []),
   ];
   return (
     <nav className="mg-rail mg-glass" aria-label="모개숲">
@@ -295,10 +295,13 @@ function UserMenu() {
   };
   const signOut = async () => {
     if (pending.current) return;
-    if (hasUnsavedWork() && !window.confirm(UNSAVED_QUESTION)) return;
     pending.current = true;
     setLeaving(true); setError('');
-    try { await logout(); setOpen(false); navigate('/'); }
+    try {
+      // Edits not saved yet are saved before the session ends; it asks only about what still could not be.
+      if (!(await saveUnsavedWork()) && !window.confirm(UNSAVED_QUESTION)) return;
+      await logout(); setOpen(false); navigate('/');
+    }
     catch (problem) { setError(problemText(problem)); }
     finally { pending.current = false; setLeaving(false); }
   };

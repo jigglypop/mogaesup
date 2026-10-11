@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError, ApiTimeoutError } from '../../api/client';
-import { appDestination, hasUnsaved, HeldSaveError, heldSavesSettled, leaveIsland } from '../edit/leave';
+import { appDestination, hasUnsaved, HeldSaveError, heldSavesSettled, leaveIsland, saveUnsaved } from '../edit/leave';
 import type { SaverState } from '../edit/save';
 import { IslandTooLargeError } from '../persistence';
 import { fakeWorld, ready } from './fakeWorld';
@@ -344,6 +344,62 @@ describe('나갈 때 저장하지 않은 변경', () => {
     expect(release).toHaveBeenCalledTimes(1);
     expect(world.system.save).toHaveBeenCalledTimes(sent);
     expect(closePage()).toBe(false);
+  });
+});
+
+describe('로그아웃하기 전의 섬 저장', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('저장하지 않은 변경을 저장하고, 저장할 것이 없으면 보내지 않는다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    await saveUnsaved(saver);
+    expect(world.system.save).not.toHaveBeenCalled();
+    // An edit the saver has not been told of yet (rule flags are looked at only every few seconds) is saved too.
+    world.edit('gameplay-events');
+    await saveUnsaved(saver);
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+    expect(hasUnsaved(saver.getState())).toBe(false);
+  });
+
+  it('저장하는 중에 바뀐 것은 이어지는 저장이 끝날 때까지 기다린다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    let finish!: () => void;
+    const slow = () => new Promise<void>((done) => (finish = done));
+    world.system.save.mockImplementationOnce(slow).mockImplementationOnce(slow);
+    world.edit();
+    void saver.save();
+    world.edit();
+    const saved = vi.fn();
+    void saveUnsaved(saver).then(saved);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saved).not.toHaveBeenCalled();
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    // The first save is done; the one for what changed meanwhile is on its way.
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(saved).not.toHaveBeenCalled();
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(hasUnsaved(saver.getState())).toBe(false);
+  });
+
+  it('다시 시도를 기다리던 저장은 바로 보내 보고, 그래도 안 되면 남은 채로 끝난다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    world.failing.with = offline();
+    world.edit();
+    saver.changed();
+    await saver.flush();
+    // Failed once; the next try is ten seconds away.
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+    await saveUnsaved(saver);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(hasUnsaved(saver.getState())).toBe(true);
+    saver.dispose();
   });
 });
 

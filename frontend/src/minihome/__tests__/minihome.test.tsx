@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { HomeView, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
+import { saveUnsavedWork } from '../../auth/sessionWork';
 import type { IslandSaver } from '../edit/save';
 import Minihome from '../Minihome';
+import { IslandTooLargeError } from '../persistence';
 import { fakeWorld } from './fakeWorld';
 
 // The island without its engine, live room and side panels: what is left is its leaving, around a saver whose saves keep
@@ -198,17 +200,24 @@ describe('꾸미기에서 저장하지 못한 변경을 버리고 나가기', ()
     const island = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true });
     await island.load();
     real.saver = island;
-    // A slow line: every save waits until the test answers it.
+    // A slow line: every save waits until the test answers it, and so does loading the stored island again.
     const answers: ((error: unknown) => void)[] = [];
     world.system.save.mockImplementation(() => new Promise<void>((_done, fail) => void answers.push(fail)));
+    let loaded!: (applied: boolean) => void;
+    world.system.load.mockImplementationOnce(() => new Promise<boolean>((done) => (loaded = done)));
     world.edit();
     island.changed();
     void island.save();
     const { container, unmount } = await mount(app());
     await click(exitButton(container));
 
-    // The save on its way fails, the one leaving asked for goes after it, and the owner leaves without the edits.
+    // The save on its way fails and the one leaving asked for goes after it; once that one fails too, the owner leaves
+    // without the edits.
     await act(async () => answers[0]!(new TypeError('Failed to fetch')));
+    await settle();
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(window.confirm).not.toHaveBeenCalled();
+    await act(async () => answers[1]!(new TypeError('Failed to fetch')));
     await settle();
     expect(window.confirm).toHaveBeenCalledTimes(1);
     expect(path).toBe('/@mogae');
@@ -219,13 +228,41 @@ describe('꾸미기에서 저장하지 못한 변경을 버리고 나가기', ()
     expect(container.textContent).not.toContain('꾸미기 도구');
     expect(history.start).not.toHaveBeenCalled();
 
-    await act(async () => answers[1]!(new TypeError('Failed to fetch')));
+    await act(async () => loaded(true));
     await settle();
     expect(world.system.save).toHaveBeenCalledTimes(2);
     expect(world.system.load).toHaveBeenCalledTimes(2);
     expect(island.getState()).toMatchObject({ phase: 'ready', dirty: false });
     expect(container.textContent).toContain('꾸미기 도구');
     expect(history.start).toHaveBeenCalledTimes(1);
+    await unmount();
+  });
+
+  it('저장이 오가는 중에 나가면 그 뒤에 놓은 것까지 저장되었는지 듣고, 저장되지 않았으면 물어 남을 수 있다', async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    const world = fakeWorld();
+    const { createIslandSaver } = await vi.importActual<typeof import('../edit/save')>('../edit/save');
+    const island = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true });
+    await island.load();
+    real.saver = island;
+    let stored!: () => void;
+    world.system.save.mockImplementationOnce(() => new Promise<void>((done) => (stored = done)));
+    world.edit();
+    island.changed();
+    void island.save();
+    // The last thing placed, while that save is on its way, makes the island too large to save.
+    world.edit();
+    island.changed();
+    world.answers.push(new IslandTooLargeError(3 * 1024 * 1024));
+    const { container, unmount } = await mount(app());
+    await click(exitButton(container));
+
+    await act(async () => stored());
+    await settle();
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(path).toBe('/@mogae/edit');
+    expect(island.getState()).toMatchObject({ dirty: true, problem: { kind: 'tooLarge' } });
     await unmount();
   });
 
@@ -236,6 +273,38 @@ describe('꾸미기에서 저장하지 못한 변경을 버리고 나가기', ()
     expect(path).toBe('/explore');
     expect(saver.reloadLatest).not.toHaveBeenCalled();
     expect(leaveIsland).toHaveBeenCalledExactlyOnceWith(saver, expect.any(Function), true, 'mogae');
+    await unmount();
+  });
+});
+
+describe('로그아웃하기 전에', () => {
+  beforeEach(() => vi.stubGlobal('matchMedia', () => ({ matches: false })));
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    real.saver?.dispose();
+    real.saver = null;
+  });
+
+  it('주인의 섬에 저장하지 않은 편집이 있으면 그 저장이 끝날 때까지 기다린다', async () => {
+    const world = fakeWorld();
+    const { createIslandSaver } = await vi.importActual<typeof import('../edit/save')>('../edit/save');
+    const island = createIslandSaver({ system: world.system, adapter: world.adapter, writable: true });
+    await island.load();
+    real.saver = island;
+    let finish!: () => void;
+    world.system.save.mockImplementationOnce(() => new Promise<void>((done) => (finish = done)));
+    const { unmount } = await mount(app());
+    world.edit();
+    const saved = vi.fn();
+    await act(async () => void saveUnsavedWork().then(saved));
+    await settle();
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+    expect(saved).not.toHaveBeenCalled();
+    await act(async () => finish());
+    await settle();
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(island.getState()).toMatchObject({ saving: false, dirty: false });
     await unmount();
   });
 });

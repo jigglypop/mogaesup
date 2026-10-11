@@ -362,6 +362,7 @@ class AvatarMeshy:
         if len(unique_actions) > contract.get('max_animation_tasks', 0):
             raise ValueError('Accepted animation task budget exceeded')
         selected = read_json(run/'selected.json')
+        saved = dict(selected)
         rigging_artifacts = read_json(run/'rigging-artifacts.json')
         basic_artifacts = {'walk': 'walking', 'run': 'running'}
         for slot, action_id in accepted.items():
@@ -373,7 +374,9 @@ class AvatarMeshy:
                     selected.pop(slot)
                 continue
             selected.setdefault(slot, action_id)
-        _write_json(run/'selected.json', selected)
+        # The worker calls this on every poll; a selection it leaves as it was is not written again.
+        if selected != saved:
+            _write_json(run/'selected.json', selected)
         selected_accepted = list(dict.fromkeys(
             action_id for slot, action_id in accepted.items() if selected.get(slot) == action_id))
         for action_id in selected_accepted:
@@ -431,6 +434,7 @@ class AvatarMeshy:
                     task = character_jobs.adopt_submitted_task(run, character_jobs.state(run))
                 if task['stage'] == 'generation':
                     task = character_jobs.rig(run, api)
+                published = False
                 while True:
                     if task['status'] in BLOCKED:
                         raise ValueError('Existing rig attempt requires recovery; no automatic resubmission')
@@ -439,7 +443,7 @@ class AvatarMeshy:
                         if not (run/'rigging-artifacts.json').is_file():
                             character_jobs.download(run, 'rigging')
                         self._ensure_accepted_actions(run, task['task_id'])
-                        pending = False
+                        pending = arrived = False
                         for action_id in set(read_json(run/'selected.json').values()):
                             directory = run/'actions'/str(action_id)
                             if (directory/'clip.json').is_file():
@@ -456,7 +460,12 @@ class AvatarMeshy:
                             if quality['errors'] or not quality['metrics']['animations']:
                                 raise ValueError('Provider animation is invalid')
                             _write_json(directory/'clip.json', {'sha256': digest(directory/'clip.glb'), 'task_id': motion['task_id']})
-                        self._publish(run)
+                            arrived = True
+                        # Once published in this run, the package changes only with a new clip: a poll that brought
+                        # none would read every GLB, merge them and write the same version again.
+                        if arrived or not published:
+                            self._publish(run)
+                            published = True
                         if not pending:
                             final_write(lambda: _write_json(run/'worker.json', {'status': 'complete', 'error': None}),
                                         'Meshy worker record')

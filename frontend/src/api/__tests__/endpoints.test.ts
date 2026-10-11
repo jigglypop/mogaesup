@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setSessionOwner } from '../../auth/sessionWork';
-import { homeApi, homesPath, layoutApi, shareUrl, socialApi } from '../endpoints';
+import { homeApi, homesPath, layoutApi, lookApi, shareUrl, socialApi } from '../endpoints';
 
 describe('섬 공유 링크', () => {
   it('미리보기를 읽는 서버의 공유 페이지를 가리킨다', () => {
@@ -67,6 +67,25 @@ describe('섬 목록 주소', () => {
             ),
         );
         const result = homeApi.saveWorld({ expectedOwnerId: 'owner', worldId: 'w', baseRevision: 1, data: {} }).catch((problem: unknown) => problem);
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(vi.getTimerCount()).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await result).toMatchObject({ name: 'ApiTimeoutError', ms: 60_000 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('내 캐릭터 저장도 캐릭터 서버를 거쳐 대답하므로 60초를 기다린다', async () => {
+      vi.useFakeTimers();
+      try {
+        fetchMock.mockImplementationOnce(
+          (_url, init) =>
+            new Promise<Response>((_resolve, reject) =>
+              init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError'))),
+            ),
+        );
+        const result = lookApi.save({ body: { jobId: 'body', version: 'v1' }, parts: {}, hairColor: null, colors: {} }).catch((problem: unknown) => problem);
         await vi.advanceTimersByTimeAsync(59_999);
         expect(vi.getTimerCount()).toBe(1);
         await vi.advanceTimersByTimeAsync(1);

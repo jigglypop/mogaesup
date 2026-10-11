@@ -140,6 +140,45 @@ describe('로그아웃', () => {
     await unmount();
   });
 
+  it('저장하지 않은 편집은 먼저 저장하고, 다 저장되면 묻지 않고 로그아웃한다', async () => {
+    let unsaved = true;
+    let saved!: () => void;
+    const save = vi.fn(() => new Promise<void>((done) => { saved = () => { unsaved = false; done(); }; }));
+    const untrack = trackUnsaved(() => unsaved, save);
+    const ask = vi.spyOn(window, 'confirm');
+    const { container, unmount } = await mount(shell());
+    await openMenu(container);
+    await act(async () => button('로그아웃')!.click());
+    // The session is kept while the save is on its way.
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(auth.logout).not.toHaveBeenCalled();
+    expect(button('로그아웃 중…')).toBeTruthy();
+    await act(async () => button('로그아웃 중…')!.click());
+    await act(async () => saved());
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(ask).not.toHaveBeenCalled();
+    expect(auth.logout).toHaveBeenCalledTimes(1);
+    untrack();
+    await unmount();
+  });
+
+  it('저장해도 남은 편집이 있으면 그때 묻고, 그만두면 로그아웃하지 않는다', async () => {
+    const steps: string[] = [];
+    const untrack = trackUnsaved(() => true, async () => void steps.push('save'));
+    vi.spyOn(window, 'confirm').mockImplementationOnce(() => {
+      steps.push('ask');
+      return false;
+    });
+    const { container, unmount } = await mount(shell());
+    await openMenu(container);
+    await act(async () => button('로그아웃')!.click());
+    expect(steps).toEqual(['save', 'ask']);
+    expect(auth.logout).not.toHaveBeenCalled();
+    expect(button('로그아웃')).toBeTruthy();
+    untrack();
+    await unmount();
+  });
+
   it('세션이 풀린 채로도 로그아웃할 수 있다', async () => {
     auth.user = null;
     auth.lapsed = mogae;

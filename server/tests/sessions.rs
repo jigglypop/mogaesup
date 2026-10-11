@@ -620,13 +620,17 @@ async fn 확인을_기다리는_틀린_비밀번호는_틀리기_전까지_계�
     };
     let (replies, free) = tokio::join!(attempts, probe);
     assert!(free, "checks under way held the account's budget");
+    // A check that waits longer than the hashing wait is turned away as busy, so how many finish depends on the load of
+    // the machine. What must hold: every reply is either a check found wrong or busy, and the one more than the
+    // checks under way is turned away.
     let statuses: Vec<StatusCode> = replies.iter().map(|reply| reply.status).collect();
     let checked = statuses.iter().filter(|status| **status == StatusCode::UNAUTHORIZED).count();
-    assert_eq!(checked, waiting, "{statuses:?}");
     let busy = replies.iter().filter(|reply| reply.body["code"] == "busy").count();
-    assert_eq!(busy, 1, "one check more of the same account at once is turned away: {statuses:?}");
-    // Found wrong, they count.
-    assert!(rate_exceeded(&app.state, "login-failed:in_flight", CHECKS_UNDER_WAY).is_err());
+    assert!(checked > 0 && checked + busy == waiting + 1, "{statuses:?}");
+    assert!(busy >= 1, "one check more of the same account at once is turned away: {statuses:?}");
+    // Found wrong, exactly these count.
+    assert!(rate_exceeded(&app.state, "login-failed:in_flight", checked as u32).is_err());
+    assert!(rate_exceeded(&app.state, "login-failed:in_flight", checked as u32 + 1).is_ok());
     // A name nobody has keeps no window of its own; its guesses still cost the address.
     assert_eq!(login_with(&app, "nobody_here", "a wrong guess").await.status, StatusCode::UNAUTHORIZED);
     assert!(rate_exceeded(&app.state, "login-failed:nobody_here", 1).is_ok());

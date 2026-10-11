@@ -59,6 +59,49 @@ def with_model(client):
     return response.json()
 
 
+def with_photo(client):
+    value = create(client)
+    image = io.BytesIO()
+    Image.new('RGB', (4, 4)).save(image, 'PNG')
+    response = client.post(f"/api/characters/{value['id']}/sources?kind=image", content=image.getvalue(), headers={"If-Match": value['revision']})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def act(client, character_id, action, key):
+    """Runs `action` on the current revision and returns the character after it."""
+    value = client.get(f"/api/characters/{character_id}").json()
+    response = client.post(f"/api/characters/{character_id}/actions/{action}", json={},
+                           headers={"If-Match": value['revision'], "Idempotency-Key": key})
+    assert response.status_code == 202, response.text
+    return client.get(f"/api/characters/{character_id}").json()
+
+
+class FakeMeshy:
+    """Meshy behind httpx. Each POST gets the next of `posts`: a status and JSON body, or an httpx error raised before
+    any answer. A task is read from `tasks`, and its GLB link serves a valid model. Every request is kept."""
+
+    def __init__(self, monkeypatch, posts, tasks=None):
+        monkeypatch.setenv('MESHY_API_KEY', 'test-key')
+        self.posts, self.tasks, self.requests = list(posts), tasks or {}, []
+        real_client = httpx.Client
+        monkeypatch.setattr(character_actions.httpx, 'Client', lambda **kwargs: real_client(**kwargs, transport=httpx.MockTransport(self.answer)))
+
+    def answer(self, request):
+        self.requests.append(request)
+        if request.url.host == 'cdn.invalid':
+            return httpx.Response(200, content=rigged_glb())
+        if request.method == 'GET':
+            return httpx.Response(200, json=self.tasks[request.url.path.rsplit('/', 1)[1]])
+        answer = self.posts.pop(0)
+        if isinstance(answer, type):
+            raise answer('unreachable', request=request)
+        return httpx.Response(answer[0], json=answer[1])
+
+    def posted(self, path):
+        return [json.loads(request.content) for request in self.requests if request.method == 'POST' and request.url.path == path]
+
+
 def test_list_update_and_reload_use_persisted_state_without_internal_paths(setup):
     client, pipeline, _ = setup
     value = create(client)
@@ -183,6 +226,10 @@ def test_provider_response_loss_does_not_allow_another_post(setup, monkeypatch):
     assert value['provider']['status'] == 'submission_uncertain'
     assert value['operation']['status'] == 'recovery_required'
     assert client.post(url, json={}, headers={"If-Match": value['revision'], "Idempotency-Key": 'another-paid-key'}).status_code == 409
+    # Meshy may have the task: it is recovered by its ID, never sent again.
+    assert not [action for action in value['next_actions'] if action['id'].startswith('retry_')]
+    retry = f"/api/characters/{value['id']}/actions/retry_generation"
+    assert client.post(retry, json={}, headers={"If-Match": value['revision'], "Idempotency-Key": 'retry-paid-key'}).status_code == 409
     assert calls == ['POST']
 
 
@@ -298,3 +345,72 @@ def test_a_stored_model_rewritten_at_the_same_size_changes_the_revision(setup, m
     assert current != first['revision']
     assert client.patch(endpoint, json={"name": "Stale"}, headers={"If-Match": first['revision']}).status_code == 409
     assert client.patch(endpoint, json={"name": "Current"}, headers={"If-Match": current}).status_code == 200
+
+
+@pytest.mark.parametrize('first, task', [
+    ((429, {'message': 'Too Many Requests'}), None),
+    (httpx.ConnectError, None),
+    ((202, {'result': 'generation-1'}), {'status': 'FAILED', 'progress': 0}),
+], ids=['refused', 'not_sent', 'failed'])
+def test_a_generation_meshy_refused_never_received_or_failed_is_sent_again_on_request(setup, monkeypatch, first, task):
+    client, pipeline, _ = setup
+    value = with_photo(client)
+    meshy = FakeMeshy(monkeypatch, [first, (202, {'result': 'generation-2'})], {'generation-1': task})
+    value = act(client, value['id'], 'submit_generation', 'first-generation')
+    if task:
+        value = act(client, value['id'], 'refresh_provider', 'read-generation')
+    failed = value['provider']['status']
+    actions = {action['id']: action for action in value['next_actions']}
+    assert value['pipeline_status'] == 'blocked' and 'submit_generation' not in actions
+    assert actions['retry_generation']['enabled'] and actions['retry_generation']['external_mutation']
+    value = act(client, value['id'], 'retry_generation', 'retry-generation')
+    assert value['operation']['status'] == 'succeeded'
+    assert (value['provider']['status'], value['provider']['task_id']) == ('PENDING', 'generation-2')
+    assert len(meshy.posted('/openapi/v1/image-to-3d')) == 2
+    # The earlier attempt is kept with its receipts.
+    _, run, _ = pipeline.entry(value['id'], 1)
+    assert json.loads((run / 'attempts/1/character.json').read_text())['status'] == failed
+    assert json.loads((run / 'attempts/1/archive.json').read_text())['reason'] == 'explicit'
+
+
+def test_a_refused_rigging_is_sent_again_for_the_generation_it_was_made_from(setup, monkeypatch):
+    client, pipeline, _ = setup
+    value = with_photo(client)
+    succeeded = {'status': 'SUCCEEDED', 'progress': 100, 'model_urls': {'glb': 'https://cdn.invalid/generated.glb'}}
+    meshy = FakeMeshy(monkeypatch, [(202, {'result': 'generation-1'}), (402, {'message': 'Payment Required'}),
+                                    (202, {'result': 'rigging-2'}), (202, {'result': 'rigging-3'})],
+                      {'generation-1': succeeded, 'rigging-2': {'status': 'FAILED', 'progress': 0}})
+    for action in ('submit_generation', 'refresh_provider', 'download_generation', 'submit_rigging'):
+        value = act(client, value['id'], action, action.replace('_', '-'))
+    actions = {action['id']: action for action in value['next_actions']}
+    assert value['provider']['status'] == 'submission_rejected' and actions['retry_rigging']['enabled']
+    # The receipt of the generation cannot be saved in place of the refused one: the run keeps the refused one, never
+    # none (which would offer a new paid generation).
+    from src.services import object_storage
+    write = object_storage.write_json
+
+    def storage_down(path, record):
+        if path.name == 'character.json' and record.get('status') == 'SUCCEEDED':
+            raise OSError('storage unavailable')
+        return write(path, record)
+    monkeypatch.setattr(object_storage, 'write_json', storage_down)
+    value = act(client, value['id'], 'retry_rigging', 'retry-rigging-1')
+    assert (value['operation']['status'], value['provider']['status']) == ('failed', 'submission_rejected')
+    actions = {action['id']: action for action in value['next_actions']}
+    assert actions['retry_rigging']['enabled'] and 'submit_generation' not in actions
+    monkeypatch.setattr(object_storage, 'write_json', write)
+    value = act(client, value['id'], 'retry_rigging', 'retry-rigging-2')
+    assert value['operation']['status'] == 'succeeded'
+    assert (value['provider']['stage'], value['provider']['status'], value['provider']['task_id']) == ('rigging', 'PENDING', 'rigging-2')
+    assert meshy.posted('/openapi/v1/rigging') == [{'input_task_id': 'generation-1', 'height_meters': 1.7}] * 2
+    assert len(meshy.posted('/openapi/v1/image-to-3d')) == 1 and value['model_id'] == 'generated'
+    # The refused attempt was archived once, by the try that could not finish.
+    _, run, _ = pipeline.entry(value['id'], 1)
+    assert json.loads((run / 'attempts/1/character.json').read_text())['status'] == 'submission_rejected'
+    assert not (run / 'attempts/2').exists()
+    # The new receipt names no archive: when it fails as well, it is archived as the next attempt with its result.
+    value = act(client, value['id'], 'refresh_provider', 'read-rigging-2')
+    value = act(client, value['id'], 'retry_rigging', 'retry-rigging-3')
+    assert (value['provider']['status'], value['provider']['task_id']) == ('PENDING', 'rigging-3')
+    assert json.loads((run / 'attempts/2/character.json').read_text())['task_id'] == 'rigging-2'
+    assert json.loads((run / 'attempts/2/rigging-result.json').read_text())['status'] == 'FAILED'

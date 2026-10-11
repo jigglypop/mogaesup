@@ -513,3 +513,31 @@ def test_an_accepted_rig_or_clip_named_only_by_its_saved_answer_is_recoverable_w
     pack = read_json(action/'motion-pack.json')
     _write_json(action/'motion-pack.json', {**pack, 'previous_tasks': [{'task_id': 'clip-1', 'status': 'FAILED'}]})
     assert saved_problem(run)['status'] == 'submission_uncertain'
+
+
+def test_waiting_for_a_clip_neither_builds_the_package_again_nor_rewrites_its_records(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    pipeline = read_json(directory/'pipeline.json')
+    pipeline['motion_actions'] = {'jump': 101}
+    _write_json(directory/'pipeline.json', pipeline)
+    job = read_json(directory/'job.json')
+    job['limits'] = {'meshy_rig_tasks': 1, 'meshy_animation_tasks': 1}
+    _write_json(directory/'job.json', job)
+    making = iter(range(4))  # Meshy is still making the clip for four polls.
+
+    def slow_clip(request):
+        if (request.method == 'GET' and '/animations/' in request.url.path and not request.url.path.endswith('/library')
+                and next(making, None) is not None):
+            return httpx.Response(200, json={'status': 'IN_PROGRESS', 'progress': 50})
+        return transport(request)
+    use_handler(monkeypatch, slow_clip)
+    publish, write = module.AvatarMeshy._publish, module._write_json
+    published, written = [], []
+    monkeypatch.setattr(module.AvatarMeshy, '_publish', lambda self, run: (published.append(run), publish(self, run))[1])
+    monkeypatch.setattr(module, '_write_json', lambda path, value: (written.append(path.name), write(path, value))[1])
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert next(making, None) is None
+    # Published with the rig's own clips while the clip was made, and once more when it arrived.
+    assert len(published) == 2 and written.count('delivery.json') == written.count('receipt.json') == 2
+    assert written.count('selected.json') == 1
+    assert next(clip for clip in service.get(1, jid)['clips'] if clip['slot'] == 'jump')['action_id'] == 101

@@ -32,7 +32,7 @@ import { Decorate } from './Decorate';
 import { EditContext, useEditState, useSaver } from './edit/context';
 import { EditBar, EditHelp, SaveBanners, StartBanner } from './edit/EditChrome';
 import { createEditHistory, readParts, sameParts } from './edit/history';
-import { appDestination, hasUnsaved, heldSavesSettled, leaveIsland } from './edit/leave';
+import { appDestination, hasUnsaved, heldSavesSettled, leaveIsland, saveUnsaved } from './edit/leave';
 import { createIslandSaver } from './edit/save';
 import { createEditSession } from './edit/session';
 import { useIslandStart } from './edit/useIslandStart';
@@ -172,8 +172,9 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const session = isOwner ? createEditSession(runtime, history, labels) : null;
     let released = false;
     let stopSession = () => {};
-    // Until the island is let go (left with nothing unsaved, or dropped), signing out asks before losing its edits.
-    const untrack = isOwner ? trackUnsaved(() => !saver.disposed && hasUnsaved(saver.getState())) : () => {};
+    // Until the island is let go (left with nothing unsaved, or dropped), signing out saves its edits first and asks
+    // before losing what could not be saved.
+    const untrack = isOwner ? trackUnsaved(() => !saver.disposed && hasUnsaved(saver.getState()), () => saveUnsaved(saver)) : () => {};
     const release = () => {
       if (released) return;
       released = true;

@@ -31,7 +31,15 @@ def _seam(alpha, width, height, anchor, radius):
     return result
 
 
+def _check_inner_edges(edges):
+    # Fractions that differ can round to the same pixel, and nothing would lie between two such boundaries.
+    inner = edges[1:-1]
+    if any(a >= b for a, b in zip(inner, inner[1:])):
+        raise PipelineError('invalid_grid', '경계가 서로 너무 가깝습니다. 경계 사이를 넓히세요.', 422)
+
+
 def _crop_views(source, xedges):
+    _check_inner_edges(xedges)
     width, height = source.size
     alpha = source.getchannel('A').tobytes()
     seams = [[0]*height]
@@ -57,6 +65,7 @@ def _crop_views(source, xedges):
 
 def crop_rows(image, yedges, xedges_by_row, *, remove_skin=False):
     """Separate rows as well as columns; long hair can extend past a row anchor."""
+    _check_inner_edges(yedges)
     from src.services.avatar_part_batches import isolate_hair
     source = isolate_hair(image) if remove_skin else image.convert('RGBA')
     width, height = source.size

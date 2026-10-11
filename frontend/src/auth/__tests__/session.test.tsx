@@ -9,7 +9,18 @@ import { Loading } from '../../pages/Loading';
 import { AuthProvider, SESSION_MARK, SESSION_RENEW_MS, useAuth } from '../AuthProvider';
 import { draftKey } from '../drafts';
 import { followSession, SESSION_RETRY_MS, SESSION_UNREACHABLE_AFTER } from '../session';
-import { doubtSession, expireSession, followSessionOwner, sessionEpoch, sessionLapsed, setSessionOwner } from '../sessionWork';
+import {
+  doubtSession,
+  expireSession,
+  followSessionOwner,
+  hasUnsavedWork,
+  saveUnsavedWork,
+  sessionEpoch,
+  sessionLapsed,
+  setSessionOwner,
+  SIGN_OUT_SAVE_MS,
+  trackUnsaved,
+} from '../sessionWork';
 
 const { me, login, register, logout } = vi.hoisted(() => ({
   me: vi.fn<() => Promise<{ user: User | null }>>(),
@@ -560,5 +571,55 @@ describe('로그인 상태 제공자', () => {
       expect(shown(container)).toBe('signedIn:mogae');
       await unmount();
     });
+  });
+});
+
+describe('로그아웃하기 전의 저장', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('저장하지 않은 편집을 먼저 저장하고, 저장이 끝나면 남은 것이 없다고 답한다', async () => {
+    let unsaved = true;
+    let saved!: () => void;
+    const save = vi.fn(() => new Promise<void>((done) => { saved = () => { unsaved = false; done(); }; }));
+    const untrack = trackUnsaved(() => unsaved, save);
+    const answered = vi.fn();
+    void saveUnsavedWork().then(answered);
+    await flush();
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(answered).not.toHaveBeenCalled();
+    saved();
+    await flush();
+    expect(answered).toHaveBeenCalledExactlyOnceWith(true);
+    expect(hasUnsavedWork()).toBe(false);
+    untrack();
+  });
+
+  it('저장하고도 남았거나 저장할 길이 없는 편집이 있으면 남았다고 답한다', async () => {
+    const failed = trackUnsaved(() => true, () => Promise.reject(new TypeError('Failed to fetch')));
+    await expect(saveUnsavedWork()).resolves.toBe(false);
+    failed();
+    const unsavable = trackUnsaved(() => true);
+    await expect(saveUnsavedWork()).resolves.toBe(false);
+    unsavable();
+    await expect(saveUnsavedWork()).resolves.toBe(true);
+  });
+
+  it('저장이 끝나지 않으면 정해 둔 만큼만 기다리고 남았다고 답한다', async () => {
+    const untrack = trackUnsaved(() => true, () => new Promise<void>(() => {}));
+    const answered = vi.fn();
+    void saveUnsavedWork().then(answered);
+    await vi.advanceTimersByTimeAsync(SIGN_OUT_SAVE_MS - 1);
+    expect(answered).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(answered).toHaveBeenCalledExactlyOnceWith(false);
+    untrack();
+  });
+
+  it('그만 지켜보는 편집은 저장하지도 묻지도 않는다', async () => {
+    const save = vi.fn(async () => {});
+    trackUnsaved(() => true, save)();
+    await expect(saveUnsavedWork()).resolves.toBe(true);
+    expect(save).not.toHaveBeenCalled();
   });
 });

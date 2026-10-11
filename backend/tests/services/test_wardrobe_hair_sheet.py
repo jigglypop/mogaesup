@@ -115,3 +115,15 @@ def test_sheet_items_are_named_by_number_whatever_the_body(tmp_path, monkeypatch
     record = split_sheet(factory, 1, {'asset_id': asset_id, 'rows': 1, 'columns': 1, 'view_order': ['front', 'back', 'side'],
                                       'remove_skin': True, 'detect_view_seams': False})
     assert [item['name'] for item in record['items']] == ['헤어 01']
+
+
+@pytest.mark.parametrize('grid', [
+    # The sheet is 300×100: .5 and .502 of its height are both row 50 ...
+    {'rows': 3, 'columns': 1, 'row_edges': [0, .5, .502, 1]},
+    # ... and 1/3 and .334 of its width both column 100.
+    {'rows': 1, 'columns': 1, 'view_edges': [[0, 1/3, .334, 1]]}])
+def test_boundaries_that_round_to_the_same_pixel_are_a_grid_error_not_a_crash(tmp_path, monkeypatch, grid):
+    factory, asset_id = sheet(tmp_path, monkeypatch)
+    with pytest.raises(PipelineError) as error:
+        split_sheet(factory, 1, {'asset_id': asset_id, 'view_order': ['front', 'back', 'side'], 'remove_skin': False, **grid})
+    assert error.value.code == 'invalid_grid' and error.value.status == 422

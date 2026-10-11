@@ -1,12 +1,19 @@
-"""Exercise release routing against real commit history without touching the checkout."""
+"""Exercise release routing against real commit history without touching the checkout, and the pipeline's CSP check."""
+import contextlib
+import http.server
 import importlib.util
+import io
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
 import unittest
+from unittest import mock
+import urllib.request
 
 
 HERE = Path(__file__).resolve().parent
@@ -15,7 +22,22 @@ SCRIPT = HERE / "changes.sh"
 KEYS = ("server_check", "backend_check", "frontend_check", "infra_check",
         "deploy_server", "deploy_web", "deploy_studio")
 PARTS = ("server", "web", "studio")
-BASH = os.environ.get("BASH_EXECUTABLE") or shutil.which("bash")
+
+
+def bash_major(path):
+    """The major version of the bash at `path`, or 0 when it does not run."""
+    try:
+        done = subprocess.run([path, "-c", 'echo "${BASH_VERSINFO[0]}"'], capture_output=True, text=True)
+    except OSError:
+        return 0
+    return int(done.stdout) if done.stdout.strip().isdigit() else 0
+
+
+# changes.sh needs bash 4 or later; macOS's /bin/bash is 3.2 and can come before Homebrew's on PATH. Without a newer
+# one, PATH's bash runs it and changes.sh says why it stops.
+BASH = os.environ.get("BASH_EXECUTABLE") or next(
+    (path for path in (shutil.which("bash"), "/opt/homebrew/bin/bash", "/usr/local/bin/bash")
+     if path and bash_major(path) >= 4), shutil.which("bash"))
 
 
 def load_bases():
@@ -74,8 +96,8 @@ class ReleaseRouting(unittest.TestCase):
                "GITHUB_OUTPUT": output.as_posix(), "GITHUB_STEP_SUMMARY": (self.repo / "summary.md").as_posix(),
                **{f"BASE_{part.upper()}": base if self.deployed[part] is None else self.deployed[part]
                   for part in PARTS}}
-        subprocess.run([BASH, SCRIPT.as_posix()], cwd=self.repo, env=env,
-                       check=True, capture_output=True, text=True)
+        done = subprocess.run([BASH, SCRIPT.as_posix()], cwd=self.repo, env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
         values = dict(line.split("=", 1) for line in output.read_text().splitlines())
         self.assertEqual(set(values), set(KEYS))
         return {key for key, value in values.items() if value == "true"}
@@ -216,6 +238,16 @@ class ReleaseRouting(unittest.TestCase):
         self.base = self.head()
         self.assertEqual(self.route(), {"backend_check", "deploy_studio"})
 
+    @unittest.skipUnless(0 < bash_major("/bin/bash") < 4, "no bash older than 4 here")
+    def test_an_older_bash_stops_with_the_reason(self):
+        output = self.repo / "output.txt"
+        env = {**os.environ, "EVENT": "push", "BASE": self.base, "GITHUB_OUTPUT": output.as_posix(),
+               "GITHUB_STEP_SUMMARY": (self.repo / "summary.md").as_posix()}
+        done = subprocess.run(["/bin/bash", SCRIPT.as_posix()], cwd=self.repo, env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("needs bash 4 or later", done.stderr)
+        self.assertFalse(output.exists())
+
 
 class ReleasePaths(unittest.TestCase):
     """The studio release (backend/infra/prepare-aws.ps1) and its routing hold the same files."""
@@ -312,6 +344,100 @@ class DeployBases(unittest.TestCase):
         self.assertEqual(reconcile(found, "b"), found)
         # A site that does not say what it runs (an older release) changes nothing.
         self.assertEqual(reconcile(found, None), found)
+
+
+class CheckCsp(unittest.TestCase):
+    """check_csp.py: the template has to allow the page's inline scripts; the live site only ever warns."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("check_csp", HERE / "check_csp.py")
+        self.csp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.csp)
+        temp = tempfile.TemporaryDirectory(prefix="check-csp-")
+        self.addCleanup(temp.cleanup)
+        folder = Path(temp.name)
+        self.html = folder / "index.html"
+        self.html.write_text("<script>document.documentElement.dataset.theme = 'dark'</script>"
+                             '<script type="module" src="/assets/index.js"></script>', encoding="utf-8")
+        [self.hash] = self.csp.hashes(self.html.read_text(encoding="utf-8"))
+        self.policy = f"default-src 'self'; script-src 'self' {self.hash}"
+        # The policy block as frontend/infra/aws-static.yaml writes it.
+        self.template = folder / "aws-static.yaml"
+        self.template.write_text("            ContentSecurityPolicy: !Sub\n              - >-\n"
+                                 "                default-src 'self';\n"
+                                 f"                script-src 'self' {self.hash}\n"
+                                 "              - LiveRoom: !If [HasDomain, !Sub ' wss://${DomainName}', '']\n",
+                                 encoding="utf-8")
+        # The local sites below are reached directly, whatever proxy the machine names.
+        urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
+        self.addCleanup(urllib.request.install_opener, None)
+
+    def check(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.csp.main(["--html", self.html.as_posix(), *args])
+        return code, out.getvalue()
+
+    def site(self, status=None, policy=""):
+        """A local site answering HEAD with `status` and `policy`; without a status, with a line that is not HTTP."""
+        class Page(http.server.BaseHTTPRequestHandler):
+            def do_HEAD(self):
+                if status is None:
+                    self.wfile.write(b"nonsense\r\n")
+                    return
+                self.send_response(status)
+                if policy:
+                    self.send_header("Content-Security-Policy", policy)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_a_template_without_a_hash_of_the_page_fails(self):
+        self.template.write_text("script-src 'self'", encoding="utf-8")
+        code, out = self.check("--template", self.template.as_posix())
+        self.assertEqual(code, 1)
+        self.assertIn(f"::error file={self.template.as_posix()}::script-src에", out)
+        self.template.write_text(f"script-src 'self' {self.hash}", encoding="utf-8")
+        self.assertEqual(self.check("--template", self.template.as_posix())[0], 0)
+
+    def test_the_live_policy_only_warns(self):
+        site = self.site(200, self.policy)
+        self.assertEqual(self.check("--live", site, "--template", self.template.as_posix()),
+                         (0, f"{site}의 CSP가 템플릿과 같습니다\n"))
+        site = self.site(200, "default-src 'self'; script-src 'self'")
+        code, out = self.check("--live", site, "--template", self.template.as_posix())
+        self.assertEqual(code, 0)
+        self.assertIn(f"::warning::{site}의 CSP에 인라인 스크립트 해시 {self.hash}가 없습니다", out)
+        self.assertIn(f"::warning::{site}의 CSP가 frontend/infra/aws-static.yaml과 다릅니다(script-src)", out)
+
+    def test_a_site_that_does_not_answer_only_warns(self):
+        # The deploy that would bring the site back must not stop here.
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            refused = f"http://127.0.0.1:{closed.getsockname()[1]}"
+        for url in (self.site(503), self.site(403), self.site(), refused):
+            with self.subTest(url=url):
+                code, out = self.check("--live", url, "--template", self.template.as_posix())
+                self.assertEqual(code, 0)
+                self.assertIn(f"::warning::{url}의 CSP를 확인하지 못했습니다", out)
+        with mock.patch.object(urllib.request, "urlopen", side_effect=TimeoutError("timed out")):
+            self.assertEqual(self.check("--live", "https://mogaesup.com"),
+                             (0, "::warning::https://mogaesup.com의 CSP를 확인하지 못했습니다: timed out\n"))
+
+    def test_a_template_without_a_policy_fails_even_when_the_site_does_not_answer(self):
+        # The repository is inconsistent whatever the site does.
+        self.template.write_text(f"script-src 'self' {self.hash}", encoding="utf-8")
+        with mock.patch.object(urllib.request, "urlopen", side_effect=TimeoutError("timed out")):
+            code, out = self.check("--live", "https://mogaesup.com", "--template", self.template.as_posix())
+        self.assertEqual(code, 1)
+        self.assertIn(f"::error file={self.template.as_posix()}::템플릿에서 CSP를 찾지 못했습니다", out)
 
 
 if __name__ == "__main__":

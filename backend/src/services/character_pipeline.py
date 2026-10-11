@@ -266,6 +266,10 @@ class CharacterPipeline:
         if next_action in {"submit_generation", "submit_rigging"} and not model_id == "imported":
             add(next_action, "Meshy 3D 생성" if next_action == "submit_generation" else "Meshy 기본 리깅",
                 key_present and not problems, None if key_present else "서버에 Meshy API 키가 필요합니다.", True)
+        if next_action in {"retry_generation", "retry_rigging"}:
+            # The attempt Meshy refused, never received or ended is moved aside with its receipts, then sent again.
+            add(next_action, "Meshy 3D 생성 다시 제출" if next_action == "retry_generation" else "Meshy 기본 리깅 다시 제출",
+                key_present, None if key_present else "서버에 Meshy API 키가 필요합니다.", True)
         if next_action in {"download_generation", "download_rigging"}:
             add(next_action, "생성 모델 받기" if next_action == "download_generation" else "리깅 모델 받기")
         # Recovery GETs are allowed after a server restart; they do not resubmit work.

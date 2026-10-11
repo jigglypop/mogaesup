@@ -42,8 +42,10 @@ def save_submission_response(directory, name, response):
         LOGGER.warning('Submission receipt not saved: run=%s stage=%s type=%s', directory.name, name, type(exc).__name__)
 
 
-def archive_attempt(directory: Path, reason: str) -> int:
-    """Move a finished or unaccepted attempt aside, keeping its receipts, before a new submission."""
+def archive_attempt(directory: Path, reason: str, replacement: dict | None = None) -> int:
+    """Move a finished or unaccepted attempt aside, keeping its receipts, before a new submission. `replacement`, a
+    receipt that names no archive, is written over its character.json instead of removing it: the receipt the next
+    submission starts from."""
     value = state(directory)
     if value.get("status") not in RETRYABLE:
         raise ValueError("Only failed or unaccepted Meshy attempts can be replaced")
@@ -69,7 +71,9 @@ def archive_attempt(directory: Path, reason: str) -> int:
     order = sorted(ATTEMPT_FILES, key=lambda name: (name == "character.json", name.endswith(".json")))
     for name in order:
         source = directory / name
-        if source.is_file():
+        if name == "character.json" and replacement is not None:
+            _write_json(source, replacement)
+        elif source.is_file():
             source.unlink()
     return index
 

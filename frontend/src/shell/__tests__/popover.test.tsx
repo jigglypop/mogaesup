@@ -1,11 +1,14 @@
 import { act } from 'react';
 
-import { describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { PermissionName, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
-import { nextMenuIndex, usePopover } from '../Shell';
+import { nextMenuIndex, Rail, usePopover } from '../Shell';
 
-vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: null }) }));
+const auth = vi.hoisted(() => ({ user: null as User | null }));
+vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: auth.user }) }));
 
 function Menu() {
   const { open, setOpen, ref } = usePopover();
@@ -92,5 +95,30 @@ describe('팝오버 메뉴', () => {
     expect(last).toBeTruthy();
     outside.remove();
     await unmount();
+  });
+});
+
+describe('레일', () => {
+  afterEach(() => {
+    auth.user = null;
+  });
+
+  it('운영은 카탈로그 편집자에게 가져오기로, 카탈로그를 고치지 않는 운영자에게 캐릭터 공장으로 간다', async () => {
+    const admin = async (...permissions: PermissionName[]) => {
+      auth.user = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user', permissions };
+      const { container, unmount } = await mount(
+        <MemoryRouter>
+          <Rail />
+        </MemoryRouter>,
+      );
+      const link = [...container.querySelectorAll('a')].find((anchor) => anchor.textContent === '운영');
+      await unmount();
+      return link?.getAttribute('href');
+    };
+    expect(await admin('operator', 'studio_viewer')).toBe('/admin/studio');
+    expect(await admin('paid_operator', 'operator', 'studio_viewer')).toBe('/admin/studio');
+    expect(await admin('moderator', 'catalog_editor')).toBe('/admin');
+    expect(await admin('admin', 'paid_operator', 'operator', 'moderator', 'catalog_editor', 'studio_viewer')).toBe('/admin');
+    expect(await admin('studio_viewer')).toBeUndefined();
   });
 });

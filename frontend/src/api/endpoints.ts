@@ -176,8 +176,11 @@ export const catalogApi = {
 /** The caller's own character from the wardrobe; each member reaches only theirs. */
 export const lookApi = {
   mine: (signal?: AbortSignal) => api<{ look: Look | null }>('/looks/me', { signal }),
-  /** Saves it and starts assembling it; poll `mine` until it is no longer `baking`. */
-  save: (body: LookRequest) => api<{ look: Look }>('/looks/me', { method: 'PUT', body }),
+  /**
+   * Saves it and starts assembling it; poll `mine` until it is no longer `baking`. The server reads the wardrobe from the
+   * character server first, so a save may take longer than other requests before it counts as unanswered.
+   */
+  save: (body: LookRequest) => api<{ look: Look }>('/looks/me', { method: 'PUT', body, timeoutMs: 60_000 }),
   wear: (worn: boolean) => api<{ look: Look }>('/looks/me', { method: 'PATCH', body: { worn } }),
 };
 

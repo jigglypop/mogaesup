@@ -9,6 +9,7 @@ from src.services import character_jobs
 from src.services.asset_delivery import inspect_glb
 from src.services.asset_editor import _write_json
 from src.services.glb import parse_glb
+from src.services.character_audit import RETRY
 from src.services.character_pipeline import OPERATIONS, CharacterPipeline, PipelineError, now, read_json
 from src.services.model_providers import MESHY_BASE
 from src.services.object_storage import sha256 as _digest
@@ -42,6 +43,21 @@ def publish_parts(pipeline, entry, run, control, operation, user_id):
         control.update(parts=read_json(output / "selection.json")["parts"], parts_sha256=_digest(output / "character.glb"))
 
 
+def release_attempt(run, stage):
+    """Move the `stage` attempt Meshy refused, never received or has ended aside with its receipts, so the stage can be
+    sent again. A rigging attempt leaves in its place the successful generation it was sent for."""
+    value = character_jobs.state(run)
+    if (value.get("stage") != stage or value.get("status") not in RETRY
+            or (stage == "rigging" and not value.get("generation_task_id"))):
+        raise PipelineError("action_unavailable", "현재 상태에서 실행할 수 없는 작업입니다.")
+    generation = None
+    if stage == "rigging":
+        # Without the archive this attempt's receipt names: a later attempt that fails is archived as its own.
+        generation = {key: item for key, item in value.items() if key not in {"generation_task_id", "http_status", "archived_as"}}
+        generation.update(stage="generation", status="SUCCEEDED", task_id=value["generation_task_id"], progress=100)
+    character_jobs.archive_attempt(run, "explicit", generation)
+
+
 def perform(pipeline: CharacterPipeline, entry, run, control, operation):
     action = operation["action_id"]
     payload = operation["payload"]
@@ -52,7 +68,7 @@ def perform(pipeline: CharacterPipeline, entry, run, control, operation):
         model = files.get(model_id)
     if operation["input_sha256"] and (not model or _digest(model) != operation["input_sha256"]):
         raise PipelineError("input_changed", "작업 수락 이후 모델이 변경되었습니다.")
-    if action == "submit_generation" and (not files.get("reference") or _digest(files["reference"]) != operation.get("image_sha256")):
+    if action in {"submit_generation", "retry_generation"} and (not files.get("reference") or _digest(files["reference"]) != operation.get("image_sha256")):
         raise PipelineError("input_changed", "작업 수락 이후 입력 이미지가 변경되었습니다.")
     if action in {"prepare_character", "resume_character", "recover_motion_task"}:
         from src.services.character_motion import prepare, recover, read_pack, DEFAULT_ACTIONS
@@ -71,13 +87,16 @@ def perform(pipeline: CharacterPipeline, entry, run, control, operation):
                     source = next((p for p in files.values() if p.suffix == ".glb" and _digest(p) == pack["input_sha256"]), None)
                     if source is None:
                         raise PipelineError("input_changed", "동작 패키지의 원본 모델을 찾을 수 없습니다.")
+                elif pack:
+                    # A pack started from the provider's task rigs that task: a model downloaded since is not its source.
+                    source = None
                 pack = prepare(run, source, control.get("height_meters", entry.get("height_meters")),
                     payload.get("actions", DEFAULT_ACTIONS), payload.get("max_new_tasks", 6), client)
                 if pack.get("status") == "complete":
                     for field in ("parts_model", "parts_blend", "rest_render", "parts_sha256"):
                         control.pop(field, None)
                     control.update(inspection=inspect_model(run / "motions/character.glb"), parts=[], review={}, rig_origin="meshy", body_coverage="unknown")
-    elif action in {"refresh_provider", "recover_task", "submit_generation", "submit_rigging"}:
+    elif action in {"refresh_provider", "recover_task", "submit_generation", "submit_rigging", "retry_generation", "retry_rigging"}:
         key = os.getenv("MESHY_API_KEY")
         if not key:
             raise PipelineError("provider_unconfigured", "서버의 Meshy API 설정이 필요합니다.")
@@ -85,9 +104,13 @@ def perform(pipeline: CharacterPipeline, entry, run, control, operation):
                           headers={"Authorization": f"Bearer {key}"}, timeout=120) as client:
             if action in {"refresh_provider", "recover_task"}:
                 character_jobs.refresh(run, client, payload.get("task_id"))
-            elif action == "submit_generation":
+            elif action in {"submit_generation", "retry_generation"}:
+                if action == "retry_generation":
+                    release_attempt(run, "generation")
                 character_jobs.generate(run, files["reference"], control.get("height_meters", entry.get("height_meters")), client, payload.get("profile", "meshy-7"))
             else:
+                if action == "retry_rigging":
+                    release_attempt(run, "rigging")
                 character_jobs.rig(run, client)
     elif action.startswith("download_"):
         character_jobs.download(run, action.removeprefix("download_"))
