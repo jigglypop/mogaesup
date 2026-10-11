@@ -757,6 +757,234 @@
       "fit": {
         "height": 0.35
       }
+    },
+    {
+      "id": "cafe-counter",
+      "file": "decor/cafe-counter.glb",
+      "category": "furniture",
+      "name": "카페 카운터",
+      "emoji": "🧾",
+      "shelf": "furniture",
+      "prompt": "앞판이 크림색이고 상판이 나무인 카페 주문 카운터 한 개. 위에 작은 계산기 상자와 컵 세 개가 붙어 있는 한 덩어리로 서 있다.",
+      "fit": {
+        "width": 2.4
+      }
+    },
+    {
+      "id": "cafe-espresso-machine",
+      "file": "decor/cafe-espresso-machine.glb",
+      "category": "furniture",
+      "name": "커피 머신",
+      "emoji": "☕",
+      "shelf": "furniture",
+      "prompt": "민트색과 은색으로 된 둥근 에스프레소 머신 한 대. 앞에 손잡이 두 개와 컵 받침, 위에 작은 컵 두 개가 붙어 있다.",
+      "fit": {
+        "height": 0.65
+      }
+    },
+    {
+      "id": "cafe-bread-showcase",
+      "file": "decor/cafe-bread-showcase.glb",
+      "category": "furniture",
+      "name": "빵 진열장",
+      "emoji": "🥐",
+      "shelf": "furniture",
+      "prompt": "앞이 유리로 된 나무 진열장 안에 크루아상과 식빵, 케이크가 놓인 빵 진열 쇼케이스 한 개.",
+      "fit": {
+        "width": 1.8
+      }
+    },
+    {
+      "id": "cafe-round-table",
+      "file": "decor/cafe-round-table.glb",
+      "category": "furniture",
+      "name": "원형 카페 테이블",
+      "emoji": "🍰",
+      "shelf": "furniture",
+      "prompt": "다리 하나로 선 작고 둥근 나무 카페 테이블 한 개, 상판 가운데에 작은 꽃병.",
+      "fit": {
+        "height": 1.0
+      }
+    },
+    {
+      "id": "cafe-chair",
+      "file": "decor/cafe-chair.glb",
+      "category": "furniture",
+      "name": "카페 의자",
+      "emoji": "🪑",
+      "shelf": "furniture",
+      "prompt": "등받이가 둥근 원목 카페 의자 한 개, 파스텔 쿠션이 얹혀 있다.",
+      "fit": {
+        "height": 1.35
+      }
+    },
+    {
+      "id": "cafe-menu-board",
+      "file": "decor/cafe-menu-board.glb",
+      "category": "furniture",
+      "name": "메뉴 입간판",
+      "emoji": "🪧",
+      "shelf": "furniture",
+      "prompt": "A자로 서는 검은 칠판 입간판 한 개. 칠판에는 글자 없이 분필로 그린 커피잔과 케이크 그림만 있다.",
+      "fit": {
+        "height": 1.5
+      }
+    },
+    {
+      "id": "shop-wall-shelf",
+      "file": "decor/shop-wall-shelf.glb",
+      "category": "furniture",
+      "name": "벽 진열 선반",
+      "emoji": "🗃️",
+      "shelf": "furniture",
+      "prompt": "색색의 상자와 병이 놓인 3단 나무 진열 선반 한 개. 뒤판이 막혀 있어 벽에 붙여 세운다.",
+      "fit": {
+        "height": 2.2
+      }
+    },
+    {
+      "id": "shop-clothes-rack",
+      "file": "decor/shop-clothes-rack.glb",
+      "category": "furniture",
+      "name": "옷걸이 행거",
+      "emoji": "👗",
+      "shelf": "furniture",
+      "prompt": "바퀴 달린 둥근 금속 행거에 파스텔 셔츠와 원피스 몇 벌이 걸려 있다.",
+      "fit": {
+        "height": 2.1
+      }
+    },
+    {
+      "id": "shop-checkout",
+      "file": "decor/shop-checkout.glb",
+      "category": "furniture",
+      "name": "계산대",
+      "emoji": "💳",
+      "shelf": "furniture",
+      "prompt": "작은 금전등록기와 바구니가 올라간 나무 계산대 한 개.",
+      "fit": {
+        "width": 1.8
+      }
+    },
+    {
+      "id": "shop-produce-stand",
+      "file": "decor/shop-produce-stand.glb",
+      "category": "furniture",
+      "name": "과일·채소 진열대",
+      "emoji": "🍎",
+      "shelf": "furniture",
+      "prompt": "사과, 당근, 양배추가 담긴 나무 상자가 계단식으로 놓인 진열대 한 개.",
+      "fit": {
+        "width": 2.0
+      }
+    },
+    {
+      "id": "shop-basket-stand",
+      "file": "decor/shop-basket-stand.glb",
+      "category": "furniture",
+      "name": "바구니 진열대",
+      "emoji": "🧺",
+      "shelf": "furniture",
+      "prompt": "손잡이 달린 장바구니 여러 개가 겹쳐 쌓인 낮은 나무 받침대 한 개.",
+      "fit": {
+        "height": 1.1
+      }
+    },
+    {
+      "id": "office-desk",
+      "file": "decor/office-desk.glb",
+      "category": "furniture",
+      "name": "사무용 책상",
+      "emoji": "🖥️",
+      "shelf": "furniture",
+      "prompt": "서랍이 달린 넓은 나무 책상 한 개, 위에 모니터 하나와 키보드, 머그컵이 붙어 있다.",
+      "fit": {
+        "width": 2.0
+      }
+    },
+    {
+      "id": "office-chair",
+      "file": "decor/office-chair.glb",
+      "category": "furniture",
+      "name": "사무용 의자",
+      "emoji": "💺",
+      "shelf": "furniture",
+      "prompt": "바퀴와 팔걸이가 달린 둥근 등받이 사무용 의자 한 개.",
+      "fit": {
+        "height": 1.4
+      }
+    },
+    {
+      "id": "office-bookshelf",
+      "file": "decor/office-bookshelf.glb",
+      "category": "furniture",
+      "name": "책장",
+      "emoji": "📚",
+      "shelf": "furniture",
+      "prompt": "색색의 책과 작은 화분이 꽂힌 키 큰 나무 책장 한 개.",
+      "fit": {
+        "height": 2.4
+      }
+    },
+    {
+      "id": "office-whiteboard",
+      "file": "decor/office-whiteboard.glb",
+      "category": "furniture",
+      "name": "화이트보드",
+      "emoji": "📋",
+      "shelf": "furniture",
+      "prompt": "다리와 바퀴가 달린 이동식 화이트보드 한 개. 표면에는 글자 없이 동그라미와 화살표만 그려져 있다.",
+      "fit": {
+        "height": 2.4
+      }
+    },
+    {
+      "id": "office-water-cooler",
+      "file": "decor/office-water-cooler.glb",
+      "category": "furniture",
+      "name": "정수기",
+      "emoji": "🚰",
+      "shelf": "furniture",
+      "prompt": "위에 파란 물통이 꽂힌 하얀 정수기 한 대, 앞에 작은 꼭지 두 개.",
+      "fit": {
+        "height": 1.6
+      }
+    },
+    {
+      "id": "plant-big-pot",
+      "file": "decor/plant-big-pot.glb",
+      "category": "furniture",
+      "name": "큰 화분",
+      "emoji": "🪴",
+      "shelf": "plants",
+      "prompt": "둥근 도자기 화분에 심은 키 큰 몬스테라 한 그루. 잎은 큼직한 덩어리로 단순하게.",
+      "fit": {
+        "height": 1.8
+      }
+    },
+    {
+      "id": "sofa-two-seat",
+      "file": "decor/sofa-two-seat.glb",
+      "category": "furniture",
+      "name": "2인 소파",
+      "emoji": "🛋️",
+      "shelf": "furniture",
+      "prompt": "쿠션이 통통한 파스텔 하늘색 2인용 소파 한 개.",
+      "fit": {
+        "width": 2.3
+      }
+    },
+    {
+      "id": "rug-round",
+      "file": "decor/rug-round.glb",
+      "category": "furniture",
+      "name": "러그",
+      "emoji": "🧶",
+      "shelf": "furniture",
+      "prompt": "두툼하고 둥근 파스텔 러그 한 장, 가장자리에 굵은 테두리.",
+      "fit": {
+        "width": 2.6
+      }
     }
   ]
 }
