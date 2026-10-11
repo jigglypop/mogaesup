@@ -201,7 +201,7 @@ export function LayoutComposer({ session, residents, ownerId }: Props) {
       setWorking('measuring');
       const snapshot = session.runtime.buildingStore.getState().serialize();
       const residentRevision = residents.revision();
-      const measured = await measureLayoutCatalog(snapshot.objects.flatMap(object => object.config?.modelUrl ? [object.config.modelUrl] : []));
+      const measured = await measureLayoutCatalog(snapshot.objects.flatMap(object => object.config?.modelUrl ? [object.config.modelUrl] : []), intent.kind);
       if (controller.signal.aborted) return;
       const pivot = session.pivot();
       const points = residents.getState().map(resident => [resident.position[0], resident.position[2]] as const);

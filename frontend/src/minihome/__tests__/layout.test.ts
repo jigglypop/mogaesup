@@ -7,7 +7,7 @@ import { MeshoptDecoder } from 'meshoptimizer';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createBuildingStore, DEFAULT_BUILDING_OBJECT_CATALOG, type BuildingSerializedState } from 'gaesup-world/building';
 import { createVillage, SPAWN } from '../village';
-import { LayoutError, applyLayout, footprintsOverlap, interpretLayout, measureLayoutCatalog, objectFootprint, proposeLayout, type LayoutCatalogItem, type XZ } from '../edit/layout';
+import { LayoutError, STORE_PROP_IDS, applyLayout, footprintsOverlap, interpretLayout, measureLayoutCatalog, objectFootprint, proposeLayout, type LayoutCatalogItem, type XZ } from '../edit/layout';
 import { createEditHistory } from '../edit/history';
 import type { EditSession } from '../edit/session';
 import type { LocalBox } from '../edit/objects';
@@ -21,6 +21,7 @@ vi.mock('../edit/bounds', () => ({ loadModelBounds: load }));
 const frontend = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const engine = resolve(dirname(fileURLToPath(import.meta.resolve('gaesup-world'))), '../public');
 let measured: LayoutCatalogItem[];
+let measuredStudio: LayoutCatalogItem[];
 const bounds = new Map<string, LocalBox>();
 const wanted = new Set(['table-basic', 'chair-basic', 'shop-stall-basic', 'storage-basic', 'lamp-basic']);
 beforeAll(async () => {
@@ -28,7 +29,9 @@ beforeAll(async () => {
   const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.decoder': MeshoptDecoder });
   const defaults = DEFAULT_BUILDING_OBJECT_CATALOG.filter(v => wanted.has(v.id));
   const village = createVillage();
-  const urls = new Set([...defaults.map(v => v.modelUrl!), ...village.objects!.flatMap(v => v.config?.modelUrl ? [v.config.modelUrl] : [])]);
+  // Studio furniture the layout may place (what the browser measures for each kind): the same GLBs, read the same way.
+  const stores = [...new Set(STORE_PROP_IDS)].map(id => ({ id: `prop-${id}`, label: id, modelUrl: `/gltf/decor/${id}.glb` }));
+  const urls = new Set([...defaults.map(v => v.modelUrl!), ...stores.map(v => v.modelUrl), ...village.objects!.flatMap(v => v.config?.modelUrl ? [v.config.modelUrl] : [])]);
   for (const url of urls) {
     const override = resolve(frontend, 'public', url.replace(/^\//, ''));
     const path = existsSync(override) ? override : resolve(engine, url.replace(/^\//, ''));
@@ -39,6 +42,8 @@ beforeAll(async () => {
     bounds.set(url, { min: value.min, max: value.max });
   }
   measured = defaults.map(v => ({ id: v.id, label: v.label, modelUrl: v.modelUrl!, scale: v.defaultScale, color: v.defaultColor, bounds: bounds.get(v.modelUrl!)! }));
+  // What measureLayoutCatalog adds for a kind: the studio furniture that kind may place.
+  measuredStudio = stores.map(v => ({ id: v.id, label: v.label, modelUrl: v.modelUrl, scale: 1, color: '#ffffff', bounds: bounds.get(v.modelUrl)! }));
 });
 
 const island = () => {
@@ -46,7 +51,7 @@ const island = () => {
   store.getState().hydrate(createVillage());
   return { store, snapshot: store.getState().serialize() };
 };
-const proposal = (snapshot: BuildingSerializedState, text = '12m × 12m 카페 2인') => proposeLayout(snapshot, interpretLayout(text), measured,
+const proposal = (snapshot: BuildingSerializedState, text = '12m × 12m 카페 2인') => proposeLayout(snapshot, interpretLayout(text), [...measured, ...measuredStudio],
   [SPAWN[0], SPAWN[2]], [[SPAWN[0], SPAWN[2]]], url => bounds.get(url));
 
 describe('실제 섬 매장 자동 배치', () => {
@@ -85,7 +90,17 @@ describe('실제 섬 매장 자동 배치', () => {
     const { snapshot } = island();
     const plan = proposal(snapshot, text);
     expect(plan.objects.length).toBeGreaterThan(0);
-    expect(plan.objects.every(v => measured.some(item => item.id === v.config?.modelId))).toBe(true);
+    expect(plan.objects.every(v => [...measured, ...measuredStudio].some(item => item.id === v.config?.modelId))).toBe(true);
+  });
+
+  it('카페·상점·사무실은 각자 쓰는 실제 기물을 자리가 있는 만큼 더 놓는다', () => {
+    const { snapshot } = island();
+    const ids = (text: string) => proposal(snapshot, text).objects.map(v => v.config?.modelId);
+    expect(ids('12m × 12m 카페 2인')).toEqual(expect.arrayContaining(['table-basic', 'chair-basic', 'shop-stall-basic', 'prop-cafe-counter']));
+    expect(ids('12m × 12m 상점')).toEqual(expect.arrayContaining(['prop-shop-checkout', 'prop-shop-wall-shelf']));
+    expect(ids('12m × 12m 사무실 4인')).toEqual(expect.arrayContaining(['prop-office-bookshelf', 'prop-office-whiteboard']));
+    // Only what the kind places: a cafe never gets the office's desks or shelves.
+    expect(ids('12m × 12m 카페 2인').some(id => String(id).startsWith('prop-office-'))).toBe(false);
   });
 
   it('적용은 한 undo 단계이고 재검수 중 섬이 바뀌면 적용하지 않는다', () => {

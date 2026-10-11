@@ -67,7 +67,7 @@ describe('매장 배치 화면', () => {
     await create(container);
     expect(container.querySelector('[aria-label="실제 미리보기 장면"]')).not.toBeNull();
     // Only the island's placed models are measured besides the planner's own pieces, not the furniture catalog.
-    expect(actions.measure).toHaveBeenCalledWith([]);
+    expect(actions.measure).toHaveBeenCalledWith([], 'cafe');
     expect(actions.propose).toHaveBeenCalledOnce();
     expect(actions.apply).not.toHaveBeenCalled();
     expect(api.interpret).not.toHaveBeenCalled();

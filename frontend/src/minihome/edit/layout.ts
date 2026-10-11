@@ -66,12 +66,72 @@ export function checkLayoutIntent(intent: LayoutIntent): void {
  * dozens of studio models the planner never places and would all be downloaded and decoded for each proposal. A placed
  * model that cannot be measured stays unknown, and `proposeLayout` refuses to guess its footprint in the owner's words.
  */
-export async function measureLayoutCatalog(extraUrls: readonly string[] = []): Promise<LayoutCatalogItem[]> {
+export async function measureLayoutCatalog(extraUrls: readonly string[] = [], kind?: LayoutIntent['kind']): Promise<LayoutCatalogItem[]> {
   const wanted = new Set(['table-basic', 'chair-basic', 'shop-stall-basic', 'storage-basic', 'lamp-basic']);
-  const items = DEFAULT_BUILDING_OBJECT_CATALOG.filter(item => wanted.has(item.id) && !!item.modelUrl)
-    .map(item => ({ id: item.id, label: item.label, modelUrl: item.modelUrl!, scale: item.defaultScale, color: item.defaultColor }));
+  const items: LayoutCatalogItem[] = DEFAULT_BUILDING_OBJECT_CATALOG.filter(item => wanted.has(item.id) && !!item.modelUrl)
+    .map(item => ({ id: item.id, label: item.label, modelUrl: item.modelUrl!, scale: item.defaultScale, color: item.defaultColor, bounds: undefined! }));
+  // The studio furniture this kind may place: only those, so a proposal downloads what it can use.
+  for (const prop of kind ? storeProps(kind) : []) {
+    if (items.some(item => item.id === propCatalogId(prop.id))) continue;
+    items.push({ id: propCatalogId(prop.id), label: prop.label, modelUrl: storePropUrl(prop.id), scale: 1, color: '#ffffff', bounds: undefined! });
+  }
   await Promise.all([...new Set(extraUrls)].map(url => loadModelBounds(url).catch(() => undefined)));
   return Promise.all(items.map(async item => ({ ...item, bounds: await loadModelBounds(item.modelUrl) })));
+}
+
+/**
+ * Studio furniture made with scripts/props, per kind, in the order the layout tries to place it after its core pieces:
+ * each where it fits and skipped where it does not. They are built-in catalog items (`prop-<id>`, see
+ * server/migrations/20261011190000_store_props.sql) and are placed the way the decorating drawer places them.
+ */
+const STORE_PROPS: Record<LayoutIntent['kind'], { id: string; label: string; at: StoreSpot }[]> = {
+  cafe: [
+    { id: 'cafe-counter', label: '카페 카운터', at: 'back' },
+    { id: 'cafe-espresso-machine', label: '커피 머신', at: 'backRight' },
+    { id: 'cafe-bread-showcase', label: '빵 진열장', at: 'right' },
+    { id: 'cafe-menu-board', label: '메뉴 입간판', at: 'frontLeft' },
+    { id: 'plant-big-pot', label: '큰 화분', at: 'backLeft' },
+    { id: 'rug-round', label: '러그', at: 'center' },
+  ],
+  shop: [
+    { id: 'shop-checkout', label: '계산대', at: 'front' },
+    { id: 'shop-wall-shelf', label: '벽 진열 선반', at: 'left' },
+    { id: 'shop-wall-shelf', label: '벽 진열 선반', at: 'right' },
+    { id: 'shop-clothes-rack', label: '옷걸이 행거', at: 'backRight' },
+    { id: 'shop-produce-stand', label: '과일·채소 진열대', at: 'right' },
+    { id: 'shop-basket-stand', label: '바구니 진열대', at: 'frontRight' },
+    { id: 'plant-big-pot', label: '큰 화분', at: 'backLeft' },
+    { id: 'rug-round', label: '러그', at: 'center' },
+  ],
+  office: [
+    { id: 'office-bookshelf', label: '책장', at: 'left' },
+    { id: 'office-whiteboard', label: '화이트보드', at: 'right' },
+    { id: 'office-water-cooler', label: '정수기', at: 'frontRight' },
+    { id: 'sofa-two-seat', label: '2인 소파', at: 'back' },
+    { id: 'plant-big-pot', label: '큰 화분', at: 'backLeft' },
+    { id: 'rug-round', label: '러그', at: 'center' },
+  ],
+};
+type StoreSpot = 'back' | 'front' | 'left' | 'right' | 'backLeft' | 'backRight' | 'frontLeft' | 'frontRight' | 'center';
+const storeProps = (kind: LayoutIntent['kind']) => STORE_PROPS[kind];
+/** Every studio piece a layout may place, once each (for tools that measure them ahead of time). */
+export const STORE_PROP_IDS = [...new Set(Object.values(STORE_PROPS).flat().map(prop => prop.id))];
+const propCatalogId = (id: string) => `prop-${id}`;
+const storePropUrl = (id: string) => `/gltf/decor/${id}.glb`;
+/** Where a store piece is wanted inside the room, as a point the scan starts from (a wall or a corner, or the centre). */
+const spotOf = (at: StoreSpot, min: XZ, max: XZ): XZ => {
+  const mid: XZ = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2];
+  switch (at) {
+    case 'back': return [mid[0], min[1] + 1];
+    case 'front': return [mid[0], max[1] - 1];
+    case 'left': return [min[0] + 1, mid[1]];
+    case 'right': return [max[0] - 1, mid[1]];
+    case 'backLeft': return [min[0] + 1, min[1] + 1];
+    case 'backRight': return [max[0] - 1, min[1] + 1];
+    case 'frontLeft': return [min[0] + 1, max[1] - 1];
+    case 'frontRight': return [max[0] - 1, max[1] - 1];
+    case 'center': return mid;
+  }
 }
 
 export function objectFootprint(object: PlacedObject, bounds?: LocalBox): XZ[] {
@@ -213,6 +273,13 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
     }
     const lamp = scan('lamp-basic', [max[0] - 1, max[1] - 1]);
     if (lamp) keep(lamp);
+    // Studio furniture for the kind, where there is room for it (the core pieces above come first).
+    for (const prop of storeProps(intent.kind)) {
+      const id = propCatalogId(prop.id);
+      if (!catalog.has(id)) continue;
+      const piece = scan(id, spotOf(prop.at, min, max));
+      if (piece) keep(piece);
+    }
     const walls: LayoutWall[] = [];
     const wallGroupId = `${planId}-walls`;
     const wallMeshId = `${planId}-wall`;
