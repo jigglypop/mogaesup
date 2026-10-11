@@ -664,3 +664,105 @@ async fn 주소_몇_개로는_계정_한도를_다_쓰지_못해_새_기기에�
     assert_eq!(login_at(&app, "203.0.113.3", "budget_owner", PASSWORD).await.status, StatusCode::TOO_MANY_REQUESTS);
     app.cleanup().await;
 }
+
+/// From here on permissions cannot be read, as when the database fails in the middle of a sign-in: `auth_tuples`
+/// becomes a view whose `subject_relation` raises. The account's role, which the sign-in reads first, never asks for it.
+async fn break_permissions(app: &TestApp) {
+    for statement in [
+        "ALTER TABLE auth_tuples RENAME TO auth_tuples_kept",
+        "CREATE FUNCTION unreadable() RETURNS text STABLE LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unreadable'; END $$",
+        "CREATE VIEW auth_tuples AS SELECT object_type, object_id, relation, subject_type, subject_id,
+         unreadable() AS subject_relation FROM auth_tuples_kept",
+    ] {
+        sqlx::query(statement).execute(&app.state.db).await.unwrap();
+    }
+}
+
+async fn mend_permissions(app: &TestApp) {
+    for statement in ["DROP VIEW auth_tuples", "ALTER TABLE auth_tuples_kept RENAME TO auth_tuples"] {
+        sqlx::query(statement).execute(&app.state.db).await.unwrap();
+    }
+}
+
+/// Until the transaction it returns ends, permissions cannot be read, as when the database is slow in the middle of a
+/// sign-in: it holds `auth_tuples` locked. Making an account never reads it.
+async fn hold_permissions(app: &TestApp) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut held = app.state.db.begin().await.unwrap();
+    sqlx::query("LOCK TABLE auth_tuples IN ACCESS EXCLUSIVE MODE").execute(&mut *held).await.unwrap();
+    held
+}
+
+#[tokio::test]
+async fn 권한을_읽지_못한_로그인과_가입은_세션을_남기지_않고_다른_기기를_밀어내지_않는다() {
+    let app = TestApp::new(None).await;
+    let phone = app.register("perm_owner", "권한").await;
+    app.register("perm_other", "다른 계정").await;
+    app.grant("perm_other", "system:mogaesup", "moderator").await;
+    // The account is at its cap, and its phone is the device used least recently.
+    age(&app, &phone, 24).await;
+    let user = app.user_id("perm_owner").await;
+    for at in 1..SESSIONS_PER_USER {
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '30 days')",
+        )
+        .bind(hash(&format!("mogaesup_session={at:064x}")))
+        .bind(user)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    }
+    let before = sessions(&app).await;
+
+    break_permissions(&app).await;
+    let body = json!({"username": "perm_owner", "password": PASSWORD});
+    let refused = app.call("POST", "/api/auth/login", Some(body), None).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("database")));
+    assert_eq!(refused.cookie, None);
+    // A sign-up whose sign-in fails says the account is there.
+    let body = json!({"username": "perm_late", "password": PASSWORD});
+    let late = app.call("POST", "/api/auth/register", Some(body), None).await;
+    assert_eq!((late.status, late.body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("signed_up")));
+    assert_eq!(late.cookie, None);
+    // Neither made a session, nor ended the phone's to make room for one.
+    assert_eq!(sessions(&app).await, before);
+    assert!(days_left(&app, &phone).await.is_some());
+
+    mend_permissions(&app).await;
+    assert_eq!(signed_in(&app, &phone).await, "perm_owner");
+    login(&app, "perm_late").await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 가입_뒤_로그인이_마감까지_끝나지_않아도_가입은_끝났다고_답한다() {
+    let app = TestApp::new(None).await;
+    let held = hold_permissions(&app).await;
+    // The account is made, and its sign-in waits for permissions past the route's deadline. The sign-up answers before
+    // it is cut off as busy, which would send the member to sign up again and find the name taken.
+    let body = json!({"username": "slow_late", "password": PASSWORD});
+    let late = app.call("POST", "/api/auth/register", Some(body.clone()), None).await;
+    assert_eq!((late.status, late.body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("signed_up")));
+    assert_eq!(late.cookie, None);
+    assert_eq!(sessions(&app).await, 0);
+
+    held.rollback().await.unwrap();
+    let again = app.call("POST", "/api/auth/register", Some(body), None).await;
+    assert_eq!((again.status, again.body["code"].as_str()), (StatusCode::CONFLICT, Some("username_taken")));
+    login(&app, "slow_late").await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 실시간_티켓은_계정당_10분에_180장까지_나온다() {
+    let app = TestApp::new(None).await;
+    let cookie = app.register("tickets", "티켓").await;
+    // A room and its game socket take one each at every reconnect: two tabs whose connection drops every 25 seconds
+    // ask for about a hundred in ten minutes.
+    for _ in 0..180 {
+        let reply = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    let refused = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    app.cleanup().await;
+}

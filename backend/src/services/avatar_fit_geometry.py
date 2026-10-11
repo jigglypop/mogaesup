@@ -82,12 +82,51 @@ def normalize_body(objects, body, target):
     return report
 
 
+# A T-pose arm's own skin lies within ARM_SKIN_M of its line, on a provider's body before slimming and on a big hand's
+# raised thumb too, and the arm's share fades out by ARM_REACH_M.
+ARM_SKIN_M, ARM_REACH_M = .07, .09
+
+
+def arm_lines(rig):
+    """Each arm's joints from the shoulder through the elbow to the wrist."""
+    bones = {bone.name.lower().split(':')[-1]: bone for bone in rig.data.bones}
+    lines = [[rig.matrix_world @ bones[side+name].head_local for name in ('arm', 'forearm', 'hand') if side+name in bones]
+             for side in ('left', 'right')]
+    return [joints for joints in lines if len(joints) > 1]
+
+
+def arm_share(point, lines, tree):
+    """How much of the skin at `point` is an arm's own, 0 to 1. The arm's line sees its own skin with none between:
+    where the head overhangs an arm, however close, the arm's skin lies between them (`tree` is the body's surface,
+    whichever way its faces wind). Past the wrist the line runs on through the hand, which the head never overhangs
+    and whose fingers face one another across their gaps; there the distance alone decides."""
+    nearest, foot, hand = float('inf'), None, False
+    for joints in lines:
+        for index, (start, end) in enumerate(zip(joints, joints[1:])):
+            axis = end-start
+            t = max(0, (point-start).dot(axis)/max(axis.dot(axis), 1e-10))
+            if index < len(joints)-2:
+                t = min(t, 1)
+            distance = (point-(start+axis*t)).length
+            if distance < nearest:
+                nearest, foot, hand = distance, start+axis*t, index == len(joints)-2 and t > 1
+    if nearest >= ARM_REACH_M:
+        return 0.
+    # The ray stops 2 mm short of the skin at `point`, whose own faces it reaches last.
+    if not hand and nearest > .002 and tree.ray_cast(foot, (point-foot)/nearest, nearest-.002)[0] is not None:
+        return 0.
+    share = min(1, (ARM_REACH_M-nearest)/(ARM_REACH_M-ARM_SKIN_M))
+    return share*share*(3-2*share)
+
+
 def head_weighted_vertices(body, rig, minimum=.25):
     """Return vertices that are materially controlled by the canonical Head bone."""
     head = next((bone for bone in rig.data.bones
                  if bone.name.lower().split(':')[-1] == 'head'), None)
     if head is None:
         return {}
+    lines = arm_lines(rig)
+    tree = surface(body)[0] if lines else None
     result = {}
     for obj in body:
         group = next((group for group in obj.vertex_groups
@@ -106,7 +145,8 @@ def head_weighted_vertices(body, rig, minimum=.25):
                 continue
             weight = next((entry.weight for entry in vertex.groups
                            if entry.group == group.index), 0.)
-            if weight >= minimum:
+            # Arm and hand skin that an earlier binding gave to Head is no part of the head.
+            if weight >= minimum and not arm_share(obj.matrix_world @ vertex.co, lines, tree):
                 indices.add(vertex.index)
         if indices:
             result[obj] = indices
@@ -190,15 +230,22 @@ def bind_body_head(body, rig, spec):
     if bone is None:
         return {'method': 'unchanged', 'adjusted_vertices': 0}
     blend_start = collar-.04
+    lines = arm_lines(rig)
+    tree = surface(body)[0] if lines else None
     adjusted = 0
     for obj in body:
         group = obj.vertex_groups.get(bone.name) or obj.vertex_groups.new(name=bone.name)
         for vertex in obj.data.vertices:
-            height = (obj.matrix_world @ vertex.co).z
+            point = obj.matrix_world @ vertex.co
+            height = point.z
             if height <= blend_start:
                 continue
             blend = min(1, (height-blend_start)/(collar-blend_start))
             blend = blend*blend*(3-2*blend)
+            # T-pose arms and hands reach into the band at shoulder height: their own skin keeps its bones.
+            blend *= 1-arm_share(point, lines, tree)
+            if blend <= 0:
+                continue
             previous = [(g.group, g.weight) for g in vertex.groups]
             total = sum(weight for _, weight in previous)
             head_weight = sum(weight for index, weight in previous if index == group.index)
@@ -223,6 +270,9 @@ def slim_base_body(body, rig, spec):
     from src.services.avatar_head_geometry import underlayer_faces
     fabric = underlayer_faces(body)
     _, _, head_collar = head_region(body, rig, spec)
+    lines = arm_lines(rig)
+    # The arms' own skin is told apart on the body as it is before any of it is made thinner.
+    tree = surface(body)[0] if lines else None
     joints = []
     for side in ('Left', 'Right'):
         for name, parent, diameter in (('Hand', 'ForeArm', core.get('wrist_diameter_m', .028)),
@@ -253,14 +303,19 @@ def slim_base_body(body, rig, spec):
             point = obj.matrix_world @ vertex.co
             is_fabric = vertex.index in fabric_vertices
             # Auto-rigging can assign the entire face to a shoulder. Only the
-            # identified underlayer below the head may be made thinner.
+            # identified underlayer below the head may be made thinner, and
+            # that of the T-pose arms beside it at shoulder height as far as
+            # it is theirs.
             near_joint = []
             for center, axis, radius in joints:
                 along = (point-center).dot(axis)
                 radial = point-center-axis*along
                 if abs(along) < .035 and radial.length < .07:
                     near_joint.append((center, axis, radius, along))
-            if (not is_fabric and not near_joint) or point.z >= head_collar-.04:
+            if not is_fabric and not near_joint:
+                continue
+            share = arm_share(point, lines, tree) if point.z >= head_collar-.04 else 1
+            if not share:
                 continue
             influences = [(segments[names[g.group]], g.weight) for g in vertex.groups
                           if is_fabric and names.get(g.group) in segments]
@@ -299,6 +354,7 @@ def slim_base_body(body, rig, spec):
                 radial = candidate-center-axis*axial
                 blend = (1-abs(along)/.035)**2
                 delta += radial*(min(1, radius/max(radial.length, 1e-8))-1)*blend
+            delta *= share
             if delta.length > 1e-7:
                 local_delta = inverse.to_3x3() @ delta
                 destination = vertex.co+local_delta

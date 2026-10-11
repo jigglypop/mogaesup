@@ -51,8 +51,9 @@ export const glbBodiesApi = {
   saveDraft: (type: BodyType, draft: GlbBodyDraft) => localStorage.setItem(draftKey(type), JSON.stringify(draft)),
   info: (id: string, signal?: AbortSignal) => request<BodyGlbAsset>(`/api/avatar-factory/base-bodies/glb-assets/${encodeURIComponent(id)}`, { signal }),
   upload: (file: File) => uploadGlb('/api/avatar-factory/base-bodies/glb-assets', file),
-  create: (input: GlbBodyInput) => glbBodies(input.body_type).send(input, pending => request<FactoryJob>('/api/avatar-factory/base-bodies/glb', {
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (input: GlbBodyInput, key?: string) => glbBodies(input.body_type).send(input, pending => request<FactoryJob>('/api/avatar-factory/base-bodies/glb', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
     body: JSON.stringify(pending.input), timeoutMs: 60000,
-  })),
+  }), key ? { key } : {}),
 };

@@ -307,7 +307,7 @@ export function CharacterFactory({ jobs: listedJobs, jobsLoading, jobsError, cat
             : <p role="status">{job.reference_preparation.failure?.message || job.error || (job.reference_preparation.status === 'pending' ? '대기 중' : '규격 이미지 준비 중')}</p>}
           {normalizedSideReference && <a href={normalizedSideReference.url} target="_blank" rel="noreferrer"><img src={normalizedSideReference.url} alt={'공통 규격으로 맞추고 배경을 제거한 오른쪽 측면 캐릭터'} /></a>}
         </section>}
-        {job && <RigRecovery jobId={job.id} refreshKey={`${job.status}:${job.character_flow?.stage ?? ''}:${job.updated_at ?? ''}`} onComplete={() => { void refreshJobs(); }} />}
+        {job && <RigRecovery key={`rig:${job.id}`} jobId={job.id} refreshKey={`${job.status}:${job.character_flow?.stage ?? ''}:${job.updated_at ?? ''}`} onComplete={() => { void refreshJobs(); }} />}
         {job && <StageRunner key={`stages:${job.id}`} jobId={job.id} onChange={() => { void refreshJobs(); void selectedJob.refresh(); }} />}
         {job ? <NativeAssembly key={`assembly:${job.id}`} jobId={job.id} simple flow={job.character_flow} /> : <div className="character-empty"><h2>캐릭터 미리보기</h2><p>{jobsLoading ? '작업 불러오는 중…' : '제작 결과 없음'}</p></div>}
       </section>

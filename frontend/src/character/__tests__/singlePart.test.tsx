@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { mount } from '../../__tests__/mount';
 import { factoryApi, type FactoryJob, type NativePartsState } from '../factory/api';
 import { studioApi } from '../studio/api';
+import garmentStyles from '../studio/garment-styles.json';
 import { SinglePart } from '../studio/SinglePart';
 
 // The screens beside the form (the viewer, progress, stage runner, uploads) are not what is tested.
@@ -138,6 +139,25 @@ describe('파츠 하나 만들기', () => {
     await unmount();
   });
 
+  it('다른 탭이 이미 복구해 지운 요청도 이 화면의 복구 버튼은 같은 요청 키로만 보낸다', async () => {
+    const PENDING = 'gaesup.studio.single-part.v1';
+    localStorage.setItem(PENDING, JSON.stringify({ key: 'lost-key', input: { base_job_id: 'base-job', base_version: 'v1', slot: 'top',
+      hair_length: 'source', bottom_kind: 'source', view_mode: 'front_side_back', part_method: 'worn' } }));
+    singlePart.mockRestore();
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ id: 'part-job' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container, unmount } = await open('top');
+    await settle();
+    // Another tab got the answer and forgot the saved request after this screen last looked.
+    localStorage.removeItem(PENDING);
+    await submit(container, '기존 요청 복구');
+    await settle();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Idempotency-Key')).toBe('lost-key');
+    expect(localStorage.getItem(PENDING)).toBeNull();
+    await unmount();
+  });
+
   it('하의 종류는 입힌 채 만들어도 보낸다', async () => {
     const { container, unmount } = await open('bottom');
     await settle();
@@ -161,6 +181,21 @@ describe('파츠 하나 만들기', () => {
     expect(select(container, '헤어 길이').value).toBe('short');
     await submit(container, '헤어 하나 생성');
     expect(singlePart.mock.calls[0]?.[0]).toMatchObject({ slot: 'hair', hair_length: 'short', part_method: 'worn', part_name: '레이어드 C컬 롭' });
+    await unmount();
+  });
+
+  it('디자인 헤어는 파일 순서대로 모두 스타일에 있고, 고르면 이름·디자인·헤어 길이를 채운다', async () => {
+    const hair = (garmentStyles.garments as { slot: string; name: string; brief: string; hair_length?: string }[]).filter((item) => item.slot === 'hair');
+    const { container, unmount } = await open('hair');
+    await settle();
+    await submit(container, '하나 생성');
+    expect([...select(container, '스타일').options].map((option) => option.value)).toEqual(['', ...hair.map((item) => item.name)]);
+    for (const item of hair) {
+      await choose(container, '스타일', item.name);
+      expect(select(container, '스타일').value).toBe(item.name);
+      expect(select(container, '헤어 길이').value, item.name).toBe(item.hair_length);
+      expect(container.querySelector('textarea')?.value).toBe(`${item.brief} ${garmentStyles.style}`);
+    }
     await unmount();
   });
 

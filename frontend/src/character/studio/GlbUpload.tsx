@@ -1,7 +1,8 @@
 import { useId, useRef, useState } from 'react';
 import './glb-upload.css';
 
-export function GlbUpload({ disabled = false, onUpload, maxMb = 64 }: { disabled?: boolean; onUpload: (file: File) => Promise<void>; maxMb?: number }) {
+// `action` is what the button does: '등록' when the upload registers the GLB, '업로드' when registering is a later step.
+export function GlbUpload({ disabled = false, onUpload, maxMb = 64, action = '등록' }: { disabled?: boolean; onUpload: (file: File) => Promise<void>; maxMb?: number; action?: string }) {
   const id = useId(), locked = useRef(false), dragDepth = useRef(0);
   const [file, setFile] = useState<File>(), [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false), [complete, setComplete] = useState(false), [error, setError] = useState('');
@@ -22,7 +23,7 @@ export function GlbUpload({ disabled = false, onUpload, maxMb = 64 }: { disabled
     if (!file || disabled || locked.current) return;
     locked.current = true; setUploading(true); setError('');
     try { await onUpload(file); setComplete(true); }
-    catch (e) { setError(e instanceof Error ? e.message : 'GLB 등록에 실패했습니다.'); }
+    catch (e) { setError(e instanceof Error ? e.message : `GLB ${action}에 실패했습니다.`); }
     finally { locked.current = false; setUploading(false); }
   }
   // The file input inside is the one control: Tab reaches it, Space or Enter opens the picker, and a paste while it
@@ -41,9 +42,9 @@ export function GlbUpload({ disabled = false, onUpload, maxMb = 64 }: { disabled
         aria-describedby={`${id}-hint${error ? ` ${id}-error` : ''}`} aria-invalid={!!error}
         onChange={event => { select(Array.from(event.target.files || [])); event.target.value = ''; }} />
     </label>
-    {file && <div className="glb-upload-selection"><div><strong title={file.name}>{file.name}</strong><small>{file.size >= 1048576 ? `${(file.size / 1048576).toFixed(2)} MB` : `${Math.max(1, Math.ceil(file.size / 1024))} KB`}</small></div><button type="button" disabled={unavailable || complete} onClick={() => void upload()}>{uploading ? '등록 중…' : complete ? '등록 완료' : '등록'}</button></div>}
-    {uploading && <progress aria-label="GLB 등록 중" />}
-    {complete && <span className="glb-upload-status" role="status">등록 완료</span>}
+    {file && <div className="glb-upload-selection"><div><strong title={file.name}>{file.name}</strong><small>{file.size >= 1048576 ? `${(file.size / 1048576).toFixed(2)} MB` : `${Math.max(1, Math.ceil(file.size / 1024))} KB`}</small></div><button type="button" disabled={unavailable || complete} onClick={() => void upload()}>{uploading ? `${action} 중…` : complete ? `${action} 완료` : action}</button></div>}
+    {uploading && <progress aria-label={`GLB ${action} 중`} />}
+    {complete && <span className="glb-upload-status" role="status">{action} 완료</span>}
     {error && <p id={`${id}-error`} role="alert">{error}</p>}
   </div>;
 }

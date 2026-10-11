@@ -26,7 +26,7 @@ from src.services.avatar_body_layers import (
     crop_regions, mark_body_coverage, hide_covered_materials, restore_covered_materials, strip_covered_primitives,
 )
 from src.services.avatar_head_geometry import headwear_palette, prepare_rear_hair, fit_hat, fit_reference_frame, hat_target_over_hair, fit_hair, fit_hair_length, fit_hair_scalp, fit_hair_scalp_bounded, head_preview_body, whiten_base_body, seat_legacy_hair_roots
-from src.services.avatar_hair_geometry import add_scalp_cap, fit_hair_cavity, repair_hair_backing
+from src.services.avatar_hair_geometry import add_scalp_cap, fit_hair_cavity, repair_hair_backing, seat_hair_cavity
 from src.services.avatar_arm_geometry import fit_sleeves, bind_top_regions, t_rest_pose
 from src.services.avatar_render_budget import optimize_part
 from src.services.avatar_pipeline_quality import REVISION as QUALITY_REVISION, seal_quality
@@ -446,7 +446,11 @@ def fit_uniform_part(part, meshes, body, rig, spec, targets, imported):
         transform, _, measurement = fit_reference_frame(meshes, targets[slot], slot)
         measurement['frame'] = 'body_slot_bounds'
     place(meshes, transform)
-    if slot in ('hair', 'hat'):
+    if slot == 'hair' and fitting.get('hair_cavity_seat') == 'two-way-v1':
+        # fit_hair put the outer crown a fixed height over the head: the inner surface comes down onto
+        # the scalp (or out of it), still with one uniform scale. A solid mass of hair keeps its place.
+        measurement['cavity_fitting'] = seat_hair_cavity(meshes, body, rig, spec)
+    elif slot in ('hair', 'hat'):
         # Still one uniform scale: enlarge only when the inner surface sits inside the skull (a cap
         # sized to the head's width is too shallow for the deep SD head and its forehead shows through).
         measurement['cavity_fitting'] = fit_hair_cavity(meshes, body, rig, spec)

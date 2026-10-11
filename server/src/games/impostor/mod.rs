@@ -76,6 +76,7 @@ use super::{
     BAD_ACTION, BAD_LAYOUT, Ctx, Game, GameError, Kind, Millis, distance_xz, distinct, layout_points, pick_many, point,
     within,
 };
+use crate::security::plain_text;
 use bots::Bot;
 use walk::{Route, Walk};
 
@@ -406,12 +407,10 @@ fn id(value: &Value) -> Option<Uuid> {
 }
 
 /// Text a player may say: something, at most [`MAX_TEXT`] characters once trimmed, with no control characters (nor
-/// the invisible ones that turn the text around).
+/// the invisible ones that hide the text or turn it around, see [`plain_text`]).
 fn clean(text: &str) -> Option<&str> {
     let text = text.trim();
-    let turns = |c: char| matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-    let fine =
-        !text.is_empty() && text.chars().count() <= MAX_TEXT && !text.chars().any(|c| c.is_control() || turns(c));
+    let fine = !text.is_empty() && text.chars().count() <= MAX_TEXT && plain_text(text, false);
     fine.then_some(text)
 }
 

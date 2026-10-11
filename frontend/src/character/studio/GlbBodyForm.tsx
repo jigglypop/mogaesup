@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { PAID_WORK_OFF, usePaidWork } from '../../studio/usage';
 import type { FactoryJob } from '../factory/api';
 import type { BodyType } from './base-bodies-api';
 import { GlbUpload } from './GlbUpload';
@@ -8,6 +9,8 @@ type Props = { bodyType: BodyType;
   onJob: (job: FactoryJob) => void; refreshJobs: () => Promise<unknown>; onBusy: (busy: boolean) => void };
 
 export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
+  // Uploading the GLB is free; registering it, either way, is a paid studio request.
+  const paid = usePaidWork();
   const [draft, setDraft] = useState(() => readGlbDraft(bodyType));
   const [busy, setBusy] = useState(false), [checking, setChecking] = useState(!!draft.asset);
   const [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -46,11 +49,12 @@ export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
     if (locked.current || (!pending && !draft.asset)) return;
     locked.current = true; setBusy(true); setError(''); setNotice('');
     try {
+      // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
       const job = await glbBodiesApi.create(pending?.input || {
         name: draft.name.trim(), body_type: bodyType, model_asset: draft.asset!.id,
         import_mode: draft.import_mode, generate_motions: mode === 'rig' && draft.generate_motions,
         prepare_expression_uv: mode === 'rig' && draft.prepare_expression_uv,
-      });
+      }, pending?.key);
       onJob(job); setNotice('GLB 등록 작업을 접수했습니다.');
       await refreshJobs();
     } catch (reason) { setError((reason as Error).message); }
@@ -58,7 +62,7 @@ export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
   }
   return <div className="base-body-glb">
     <label>이름<input maxLength={100} value={input?.name ?? draft.name} disabled={disabled} onChange={event => update({ name: event.target.value })} /></label>
-    <GlbUpload disabled={disabled} maxMb={256} onUpload={upload} />
+    <GlbUpload disabled={disabled} maxMb={256} action="업로드" onUpload={upload} />
     {draft.asset && <div className="base-body-glb-info">
       <strong>{draft.filename || '등록된 GLB'}</strong>
       <span>삼각형 {draft.asset.triangles.toLocaleString()}개 · {(draft.asset.bytes / 1048576).toFixed(1)}MB</span>
@@ -74,7 +78,8 @@ export function GlbBodyForm({ bodyType, onJob, refreshJobs, onBusy }: Props) {
       <label className="base-body-check"><input type="checkbox" checked={input?.prepare_expression_uv ?? draft.prepare_expression_uv} disabled={disabled} onChange={event => update({ prepare_expression_uv: event.target.checked })} />표정용 빈 얼굴 준비</label>
       <small>Meshy 유료 리깅 1회{motions ? ' · 기본 동작 5종' : ''} · 기존 골격·동작 교체</small>
     </>}
-    <button className="base-body-create" onClick={() => void submit()} disabled={busy || checking || !!recovery.error || (!pending && (!draft.name.trim() || !draft.asset))}>{busy ? '접수 중' : pending ? '같은 GLB 요청 복구' : mode === 'rig' ? '새 리깅 시작 후 등록' : '바로 등록'}</button>
+    <button className="base-body-create" onClick={() => void submit()} disabled={busy || checking || !!recovery.error || !paid || (!pending && (!draft.name.trim() || !draft.asset))}>{busy ? '접수 중' : pending ? '같은 GLB 요청 복구' : mode === 'rig' ? '새 리깅 시작 후 등록' : '바로 등록'}</button>
+    {!paid && <small>{PAID_WORK_OFF}</small>}
     {pending && <p className="base-body-recovery">응답 확인 안 됨</p>}
     {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}
     {notice && <p role="status">{notice}</p>}

@@ -369,7 +369,7 @@ async fn 포장된_미니미는_기본_하나만_남고_고른_섬은_기본으�
 async fn resident_app() -> (TestApp, Arc<Studio>, String, String) {
     let studio = Studio::new();
     let app = TestApp::new(Some(fake_factory(studio.clone()).await)).await;
-    let admin = app.register("operator_r", "운영자").await;
+    let admin = app.register("operator_r", "대장").await;
     app.make_admin("operator_r").await;
     let owner = app.register("owner_r", "주인").await;
     (app, studio, admin, owner)

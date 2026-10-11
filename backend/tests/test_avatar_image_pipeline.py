@@ -240,6 +240,29 @@ def test_a_job_whose_first_publish_failed_keeps_its_rig_budget(setup, monkeypatc
     assert saved['profile']['rig'] == 'meshy-native' and saved['profile']['height'] == 1.2
 
 
+def test_one_texture_setting_for_the_whole_part_set_reads_each_reference_once(setup, monkeypatch):
+    from src.services.meshy_options import freeze_options
+    from src.services.object_storage import StoredPath
+    from src.services.studio_prompts import StudioPrompts
+    service, factory, payload, _, _, _ = setup
+    textures = [service.blueprints.upload(1, png(color))['id'] for color in ('navy', 'orange')]
+    options = {'texture_mode': 'images', 'texture_image_assets': textures}
+    reads, read = [], StoredPath.read_bytes
+    monkeypatch.setattr(StoredPath, 'read_bytes', lambda self: (reads.append(self.stem), read(self))[1])
+    job, _ = service.create(1, 'character-parts-shared-textures', {
+        **payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS,
+        'view_mode': 'front_side_back', 'meshy_options': options})
+    # Six slots, one setting: each reference is read, hashed and decoded once for the set, not twice per slot.
+    assert sorted(name for name in reads if name in textures) == sorted(textures)
+    parts = read_json(factory.directory(1, job['id'])/'pipeline.json')['parts']
+    assert [part['slot'] for part in parts] == module.CHARACTER_PART_SLOTS
+    prompts = StudioPrompts(factory, 1).snapshot()['meshy_texture']
+    for part in parts:
+        assert part['meshy_options'] == freeze_options(factory, 1, options, part['slot'], prompts, shared=True)
+        assert part['meshy_options']['texture_images'] == [{'asset': asset, 'sha256': asset, 'mime': 'image/png'}
+                                                           for asset in textures]
+
+
 def test_a_run_whose_pause_was_not_saved_reads_as_stopped_and_can_be_resumed(setup, monkeypatch):
     from src.services import avatar_variants, run_lock
     service, factory, payload, _, _, _ = setup

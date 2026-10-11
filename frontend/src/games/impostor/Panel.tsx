@@ -10,6 +10,8 @@ import { TASK_NAMES } from './tasks';
 
 /** The longest line the server takes. */
 const MAX_TEXT = 120;
+/** The least time between two lines of one player: the server refuses a quicker one. */
+const TALK_GAP = 1_000;
 const ROLE: Record<ImpostorRole, string> = { crew: '크루', impostor: '임포스터' };
 const REASON: Record<ImpostorOutcome['reason'], string> = {
   tasks: '작업을 모두 마쳤어요',
@@ -114,16 +116,35 @@ function Verdict({ last, names }: { last: NonNullable<ImpostorView['lastMeeting'
 /** The meeting's lines (and, to the dead, the ghosts'), with a line to send when the viewer may talk. */
 function Talk({ lines, you, act, label, open }: { lines: ImpostorLine[]; you: string; act: Act; label: string; open: boolean }) {
   const [text, setText] = useState('');
+  // For a TALK_GAP after a line goes out, the next waits.
+  const [resting, setResting] = useState(false);
+  // The line on its way, as typed, and the newest line there was when it went: the field keeps it until it is in the
+  // talk, so a line the server refuses is still there to send again.
+  const sent = useRef<{ typed: string; after: number } | null>(null);
   const log = useRef<HTMLOListElement>(null);
   const last = lines.at(-1)?.id;
   useEffect(() => {
     const list = log.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [last]);
+  useEffect(() => {
+    const line = sent.current;
+    if (!line || !lines.some((said) => said.from === you && said.id > line.after)) return;
+    sent.current = null;
+    // Only the line goes: anything typed after it stays.
+    setText((current) => (current.startsWith(line.typed) ? current.slice(line.typed.length) : current));
+  }, [lines, you]);
+  useEffect(() => {
+    if (!resting) return undefined;
+    const timer = setTimeout(() => setResting(false), TALK_GAP);
+    return () => clearTimeout(timer);
+  }, [resting]);
   const send = (event: FormEvent) => {
     event.preventDefault();
     const line = text.trim().slice(0, MAX_TEXT);
-    if (line && act({ do: 'say', text: line })) setText('');
+    if (!line || resting || !act({ do: 'say', text: line })) return;
+    sent.current = { typed: text, after: last ?? 0 };
+    setResting(true);
   };
   // Typing walks nobody on the island; Escape still folds the panel.
   const keep = (event: KeyboardEvent) => {
@@ -155,7 +176,7 @@ function Talk({ lines, you, act, label, open }: { lines: ImpostorLine[]; you: st
             onChange={(event) => setText(event.target.value)}
             onKeyDown={keep}
           />
-          <button type="submit" className="mg-btn is-small" disabled={!text.trim()}>
+          <button type="submit" className="mg-btn is-small" disabled={resting || !text.trim()}>
             보내기
           </button>
         </form>

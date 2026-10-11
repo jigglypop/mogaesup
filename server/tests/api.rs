@@ -370,7 +370,7 @@ fn textured_glb() -> Vec<u8> {
     let mut picture = std::io::Cursor::new(Vec::new());
     image::RgbImage::new(1100, 1100).write_to(&mut picture, image::ImageFormat::Png).unwrap();
     let picture = picture.into_inner();
-    let (mut json, mut bin) = test_glb::document(&["Armature|Idle", "Walking"]);
+    let (mut json, mut bin) = test_glb::document(&["Idle", "Walking"]);
     let image_view = json["bufferViews"].as_array().unwrap().len();
     json["bufferViews"]
         .as_array_mut()
@@ -385,11 +385,36 @@ fn textured_glb() -> Vec<u8> {
     glb::join(&json, &bin)
 }
 
+/// A rigged figure with 3000 images of one small picture and 1000 takes besides idle and walk.
+fn crowded_glb() -> Vec<u8> {
+    let picture = png(4, 4);
+    let (mut json, mut bin) = test_glb::document(&["Idle", "Walking"]);
+    let take = json["animations"][0].clone();
+    let takes = (0..1000).map(|at| {
+        let mut extra = take.clone();
+        extra["name"] = format!("take_{at}").into();
+        extra
+    });
+    json["animations"].as_array_mut().unwrap().extend(takes);
+    let image_view = json["bufferViews"].as_array().unwrap().len();
+    json["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer": 0, "byteOffset": bin.len(), "byteLength": picture.len()}));
+    bin.extend(picture);
+    json["buffers"][0]["byteLength"] = bin.len().into();
+    json["images"] = json!(vec![json!({"bufferView": image_view, "mimeType": "image/png"}); 3000]);
+    glb::join(&json, &bin)
+}
+
 /// What the fake character server serves for a job and chosen face.
 fn served_model(job: &str, face: Option<&str>) -> Vec<u8> {
     match job {
         "statue" => statue_glb(),
         "textured" => textured_glb(),
+        // Idle and walk as the island's visitors find them, but not as their owner's own player does.
+        "prefixed" => test_glb::character(&["Armature|Idle", "Armature|Walking"]),
+        "crowded" => crowded_glb(),
         _ => character_glb(&format!("{job}/{}", face.unwrap_or("plain"))),
     }
 }
@@ -609,7 +634,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     let seen = Seen::default();
     let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_f", "회원").await;
-    let admin = app.register("operator_f", "운영자").await;
+    let admin = app.register("operator_f", "대장").await;
     app.make_admin("operator_f").await;
     assert_eq!(
         app.call("GET", "/api/catalog/items?kind=minime", None, None).await.body["items"].as_array().unwrap().len(),
@@ -735,7 +760,7 @@ async fn 다시_가져와도_공개_상태와_이름을_지키고_버전을_되�
     let studio = Studio::standard();
     studio.slow("job_1", Duration::from_millis(400));
     let app = factory_app(&seen, studio.clone()).await;
-    let admin = app.register("operator_v", "운영자").await;
+    let admin = app.register("operator_v", "대장").await;
     app.make_admin("operator_v").await;
 
     let queued = app.call("POST", IMPORT, Some(import_body("job_1", "hero", "영웅")), Some(&admin)).await;
@@ -831,7 +856,7 @@ async fn 새_항목으로_가져오면_이미_있는_항목을_덮어쓰지_않�
     let studio = Studio::standard();
     studio.add(factory_job("job_2", "c_job_2", "2026-09-04T00:00:00Z"));
     let app = factory_app(&seen, studio.clone()).await;
-    let admin = app.register("operator_n", "운영자").await;
+    let admin = app.register("operator_n", "대장").await;
     app.make_admin("operator_n").await;
     let new_item = |job: &str, id: &str, label: &str| {
         let mut body = import_body(job, id, label);
@@ -887,7 +912,7 @@ async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변�
     let studio = Studio::with(vec![factory_job("textured", "c_tex", "2026-09-05T00:00:00Z")]);
     studio.stage("textured", "expressions");
     let app = factory_app(&seen, studio.clone()).await;
-    let admin = app.register("operator_r", "운영자").await;
+    let admin = app.register("operator_r", "대장").await;
     app.make_admin("operator_r").await;
 
     let done = import(&app, &admin, import_body("textured", "tex", "텍스처")).await;
@@ -926,13 +951,65 @@ async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변�
 }
 
 #[tokio::test]
+async fn 접두어가_붙은_idle_walk뿐인_미니미는_이름을_고치라며_가져오지_않는다() {
+    let seen = Seen::default();
+    let studio = Studio::with(vec![factory_job("prefixed", "c_prefixed", "2026-09-06T00:00:00Z")]);
+    let app = factory_app(&seen, studio).await;
+    let admin = app.register("operator_p", "대장").await;
+    app.make_admin("operator_p").await;
+
+    let failed = import(&app, &admin, import_body("prefixed", "prefixed", "접두어")).await;
+    assert_eq!((failed["status"].as_str(), failed["errorCode"].as_str()), (Some("failed"), Some("not_playable")));
+    assert_eq!(failed["step"], "verify");
+    assert_eq!(failed["errorMessage"], "미니미로 쓰려면 애니메이션 이름이 idle·walk여야 합니다.");
+    let report = &failed["report"];
+    assert_eq!(check(report, "clips")["level"], "ok");
+    assert_eq!(check(report, "clip_names")["level"], "error");
+    assert_eq!(
+        check(report, "clip_names")["message"],
+        "애니메이션 이름을 idle·walk로 내보내야 합니다: Armature|Idle, Armature|Walking"
+    );
+    assert_eq!(admin_item(&app, &admin, "prefixed").await, Value::Null);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 텍스처와_애니메이션이_많아도_가져오기_보고서는_앞쪽_64개와_개수만_담는다() {
+    let seen = Seen::default();
+    let studio = Studio::with(vec![factory_job("crowded", "c_crowded", "2026-09-07T00:00:00Z")]);
+    let app = factory_app(&seen, studio).await;
+    let admin = app.register("operator_c", "대장").await;
+    app.make_admin("operator_c").await;
+
+    let done = import(&app, &admin, import_body("crowded", "crowded", "많은 모델")).await;
+    assert_eq!(done["status"], "done", "{done}");
+    // What the admin page polls carries every report, so each stays small whatever the model holds.
+    let recent = app.call("GET", "/api/catalog/admin/imports", None, Some(&admin)).await;
+    assert!(recent.bytes.len() < 32 * 1024, "{}", recent.bytes.len());
+    let report = &recent.body["imports"][0]["report"];
+    let model = &report["model"];
+    assert_eq!((model["textureCount"].as_u64(), model["animationCount"].as_u64()), (Some(3000), Some(1002)));
+    let listed = |list: &Value| list.as_array().unwrap().len();
+    assert_eq!(
+        (listed(&model["textures"]), listed(&report["webTextures"]), listed(&model["animations"])),
+        (64, 64, 64)
+    );
+    assert_eq!(model["animations"][63], "take_61");
+    assert_eq!(check(report, "textures")["message"], "텍스처 3000장 · 가장 큰 변 4px");
+    assert!(check(report, "unused_clips")["message"].as_str().unwrap().ends_with("take_63 외 936개"));
+    let versions = app.call("GET", "/api/catalog/admin/items/crowded/versions", None, Some(&admin)).await;
+    assert_eq!(&versions.body["versions"][0]["report"], report);
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_쓰지_않는다() {
     let seen = Seen::default();
     let studio = Studio::standard();
     // Long enough that the sweep below lands while the model is still downloading, even on a slow runner.
     studio.slow("job_1", Duration::from_millis(3000));
     let app = factory_app(&seen, studio).await;
-    let admin = app.register("operator_z", "운영자").await;
+    let admin = app.register("operator_z", "대장").await;
     app.make_admin("operator_z").await;
     let queued = app.call("POST", IMPORT, Some(import_body("job_1", "late", "늦은 영웅")), Some(&admin)).await;
     assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
@@ -991,7 +1068,7 @@ async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_�
 #[tokio::test]
 async fn 서버가_다시_뜨면_멈춘_가져오기를_실패로_적는다() {
     let app = TestApp::new(None).await;
-    let admin = app.register("operator_i", "운영자").await;
+    let admin = app.register("operator_i", "대장").await;
     app.make_admin("operator_i").await;
     for (item, status) in [("a1", "running"), ("a2", "queued"), ("a3", "done")] {
         sqlx::query(
@@ -1076,7 +1153,7 @@ async fn 버전을_두기_전에_가져온_항목은_지금_모델이_첫_버전
 async fn 미니미는_공개된_카탈로그나_기본_미니미만_고른다() {
     let app = TestApp::new(None).await;
     let member = app.register("member_m", "회원").await;
-    let admin = app.register("operator_m", "운영자").await;
+    let admin = app.register("operator_m", "대장").await;
     app.make_admin("operator_m").await;
     sqlx::query(
         "INSERT INTO catalog_items (id, kind, label, emoji, model_url, source, status) VALUES
@@ -1132,7 +1209,7 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
     let seen = Seen::default();
     let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_g", "회원").await;
-    let admin = app.register("operator_g", "운영자").await;
+    let admin = app.register("operator_g", "대장").await;
     app.make_admin("operator_g").await;
     let path = "/api/factory/avatar-factory/capabilities?probe=1";
     assert_eq!(app.call("GET", path, None, None).await.status, StatusCode::UNAUTHORIZED);
@@ -1157,7 +1234,7 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     let seen = Seen::default();
     let app = studio_app(&seen, FactoryAccess::Read, 0).await;
     let member = app.register("member_s", "회원").await;
-    let admin = app.register("operator_s", "운영자").await;
+    let admin = app.register("operator_s", "대장").await;
     app.make_admin("operator_s").await;
 
     let wardrobe = "/api/avatar-factory/wardrobe/bodies";
@@ -1180,7 +1257,7 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     app.cleanup().await;
 
     let app = studio_app(&seen, FactoryAccess::Paid, 1).await;
-    let admin = app.register("operator_p", "운영자").await;
+    let admin = app.register("operator_p", "대장").await;
     app.make_admin("operator_p").await;
     let select = "/api/avatar-factory/jobs/job_1/native-parts/select";
     assert_eq!(app.call("POST", select, Some(json!({})), Some(&admin)).await.status, StatusCode::OK);

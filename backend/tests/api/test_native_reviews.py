@@ -79,6 +79,21 @@ def test_review_rejects_wrong_sha_non_current_version_and_other_owner(setup):
     assert submit(client, directory).status_code == 404
 
 
+def test_a_recorded_review_is_replayed_after_another_version_became_current(setup):
+    client, _, directory, _ = setup
+    recorded = submit(client, directory)
+    assert recorded.status_code == 200, recorded.text
+    # Its answer was lost, and a refit made another version current before the operator sent it again.
+    _write_json(directory.parent/'current.json', {'version': 'd'*24})
+    replay = submit(client, directory)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()['review'] == recorded.json()['review']
+    # A changed review under the same key is still a conflict, and a new review of the version that is no longer
+    # current is still refused.
+    assert submit(client, directory, notes='같은 키의 검수 내용을 변경함').json()['error']['code'] == 'idempotency_conflict'
+    assert submit(client, directory, key='native-review-002').json()['error']['code'] == 'assembly_changed'
+
+
 def test_member_cannot_submit_review(setup):
     client, _, directory, app = setup
     app.dependency_overrides[get_current_user] = lambda: UserContext(1, 'member', ['ADMIN', 'MEMBER'])

@@ -122,7 +122,8 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
     } catch (reason) {
       if (!controller.signal.aborted && sequence === profileSequence.current) { setSourceVersion(previousVersion); setError((reason as Error).message); }
     } finally {
-      if (!controller.signal.aborted && sequence === profileSequence.current) setProfileLoading(false);
+      // A load that took over from the panel's first one (a fit that ended meanwhile) ends the panel's loading too.
+      if (!controller.signal.aborted && sequence === profileSequence.current) { setLoading(false); setProfileLoading(false); }
     }
   }
   async function perform(action: () => Promise<void>) {

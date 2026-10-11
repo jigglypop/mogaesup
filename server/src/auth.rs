@@ -4,7 +4,7 @@ use argon2::{
 };
 use axum::{
     Json,
-    extract::{Request, State},
+    extract::{Extension, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::{
@@ -23,8 +24,8 @@ use crate::{
     error::{ApiError, ApiResult, LOGIN_REQUIRED, bad, conflict, forbidden, internal},
     rebac::{self, Actor, Checker, PERMISSIONS, Permission, ROLE_COLUMN, Subject, Tuple},
     security::{
-        Running, client_address, constant_time_eq, hmac_sha256, rate_exceeded, rate_limit, rate_record, rate_reserve,
-        rate_running,
+        Running, client_address, constant_time_eq, hmac_sha256, plain_text, rate_exceeded, rate_limit, rate_record,
+        rate_reserve, rate_running,
     },
 };
 
@@ -65,6 +66,10 @@ pub const CHECKS_UNDER_WAY: u32 = 16;
 const HASH_WAIT: Duration = Duration::from_secs(10);
 /// How long a sign-in route may take in all.
 const AUTH_DEADLINE: Duration = Duration::from_secs(30);
+/// A sign-up that made its account stops signing it in this long before its [`Deadline`], to say the account is made
+/// instead of being cut off as busy. The app waits about as long as the deadline, so the answer leaves in time to reach
+/// it.
+const SIGNED_UP_MARGIN: Duration = Duration::from_secs(2);
 const BUSY: ApiError = ApiError::new(
     StatusCode::SERVICE_UNAVAILABLE,
     "busy",
@@ -76,11 +81,18 @@ const INVALID_CREDENTIALS: ApiError =
 const WRONG_PASSWORD: ApiError =
     ApiError::new(StatusCode::BAD_REQUEST, "wrong_password", "현재 비밀번호가 올바르지 않습니다.");
 const PASSWORD_CHANGED: ApiError = conflict("password_changed", "비밀번호가 방금 바뀌었습니다. 다시 시도해 주세요.");
-/// Names that read as the site's own staff. New accounts cannot take them; existing ones keep working. Usernames are
-/// ASCII, so the Korean ones only matter if that ever changes.
+/// Names that read as the site's own staff, as letters and digits in lower case. New accounts take none as a username,
+/// nor as a display name in any width, case or spacing (see [`reads_as_staff`]); existing accounts keep theirs.
 const RESERVED_NAMES: [&str; 9] =
     ["admin", "administrator", "mogaesup", "root", "system", "support", "staff", "운영자", "관리자"];
 const USERNAME_TAKEN: ApiError = conflict("username_taken", "이미 사용 중인 아이디입니다.");
+const STAFF_NAME: ApiError = bad("reserved_name", "운영진처럼 보이는 이름은 쓸 수 없어요.");
+/// Sign-up made the account but could not sign it in.
+const SIGNED_UP: ApiError = ApiError::new(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "signed_up",
+    "가입은 끝났어요. 같은 아이디와 비밀번호로 로그인해 주세요.",
+);
 
 /// A signed-in account. `role` is `admin` while it holds `system:mogaesup#admin` (see [`rebac`]), else `user`.
 #[derive(Clone, Debug, Serialize)]
@@ -217,10 +229,24 @@ pub(crate) fn username(raw: &str) -> ApiResult<String> {
     Ok(name)
 }
 
+/// Whether a display name reads as one of [`RESERVED_NAMES`]: the same letters and digits once their width and form
+/// are made one (NFKC) and their case too, whatever spaces, marks, symbols or invisible joiners come between them.
+fn reads_as_staff(name: &str) -> bool {
+    let letters: String = name.nfkc().flat_map(char::to_lowercase).filter(|c| c.is_alphanumeric()).collect();
+    RESERVED_NAMES.contains(&letters.as_str())
+}
+
+/// The name a new account shows others: the username without one.
 fn display_name(raw: Option<&str>, fallback: &str) -> ApiResult<String> {
     let name = raw.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(fallback).to_owned();
-    if name.chars().count() > 20 || name.chars().any(char::is_control) {
+    if name.chars().count() > 20 {
         return Err(bad("invalid_name", "이름은 20자 이하로 입력해 주세요."));
+    }
+    if !plain_text(&name, false) {
+        return Err(bad("invalid_name", "이름에 쓸 수 없는 문자가 들어 있어요."));
+    }
+    if reads_as_staff(&name) {
+        return Err(STAFF_NAME);
     }
     Ok(name)
 }
@@ -248,9 +274,16 @@ async fn hashing_slot(state: &AppState) -> ApiResult<OwnedSemaphorePermit> {
     }
 }
 
-/// The sign-in routes answer within [`AUTH_DEADLINE`], whatever they wait for.
-pub async fn deadline(request: Request, next: Next) -> Response {
-    tokio::time::timeout(AUTH_DEADLINE, next.run(request)).await.unwrap_or_else(|_| BUSY.into_response())
+/// When a sign-in route is cut off (see [`deadline`]).
+#[derive(Clone, Copy)]
+pub struct Deadline(tokio::time::Instant);
+
+/// The sign-in routes answer within [`AUTH_DEADLINE`], whatever they wait for. A route that has to answer on its own
+/// before then reads when that is from its [`Deadline`].
+pub async fn deadline(mut request: Request, next: Next) -> Response {
+    let by = tokio::time::Instant::now() + AUTH_DEADLINE;
+    request.extensions_mut().insert(Deadline(by));
+    tokio::time::timeout_at(by, next.run(request)).await.unwrap_or_else(|_| BUSY.into_response())
 }
 
 async fn hash_password(state: &AppState, password: String) -> ApiResult<String> {
@@ -443,6 +476,9 @@ async fn session(
     device: Option<String>,
     status: StatusCode,
 ) -> ApiResult<Response> {
+    // Read before the session is made, so the commit is the last thing waited for: a failure or the deadline cannot leave
+    // a session whose cookie no browser got, which would also have ended another device's session to make room.
+    let body = json!({"user": with_permissions(state, &user).await?});
     let mut random = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let token = hex::encode(random);
@@ -476,8 +512,7 @@ async fn session(
     .await?;
     tx.commit().await?;
     end_sockets(state, &expired);
-    let body = with_permissions(state, &user).await?;
-    let mut response = (status, Json(json!({"user": body}))).into_response();
+    let mut response = (status, Json(body)).into_response();
     send_session(state, headers, &mut response, &token, SESSION_MAX_AGE_SECONDS)?;
     let device = device.unwrap_or_else(|| {
         let mut id = [0u8; 16];
@@ -511,15 +546,16 @@ async fn end_other_sessions(state: &AppState, user: Uuid, keep: &str) -> ApiResu
 
 pub async fn register(
     State(state): State<AppState>,
+    Extension(Deadline(by)): Extension<Deadline>,
     headers: HeaderMap,
     Json(body): Json<Credentials>,
 ) -> ApiResult<Response> {
     let name = username(&body.username)?;
     new_password(&body.password)?;
-    let display = display_name(body.display_name.as_deref(), &name)?;
     if RESERVED_NAMES.iter().any(|reserved| reserved.eq_ignore_ascii_case(&name)) {
         return Err(USERNAME_TAKEN);
     }
+    let display = display_name(body.display_name.as_deref(), &name)?;
     // Attempts are limited per address; the site-wide cap counts only created accounts, so rejected requests cannot
     // close sign-up for everyone.
     rate_limit(&state, format!("register-address:{}", client_address(&headers)), 20)?;
@@ -531,7 +567,13 @@ pub async fn register(
         return Err(USERNAME_TAKEN);
     }
     created.keep();
-    session(&state, &headers, user, &hash, None, StatusCode::CREATED).await
+    // The account is made by now, and signing up again would only find its name taken: a sign-in that fails, or runs out
+    // of time (`SIGNED_UP_MARGIN`), says the account is there.
+    let signing_in = session(&state, &headers, user, &hash, None, StatusCode::CREATED);
+    match tokio::time::timeout_at(by - SIGNED_UP_MARGIN, signing_in).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) | Err(_) => Err(SIGNED_UP),
+    }
 }
 
 pub async fn login(
@@ -716,9 +758,10 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
 
 pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let (user, hash) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
-    // A page asks for one when its room connects and again each time the connection drops (checked every second, with
-    // waits that double up to 30 seconds), so several tabs or a reconnect loop still fit.
-    rate_limit(&state, format!("realtime-ticket:{}", user.id), 90)?;
+    // A page asks for one when its room connects and another for its game socket once the room is in, and both again
+    // each time a connection drops (checked every second, with waits that double up to 30 seconds), so several tabs or
+    // a reconnect loop still fit.
+    rate_limit(&state, format!("realtime-ticket:{}", user.id), 180)?;
     let (ticket, expires_at) = crate::rooms::issue_ticket(&state.config.ticket_secret, &user, &hash);
     Ok(Json(json!({"ticket": ticket, "expiresAt": expires_at, "user": user})))
 }
@@ -851,6 +894,29 @@ mod tests {
         assert!(username("ab").is_err());
         assert!(username("has space").is_err());
         assert!(username(&"a".repeat(21)).is_err());
+    }
+
+    #[test]
+    fn display_names_that_read_as_staff_or_hide_themselves_are_refused() {
+        let refused = |name: &str| display_name(Some(name), "fallback").err().map(|error| error.code);
+        // In any width, case or spacing, with marks, symbols or joiners between the letters, or spelled in jamo.
+        let jamo = "\u{110b}\u{116e}\u{11ab}\u{110b}\u{1167}\u{11bc}\u{110c}\u{1161}";
+        let spaced = [" 운 영 자 ", "관리\u{3000}자", "운\u{200d}영자", "[운영자]", "관리자✅", jamo];
+        let cased = ["ADMIN", "Ａｄｍｉｎ", "𝐚𝐝𝐦𝐢𝐧", "Staff", "support!", "Mogaesup", "ROOT", "System"];
+        for name in ["운영자", "관리자", "Administrator"].into_iter().chain(spaced).chain(cased) {
+            assert_eq!(refused(name), Some("reserved_name"), "{name:?}");
+        }
+        // Nor a name that hides itself, or reads turned around.
+        for name in ["\u{200b}", "\u{202e}abc", "모개\u{2066}", "a\u{feff}b", "줄\n바꿈", "\u{7}"] {
+            assert_eq!(refused(name), Some("invalid_name"), "{name:?}");
+        }
+        assert_eq!(refused(&"가".repeat(21)), Some("invalid_name"));
+        // Other names are kept as written, emoji too; a blank one is the username.
+        for name in ["운영", "관리인", "모개", "rooted", "모개 👩\u{200d}🏫", &"가".repeat(20)] {
+            assert_eq!(display_name(Some(name), "fallback").unwrap(), name, "{name:?}");
+        }
+        assert_eq!(display_name(Some("  "), "mogae").unwrap(), "mogae");
+        assert_eq!(display_name(None, "mogae").unwrap(), "mogae");
     }
 
     #[test]

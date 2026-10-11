@@ -19,6 +19,7 @@ from src.services.avatar_openai_images import DEFAULT_BASE
 from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec, head_bounds
 from src.services.character_parts import blender_executable, blender_process, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
+from src.services.keyed_lock import keyed_lock
 from src.services.model_providers import base_url
 from src.services.object_storage import StoredPath as Path, WorkspaceUploadError, copy_file, copy_tree, local_workspace
 from src.services.process_identity import identity, state as process_state
@@ -113,6 +114,12 @@ class AvatarVariants:
 
     def create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
         require_request_key(key)
+        # One request per key at a time: another with the same key waits, then replays the accepted job or is refused
+        # before it writes anything where that job keeps its files.
+        with keyed_lock(('variant', request_job_id(owner, 'image' if photo_input is not None else 'variant', key))):
+            return self._create(owner, key, payload, photo_input=photo_input, frozen_context=frozen_context)
+
+    def _create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
         require_bucket()
         slots = payload['slots']
         if not slots or len(set(slots)) != len(slots) or not set(slots) <= set(VARIANT_SLOTS):
@@ -141,11 +148,13 @@ class AvatarVariants:
                 uploaded_views=bool(payload.get('uploaded_views')), uploaded_model=bool(payload.get('uploaded_model')),
                 worn_redraw=bool((payload.get('redraw') or {}).get('worn')))
             if resolve_provider(source_input.get('model_provider')) == 'meshy':
-                require_credits(0 if payload.get('uploaded_model') else sum(needs_provider(m) for m in estimate.values()))
+                # Each part the provider makes, at the texture resolution it asks for.
+                require_credits([] if payload.get('uploaded_model') else
+                                [source_input.get('meshy_options') for m in estimate.values() if needs_provider(m)])
         if not read_json(target/'job.json'):
             self._warm_body(owner, payload)
-        # Copies of stored files (one request each in S3) are made after every check has passed and without the
-        # process lock; the lock is taken again only to accept the job.
+        # Copies of stored files (one request each in S3), and the receipts written beside them, are made after every
+        # check has passed and without the process lock; the lock is taken again only to accept the job.
         staged = []
         with _LOCK:
             prior = read_json(target/'job.json')
@@ -158,9 +167,12 @@ class AvatarVariants:
             prompt_snapshot = (deepcopy(frozen_context['prompt_snapshot']) if frozen_context
                                else StudioPrompts(self.factory, owner).snapshot())
             from src.services.meshy_options import freeze_options
+            # A texture reference the slots share is read and checked once for all of them.
+            checked = {}
             meshy_options = (deepcopy(frozen_context['meshy_options']) if frozen_context else
                              {slot: freeze_options(self.factory, owner, (photo_input or payload).get('meshy_options'),
-                                                   slot, prompt_snapshot['meshy_texture'], shared=photo_input is not None)
+                                                   slot, prompt_snapshot['meshy_texture'], shared=photo_input is not None,
+                                                   checked=checked)
                               for slot in slots})
             uploaded_views = payload.get('uploaded_views')
             uploaded_model = payload.get('uploaded_model')
@@ -292,9 +304,10 @@ class AvatarVariants:
                     # The frozen body GLB already carries the saved face/body state.
                     # Do not enqueue the five paid default-expression requests again.
                     state['default_expressions'] = None
-                    from src.services.avatar_expression_reuse import snapshot_saved_expressions
-                    state['expression_reuse'] = snapshot_saved_expressions(
+                    from src.services.avatar_expression_reuse import saved_expression_snapshot
+                    state['expression_reuse'], faces = saved_expression_snapshot(
                         self.factory, owner, base_id, native['version'], target)
+                    staged.extend((copy_file, face, frozen) for face, frozen in faces)
                 elif state.get('default_expressions'):
                     from src.services.avatar_expression_pipeline import default_contract
                     state['default_expressions'] = default_contract(prompt_snapshot['expression'])
@@ -450,9 +463,9 @@ class AvatarVariants:
                         model_path = target/'parts'/slot/'generated.glb'
                         model_path.parent.mkdir(parents=True, exist_ok=True)
                         staged.append((copy_file, Path(uploaded_model['path']), model_path))
-                        _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
+                        staged.append((_write_json, model_path.parent/'generation-artifacts.json', {'generated': {
                             'path': str(model_path), 'sha256': uploaded_model['sha256'],
-                            'origin': 'uploaded_glb', 'asset_id': uploaded_model['asset_id']}})
+                            'origin': 'uploaded_glb', 'asset_id': uploaded_model['asset_id']}}))
                     elif uploaded_views:
                         from src.services.avatar_blueprints import AvatarBlueprints
                         assets = AvatarBlueprints(self.factory.data)
@@ -480,9 +493,9 @@ class AvatarVariants:
                     model_path = target/'parts'/'body'/'generated.glb'
                     model_path.parent.mkdir(parents=True, exist_ok=True)
                     staged.append((copy_file, body_file, model_path))
-                    _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
+                    staged.append((_write_json, model_path.parent/'generation-artifacts.json', {'generated': {
                         'path': str(model_path), 'sha256': body_hash,
-                        'reused_from': {'job_id': base_id, 'version': native['version'], 'slot': 'body'}}})
+                        'reused_from': {'job_id': base_id, 'version': native['version'], 'slot': 'body'}}}))
                     continue
                 for view in (part.get('views') or {}).values():
                     name = view['file']

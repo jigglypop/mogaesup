@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent } from 'react';
+import { PAID_WORK_OFF, usePaidWork } from '../../studio/usage';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { MeshyMotion } from '../factory/MeshyMotion';
 import { NativeAssembly } from '../factory/NativeAssembly';
@@ -57,6 +58,7 @@ function BodyViewUpload({ view, asset, disabled, busy, onUpload, onClear }: {
 }
 
 export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: Props) {
+  const paid = usePaidWork();
   const [bodyType, setBodyType] = useState<BodyType>('male');
   const [sourceMode, setSourceMode] = useState<'glb' | 'images'>('glb');
   const [glbBusy, setGlbBusy] = useState(false);
@@ -135,7 +137,8 @@ export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: 
     if (!request) return;
     locked.current = true; setBusy(true); setError(''); setNotice('');
     try {
-      const job = await baseBodiesApi.create(request);
+      // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
+      const job = await baseBodiesApi.create(request, pending?.key);
       onJob(job); setSelected(current => ({ ...current, [bodyType]: job.id }));
       await refreshJobs(); setNotice('기본 몸 생성 작업을 접수했습니다.');
     } catch (reason) { setError((reason as Error).message); }
@@ -167,8 +170,9 @@ export default function BaseBodies({ jobs, selectedJobId, onJob, refreshJobs }: 
           const option = rigOptions.find(item => `${item.jobId}:${item.version}` === event.target.value);
           update({ rig_source: option ? { job_id: option.jobId, version: option.version } : undefined });
         }}><option value="">새 리깅 생성</option>{rigValue && !rigOptions.some(item => `${item.jobId}:${item.version}` === rigValue) && <option value={rigValue}>{rigValue}</option>}{rigOptions.map(item => <option key={`${item.jobId}:${item.version}`} value={`${item.jobId}:${item.version}`}>{item.label}</option>)}</select></label>
-        <button className="base-body-create" disabled={busy || !!uploading || !!recovery.error || (!pending && (!draft.name.trim() || !complete))} onClick={() => void create()}>{busy ? '접수 확인 중' : pending ? '같은 요청 복구' : '기본 몸 3D 생성'}</button>
+        <button className="base-body-create" disabled={busy || !!uploading || !!recovery.error || !paid || (!pending && (!draft.name.trim() || !complete))} onClick={() => void create()}>{busy ? '접수 확인 중' : pending ? '같은 요청 복구' : '기본 몸 3D 생성'}</button>
         <small>유료 Meshy 3D 1회{shownRig ? ' · 저장된 리깅 재사용' : ' · 리깅 1회 · 기본 동작'}</small>
+        {!paid && <small>{PAID_WORK_OFF}</small>}
         {pending && <p className="base-body-recovery">{bodyLabels[bodyType]} · 응답 확인 안 됨</p>}
         {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}{notice && <p role="status">{notice}</p>}
         </>}

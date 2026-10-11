@@ -53,10 +53,10 @@ const regenerateAnimal = (id: string, input: AnimalRegenerateInput, key?: string
     body: JSON.stringify(pending.input), timeoutMs: 60000,
   }), key ? { key } : {});
 
-const createAnimal = (input: AnimalCreateInput) => animalCreation.send(input, pending => request<Animal>('/api/studio/animals', {
+const createAnimal = (input: AnimalCreateInput, key?: string) => animalCreation.send(input, pending => request<Animal>('/api/studio/animals', {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
   body: JSON.stringify(pending.input), timeoutMs: 60000,
-}));
+}), key ? { key } : {});
 export type HeadPartAsset = { name: string; sha256: string; url: string };
 export type Expression = { id: string; name: ExpressionName; layout: FaceLayout; materials: {material:number;file:string;base_file?:string}[]; artifacts:{name:string;url:string;sha256:string}[]; head?: HeadPartAsset };
 type ExpressionLibrary = { items: Expression[]; selected: string | null; revision: string };
@@ -93,9 +93,10 @@ export const studioApi = {
     method: 'PATCH', headers: { 'Content-Type': 'application/json', 'If-Match': revision }, body: JSON.stringify(changes),
   }),
   singlePartRecovery: singleParts.read,
-  singlePart: (input: SinglePartInput) => singleParts.send(input, pending => request<FactoryJob>('/api/avatar-factory/variants/single-part', {
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  singlePart: (input: SinglePartInput, key?: string) => singleParts.send(input, pending => request<FactoryJob>('/api/avatar-factory/variants/single-part', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key }, body: JSON.stringify(pending.input),
-  })),
+  }), key ? { key } : {}),
   textures: (signal?: AbortSignal) => request<{ items: Tile[] }>('/api/studio/textures', { signal }),
   texture: (input: { surface: string; size: number; seed: number }) => request<Tile>('/api/studio/textures', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),

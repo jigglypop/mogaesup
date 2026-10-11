@@ -1,5 +1,6 @@
 """Resume a selected factory stage from its saved inputs, with durable admission."""
 import hashlib
+import logging
 
 from src.services.asset_editor import _write_json, update_json
 from src.services.avatar_factory import _LOCK, digest
@@ -13,6 +14,7 @@ from src.services.meshy_status import saved_problem
 
 STAGES = ('images', 'models', 'rig', 'assemble', 'expressions')
 _WORKERS = WorkerLocks()
+LOGGER = logging.getLogger(__name__)
 
 
 def current_run(directory):
@@ -258,8 +260,12 @@ class AvatarStageResume:
             if previous:
                 if previous['stage'] != stage:
                     raise PipelineError('idempotency_conflict', '같은 요청의 시작 단계가 다릅니다.', 409)
-                # Replays recover the receipt, never restart a paid stage.
-                return state, None
+                # Replays recover the receipt, never restart a paid stage. A current run this process admitted stays
+                # accepted until something runs it; when the answer that was to run it was lost, the replay returns its
+                # id instead (execute starts an accepted run once).
+                waiting = (previous.get('status') == 'accepted' and this_process(previous.get('process'))
+                           and read_json(directory/'stage-runs/current.json').get('id') == request_id)
+                return state, request_id if waiting else None
             action = next((a for a in state['actions'] if a['stage'] == stage), None)
             if action is None or not action['enabled']:
                 raise PipelineError('stage_unavailable', (action or {}).get('reason') or '현재 실행할 수 없는 단계입니다.', 409)
@@ -269,7 +275,12 @@ class AvatarStageResume:
                       'error': None}
             _write_json(path, record)
             _write_json(directory/'stage-runs/current.json', {'id': request_id})
-        return self.get(owner, job_id), request_id
+        try:
+            state = self.get(owner, job_id)
+        except Exception as exc:
+            # The run is admitted and only its id lets the caller run it; the state read before admission answers.
+            LOGGER.warning('Stage run admitted, state not read again job=%s type=%s', job_id, type(exc).__name__)
+        return state, request_id
 
     @staticmethod
     def _require_credits(directory, stage):
@@ -279,7 +290,7 @@ class AvatarStageResume:
         if pipeline.get('uploaded_glb'):
             return
         reused = set(pipeline.get('reuse', {}).get('slots', []))
-        parts = 0
+        parts = []
         if stage in ('images', 'models'):
             for part in pipeline.get('parts', []):
                 run = directory/'parts'/part['slot']
@@ -289,12 +300,13 @@ class AvatarStageResume:
                 task = read_json(run/'character.json')
                 if (task.get('task_id') and task.get('status') not in RETRYABLE) or submitted_task_id(run, task):
                     continue  # A known task, also one only its saved answer names, is only polled.
-                parts += 1
+                parts.append((part.get('meshy_options') or {}).get('options'))
         rig_source = pipeline.get('base_body') or (pipeline.get('base_body_setup') or {}).get('rig_source')
         needs_rig = not read_json(directory/'meshy/delivery.json').get('version') and not rig_source
         if pipeline.get('model_provider', 'meshy') != 'meshy':
-            parts = 0  # Meshy credits cover only Meshy work; the rig stays on Meshy.
-        require_credits(parts, rig=needs_rig)
+            parts = []  # Meshy credits cover only Meshy work; the rig stays on Meshy.
+        # The accepted motions are requested once the rig is delivered.
+        require_credits(parts, rig=needs_rig, actions=pipeline.get('motion_actions') if needs_rig else None)
 
     def execute(self, owner, job_id, request_id):
         directory = self.factory.directory(owner, job_id)

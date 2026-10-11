@@ -23,6 +23,9 @@ function categoryOf(slot: string) {
 type Props = {
   jobs: FactoryJob[];
   loading?: boolean;
+  /** The jobs or the catalog could not be read and none has been read yet; `onReload` reads them again. */
+  failed?: boolean;
+  onReload?: () => void;
   catalog?: Catalog;
   nativeJobId?: string;
   nativeState?: NativePartsState;
@@ -32,7 +35,7 @@ type Props = {
   onRefresh: () => Promise<void>;
 };
 
-export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState, onOpen, onCompose, onCatalogChange, onRefresh }: Props) {
+export function AssetGallery({ jobs, loading, failed, onReload, catalog, nativeJobId, nativeState, onOpen, onCompose, onCatalogChange, onRefresh }: Props) {
   const [view, setView] = useState<'characters' | 'parts'>('parts');
   const [filter, setFilter] = useState<(typeof partCategories)[number][0]>('body');
   const [characterFilter, setCharacterFilter] = useState('all');
@@ -41,6 +44,7 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
   const [fitting, setFitting] = useState<{ key: string; jobId: string; slot: 'top' | 'bottom'; label: string; rawUrl?: string }>();
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [deletedItem, setDeletedItem] = useState<{ job: FactoryJob; slot?: string; scope?: 'character' | 'version' }>();
+  const [selected, setSelected] = useState<string[]>([]);
   const locked = useRef(false);
   const characterKey = (job: FactoryJob) => job.character_id || job.id;
   const characterDeleted = (job: FactoryJob) => !!catalog?.characters?.[characterKey(job)]?.deleted;
@@ -78,6 +82,9 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
     && (characterFilter === 'all' || item.rootId === characterFilter) && matchesQuery(item))
     .sort((a, b) => Number(!!(b.nativeModel || b.generatedModel)) - Number(!!(a.nativeModel || a.generatedModel)));
   const shown = filtered.slice(0, visible);
+  // Part cards on screen that can be ticked: in the trash, a part that went with its character or version comes back with it.
+  const selectable = shown.filter(item => !jobDeleted(item.job));
+  const picked = selectable.filter(item => selected.includes(item.key));
   const characterGroups = roots.flatMap(root => {
     const rootMatches = !query || `${characterName(root)} ${root.character_name} ${root.id}`.toLocaleLowerCase().includes(query);
     const availableParts = items.filter(item => item.rootId === characterKey(root) && item.deleted === trash);
@@ -105,13 +112,42 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
     try {
       onCatalogChange(await studioApi.savePartMetadata(jobId, slot, changes, revision));
       setEditing(undefined);
-      if (changes.deleted === true) setDeletedItem({ job: jobs.find(job => job.id === jobId)!, slot });
-      else if (changes.deleted === false) setDeletedItem(undefined);
+      // The notice's undo belongs to this save: only a deletion has one.
+      setDeletedItem(changes.deleted === true ? { job: jobs.find(job => job.id === jobId)!, slot } : undefined);
       setNotice(changes.deleted === true ? '휴지통으로 이동했습니다.' : changes.deleted === false ? '복원했습니다.' : '이름을 저장했습니다.');
     } catch (e) {
       setError(e instanceof ApiError && e.code === 'revision_conflict' ? '목록이 변경되었습니다. 취소 후 다시 편집해 주세요.' : (e as Error).message);
       await onRefresh();
     } finally { locked.current = false; setBusy(false); }
+  }
+
+  /** Moves the ticked parts to the trash or back, one after another; a failure does not stop the rest and stays ticked. */
+  async function saveParts(parts: typeof picked, deleted: boolean) {
+    if (locked.current || !catalog || !parts.length) return;
+    locked.current = true; setBusy(true); setError(''); setNotice(''); setDeletedItem(undefined);
+    const failed: { key: string; name: string; message: string }[] = [];
+    try {
+      let revision = catalog.revision;
+      for (const { key, job, slot, name } of parts) {
+        try {
+          const next = await studioApi.savePartMetadata(job.id, slot, { deleted }, revision);
+          onCatalogChange(next); revision = next.revision;
+        } catch (reason) {
+          // The list moved on (another change, or this one saved with its answer lost): the rest go on the list read again.
+          const latest = await studioApi.catalog().catch(() => undefined);
+          if (latest) { onCatalogChange(latest); revision = latest.revision; }
+          if (!latest || !!latest.parts?.[key]?.deleted !== deleted) failed.push({ key, name, message: (reason as Error).message });
+        }
+      }
+    } finally { locked.current = false; setBusy(false); }
+    setSelected(current => current.filter(key => !parts.some(part => part.key === key) || failed.some(item => item.key === key)));
+    if (failed.length < parts.length) {
+      setEditing(undefined);
+      setNotice(`${parts.length - failed.length}개를 ${deleted ? '휴지통으로 이동했습니다.' : '복원했습니다.'}`);
+    }
+    const reasons = new Map<string, string[]>();
+    for (const { name, message } of failed) reasons.set(message, [...reasons.get(message) ?? [], name]);
+    if (failed.length) setError(`${deleted ? '삭제' : '복원'} 실패 ${failed.length}개 · ${[...reasons].map(([message, names]) => `${names.join(', ')}: ${message}`).join(' / ')}`);
   }
 
   async function setVisibility(job: FactoryJob, scope: 'character' | 'version', deleted: boolean) {
@@ -134,13 +170,14 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
 
   function assetCard(item: (typeof items)[number], compact = false) {
     const { key, job, slot, label, name, image, generatedModel, nativeModel } = item;
-    return <article className={`asset-gallery-card ${compact ? 'compact' : ''}`} key={key}>
+    const tickable = !compact && !jobDeleted(job), ticked = tickable && selected.includes(key);
+    return <article className={`asset-gallery-card ${compact ? 'compact' : ''}${ticked ? ' selected' : ''}`} key={key}>
       <AssetModelPreview model={nativeModel ? { ...nativeModel, label: slot === 'body' ? '기본 몸 저장본' : '피팅 저장본' }
         : generatedModel ? { ...generatedModel, label: job.input_kind === 'glb' ? '등록한 GLB 원본' : '파츠 생성본 · 조립 전' } : undefined}
         image={image} name={name} emptyLabel={image ? '3D 생성 전' : '아직 저장된 결과 없음'} />
       <AssetProductionStatus job={job} slot={slot} hasModel={!!(nativeModel || generatedModel)} hasAssembly={!!nativeModel} compact />
       <div className="asset-gallery-info"><strong title={name}>{name}</strong><span>{slot === 'body' ? label : characterName(job)}</span></div>
-      <div className="asset-gallery-actions"><button className="asset-open" onClick={() => onOpen(job, slot)}>크게 보기</button>{!trash && nativeModel && <button onClick={() => onCompose(job)}>착용·조합</button>}{jobDeleted(job)
+      <div className="asset-gallery-actions">{tickable && <input type="checkbox" className="asset-select" aria-label={`${name} 선택`} checked={ticked} disabled={busy} onChange={event => setSelected(current => event.target.checked ? [...current, key] : current.filter(value => value !== key))} />}<button className="asset-open" onClick={() => onOpen(job, slot)}>크게 보기</button>{!trash && nativeModel && <button onClick={() => onCompose(job)}>착용·조합</button>}{jobDeleted(job)
         ? <button disabled={busy || !catalog} onClick={() => void setVisibility(job, characterDeleted(job) ? 'character' : 'version', false)}>{characterDeleted(job) ? '캐릭터 복원' : '조합 복원'}</button>
         : <button type="button" className={trash ? '' : 'asset-delete'} title={trash ? '휴지통에서 복원' : '휴지통으로 이동'} aria-label={`${name} ${trash ? '복원' : '삭제'}`} disabled={busy || !catalog} onClick={() => void save(job.id, slot, { deleted: !trash })}>{trash ? '복원' : '삭제'}</button>}</div>
       <details className="asset-card-tools"><summary>관리·다운로드</summary>
@@ -162,12 +199,13 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
     <div className="asset-gallery-toolbar">
       <label>검색<input type="search" value={search} onChange={event => { setSearch(event.target.value); setVisible(24); }} placeholder="캐릭터 · 파츠" /></label>
       {view === 'parts' && <label>캐릭터<select value={characterFilter} onChange={event => { setCharacterFilter(event.target.value); setVisible(24); }}><option value="all">전체 캐릭터</option>{roots.map(root => <option key={root.id} value={characterKey(root)}>{characterName(root)}</option>)}</select></label>}
-      <div className="asset-gallery-filters" role="group" aria-label="보관 위치"><button aria-pressed={!trash} onClick={() => { setTrash(false); setCharacterFilter('all'); setVisible(24); }}>갤러리</button><button aria-pressed={trash} onClick={() => { setTrash(true); setCharacterFilter('all'); setVisible(24); }}>휴지통 · {items.filter(item => item.deleted).length}</button></div>
+      <div className="asset-gallery-filters" role="group" aria-label="보관 위치"><button aria-pressed={!trash} onClick={() => { setTrash(false); setCharacterFilter('all'); setVisible(24); setSelected([]); }}>갤러리</button><button aria-pressed={trash} onClick={() => { setTrash(true); setCharacterFilter('all'); setVisible(24); setSelected([]); }}>휴지통 · {items.filter(item => item.deleted).length}</button></div>
       <span>{view === 'characters' ? characterGroups.length : filtered.length}개</span>
     </div>
     {error && <p role="alert">{error}</p>}{notice && <div className="asset-delete-notice" role="status"><span>{notice}</span>{deletedItem && <button disabled={busy} onClick={() => deletedItem.slot ? void save(deletedItem.job.id, deletedItem.slot, { deleted: false }) : void setVisibility(deletedItem.job, deletedItem.scope!, false)}>삭제 취소</button>}</div>}
     {fitting && <PartFitting key={fitting.key} jobId={fitting.jobId} slot={fitting.slot} label={fitting.label} rawUrl={fitting.rawUrl} onClose={() => setFitting(undefined)} onPendingSlot={pendingSlot => openFitting(fitting.jobId, pendingSlot)} />}
-    {(!catalog || loading) ? <p className="asset-gallery-empty">관리 목록 불러오는 중…</p> : view === 'characters' ? characterGroups.length ? <div className="asset-character-grid">{characterGroups.map(({ root, parts, versions, preview, assembly, assembledVersion, model }) => <article className="asset-character-card" key={root.id}>
+    {failed ? <p className="asset-gallery-empty">목록을 불러오지 못했습니다. <button onClick={onReload}>다시 불러오기</button></p>
+      : (!catalog || loading) ? <p className="asset-gallery-empty">관리 목록 불러오는 중…</p> : view === 'characters' ? characterGroups.length ? <div className="asset-character-grid">{characterGroups.map(({ root, parts, versions, preview, assembly, assembledVersion, model }) => <article className="asset-character-card" key={root.id}>
       <AssetModelPreview model={model} image={preview} name={characterName(root)} emptyLabel="아직 저장된 결과 없음" />
       <AssetProductionStatus job={assembly ? assembledVersion : root} hasModel={!!model} hasAssembly={!!assembly} />
       <div className="asset-character-heading"><div><strong>{characterName(root)}</strong><small>{versions.length}개 버전 · {parts.length}개 파츠</small></div><button onClick={() => onOpen(assembly ? assembledVersion : root)}>캐릭터 열기</button></div>
@@ -175,7 +213,10 @@ export function AssetGallery({ jobs, loading, catalog, nativeJobId, nativeState,
       <details><summary>저장 버전 · {versions.length}</summary><div className="asset-character-versions">{versions.map(version => <div className="asset-character-version" key={version.id}><button onClick={() => onOpen(version)}>{version.part_name || (version.base_job_id ? version.requested_slots?.map(slot => partLabels[slot] || slot).join(', ') || '파츠 조합' : '기본 몸 조합')}<small>{new Date(version.created_at).toLocaleString()}</small></button>{!trash && version.assembly_version && <button onClick={() => onCompose(version)}>조합 편집·저장</button>}{!characterDeleted(version) && <button className={trash ? '' : 'asset-delete'} disabled={busy} onClick={() => void setVisibility(version, 'version', !trash)}>{trash ? '조합 복원' : '조합 삭제'}</button>}</div>)}</div></details>
       <details><summary>연결 파츠 · {parts.length}</summary><div className="asset-character-parts">{parts.map(item => assetCard(item, true))}</div></details>
     </article>)}</div> : <p className="asset-gallery-empty">{query ? '검색 결과가 없습니다.' : trash ? '삭제한 에셋이 없습니다.' : '저장된 캐릭터가 없습니다.'}</p>
-      : filtered.length ? <><div className={`asset-gallery-grid category-${filter}`}>{shown.map(item => assetCard(item))}</div>{visible < filtered.length && <button className="asset-gallery-more" onClick={() => setVisible(count => count + 24)}>더 보기 · {filtered.length-visible}개</button>}</>
+      : filtered.length ? <>{!!selectable.length && <div className="asset-gallery-selection" role="group" aria-label="파츠 선택"><span>{picked.length}개 선택</span>
+        <button type="button" disabled={busy} onClick={() => setSelected(current => [...current.filter(key => !selectable.some(item => item.key === key)), ...(picked.length === selectable.length ? [] : selectable.map(item => item.key))])}>{picked.length === selectable.length ? '전체 해제' : '전체 선택'}</button>
+        <button type="button" className={trash ? '' : 'asset-delete'} disabled={busy || !catalog || !picked.length} onClick={() => void saveParts(picked, !trash)}>{trash ? '선택 복원' : '선택 삭제'}</button></div>}
+        <div className={`asset-gallery-grid category-${filter}`}>{shown.map(item => assetCard(item))}</div>{visible < filtered.length && <button className="asset-gallery-more" onClick={() => setVisible(count => count + 24)}>더 보기 · {filtered.length-visible}개</button>}</>
         : <p className="asset-gallery-empty">{query ? '검색 결과가 없습니다.' : trash ? '삭제한 에셋이 없습니다.' : '이 분류에 저장된 파츠가 없습니다.'}</p>}
   </section>;
 }

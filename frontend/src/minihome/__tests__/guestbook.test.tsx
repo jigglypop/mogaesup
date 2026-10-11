@@ -2,6 +2,7 @@ import { act } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ApiRequestError } from '../../api/client';
 import type { GuestbookEntry, GuestbookPage, User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
 import { Guestbook } from '../Guestbook';
@@ -20,7 +21,10 @@ const entry = (id: string): GuestbookEntry => ({
   body: `글 ${id}`, secret: false, canDelete: false, createdAt: '2026-10-01T00:00:00Z',
 });
 const page = (ids: string[], nextBefore: string | null = null): GuestbookPage => ({ entries: ids.map(entry), total: 3, nextBefore });
-const screen = (username = 'home') => <MemoryRouter><Guestbook username={username} viewer={viewer} /></MemoryRouter>;
+const screen = (username = 'home', who: User | null = viewer) => <MemoryRouter><Guestbook username={username} viewer={who} /></MemoryRouter>;
+const refusal = () => new ApiRequestError(401, 'login_required', '로그인이 필요합니다.');
+const submit = (container: HTMLElement) =>
+  act(async () => { container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
 const button = (container: HTMLElement, label: string) => [...container.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.trim() === label)!;
 
 describe('방명록 요청', () => {
@@ -70,6 +74,57 @@ describe('방명록 요청', () => {
     expect(container.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(true);
     await act(async () => { finish({ id: 'new' }); });
     expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('');
+    await unmount();
+  });
+
+  it('세션이 끊겨 거절된 글은 오류와 함께 남아, 같은 사람이 다시 로그인하면 이어 쓰고 다른 사람이면 비운다', async () => {
+    write.mockRejectedValueOnce(refusal());
+    const { container, rerender, unmount } = await mount(screen());
+    const box = () => container.querySelector<HTMLTextAreaElement>('textarea');
+    const secret = () => container.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    const alert = () => container.querySelector('[role="alert"]')?.textContent;
+    await type(box()!, '오래 쓴 글');
+    await act(async () => { secret()!.click(); });
+    await submit(container);
+    // The refusal signs the member out (no viewer); the note waits for them, and the refusal stays said.
+    await rerender(screen('home', null));
+    expect(box()).toBeNull();
+    expect(alert()).toBe('로그인이 필요합니다.');
+    await rerender(screen());
+    expect(box()!.value).toBe('오래 쓴 글');
+    expect(secret()!.checked).toBe(true);
+    expect(alert()).toBeUndefined();
+    await rerender(screen('home', { ...viewer, id: 'other', username: 'other' }));
+    expect(box()!.value).toBe('');
+    expect(secret()!.checked).toBe(false);
+    await unmount();
+  });
+
+  it('세션이 먼저 끊긴 뒤 늦게 온 거절도 알린다', async () => {
+    let refuse!: (problem: unknown) => void;
+    write.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    const { container, rerender, unmount } = await mount(screen());
+    await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '오래 쓴 글');
+    await submit(container);
+    await rerender(screen('home', null));
+    await act(async () => { refuse(refusal()); });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('로그인이 필요합니다.');
+    await rerender(screen());
+    expect(container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('오래 쓴 글');
+    await unmount();
+  });
+
+  it('다른 섬으로 옮긴 뒤 늦게 온, 세션과 상관없는 거절은 새 섬에 보이지 않는다', async () => {
+    let refuse!: (problem: unknown) => void;
+    write.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    const { container, rerender, unmount } = await mount(screen('first'));
+    await type(container.querySelector<HTMLTextAreaElement>('textarea')!, '오래 쓴 글');
+    await submit(container);
+    await rerender(screen('second'));
+    // Not the server's refusal of the session (a proxy's own 401, say): nobody was signed out.
+    await act(async () => { refuse(new ApiRequestError(401, 'http_error', '요청이 실패했어요 (401)')); });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('');
     await unmount();
   });
 

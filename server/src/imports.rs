@@ -57,12 +57,18 @@ const WEB_BYTES_BUDGET: usize = 24 * 1024 * 1024;
 const TEXTURE_EDGE_BUDGET: u32 = 1024;
 /// Heights a 미니미 can plausibly have, in metres; the built-in figures stand 1.7 m.
 const HEIGHT_RANGE: RangeInclusive<f64> = 0.3..=3.0;
+/// Textures, animations and required extensions a report lists, and the characters it keeps of a model's own names, so
+/// a report stays small for the admin page that reads it back with every import it lists.
+const LISTED: usize = 64;
+const NAME_CHARS: usize = 64;
 
 const NOT_GLB: ApiError = bad("not_glb", "GLB 파일이 아닙니다.");
 const COMPRESSED: ApiError = bad("draco", "Draco로 압축한 GLB는 받지 않습니다.");
 const CHECKSUM: ApiError = bad("factory_checksum", "받은 모델이 캐릭터 서버의 기록과 다릅니다. 다시 시도해 주세요.");
 const NOT_PLAYABLE: ApiError =
     bad("not_playable", "미니미로 쓰려면 리깅(스킨)과 idle·walk 애니메이션이 있어야 합니다.");
+/// A 미니미 whose idle or walk goes by no name its owner's own player finds ([`player_clip`]).
+const UNNAMED: ApiError = bad("not_playable", "미니미로 쓰려면 애니메이션 이름이 idle·walk여야 합니다.");
 const NOT_RESIDENT: ApiError = bad("not_playable", "주민으로 쓰려면 리깅(스킨)과 idle 애니메이션이 있어야 합니다.");
 /** Engine clips a resident needs: it stands where the island's owner put it, so a walk is optional. */
 const RESIDENT_CLIPS: [&str; 1] = ["idle"];
@@ -104,6 +110,54 @@ struct FileReport {
     slimmed: Option<bool>,
 }
 
+/// A model's details as a report keeps them: its first [`LISTED`] textures, animations and required extensions, and
+/// how many textures and animations it has.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelReport {
+    #[serde(flatten)]
+    details: glb::Details,
+    texture_count: usize,
+    animation_count: usize,
+}
+
+impl ModelReport {
+    fn of(details: &glb::Details) -> Self {
+        let mut kept = details.clone();
+        kept.textures = listed(&details.textures);
+        kept.animations = details.animations.iter().take(LISTED).map(|name| short(name)).collect();
+        kept.required = details.required.iter().take(LISTED).map(|name| short(name)).collect();
+        Self { details: kept, texture_count: details.textures.len(), animation_count: details.animations.len() }
+    }
+}
+
+/// The first [`LISTED`] of `textures`, their MIME types (the model's own text) shortened.
+fn listed(textures: &[glb::Texture]) -> Vec<glb::Texture> {
+    let kept = |texture: &glb::Texture| glb::Texture {
+        image: texture.image,
+        mime: texture.mime.as_deref().map(short),
+        width: texture.width,
+        height: texture.height,
+        bytes: texture.bytes,
+    };
+    textures.iter().take(LISTED).map(kept).collect()
+}
+
+/// A model's own name as a report keeps it: its first [`NAME_CHARS`] characters.
+fn short(name: &str) -> String {
+    name.chars().take(NAME_CHARS).collect()
+}
+
+/// `names` for a check message: the first [`LISTED`], shortened, and how many more there are.
+fn listing<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let mut names = names.into_iter();
+    let text = names.by_ref().take(LISTED).map(short).collect::<Vec<_>>().join(", ");
+    match names.count() {
+        0 => text,
+        more => format!("{text} 외 {more}개"),
+    }
+}
+
 /// What an import found, kept with the import and with the version it made.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,8 +168,8 @@ struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<FileReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<glb::Details>,
-    /// The stored copy's textures, after shrinking.
+    model: Option<ModelReport>,
+    /// The stored copy's first [`LISTED`] textures, after shrinking.
     #[serde(skip_serializing_if = "Option::is_none")]
     web_textures: Option<Vec<glb::Texture>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,9 +230,28 @@ fn thumbnail(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     Some((out.into_inner(), picture.width(), picture.height()))
 }
 
+/// What gaesup-world's own player calls a clip, and so how a 미니미 moves for its owner. It looks a clip up by its name
+/// in any case, without control characters or surrounding spaces (` Idle` → `idle`), and an alias by the whole name in
+/// any case (`Walking` → `walk`, but not `Walking `). Visitors see it through [`glb::engine_clip`], which also reads
+/// `Armature|Walking` as `walk`.
+fn player_clip(name: &str) -> Option<&'static str> {
+    // The name the player keeps a clip under: control characters dropped, then spaces trimmed as JavaScript trims them.
+    let kept: String = name.chars().filter(|c| !c.is_ascii_control()).collect();
+    let kept = kept.trim_matches(|c: char| c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())).to_lowercase();
+    Some(match (kept.as_str(), name.to_lowercase().as_str()) {
+        ("idle", _) => "idle",
+        ("walk", _) | (_, "walking") => "walk",
+        ("run", _) | (_, "running") => "run",
+        ("jump", _) | (_, "jumping") => "jump",
+        ("fall", _) | (_, "falling") => "fall",
+        _ => return None,
+    })
+}
+
 /// Runs every check on a downloaded model into `report`, then fails on the first hard problem, in this order: not a
 /// GLB, a checksum that differs from the character server's record, a character whose data cannot be read (with what
-/// could not), a 미니미 without a rig or without idle and walk, a resident (`npc`) without a rig or without idle.
+/// could not), a 미니미 without a rig or without idle and walk, a resident (`npc`) without a rig or without idle, a
+/// 미니미 whose idle or walk has no name its owner's player finds ([`player_clip`]).
 fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report) -> ApiResult<glb::Details> {
     let sha256 = hex::encode(Sha256::digest(bytes));
     let checksum = match expected {
@@ -237,10 +310,23 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
     } else {
         report.check("clips", must, format!("필요한 애니메이션이 없습니다: {}", missing.join(", ")));
     }
+    // A resident is found by any name holding its clip's; the owner's own player needs the whole name.
+    let unnamed: Vec<&str> = if resident {
+        Vec::new()
+    } else {
+        let named: Vec<&str> = details.animations.iter().filter_map(|name| player_clip(name)).collect();
+        wanted.iter().copied().filter(|clip| !missing.contains(clip) && !named.contains(clip)).collect()
+    };
+    if !unnamed.is_empty() {
+        let names = details.animations.iter().map(String::as_str);
+        let names = names.filter(|name| glb::engine_clip(name).is_some_and(|clip| unnamed.contains(&clip)));
+        let message = format!("애니메이션 이름을 {}로 내보내야 합니다: {}", unnamed.join("·"), listing(names));
+        report.check("clip_names", must, message);
+    }
     let unused: Vec<&str> =
         details.animations.iter().filter(|name| glb::engine_clip(name).is_none()).map(String::as_str).collect();
     if !unused.is_empty() {
-        report.check("unused_clips", Level::Info, format!("엔진이 쓰지 않는 애니메이션: {}", unused.join(", ")));
+        report.check("unused_clips", Level::Info, format!("엔진이 쓰지 않는 애니메이션: {}", listing(unused)));
     }
     if details.triangles > TRIANGLE_BUDGET {
         let message = format!(
@@ -267,7 +353,7 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
         None => format!("텍스처 {}장 · 크기를 읽지 못했습니다.", details.textures.len()),
     };
     report.check("textures", Level::Info, textures);
-    report.model = Some(details.clone());
+    report.model = Some(ModelReport::of(&details));
     if checksum == Level::Error {
         return Err(CHECKSUM);
     }
@@ -276,6 +362,9 @@ fn verify(kind: &str, bytes: &[u8], expected: Option<&str>, report: &mut Report)
     }
     if character && (!summary.skinned || !missing.is_empty()) {
         return Err(if resident { NOT_RESIDENT } else { NOT_PLAYABLE });
+    }
+    if character && !unnamed.is_empty() {
+        return Err(UNNAMED);
     }
     Ok(details)
 }
@@ -590,7 +679,7 @@ impl Task {
         .map_err(internal)?;
         let web_textures = web_details.map_or_else(|| details.textures.clone(), |web| web.textures);
         web_checks(report, original, web.len(), slimmed, &web_textures);
-        report.web_textures = Some(web_textures);
+        report.web_textures = Some(listed(&web_textures));
         if let Some(file) = report.file.as_mut() {
             (file.web_bytes, file.slimmed) = (Some(web.len()), Some(slimmed));
         }
@@ -817,7 +906,7 @@ mod tests {
         }
         assert!(report.checks.iter().any(|check| check.code == "clips" && check.message.contains("walk")));
         assert!(report.checks.iter().any(|check| check.code == "unused_clips" && check.message.contains("Sit")));
-        assert_eq!(report.model.as_ref().unwrap().animations, ["Idle", "Sit"]);
+        assert_eq!(report.model.as_ref().unwrap().details.animations, ["Idle", "Sit"]);
 
         let mut report = Report::default();
         let sha = hex::encode(Sha256::digest(&statue));
@@ -849,6 +938,50 @@ mod tests {
         let mut report = Report::default();
         assert_eq!(verify("minime", b"nope", None, &mut report).unwrap_err().code, "not_glb");
         assert_eq!(levels(&report).last(), Some(&("glb", Level::Error)));
+    }
+
+    #[test]
+    fn a_minimes_idle_and_walk_need_names_its_owners_player_finds() {
+        // Visitors read `Armature|Idle` as idle; the owner's own player looks for the whole name, in any case.
+        assert_eq!((glb::engine_clip("Armature|Walking"), player_clip("Armature|Walking")), (Some("walk"), None));
+        // It drops control characters and the spaces JavaScript trims (U+FEFF, not U+0085), but not for an alias.
+        assert_eq!([" Wa\u{1}lk\u{feff}", "idle\u{85}", "Walking "].map(player_clip), [Some("walk"), None, None]);
+        let prefixed = crate::test_glb::character(&["Armature|Idle", "Armature|Walking", "Armature|Running"]);
+        let mut report = Report::default();
+        let error = verify("minime", &prefixed, None, &mut report).unwrap_err();
+        assert_eq!((error.code, error.message), ("not_playable", UNNAMED.message));
+        assert!(levels(&report).contains(&("clips", Level::Ok)));
+        let named = report.checks.iter().find(|check| check.code == "clip_names").unwrap();
+        assert_eq!(named.level, Level::Error);
+        assert_eq!(named.message, "애니메이션 이름을 idle·walk로 내보내야 합니다: Armature|Idle, Armature|Walking");
+        let mut report = Report::default();
+        let error = verify("minime", &crate::test_glb::character(&["Armature|Idle", "Walking"]), None, &mut report);
+        assert_eq!(error.unwrap_err().message, UNNAMED.message);
+        let named = report.checks.iter().find(|check| check.code == "clip_names").unwrap();
+        assert_eq!(named.message, "애니메이션 이름을 idle로 내보내야 합니다: Armature|Idle");
+        let mut report = Report::default();
+        let error = verify("minime", &crate::test_glb::character(&["Idle", "Walking "]), None, &mut report);
+        assert_eq!(error.unwrap_err().message, UNNAMED.message);
+        let named = report.checks.iter().find(|check| check.code == "clip_names").unwrap();
+        assert_eq!(named.level, Level::Error);
+        assert_eq!(named.message, "애니메이션 이름을 walk로 내보내야 합니다: Walking ");
+        for names in
+            [&["IDLE", "walk"][..], &["Armature|Idle", "idle", "Walking"], &["idle ", " Walk"], &[" Idle", "walk\t"]]
+        {
+            let mut report = Report::default();
+            assert!(verify("minime", &crate::test_glb::character(names), None, &mut report).is_ok(), "{names:?}");
+            assert!(!levels(&report).iter().any(|(code, _)| *code == "clip_names"), "{names:?}");
+        }
+        // A rig or a clip missing outright is still what a 미니미 is refused for first.
+        let mut report = Report::default();
+        let error = verify("minime", &crate::test_glb::character(&["Armature|Idle"]), None, &mut report);
+        assert_eq!(error.unwrap_err().message, NOT_PLAYABLE.message);
+        assert!(levels(&report).contains(&("clip_names", Level::Error)));
+        // A resident is found by any name holding idle; on furniture the names are only noted.
+        assert!(verify("npc", &crate::test_glb::character(&["Armature|Idle"]), None, &mut Report::default()).is_ok());
+        let mut report = Report::default();
+        assert!(verify("furniture", &prefixed, None, &mut report).is_ok());
+        assert!(levels(&report).contains(&("clip_names", Level::Info)));
     }
 
     #[test]
@@ -886,7 +1019,7 @@ mod tests {
         let model = glb::join(&json!({"asset": {"version": "2.0"}, "animations": [{"name": "Da\u{0}nce"}]}), &[]);
         let mut report = Report::default();
         verify("furniture", &model, None, &mut report).unwrap();
-        assert_eq!(report.model.as_ref().unwrap().animations, ["Da\u{0}nce"]);
+        assert_eq!(report.model.as_ref().unwrap().details.animations, ["Da\u{0}nce"]);
         report.source = Some(json!({"stage": "comp\u{0}lete", "ke\u{0}y": ["a\u{0}b", 1, null]}));
         let stored = report.json();
         assert_eq!(stored["model"]["animations"], json!(["Dance"]));
@@ -894,6 +1027,33 @@ mod tests {
         let unused = stored["checks"].as_array().unwrap().iter().find(|check| check["code"] == "unused_clips").unwrap();
         assert_eq!(unused["message"], "엔진이 쓰지 않는 애니메이션: Dance");
         assert!(!stored.to_string().contains("\\u0000"), "{stored}");
+    }
+
+    #[test]
+    fn a_report_lists_the_first_textures_and_animations_and_counts_them_all() {
+        // Thousands of images, animations and required extensions with long names: the report keeps a small share of
+        // them and every count.
+        let long = "x".repeat(1000);
+        let model = json!({"asset": {"version": "2.0"},
+            "images": vec![json!({"uri": "map.png", "mimeType": long}); 2000],
+            "animations": (0..2000).map(|at| json!({"name": format!("{at} {long}")})).collect::<Vec<_>>(),
+            "extensionsRequired": (0..2000).map(|at| format!("EXT_{at}_{long}")).collect::<Vec<_>>()});
+        let mut report = Report::default();
+        let details = verify("furniture", &glb::join(&model, &[]), None, &mut report).unwrap();
+        assert_eq!((details.textures.len(), details.animations.len(), details.required.len()), (2000, 2000, 2000));
+        let stored = report.json();
+        let model = &stored["model"];
+        assert_eq!((model["textureCount"].as_u64(), model["animationCount"].as_u64()), (Some(2000), Some(2000)));
+        let listed = |list: &Value| list.as_array().unwrap().len();
+        assert_eq!((listed(&model["textures"]), listed(&model["animations"])), (LISTED, LISTED));
+        assert_eq!(listed(&model["required"]), LISTED);
+        assert_eq!(model["textures"][63]["image"], 63);
+        assert_eq!(model["textures"][0]["mime"], "x".repeat(NAME_CHARS));
+        assert_eq!(model["animations"][1], format!("1 {}", "x".repeat(NAME_CHARS - 2)));
+        assert_eq!(model["required"][1], format!("EXT_1_{}", "x".repeat(NAME_CHARS - 6)));
+        let unused = stored["checks"].as_array().unwrap().iter().find(|check| check["code"] == "unused_clips").unwrap();
+        assert!(unused["message"].as_str().unwrap().ends_with(&format!("x, 63 {} 외 1936개", "x".repeat(61))));
+        assert!(stored.to_string().len() < 32 * 1024, "{}", stored.to_string().len());
     }
 
     #[test]

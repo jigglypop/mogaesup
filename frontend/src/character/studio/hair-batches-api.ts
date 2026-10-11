@@ -78,8 +78,9 @@ export const hairBatchesApi = {
     }),
   list: (signal: AbortSignal) => request<{ items: HairBatch[] }>(endpoint, { signal, timeoutMs: 30000 }),
   resume: (id: string) => request<HairBatch>(`${endpoint}/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 30000 }),
-  create: (input: HairBatchInput) => hairBatches.send(input, pending => request<HairBatch>(endpoint, {
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (input: HairBatchInput, key?: string) => hairBatches.send(input, pending => request<HairBatch>(endpoint, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
     body: JSON.stringify(pending.input), timeoutMs: 60000,
-  })),
+  }), key ? { key } : {}),
 };

@@ -190,6 +190,222 @@
     },
     {
       "slot": "hair",
+      "name": "버즈 컷",
+      "brief": "Very short buzz cut for a chibi character in T pose, the whole head covered by one thin even hair shell that follows the rounded skull, never bare scalp, with neatly rounded temples and a short tidy nape. Soft rounded hairline well above the eyebrows, natural black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "크루 컷",
+      "brief": "Short crew cut for a chibi character in T pose, a slightly longer rounded top brushed up at the front into one low soft ridge, sides and back tapered short and kept as a thin solid hair shell, never bare scalp. Front hairline well above the eyebrows, dark chestnut brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "슬릭백",
+      "brief": "Slicked-back cut for a chibi character in T pose, all the hair combed straight back from the forehead in three broad smooth ridges ending in a soft rounded volume at the back of the crown, short tidy sides combed back as one smooth piece. Forehead and both eyebrows fully open, jet black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "리젠트 컷",
+      "brief": "Quiff cut for a chibi character in T pose, the front hair lifted up and back into one big rounded wave above the forehead, the top combed back behind it, short tapered sides and nape kept as a thin solid hair shell, never bare scalp. Forehead open above the eyebrows, dark chocolate brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "클래식 사이드파트",
+      "brief": "Classic side-part cut for a chibi character in T pose, a clean parting line on the left and the top combed over to the right in one broad smooth wave, short neat sides and a tapered nape kept as a thin solid hair shell, never bare scalp. Front lifted slightly above the eyebrows, hazelnut brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "투블럭 컷",
+      "brief": "Korean two-block cut for a chibi character in T pose, a full rounded top layer falling over closely cropped sides and nape, the lower sides kept as a thin solid hair shell beneath it, never bare scalp. Straight natural fringe falling to just above the eyebrows, natural black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "포호크 컷",
+      "brief": "Faux hawk haircut for a chibi character in T pose, a central strip of hair from the forehead to the crown styled up into one broad rounded ridge of chunky pieces, short sides and nape kept as a thin solid hair shell, never bare scalp. Front hairline well above the eyebrows, cocoa brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "스파이키 컷",
+      "brief": "Spiky cut for a chibi character in T pose, the crown built from a few big chunky spikes with rounded tips pointing up and back, the sides and back as broad rounded spikes down to the nape. Three short spiky fringe pieces pointing down to just above the eyebrows, golden blonde. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "숏 컬리 펌",
+      "brief": "Short men's curly perm for a chibi character in T pose, a rounded top of big springy curls forming one soft cloud, short tapered sides and nape kept as a thin solid hair shell, never bare scalp. Short curly fringe resting above the eyebrows, deep cocoa brown, curls as broad rounded clumps. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "숏 트위스트",
+      "brief": "Short two-strand twists for a chibi character in T pose, chunky rounded twists standing up and out from the whole head in one even rounded shape, hair-coloured roots between the twists, never bare scalp. Neat rounded hairline above the eyebrows and a tidy rounded nape, natural black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "콘로우",
+      "brief": "Straight-back cornrows for a chibi character in T pose, six broad raised rounded braids running in parallel rows from a neat hairline over the crown down to the nape, hair-coloured grooves between the rows, never bare scalp, the braid ends tucked under at the nape. Hairline well above the eyebrows, natural black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "반투 노트",
+      "brief": "Bantu knots for a chibi character in T pose, the hair divided into six neat sections, each twisted into one round coiled knot sitting on the head, hair-coloured roots between the sections, never bare scalp. Smooth rounded hairline above the eyebrows, dark brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "댄디 컷",
+      "brief": "Dandy cut for a chibi character in T pose, a soft rounded shape with light layers, sides falling over the ears as broad rounded pieces and a rounded back ending at a short tidy nape. Natural straight fringe separated into a few broad pieces resting just above the eyebrows, soft dark brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "리프 컷",
+      "brief": "Leaf cut for a chibi character in T pose, the fringe parted just off centre and swept outward to both sides in two broad leaf-shaped locks that curve over the temples, both eyebrows readable between them. Rounded volume on top, sides falling just over the ears, a short tidy nape, ash brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "커튼 헤어",
+      "brief": "Curtain haircut for a chibi character in T pose, a clean centre part with two broad fringe locks falling from it and curving outward past the ends of the eyebrows to the cheekbones like open curtains. Rounded volume on top, sides covering the ears and a short rounded nape, light ash brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "픽시 컷",
+      "brief": "Pixie cut for a chibi character in T pose, a soft rounded top with a little volume, short rounded side pieces over the ears and a neatly tapered nape, all built as broad rounded pieces. Short side-swept fringe resting above the eyebrows, platinum blonde. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "바가지 머리",
+      "brief": "Rounded bowl cut for a chibi character in T pose, one smooth dome of hair, the sides falling straight to the middle of the ears and the back rounded down to a neat nape on the same line. Full straight fringe cut in one even line just above the eyebrows, chestnut brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "라운드 아프로",
+      "brief": "Rounded afro for a chibi character in T pose, tight curls forming one round soft cloud around the whole head, the sides and back as one continuous rounded volume ending at the nape, curls shown as a few broad rounded bumps. Neat rounded hairline just above the eyebrows, dark espresso brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "울프 컷",
+      "brief": "Wolf cut for a chibi character in T pose, a shaggy rounded top of choppy layered clumps, short layered sides and a longer layered back that flips out around the nape and neck as one continuous rounded piece. Short curtain bangs parted above the eyebrows, ash grey. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "샤기 컷",
+      "brief": "Chin-length shag cut for a chibi character in T pose, choppy rounded layers stacked from the crown with plenty of volume and ends flicking outward at the jawline all around, the back as one layered rounded piece. Piecey curtain bangs built as a few broad pieces above the eyebrows, copper. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "일자뱅 단발",
+      "brief": "Straight blunt bob for a chibi character in T pose, one-length hair falling straight to the jawline and cut in one clean even line all around, smooth sides past the cheeks and a smooth rounded back. Full blunt bangs cut straight across just above the eyebrows, jet black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "센터파트 칼단발",
+      "brief": "Sleek centre-part bob for a chibi character in T pose with no fringe, the hair parted in the middle and falling straight and smooth to one sharp blunt line at the jaw, sides framing the cheeks and a smooth rounded back. Forehead open above the eyebrows, dark chocolate brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "언발란스 단발",
+      "brief": "Asymmetric bob for a chibi character in T pose, a deep side part with the right side cut at the jawline and the left side a little longer, reaching just below the chin, the back sloping smoothly between them as one rounded piece. Long side-swept fringe resting above the eyebrows, dusty blue. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "웨이브 단발",
+      "brief": "Wavy bob for a chibi character in T pose, chin-length hair with soft broad S-waves through the sides and back and rounded volume around the cheeks, the waves shown as a few broad rounded clumps. Deep side part with a swept wavy fringe resting above the eyebrows, ash beige. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "컬리 단발",
+      "brief": "Curly bob for a chibi character in T pose, chin-length hair of round springy curls forming one soft rounded shape with full curly volume over the sides and back, curls shown as broad rounded clumps. Short curly bangs resting above the eyebrows, cinnamon brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "아웃컬 단발",
+      "brief": "Flipped-out bob for a chibi character in T pose, chin-length smooth hair whose ends turn outward in one soft rounded flip all around, smooth rounded volume over the crown and sides. Short rounded fringe resting above the eyebrows, pastel pink. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "웨이브 롭",
+      "brief": "Wavy lob for a chibi character in T pose, shoulder-length hair in loose beachy S-waves with the tips resting on the shoulder line and flicking slightly outward, the back as a few broad wavy clumps. Centre part with two broad wavy front locks opening above the eyebrows, sandy blonde. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "숏 양갈래",
+      "brief": "Short pigtails for a chibi character in T pose, chin-length hair with a centre part gathered into two small round tufts just below the ears with compact ties in the same hair colour, a smooth rounded back. Short straight fringe above the eyebrows, ginger, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "하프업 번 단발",
+      "brief": "Half-up bob for a chibi character in T pose, the top section gathered into one small round bun at the back of the crown with a compact tie in the same hair colour, the rest falling smooth to the jawline with the ends tucked inward. Soft side-swept fringe above the eyebrows, mocha brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "맨번",
+      "brief": "Man bun for a chibi character in T pose, the longer top hair pulled back smoothly into one small round bun at the back of the crown with a compact tie in the same hair colour, short tapered sides and nape kept as a thin solid hair shell, never bare scalp. Forehead open above the eyebrows, dark brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "하이 번",
+      "brief": "High bun for a chibi character in T pose, all the hair pulled up smoothly into one neat round bun on top of the crown with a compact tie in the same hair colour, the sides and back swept up as broad smooth pieces. Short soft baby bangs above the eyebrows, warm chestnut brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "메시 번",
+      "brief": "Messy bun for a chibi character in T pose, the hair gathered loosely at the back of the crown into one rounded bun of a few broad soft loops with a compact tie in the same hair colour, two broad face-framing locks at the cheeks. Fringe parted above the eyebrows, ash blonde, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "양갈래 번",
+      "brief": "Twin space buns for a chibi character in T pose, the hair parted down the middle and gathered into two round buns high on either side of the crown, each with a compact tie in the same hair colour, the sides and back swept up smoothly. Short straight fringe above the eyebrows, soft lavender, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "로우 시뇽",
+      "brief": "Low chignon for a chibi character in T pose, a centre part with the hair smoothed back over both sides into one round sleek bun at the nape held by a compact tie in the same hair colour, the back of the head smooth and rounded. Forehead open above the eyebrows, deep espresso brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "크라운 브레이드",
+      "brief": "Crown braid for a chibi character in T pose, one thick rounded braid wrapping all the way around the head like a crown just behind the hairline, the rest of the hair smoothed up into it and the braid end tucked in at the nape. Forehead open above the eyebrows, wheat blonde, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
+      "name": "아프로 퍼프",
+      "brief": "Afro puff for a chibi character in T pose, curly hair brushed up smoothly from the hairline and nape into one round puff of tight curls on top of the crown with a compact tie in the same hair colour, curls shown as broad rounded bumps. Forehead open above the eyebrows, dark brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "short"
+    },
+    {
+      "slot": "hair",
       "name": "엘리자벳 펌 롱 웨이브",
       "brief": "Long Elizabeth perm falling to the waist, big soft inward waves from the cheeks down and rounded inward-curled ends. Centre part with long curtain bangs flowing into the waves, warm caramel brown, the long hair hanging behind the shoulders in a few broad wavy clumps. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
       "hair_length": "long"
@@ -210,6 +426,120 @@
       "slot": "hair",
       "name": "로우 포니테일",
       "brief": "Low ponytail tied at the nape with a compact tie in the same hair colour, the tail falling straight down the back to the waist as one broad rounded piece. Soft curtain bangs parted above the eyebrows and smooth sides tucked behind the ears, natural black, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "일자뱅 롱 스트레이트",
+      "brief": "Long straight hair for a chibi character in T pose, one-length sleek hair falling to the waist behind the shoulders in one broad smooth sheet, straight side pieces framing the cheeks. Full blunt bangs cut straight across just above the eyebrows, natural black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "센터파트 롱 스트레이트",
+      "brief": "Long sleek straight hair for a chibi character in T pose with a clean centre part and no fringe, the front locks falling straight past the cheeks and tucked behind the shoulders, the back hanging to the waist as one broad smooth sheet. Forehead open above the eyebrows, milk chocolate brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "히메 컷",
+      "brief": "Hime cut for a chibi character in T pose, straight side locks cut in one even line at the jaw and long straight back hair falling to the waist behind the shoulders as one broad smooth sheet. Blunt straight fringe just above the eyebrows, jet black. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "시스루뱅 롱 웨이브",
+      "brief": "Long soft waves with see-through bangs for a chibi character in T pose, gentle S-waves from the cheeks down and the long hair falling to the waist behind the shoulders in a few broad wavy clumps. Light fringe built as a few broad thin pieces resting above the eyebrows, latte brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "할리우드 웨이브",
+      "brief": "Retro Hollywood waves for a chibi character in T pose, a deep side part with the hair set in big sculpted S-waves from the crown down, the long hair falling to the waist behind the shoulders in a few broad rounded waves. Long swept front wave lifted above the eyebrows, honey blonde. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "롱 히피펌",
+      "brief": "Long hippie perm for a chibi character in T pose, the whole length set in small tight crimped waves gathered into a few broad wavy clumps, the hair spreading softly to the waist behind the shoulders. Centre part with wavy front locks opening above the eyebrows, chestnut brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "롱 코일 컬",
+      "brief": "Long afro-textured coils for a chibi character in T pose, big rounded spiral coils with full rounded volume around the head and down the back to the waist behind the shoulders, coils shown as broad rounded clumps. Short coily fringe above the eyebrows, dark brown. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "박스 브레이드",
+      "brief": "Long box braids for a chibi character in T pose, ten chunky rounded braids from neat square sections hanging straight down behind the shoulders to the waist with rounded ends, hair-coloured roots between the sections, never bare scalp. Neat hairline above the eyebrows, natural black, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "피쉬테일 브레이드",
+      "brief": "Fishtail braid for a chibi character in T pose, all the hair swept back smoothly into one broad fishtail braid hanging straight down the back to the waist, the end tied with a compact tie in the same hair colour. Soft side-swept fringe above the eyebrows, ash blonde, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "양갈래 땋은 머리",
+      "brief": "Twin braids for a chibi character in T pose, a centre part and two long three-strand braids starting behind the ears and hanging down behind the shoulders to the waist, the ends tied with compact ties in the same hair colour. Short straight bangs above the eyebrows, copper, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "하이 포니테일",
+      "brief": "High ponytail for a chibi character in T pose, all the hair pulled up smoothly to the back of the crown and tied with a compact tie in the same hair colour, the tail falling down the back to the waist as one broad rounded piece. Side-swept fringe above the eyebrows, dark brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "사이드 포니테일",
+      "brief": "Side ponytail for a chibi character in T pose, the hair swept to the left and tied low at the left side of the nape with a compact tie in the same hair colour, the tail hanging down behind the left shoulder as one broad rounded piece. Side fringe above the eyebrows, caramel brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "버블 포니테일",
+      "brief": "Bubble ponytail for a chibi character in T pose, a high ponytail at the back of the crown divided down its length by compact ties in the same hair colour into four round bubbles hanging down the back to the waist. Smooth swept fringe above the eyebrows, silver grey, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "하이 트윈테일",
+      "brief": "High twin tails for a chibi character in T pose, a centre part with the hair gathered into two tails high on either side of the crown, each tied with a compact tie in the same hair colour and falling as one broad rounded piece down behind the shoulders. Full straight fringe above the eyebrows, pastel pink, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "로우 트윈테일",
+      "brief": "Low twin tails for a chibi character in T pose, a centre part with the hair tied into two tails just below the ears with compact ties in the same hair colour, each tail falling straight down behind the shoulders as one broad rounded piece. Soft curtain bangs above the eyebrows, chocolate brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "드릴 트윈테일",
+      "brief": "Twin drill curls for a chibi character in T pose, two high tails tied at either side of the crown with compact ties in the same hair colour, each wound into one big rounded spiral ringlet hanging down behind the shoulders. Straight full fringe above the eyebrows, golden blonde, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "하프업 포니테일",
+      "brief": "Half-up ponytail for a chibi character in T pose, the top section pulled back into a small ponytail at the back of the crown with a compact tie in the same hair colour, the rest falling straight to the waist behind the shoulders in one broad smooth sheet. Soft fringe parted above the eyebrows, chestnut brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "하프업 양갈래 번",
+      "brief": "Half-up space buns for a chibi character in T pose, two small round buns high on either side of the crown, each with a compact tie in the same hair colour, the rest of the hair falling straight to the waist behind the shoulders. Short straight fringe above the eyebrows, soft mint green, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
+      "hair_length": "long"
+    },
+    {
+      "slot": "hair",
+      "name": "하프업 브레이드",
+      "brief": "Half-up braided crown for a chibi character in T pose, two rounded side braids from the temples meeting at the back of the crown with a compact tie in the same hair colour, the rest falling to the waist behind the shoulders in soft broad waves. Centre part with the fringe opening above the eyebrows, honey brown, no ornaments. Closed rounded crown with hair-coloured root backing, rear roots connected down to the nape, clear face opening with readable eyebrows, a few broad smooth clumps, no loose strands.",
       "hair_length": "long"
     },
     {

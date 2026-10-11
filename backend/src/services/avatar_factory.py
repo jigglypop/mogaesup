@@ -153,13 +153,16 @@ class AvatarFactory:
             if job['status'] in ('failed', 'recovery_required') and runner and process_state(runner.get('process')) != 'exited':
                 blocked = True
             rejected = None
+            from src.services.avatar_image_pipeline import auto_resubmits
             from src.services.character_jobs import submitted_task_id
             for p in state.get('parts', []):
                 run = directory/'parts'/p['slot']
                 task = read_json(run/'character.json')
                 # A submission whose saved answer names the accepted task is that task: resume polls it, never resends.
                 known = bool(task.get('task_id') or (task and submitted_task_id(run, task)))
-                blocked = blocked or bool(task and (not known or task.get('status') in ('FAILED', 'CANCELED')))
+                # One the provider never took is sent again by the resumed run itself while its automatic resends last.
+                blocked = blocked or bool(task and not auto_resubmits(p, task)
+                                          and (not known or task.get('status') in ('FAILED', 'CANCELED')))
                 if task.get('status') == 'submission_rejected' and task.get('http_status'):
                     response = read_json(directory/'parts'/p['slot']/f'{task.get("stage", "generation")}-submission-response.json')
                     rejected = (task['http_status'], task.get('provider', 'meshy'), response.get('body') or '')

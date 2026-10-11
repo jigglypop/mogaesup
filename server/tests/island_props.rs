@@ -66,7 +66,7 @@ async fn 생성한_섬_기물은_공개된_기본_가구이고_앱이_모델과_
     assert_eq!(labels.len(), props.len(), "duplicate prop names");
 
     // Admins retire, rename and publish them like any item, and running the rows again keeps what they changed.
-    let admin = app.register("operator_p", "운영자").await;
+    let admin = app.register("operator_p", "대장").await;
     app.make_admin("operator_p").await;
     let retired = app
         .call(

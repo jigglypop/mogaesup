@@ -312,6 +312,29 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
+/// Characters that hide text or turn it around where others read it: the zero width space, the direction marks,
+/// embeddings, overrides and isolates (the Arabic letter mark too), the word joiner and invisible operators, and the
+/// byte order mark. The joiners emoji are made with (U+200C, U+200D) are not among them.
+fn hidden(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}'
+            | '\u{200b}'
+            | '\u{200e}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
+}
+
+/// Whether `text` reads to others as it was written, for anything people write that others see (a name, a guestbook
+/// entry, a line in a game): no control character, line breaks aside where `multiline` (a text area), nor any that
+/// hides text or turns it around ([`hidden`]).
+pub fn plain_text(text: &str, multiline: bool) -> bool {
+    text.chars().all(|c| (!c.is_control() || (multiline && c == '\n')) && !hidden(c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +365,25 @@ mod tests {
         assert_ne!(address("2001:db8:1:3::1"), address("2001:db8:1:2::1"));
         assert_eq!(address("::ffff:203.0.113.7"), "203.0.113.7");
         assert_eq!(address("not an address"), "not an address");
+    }
+
+    #[test]
+    fn plain_text_refuses_control_characters_and_the_invisible_ones_that_hide_or_turn_text_but_keeps_emoji_joiners() {
+        // Joiners and variation selectors in emoji, and the tags of a subdivision flag (Scotland's), are kept.
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        assert!(plain_text(&format!("모개숲 주민 👩‍🏫 🏳️‍🌈 👁️‍🗨️ {scotland}"), false));
+        assert!(plain_text("आ\u{200c}ज", false), "a zero width non-joiner, as Indic and Persian text use it");
+        assert!(plain_text("두 줄\n상태", true) && !plain_text("두 줄\n상태", false));
+        for hidden in [
+            "\u{0}", "\r", "\t", "\u{1b}", "\u{85}", "\u{200b}", "\u{200e}", "\u{200f}", "\u{202a}", "\u{202b}",
+            "\u{202c}", "\u{202d}", "\u{202e}", "\u{2060}", "\u{2061}", "\u{2062}", "\u{2063}", "\u{2064}", "\u{2066}",
+            "\u{2067}", "\u{2068}", "\u{2069}", "\u{feff}", "\u{61c}",
+        ] {
+            assert!(!plain_text(&format!("a{hidden}b"), true), "{hidden:?}");
+            assert!(!plain_text(hidden, false), "{hidden:?}");
+        }
+        // Reversed by an override, a line reads as something else.
+        assert!(!plain_text("\u{202e}요어맞 이것", false));
     }
 
     #[test]

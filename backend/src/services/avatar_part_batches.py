@@ -1,7 +1,7 @@
 """Uploaded three-view hair batches with durable, independently resumable jobs."""
 from concurrent.futures import as_completed
 from src.services.runtime_activity import ContextThreadPoolExecutor as ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import io
 import json
@@ -358,6 +358,8 @@ class PartBatches:
         # as paused, and can be resumed, instead of running until a restart.
         owner_running = record.get('status') == 'running' and worker_alive(
             record, _RUNS.busy((int(owner), record['id'])))
+        # An accepted batch whose run this process has started runs next: another resume would only send a second run.
+        dispatched = record.get('status') == 'accepted' and _RUNS.busy((int(owner), record['id']))
         status = 'complete' if complete else 'running' if running or owner_running else record.get('status', 'paused')
         if status == 'running' and not running and not owner_running:
             status = 'paused'
@@ -365,7 +367,7 @@ class PartBatches:
                   if key not in ('fingerprint', 'process', 'frozen_context')}
         public.update(status=status, items=items,
                       completed=sum(item['status'] == 'complete' for item in items),
-                      can_resume=bool(not complete and not running and not owner_running))
+                      can_resume=bool(not complete and not running and not owner_running and not dispatched))
         return public
 
     def create(self, owner, key, payload):
@@ -380,7 +382,7 @@ class PartBatches:
                 raise PipelineError('idempotency_conflict', '접수한 일괄 작업 입력이 다릅니다.', 409)
             return self._public(owner, old), False
         from src.services.meshy_status import require_credits
-        require_credits(len(payload['items']))
+        require_credits([payload['meshy_options']]*len(payload['items']))
         if len(payload['items']) > 48:
             raise PipelineError('batch_too_large', '일괄 작업은 최대 48개입니다.', 422)
         # Up to 144 images are read and decoded, and the base body is read and hashed: not under the process lock and
@@ -483,12 +485,27 @@ class PartBatches:
             return
         path = self._path(owner, batch)
         try:
-            with _batch_lease(self.root(owner, batch)):
-                record = read_json(path)
-                if not record or record.get('status') != 'accepted':
+            # The base is read and hashed before the process lock and the batch lease are taken, as a resume does. They
+            # are taken in the order every other change of the batch takes them, so a resume holding the lease is waited
+            # for instead of the batch being paused as run elsewhere; under them it is only seen still accepted and written.
+            record = read_json(path)
+            if not record or record.get('status') != 'accepted':
+                return
+            if record.get('base_receipt') != self._base_receipt(owner, record['input']):
+                raise PipelineError('base_changed', '접수한 기준 몸이 변경되었습니다.', 409)
+            with _LOCK, ExitStack() as held:
+                try:
+                    held.enter_context(_batch_lease(self.root(owner, batch)))
+                except PipelineError:
+                    # Another process holds the batch: it runs it or leaves it as it is, and a pause would write over that.
                     return
-                if record.get('base_receipt') != self._base_receipt(owner, record['input']):
-                    raise PipelineError('base_changed', '접수한 기준 몸이 변경되었습니다.', 409)
+                current = read_json(path)
+                # A resume may have accepted it again meanwhile, for the same base: this run runs it, and the run that
+                # resume sends finds it taken.
+                if (not current or current.get('status') != 'accepted'
+                        or current.get('base_receipt') != record.get('base_receipt')):
+                    return
+                record = current
                 record.update(status='running', process=identity(), error=None)
                 self._save(owner, record)
             explicit_resume = bool(record.get('resume_requested_at'))

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 
 import { Link } from 'react-router-dom';
 
-import { problemText } from '../api/client';
+import { ApiRequestError, SESSION_REFUSED, problemText } from '../api/client';
 import { socialApi } from '../api/endpoints';
 import type { GuestbookEntry, User } from '../api/types';
 import { useSignInPath } from '../auth/signIn';
@@ -17,6 +17,9 @@ const when = (at: string) => {
   return new Date(at).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' });
 };
 
+/** The server no longer takes the session: `api` has signed the member out. */
+const refused = (problem: unknown) => problem instanceof ApiRequestError && problem.status === 401 && problem.code === SESSION_REFUSED;
+
 /** The island's guestbook: a note to leave at the top, then the notes, newest first. */
 export function Guestbook({ username, viewer }: { username: string; viewer: User | null }) {
   const signIn = useSignInPath();
@@ -29,6 +32,10 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
   const [loading, setLoading] = useState(false);
   const [posting, setPosting] = useState(false);
   const context = useRef<{ controller: AbortController; reads: number; paging: boolean; mutating: boolean } | null>(null);
+  const viewerId = viewer?.id ?? null;
+  // Whose note the box holds, on which island: a session that lapses (no viewer until they sign in again) leaves it
+  // theirs, with what went wrong still shown; another member, or another island, starts afresh.
+  const writer = useRef<{ username: string; id: string } | null>(null);
 
   const load = useCallback(
     async (before?: string) => {
@@ -53,16 +60,21 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
   const run = (action: () => Promise<unknown>) => {
     const scope = context.current;
     setError('');
-    action().catch((problem: unknown) => { if (scope && !scope.controller.signal.aborted) setError(problemText(problem)); });
+    // A refused session signs the member out (a new scope), maybe before the refusal comes here: it is still said.
+    action().catch((problem: unknown) => { if (scope && (!scope.controller.signal.aborted || refused(problem))) setError(problemText(problem)); });
   };
 
   useEffect(() => {
     const scope = { controller: new AbortController(), reads: 0, paging: false, mutating: false };
     context.current = scope;
-    setEntries([]); setTotal(0); setNextBefore(null); setText(''); setSecret(false); setPosting(false); setError('');
+    const theirs = writer.current?.username === username && (viewerId === null || writer.current.id === viewerId);
+    if (!theirs) writer.current = viewerId === null ? null : { username, id: viewerId };
+    setEntries([]); setTotal(0); setNextBefore(null); setPosting(false);
+    if (!theirs) { setText(''); setSecret(false); }
+    if (!theirs || viewerId !== null) setError('');
     void load().catch((problem: unknown) => { if (!scope.controller.signal.aborted) setError(problemText(problem)); });
     return () => { scope.controller.abort(); };
-  }, [load, viewer?.id]);
+  }, [load, username, viewerId]);
 
   const mutate = (action: (scope: NonNullable<typeof context.current>) => Promise<void>) => {
     const scope = context.current;

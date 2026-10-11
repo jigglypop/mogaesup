@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import hashlib
 import io
 import shutil
+import threading
 
 from PIL import Image
 import pytest
@@ -77,6 +78,17 @@ def test_every_image_is_checked_before_the_process_lock_and_the_batch_lease_are_
     assert dispatch and record['status'] == 'accepted' and [item['name'] for item in record['items']] == ['헤어 A', '헤어 B']
     assert len(seen.checks) == 5 and not any(seen.checks)
     assert seen.leases == [1]
+
+
+def test_a_batch_is_priced_at_the_texture_resolution_of_its_parts(batches, monkeypatch):
+    factory, _, service = batches
+    asked = []
+    monkeypatch.setattr(meshy_status, 'require_credits', lambda parts: asked.append(parts))
+    service.create(1, 'part-batch-key-0008k', payload(
+        factory, ('헤어 A', three('red')), ('헤어 B', three('blue')),
+        meshy_options=MeshyPartOptions(texture_resolution='8k').model_dump(mode='json')))
+    # Two hairs, each at the 8K price.
+    assert [meshy_status.required_credits(parts) for parts in asked] == [2*35]
 
 
 def plant(factory, content):
@@ -261,6 +273,101 @@ def test_the_last_save_reads_the_children_outside_the_lock_and_again_when_the_re
     saved = read_json(path)
     assert held == [False, False]
     assert saved['status'] == 'paused' and saved['note'] == 'written meanwhile' and saved['items'][0]['status'] == 'paused'
+
+
+class Started:
+    """Every hair stops at its first step; `started` lists the child keys a run started."""
+    started = []
+
+    def __init__(self, factory):
+        pass
+
+    def create_single_part(self, owner, key, *args, **kwargs):
+        self.started.append(key)
+        raise PipelineError('fixture_stopped', '헤어 처리 중단', 409)
+
+
+def test_a_resume_that_overlaps_the_dispatched_run_neither_pauses_nor_drops_it(batches, monkeypatch):
+    """The run an acceptance sent took the batch lease without the process lock: while a second resume held both to
+    accept the batch again, it failed at once and paused the batch as run elsewhere, and the run that resume sent found
+    the first one still holding the batch. Nothing ran."""
+    factory, _, service = batches
+    record, _ = service.create(1, 'part-batch-key-0013', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    monkeypatch.setattr(Started, 'started', [])
+    monkeypatch.setattr(avatar_part_batches, 'AvatarVariants', Started)
+    dispatched = threading.Thread(target=service.execute, args=(1, record['id']))
+    waiting = threading.Event()
+
+    class ProcessLock:
+        """The process lock, telling when the dispatched run waits for it."""
+
+        def __enter__(self):
+            if threading.current_thread() is dispatched:
+                waiting.set()
+            return _LOCK.__enter__()
+
+        def __exit__(self, *exc):
+            return _LOCK.__exit__(*exc)
+    monkeypatch.setattr(avatar_part_batches, '_LOCK', ProcessLock())
+    save = service._save
+
+    def overlapped(owner, value):
+        if threading.current_thread() is dispatched or dispatched.ident:
+            return save(owner, value)
+        # The second resume holds the process lock and the batch lease. The dispatched run reaches them, then the batch
+        # is accepted again and the run this resume sends starts while the dispatched one holds the batch.
+        dispatched.start()
+        assert waiting.wait(30)
+        save(owner, value)
+        service.execute(owner, value['id'])
+    monkeypatch.setattr(service, '_save', overlapped)
+    _, dispatch = service.resume(1, record['id'])
+    dispatched.join(30)
+    assert dispatch and not dispatched.is_alive()
+    # The dispatched run waited for the resume and ran the batch, once.
+    saved = read_json(service.root(1, record['id'])/'batch.json')
+    assert Started.started == [record['items'][0]['key']]
+    assert saved['status'] == 'paused' and saved['error'] == '완료되지 않은 헤어 작업을 저장했습니다. 이어가기로 계속하세요.'
+
+
+def test_a_run_that_finds_the_batch_held_by_another_process_leaves_it_as_it_was(batches, monkeypatch):
+    factory, _, service = batches
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    record, _ = service.create(1, 'part-batch-key-0014', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    monkeypatch.setattr(Started, 'started', [])
+    monkeypatch.setattr(avatar_part_batches, 'AvatarVariants', Started)
+    # Another process holds the batch lease, without this process's lock.
+    with avatar_part_batches._batch_lease(service.root(1, record['id'])):
+        service.execute(1, record['id'])
+    saved = read_json(service.root(1, record['id'])/'batch.json')
+    assert Started.started == [] and saved['status'] == 'accepted' and saved['error'] is None
+    assert service.get(1, record['id'])['can_resume'] and avatar_part_batches._RUNS == {}
+
+
+def test_an_accepted_batch_whose_run_started_here_is_not_resumed_again(batches):
+    factory, _, service = batches
+    record, _ = service.create(1, 'part-batch-key-0015', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    path = service.root(1, record['id'])/'batch.json'
+    saved = read_json(path)
+    # The run the acceptance sent holds the batch's worker lock and has not marked it running yet.
+    assert avatar_part_batches._RUNS.acquire((1, record['id']))
+    try:
+        assert not service.get(1, record['id'])['can_resume']
+        public, dispatch = service.resume(1, record['id'])
+        assert not dispatch and public['status'] == 'accepted' and not public['can_resume'] and read_json(path) == saved
+    finally:
+        avatar_part_batches._RUNS.release((1, record['id']))
+    assert service.get(1, record['id'])['can_resume']
+
+
+def test_a_run_reads_and_hashes_its_base_while_the_process_lock_is_free(batches, monkeypatch):
+    factory, _, service = batches
+    record, _ = service.create(1, 'part-batch-key-0016', payload(factory, ('헤어', three((40, 40, 60, 255)))))
+    monkeypatch.setattr(Started, 'started', [])
+    monkeypatch.setattr(avatar_part_batches, 'AvatarVariants', Started)
+    seen = hashes_while_free(monkeypatch)
+    service.execute(1, record['id'])
+    assert seen and all(seen) and Started.started == [record['items'][0]['key']]
 
 
 def test_a_listing_reads_the_job_of_a_made_child_once(batches, monkeypatch):

@@ -15,9 +15,9 @@ use crate::{
     AppState,
     auth::{current_user, optional_user},
     error::{ApiResult, bad, conflict, forbidden, not_found},
-    homes::{Page, plain_text, visible_home},
+    homes::{Page, visible_home},
     rebac::{Checker, MODERATOR, Subject},
-    security::{client_address, rate_limit},
+    security::{client_address, plain_text, rate_limit},
 };
 
 /// Entries standing in one guestbook from its visitors, and apart from them its owner's: visitors filling it never

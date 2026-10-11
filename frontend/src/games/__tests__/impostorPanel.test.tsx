@@ -73,7 +73,7 @@ describe('임포스터 패널', () => {
       alive: false,
       talk: [{ id: 4, from: 'd', name: '디', text: '여기도 있어요', ghost: true }],
     });
-    const { view: shown, button, press, text, act: sent } = await panel(ghost);
+    const { view: shown, button, press, text, show, act: sent } = await panel(ghost);
     expect(text('.mg-impostor-role')).toEqual(['크루탈락']);
     expect(shown.container.querySelector('.mg-impostor-talk')!.getAttribute('aria-label')).toBe('유령 대화');
     expect(text('.mg-impostor-talk li')).toEqual(['유령디여기도 있어요']);
@@ -83,6 +83,7 @@ describe('임포스터 패널', () => {
     await type(field, '  비가 범인이에요 ');
     await press('보내기');
     expect(sent).toHaveBeenLastCalledWith({ do: 'say', text: '비가 범인이에요' });
+    await show({ ...ghost, talk: [...ghost.talk, { id: 5, from: 'me', name: '나', text: '비가 범인이에요', ghost: true }] });
     expect(field.value).toBe('');
     // Keys typed into the line stay out of the island's controls (they listen on the document); Escape still goes on.
     const heard = vi.fn();
@@ -108,6 +109,43 @@ describe('임포스터 패널', () => {
     await type(shown.container.querySelector<HTMLInputElement>('.mg-impostor-talk input')!, '저는 위에 있었어요');
     await press('보내기');
     expect(sent).toHaveBeenLastCalledWith({ do: 'say', text: '저는 위에 있었어요' });
+  });
+
+  it('대화는 1초에 한 줄씩 나가고, 보낸 줄은 대화에 올라온 뒤에야 입력에서 지운다', async () => {
+    vi.useFakeTimers({ now: NOW });
+    try {
+      const talking = game({ phase: 'discuss', meeting: meeting() });
+      const { view: shown, button, press, show, act: sent } = await panel(talking);
+      const field = shown.container.querySelector<HTMLInputElement>('.mg-impostor-talk input')!;
+      const wait = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+      const mine = { id: 1, from: 'me', name: '나', text: '아니', ghost: false };
+      await type(field, '아니');
+      await press('보내기');
+      expect(sent).toHaveBeenLastCalledWith({ do: 'say', text: '아니' });
+      // On its way it stays in the field; once in the talk, it goes.
+      expect(field.value).toBe('아니');
+      await show({ ...talking, talk: [mine] });
+      expect(field.value).toBe('');
+      // The next within the second (the server would refuse it) does not go, and stays.
+      await wait(500);
+      await type(field, '나 작업대에 있었어');
+      expect(button('보내기')!.disabled).toBe(true);
+      await act(async () => {
+        shown.container.querySelector('.mg-impostor-talk form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      });
+      expect(sent).toHaveBeenCalledTimes(1);
+      expect(field.value).toBe('나 작업대에 있었어');
+      await wait(500);
+      await press('보내기');
+      expect(sent).toHaveBeenLastCalledWith({ do: 'say', text: '나 작업대에 있었어' });
+      // Refused, it never comes into the talk: someone else's line clears nothing, and it can go again.
+      await show({ ...talking, talk: [mine, { id: 2, from: 'b', name: '비', text: '거짓말', ghost: false }] });
+      await wait(1_000);
+      expect(field.value).toBe('나 작업대에 있었어');
+      expect(button('보내기')!.disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('투표에서는 살아 있는 사람에게 한 번 투표하거나 건너뛰고, 누가 누구에게 냈는지는 보이지 않는다', async () => {

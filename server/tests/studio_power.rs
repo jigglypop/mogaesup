@@ -245,7 +245,7 @@ async fn 꺼진_스튜디오는_요청이_깨우고_켜지는_동안_studio_waki
 async fn 꺼지는_중이면_studio_stopping으로_답하고_변경은_기록하지_않는다() {
     let aws = FakeAws::new("stopping");
     let app = app_with(unreachable().await, &aws).await;
-    let admin = app.register("operator_w", "운영자").await;
+    let admin = app.register("operator_w", "대장").await;
     app.make_admin("operator_w").await;
 
     let reply = app.call("GET", WARDROBE, None, Some(&admin)).await;
@@ -313,7 +313,7 @@ async fn 관리자만_스튜디오_전원을_보고_켠다() {
     let aws = FakeAws::new("stopped");
     let app = app_with(unreachable().await, &aws).await;
     let member = app.register("member_p", "회원").await;
-    let admin = app.register("operator_p", "운영자").await;
+    let admin = app.register("operator_p", "대장").await;
     app.make_admin("operator_p").await;
 
     assert_eq!(app.call("GET", POWER, None, None).await.status, StatusCode::UNAUTHORIZED);
@@ -339,7 +339,7 @@ async fn 관리자만_스튜디오_전원을_보고_켠다() {
 
     // Without an instance (local runs) the studio is always on and there is nothing to start.
     let app = TestApp::new(Some(factory(unreachable().await, None))).await;
-    let admin = app.register("operator_l", "운영자").await;
+    let admin = app.register("operator_l", "대장").await;
     app.make_admin("operator_l").await;
     assert_eq!(app.call("GET", POWER, None, Some(&admin)).await.body, json!({"configured": false}));
     assert_eq!(app.call("POST", POWER, None, Some(&admin)).await.body["code"], "studio_power_unconfigured");
@@ -384,7 +384,7 @@ async fn 켜지_못한_스튜디오는_요청마다_다시_켜려_하지_않는�
     // Later requests, and the operators' button, wait out the retry instead of asking EC2 again.
     tokio::time::sleep(Duration::from_millis(2100)).await;
     assert_eq!(app.call("GET", WARDROBE, None, Some(&member)).await.body["code"], "factory_unavailable");
-    let admin = app.register("operator_f", "운영자").await;
+    let admin = app.register("operator_f", "대장").await;
     app.make_admin("operator_f").await;
     let pressed = app.call("POST", POWER, None, Some(&admin)).await;
     assert_eq!((pressed.status, pressed.body["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("studio_start_failed")));

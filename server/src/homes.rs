@@ -30,7 +30,7 @@ use crate::{
     error::{ApiError, ApiResult, bad, conflict, forbidden, internal, not_found},
     permissions::like_escape,
     rebac::{Checker, Object, Subject},
-    security::{client_address, hmac_sha256, rate_limit},
+    security::{client_address, hmac_sha256, plain_text, rate_limit},
     share,
 };
 
@@ -195,11 +195,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/homes/{username}", get(view))
         .route("/api/homes/{username}/visits", post(visit))
         .route("/api/homes/{username}/world", get(world))
-}
-
-/// Whether `text` holds no control character; `multiline` lets line breaks through where the field is a text area.
-pub(crate) fn plain_text(text: &str, multiline: bool) -> bool {
-    text.chars().all(|c| !c.is_control() || (multiline && c == '\n'))
 }
 
 #[derive(Clone, Serialize)]
@@ -1455,5 +1450,9 @@ mod tests {
             assert!(!plain_text(&format!("a{control}b"), true), "{control:?}");
         }
         assert!(plain_text("👩‍🏫 이모지", false));
+        // Nor a title or status that hides itself or reads turned around.
+        for hidden in ["\u{200b}", "\u{202e}섬 제목", "상태\u{2066}"] {
+            assert!(!plain_text(hidden, true), "{hidden:?}");
+        }
     }
 }

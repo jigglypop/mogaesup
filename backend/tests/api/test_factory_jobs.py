@@ -152,6 +152,36 @@ def test_resume_refuses_a_second_continuation_while_the_character_flow_runs(clie
     assert continued == [PART]
 
 
+@pytest.mark.parametrize('task, automatic, offered', [
+    # Meshy never received the request, or refused it for load: the resumed run sends it again by itself.
+    ({'status': 'submission_not_sent'}, 0, True),
+    ({'status': 'submission_rejected', 'http_status': 429}, 2, True),
+    ({'status': 'submission_rejected', 'http_status': 503}, 0, True),
+    # Its automatic resends are used up: only an explicit run sends it again.
+    ({'status': 'submission_rejected', 'http_status': 429}, 3, False),
+    ({'status': 'submission_rejected', 'http_status': 402}, 0, False),
+    # Meshy may have accepted it, and nothing saved names the task.
+    ({'status': 'submission_uncertain'}, 0, False)])
+def test_resume_is_offered_when_the_resumed_run_sends_an_unaccepted_3d_request_again(client, library, monkeypatch,
+                                                                                    task, automatic, offered):
+    from src.services.avatar_image_pipeline import AvatarImagePipeline
+    monkeypatch.setattr(AvatarImagePipeline, 'execute', lambda self, owner, job_id: None)
+    library.job(LATER, status='pipeline_paused')
+    put(library.directory(LATER)/'pipeline.json', {'parts': [
+        {'slot': 'top', 'image': {'status': 'succeeded'}, 'model': {'status': task['status']},
+         'model_attempts': [{'reason': 'auto', 'status': task['status']}]*automatic}]})
+    put(library.directory(LATER)/'parts/top/character.json', {'stage': 'generation', 'provider': 'meshy', **task})
+
+    job = client.get(f'/api/avatar-factory/jobs/{LATER}').json()
+
+    resume = next(action for action in job['next_actions'] if action['id'] == 'resume')
+    assert resume['enabled'] is offered
+    assert job['character_flow']['status'] == ('paused' if offered else 'blocked')
+    if offered:
+        # The offered action is the one POST /resume takes.
+        assert client.post(f'/api/avatar-factory/jobs/{LATER}/resume').status_code == 202
+
+
 def uploaded_views(factory):
     """The three views of a base body, uploaded by the owner: {view: asset id}."""
     from src.services.avatar_blueprints import AvatarBlueprints

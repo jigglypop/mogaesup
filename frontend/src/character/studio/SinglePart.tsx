@@ -146,7 +146,8 @@ export function SinglePart({ slot, onSlotChange, bases, base, native, versions, 
     setError('');
     try {
       if (input.meshy_options && meshyOptionsError(input.meshy_options)) throw new Error(meshyOptionsError(input.meshy_options));
-      const result = await studioApi.singlePart(input);
+      // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
+      const result = await studioApi.singlePart(input, pending?.key);
       onBaseChange(input.base_job_id);
       onJob(result);
     } catch (reason) {

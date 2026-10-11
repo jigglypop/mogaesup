@@ -1023,7 +1023,7 @@ fn the_living_talk_in_meetings_and_the_dead_among_themselves() {
     assert_eq!(play.onlooker()["talk"], json!([]));
     // Something, at most 120 characters, nothing that is not text, one line a second.
     let long = "가".repeat(121);
-    for bad in ["", "   ", long.as_str(), "a\u{7}b", "a\nb", "\u{202e}abc"] {
+    for bad in ["", "   ", long.as_str(), "a\u{7}b", "a\nb", "\u{202e}abc", "\u{200b}", "a\u{feff}b", "\u{2060}"] {
         assert_eq!(play.act(ghost, say(bad)), Err(BAD_TEXT), "{bad:?}");
     }
     assert_eq!(play.act(ghost, json!({"do": "say"})), Err(BAD_ACTION));

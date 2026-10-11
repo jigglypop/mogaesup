@@ -278,7 +278,7 @@ async fn 관리자_프록시의_변경도_서버_전체_상한과_기록을_따�
     // Paid, one request a month: the proxy spends it and the studio's own route cannot spend another.
     let (app, seen) = gateway(FactoryAccess::Paid, 1).await;
     let boss = admin(&app, "admin_p").await;
-    let operator = app.register("operator_p", "운영자").await;
+    let operator = app.register("operator_p", "대장").await;
     app.grant("operator_p", "system:mogaesup", "paid_operator").await;
     let refused = app.call("POST", "/api/factory/studio/generations", Some(json!({})), Some(&operator)).await;
     assert_eq!(code(refused), (StatusCode::FORBIDDEN, Some("admin_only".into())), "the proxy is for admins");

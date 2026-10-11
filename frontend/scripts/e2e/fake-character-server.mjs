@@ -13,7 +13,7 @@ import { createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { Logger, NodeIO } from '@gltf-transform/core';
+import { Logger, NodeIO, VertexLayout } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import { dequantize, prune, textureCompress, unpartition } from '@gltf-transform/functions';
 import { MeshoptDecoder } from 'meshoptimizer';
@@ -35,7 +35,12 @@ const hex = (seed) => sha256(`e2e:${seed}`).slice(0, 24);
  */
 async function models() {
   await MeshoptDecoder.ready;
-  const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.decoder': MeshoptDecoder });
+  // Each vertex attribute in a buffer view of its own, as Blender's exporter writes the studio's parts: the wardrobe
+  // resizes and moves only parts laid out that way.
+  const io = new NodeIO()
+    .registerExtensions(ALL_EXTENSIONS)
+    .registerDependencies({ 'meshopt.decoder': MeshoptDecoder })
+    .setVertexLayout(VertexLayout.SEPARATE);
   const document = await io.read(FIGURE);
   await document.transform(
     dequantize(),
@@ -114,6 +119,22 @@ function stats(bytes) {
     file_bytes: bytes.length,
     expected_sha256: sha256(bytes),
   };
+}
+
+/**
+ * The first and last byte a Range header asks of `total` bytes, read as the character server reads it; null when it
+ * cannot be served.
+ */
+function byteRange(range, total) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+  if (!match || (!match[1] && !match[2]) || total <= 0) return null;
+  if (!match[1]) {
+    const count = Number(match[2]);
+    return count > 0 ? [Math.max(0, total - count), total - 1] : null;
+  }
+  const start = Number(match[1]);
+  const end = match[2] ? Math.min(Number(match[2]), total - 1) : total - 1;
+  return start > end || start >= total ? null : [start, end];
 }
 
 const picture = (color) =>
@@ -361,7 +382,7 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
     registered_at: created(21),
   };
 
-  /** The studio's API by path (below /api/), each answering `[status, body]`, a file, or a redirect. */
+  /** The studio's API by path (below /api/), each answering `[status, body]` or a file. */
   const routes = [
     ['avatar-factory/jobs', () => [200, { jobs: jobs.map(record) }]],
     ['avatar-factory/jobs/:job', ({ job }) => job && [200, record(job)]],
@@ -471,12 +492,13 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       'studio/bodies/:job/:version/expressions',
       ({ job, version }) => job && expressions(job, version) && [200, expressions(job, version)],
     ],
-    // Faces live in object storage: the character server answers with a presigned redirect.
+    // Faces live in object storage, and the character server streams them through its own origin, never a redirect.
     [
       'studio/bodies/:job/:version/expressions/:face/:file',
       ({ job, version, face, file }) => {
         const sealed = job?.versions[version];
-        return sealed?.face === face && faceFiles(sealed)[file] && { redirect: `/signed/${job.id}/${version}/${face}/${file}` };
+        const bytes = sealed?.face === face && faceFiles(sealed)[file];
+        return bytes && { file: bytes, type: file.endsWith('.png') ? 'image/png' : 'model/gltf-binary' };
       },
     ],
     [
@@ -504,12 +526,6 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       },
     ],
   ];
-  /** What the presigned links point at: a sealed version's face files. */
-  const signed = (path) => {
-    const [id, version, face, name] = path.split('/');
-    const sealed = byId(id)?.versions[version];
-    return sealed?.face === face ? faceFiles(sealed)[name] : null;
-  };
 
   function unsigned(request) {
     const { authorization = '', cookie } = request.headers;
@@ -531,14 +547,28 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       response.writeHead(status, { 'content-type': 'application/json', ...headers });
       response.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
     };
-    if (url.pathname.startsWith('/signed/')) {
-      const bytes = request.method === 'GET' && signed(url.pathname.slice('/signed/'.length));
-      // Presigned object storage answers the browser too (the admin page's 3D preview), from another origin.
-      const type = url.pathname.endsWith('.png') ? 'image/png' : 'model/gltf-binary';
-      return bytes
-        ? send(200, bytes, { 'content-type': type, 'access-control-allow-origin': '*' })
-        : send(404, { detail: 'Not Found' });
-    }
+    /**
+     * A file as the character server sends one from object storage (backend/src/services/remote_artifact.py): with its
+     * ETag, unstored, and HEAD, If-None-Match and one byte range answered. A HEAD answer carries no body.
+     */
+    const sendFile = ({ file, type }) => {
+      const etag = `"${sha256(file).slice(0, 32)}"`;
+      const headers = { 'content-type': type, 'cache-control': 'private, no-store', 'accept-ranges': 'bytes', etag };
+      const candidates = (request.headers['if-none-match'] ?? '').split(',').map((value) => value.trim().replace(/^W\//, ''));
+      if (candidates.includes(etag) || candidates.includes('*')) return send(304, '', headers);
+      const ifRange = request.headers['if-range'];
+      if (request.method === 'GET' && request.headers.range && (!ifRange || ifRange === etag)) {
+        const span = byteRange(request.headers.range, file.length);
+        if (!span) return send(416, '', { ...headers, 'content-range': `bytes */${file.length}` });
+        const [start, end] = span;
+        return send(206, file.subarray(start, end + 1), {
+          ...headers,
+          'content-range': `bytes ${start}-${end}/${file.length}`,
+          'content-length': end - start + 1,
+        });
+      }
+      return send(200, file, { ...headers, 'content-length': file.length });
+    };
     const path = url.pathname.replace(/^\/api\//, '');
     const refusal = url.pathname.startsWith('/api/') ? unsigned(request) : 'not an API path';
     if (refusal) {
@@ -546,7 +576,7 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       return send(401, { detail: 'Not authenticated' });
     }
     const segments = path.split('/');
-    for (const [pattern, handle] of request.method === 'GET' ? routes : []) {
+    for (const [pattern, handle] of ['GET', 'HEAD'].includes(request.method) ? routes : []) {
       const wanted = pattern.split('/');
       if (wanted.length !== segments.length) continue;
       const params = {};
@@ -558,13 +588,11 @@ export async function startFakeCharacterServer({ port = 0 } = {}) {
       if (!matches) continue;
       const result = handle(params, url.searchParams);
       if (!result) return send(404, { detail: 'Not Found' });
-      if (Array.isArray(result)) return send(result[0], result[1]);
-      if (result.redirect)
-        return send(307, '', {
-          location: `http://${request.headers.host}${result.redirect}`,
-          'cache-control': 'private, no-store',
-        });
-      return send(200, result.file, { 'content-type': result.type, 'content-length': result.file.length });
+      if (!Array.isArray(result)) return sendFile(result);
+      if (request.method === 'GET') return send(result[0], result[1]);
+      // Only the character server's file routes answer HEAD.
+      problems.push(`fake character server: nothing answers ${request.method} ${url.pathname}`);
+      return send(405, { detail: 'Method Not Allowed' });
     }
     problems.push(`fake character server: nothing answers ${request.method} ${url.pathname}`);
     return send(404, { detail: 'Not Found' });

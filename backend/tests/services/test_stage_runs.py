@@ -1,5 +1,6 @@
-"""Stage runs whose saves fail: a run that cannot be saved as running or as finished never keeps every stage busy;
-and a stopped run never hides where newer saved records place the job."""
+"""Stage runs whose saves fail: a run that cannot be saved as running or as finished, or whose admission answer is
+lost, never keeps every stage busy; and a stopped run never hides where newer saved records place the job."""
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -148,3 +149,48 @@ def test_a_stopped_run_gives_way_to_work_saved_after_it_or_past_its_stage(job):
     assembly(directory, 'c' * 24, status='failed', error='Blender 조립 중단', created_at=AFTER)
     state, _ = flow(directory, updated_at=BEFORE)
     assert (state['stage'], state['message']) == ('assemble', 'Blender 조립 중단')
+
+
+def test_an_admitted_run_is_returned_to_be_run_even_when_its_state_cannot_be_read_again(job, monkeypatch):
+    directory, factory = job
+    reads = []
+
+    def get(self, owner, job_id):
+        reads.append(job_id)
+        if len(reads) == 2:  # The read after admission.
+            raise OSError('storage unavailable')
+        return {'actions': [{'stage': 'assemble', 'enabled': True}], 'busy': False}
+
+    monkeypatch.setattr(stages.AvatarStageResume, 'get', get)
+    service = stages.AvatarStageResume(factory)
+    _, request_id = service.start(1, 'a' * 24, 'assemble', 'assemble-run-1')
+    assert request_id and read_json(directory / 'stage-runs' / f'{request_id}.json')['status'] == 'accepted'
+    # The same request sent again after its answer was lost returns it as well while nothing has run it.
+    assert service.start(1, 'a' * 24, 'assemble', 'assemble-run-1')[1] == request_id
+    ran = []
+    monkeypatch.setattr(stages, 'publish_saved_models', lambda directory, pipeline: ran.append('publish'))
+    from src.services import avatar_character_flow
+    monkeypatch.setattr(avatar_character_flow, 'assemble_character', lambda factory, owner, job_id: ran.append('assemble'))
+    for _ in range(2):  # Both answers scheduled it: it runs once.
+        service.execute(1, 'a' * 24, request_id)
+    assert ran == ['publish', 'assemble'] and read_json(directory / 'stage-runs' / f'{request_id}.json')['status'] == 'paused'
+    assert service.start(1, 'a' * 24, 'assemble', 'assemble-run-1')[1] is None
+
+
+def test_a_replay_returns_only_the_current_run_this_process_admitted_and_nothing_took(job, monkeypatch):
+    directory, factory = job
+    monkeypatch.setattr(stages.AvatarStageResume, 'get', lambda self, owner, job_id: {'actions': [], 'busy': True})
+    service = stages.AvatarStageResume(factory)
+    request_id = hashlib.sha256(b'assemble-run-1').hexdigest()
+
+    def admitted(current=request_id, **record):
+        (directory / 'stage-runs' / 'current.json').write_text(json.dumps({'id': current}))
+        (directory / 'stage-runs' / f'{request_id}.json').write_text(json.dumps(
+            {'id': request_id, 'stage': 'assemble', 'status': 'accepted', 'process': identity(), **record}))
+        return service.start(1, 'a' * 24, 'assemble', 'assemble-run-1')[1]
+
+    assert admitted() == request_id
+    # Another process admitted it, a worker took it, or a later run replaced it.
+    assert admitted(process={'pid': 1, 'created_at': 0.0}) is None
+    assert admitted(status='running') is None
+    assert admitted(current='r1') is None

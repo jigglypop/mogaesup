@@ -1,13 +1,18 @@
 import hashlib
+import io
+import threading
 
+from PIL import Image
 import pytest
 
-from src.services import avatar_fitting_management, avatar_variants
+from src.services import (avatar_expression_reuse, avatar_fitting_management, avatar_image_pipeline, avatar_meshy,
+                          avatar_variants, meshy_status)
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
-from src.services.avatar_image_pipeline import AvatarImagePipeline
+from src.services.avatar_image_pipeline import AvatarImagePipeline, CHARACTER_PART_SLOTS
 from src.services.avatar_image_recovery import retry_view
 from src.services.avatar_variants import AvatarVariants
+from src.services.character_motion import DEFAULT_ACTIONS
 from src.services.character_pipeline import PipelineError, read_json
 from wardrobe_fixture import seed_variant_base, textured_glb
 
@@ -36,14 +41,27 @@ class Spy:
         self.copies, self.trees, self.parses, self.written = [], [], [], []
         real_copy, real_tree = avatar_variants.copy_file, avatar_variants.copy_tree
         real_write, real_identity = avatar_variants._write_json, avatar_fitting_management.geometry_identity
+        real_face_copy = avatar_expression_reuse.copy_file
         monkeypatch.setattr(avatar_variants, 'copy_file', lambda source, target: (self.copies.append(_LOCK._is_owned()), real_copy(source, target))[1])
+        monkeypatch.setattr(avatar_expression_reuse, 'copy_file', lambda source, target: (self.copies.append(_LOCK._is_owned()), real_face_copy(source, target))[1])
         monkeypatch.setattr(avatar_variants, 'copy_tree', lambda source, target: (self.trees.append(_LOCK._is_owned()), real_tree(source, target))[1])
         monkeypatch.setattr(avatar_variants, '_write_json', lambda path, value: (self.written.append((path.name, _LOCK._is_owned())), real_write(path, value))[1])
         monkeypatch.setattr(avatar_fitting_management, 'geometry_identity', lambda content: (self.parses.append(_LOCK._is_owned()), real_identity(content))[1])
 
 
+def save_expression(directory, version, expression_id='smile'):
+    """A saved, selected expression of the base version: a part job freezes its face as an input."""
+    root = directory/'native-parts'/version/'expressions'
+    face = f'{expression_id} face'.encode()
+    (root/expression_id).mkdir(parents=True)
+    (root/expression_id/'face.png').write_bytes(face)
+    _write_json(root/expression_id/'record.json', {'name': expression_id, 'files': {'face.png': hashlib.sha256(face).hexdigest()}})
+    _write_json(root/'selection.json', {'expression_id': expression_id, 'revision': '1'})
+
+
 def test_a_variant_copies_and_parses_without_the_process_lock_and_is_accepted_under_it(base, monkeypatch):
     factory, directory, payload = base
+    save_expression(directory, payload['base_version'])
     spy = Spy(monkeypatch)
     job, created = AvatarVariants(factory).create_single_part(1, KEY, payload)
     assert created and job['status'] == 'pipeline_queued' and job['base_job_id'] == payload['base_job_id']
@@ -61,6 +79,10 @@ def test_a_variant_copies_and_parses_without_the_process_lock_and_is_accepted_un
                  'parts/shoes/generation-artifacts.json', 'prefit-parts/top.glb', 'prefit-parts/shoes.glb', 'parts/hair/generated.glb'):
         assert (target/name).is_file(), name
     assert not (target/'prefit-parts/hair.glb').is_file()
+    # The saved face is frozen as an input, copied as the other files are.
+    assert (target/'expression-inputs/smile.png').read_bytes() == b'smile face'
+    assert read_json(target/'pipeline.json')['expression_reuse']['expressions'][0]['file'] == 'smile.png'
+    assert read_json(target/'parts/hair/generation-artifacts.json')['generated']['sha256'] == payload['uploaded_model']['sha256']
 
 
 def test_the_same_key_again_is_a_replay_and_another_request_is_a_conflict(base):
@@ -91,14 +113,147 @@ def test_a_request_accepted_while_the_files_are_copied_is_not_written_twice(base
     assert first_created and not created and job['id'] == first['id']
 
 
+def test_a_texture_setting_for_several_slots_reads_each_reference_once(base, monkeypatch):
+    import io
+    from PIL import Image
+    from src.services.avatar_blueprints import AvatarBlueprints
+    from src.services.object_storage import StoredPath
+    factory, _, payload = base
+    textures = []
+    for color in ('navy', 'orange'):
+        content = io.BytesIO()
+        Image.new('RGBA', (8, 8), color).save(content, 'PNG')
+        textures.append(AvatarBlueprints(factory.data).upload(1, content.getvalue())['id'])
+    reads, read = [], StoredPath.read_bytes
+    monkeypatch.setattr(StoredPath, 'read_bytes', lambda self: (reads.append(self.stem), read(self))[1])
+    job, created = AvatarVariants(factory).create(1, KEY, {
+        'base_job_id': payload['base_job_id'], 'base_version': payload['base_version'], 'slots': ['hair', 'top'],
+        'hair_length': 'source', 'descriptions': {}, 'meshy_options': {'texture_mode': 'images', 'texture_image_assets': textures}})
+    assert created
+    # Two slots, one setting: each reference is read, hashed and decoded once for the request, not twice per slot.
+    assert sorted(name for name in reads if name in textures) == sorted(textures)
+    parts = {part['slot']: part for part in read_json(factory.directory(1, job['id'])/'pipeline.json')['parts']}
+    for slot in ('hair', 'top'):
+        assert parts[slot]['meshy_options']['texture_images'] == [
+            {'asset': texture, 'sha256': texture, 'mime': 'image/png'} for texture in textures]
+
+
+def test_a_part_textured_at_8k_must_be_affordable_at_the_8k_price(base, monkeypatch):
+    from src.services import meshy_status
+    factory, _, payload = base
+    # Enough for a part at the default price (30), not at 8K (35).
+    monkeypatch.setattr(meshy_status, 'meshy_balance', lambda refresh=False: 34)
+    request = {key: value for key, value in payload.items() if key != 'uploaded_model'}
+    with pytest.raises(PipelineError) as error:
+        AvatarVariants(factory).create_single_part(1, KEY, {**request, 'meshy_options': {'texture_resolution': '8k'}})
+    assert error.value.code == 'insufficient_credits' and '필요 약 35' in error.value.message
+    assert not (factory.directory(1, hashlib.sha256(f'1:variant:{KEY}'.encode()).hexdigest()[:24])/'job.json').is_file()
+
+
 def test_nothing_is_copied_when_a_check_fails(base, monkeypatch):
     factory, directory, payload = base
+    save_expression(directory, payload['base_version'])
     spy = Spy(monkeypatch)
     (directory/'native-parts'/payload['base_version']/'top.glb').write_bytes(b'changed after sealing')
     with pytest.raises(PipelineError) as error:
         AvatarVariants(factory).create_single_part(1, KEY, payload)
     assert error.value.code == 'fitted_part_changed' and spy.copies == [] and spy.trees == []
-    assert not (factory.directory(1, hashlib.sha256(f'1:variant:{KEY}'.encode()).hexdigest()[:24])/'job.json').is_file()
+    target = factory.directory(1, hashlib.sha256(f'1:variant:{KEY}'.encode()).hexdigest()[:24])
+    assert not (target/'job.json').is_file()
+    # Neither the saved faces nor the receipt of the uploaded model are written for a request that was refused.
+    assert not (target/'expression-inputs').exists() and not (target/'parts/hair/generation-artifacts.json').exists()
+
+
+def test_a_request_with_the_same_key_and_other_input_leaves_the_accepted_job_alone(base, monkeypatch, tmp_path):
+    factory, _, payload = base
+    other = tmp_path/'other.glb'
+    other.write_bytes(b'other glb')
+    sha = hashlib.sha256(b'other glb').hexdigest()
+    changed = {**payload, 'uploaded_model': {'asset_id': sha, 'path': str(other), 'sha256': sha}}
+    service, real, outcome = AvatarVariants(factory), avatar_variants.copy_file, {}
+    copying, accepted = threading.Event(), threading.Event()
+
+    def second():
+        try:
+            outcome['job'] = service.create_single_part(1, KEY, changed)
+        except PipelineError as error:
+            outcome['error'] = error.code
+    later = threading.Thread(target=second)
+
+    def copy(source, target):
+        if threading.current_thread() is later:
+            copying.set()
+            accepted.wait(5)
+        elif not later.ident:
+            # The second request starts while the first copies its files. Unless it is kept out, it gets as far as
+            # copying its own before the first is accepted.
+            later.start()
+            copying.wait(.5)
+        return real(source, target)
+    monkeypatch.setattr(avatar_variants, 'copy_file', copy)
+    job, created = service.create_single_part(1, KEY, payload)
+    accepted.set()
+    later.join(10)
+    assert created and outcome == {'error': 'idempotency_conflict'} and not copying.is_set()
+    target = factory.directory(1, job['id'])
+    assert (target/'parts/hair/generated.glb').read_bytes() == b'uploaded glb'
+    assert read_json(target/'parts/hair/generation-artifacts.json')['generated']['sha256'] == payload['uploaded_model']['sha256']
+
+
+def photo_request(factory, color):
+    """A part set request (/image-jobs) for a new character drawn from a plain `color` photo, and that photo."""
+    photo = io.BytesIO()
+    Image.new('RGBA', (24, 24), color).save(photo, format='PNG')
+    character = factory.pipeline.create('사진 캐릭터', None, 1)
+    character = factory.pipeline.upload(character['id'], 1, photo.getvalue(), 'image', character['revision'])
+    blueprint = AvatarImagePipeline(factory).blueprints.read(1, character['id'])
+    return {'character_id': character['id'], 'source_sha256': blueprint['source_sha256'],
+            'blueprint_revision': blueprint['revision'], 'production_mode': 'character_parts',
+            'view_mode': 'front_side', 'image_mode': 'generate', 'slots': list(CHARACTER_PART_SLOTS)}, photo.getvalue()
+
+
+def test_a_photo_set_on_a_body_with_the_key_of_a_set_being_accepted_writes_nothing_into_it(base, monkeypatch):
+    factory, _, payload = base
+    monkeypatch.setenv('OPENAI_API_KEY', 'fixture-image-key')
+    monkeypatch.setenv('MESHY_API_KEY', 'fixture-mesh-key')
+    monkeypatch.setattr(avatar_image_pipeline, 'blender_executable', lambda: 'fixture-blender')
+    monkeypatch.setattr(meshy_status, 'meshy_balance', lambda refresh=False: None)
+    plain, photo = photo_request(factory, 'red')
+    on_body = {**photo_request(factory, 'blue')[0],
+               'base_job_id': payload['base_job_id'], 'base_version': payload['base_version']}
+    service, real, outcome = AvatarImagePipeline(factory), avatar_variants.copy_file, {}
+    copying, accepted = threading.Event(), threading.Event()
+
+    def second():
+        try:
+            outcome['job'] = service.create(1, KEY, on_body)
+        except PipelineError as error:
+            outcome['error'] = error.code
+    later = threading.Thread(target=second)
+
+    def library(meshy, owner):
+        if not later.ident:
+            # The set on a chosen body, with the same key, starts while this one asks Meshy for its motions. Unless it
+            # is kept out, it gets as far as copying its files into the directory this one is then accepted in.
+            later.start()
+            copying.wait(.5)
+        return [{'action_id': action_id} for action_id in DEFAULT_ACTIONS.values()]
+
+    def copy(source, target):
+        copying.set()
+        accepted.wait(5)
+        return real(source, target)
+    monkeypatch.setattr(avatar_meshy.AvatarMeshy, 'library', library)
+    monkeypatch.setattr(avatar_variants, 'copy_file', copy)
+    job, created = service.create(1, KEY, plain)
+    accepted.set()
+    later.join(10)
+    assert created and outcome == {'error': 'idempotency_conflict'} and not copying.is_set()
+    target = factory.directory(1, job['id'])
+    # Its own photo, and no body yet: the set makes its body, and a body receipt found there would be taken for it.
+    assert (target/'source.png').read_bytes() == photo
+    for name in ('parts/body/generated.glb', 'parts/body/generation-artifacts.json'):
+        assert not (target/name).exists(), name
 
 
 def test_a_glb_registered_as_it_was_is_refused_before_its_body_is_read(base, monkeypatch):

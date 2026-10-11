@@ -1,5 +1,6 @@
 """Guards in the Blender-side geometry helpers, run against stand-in Blender modules (tests/fake_blender.py): a face
 pointing past its material slots, a sleeve ramp that would run backwards, and the drawing silhouette read with numpy."""
+import math
 import types
 
 import numpy as np
@@ -137,3 +138,129 @@ def test_the_drawing_heights_are_those_of_the_list_version(monkeypatch):
                          'hem_height_m': (58-max(ys))/100.}
     # The receipt names the drawing, not where the worker kept it.
     assert report['views']['front']['source'] == 'top-front.png'
+
+
+# --- the head's skin binding beside T-pose arms -------------------------------------------------------------------------
+
+# The production spec's 1.2 m SD body: shoulders and wrists at 0.43 m, the neck at 0.46 m, a head far wider than the
+# shoulders above them.
+SD_SPEC = {'anchors': {'neck': [0, .46, 0], 'shoulder_left': [.16, .43, 0]}, 'body_height_m': 1.2,
+           'base_body': {'torso_width_m': .22, 'torso_depth_m': .13, 'arm_diameter_m': .036, 'leg_diameter_m': .044,
+                         'wrist_diameter_m': .028, 'ankle_diameter_m': .032}}
+
+
+def sd_rig(scene):
+    joints = {'Hips': ((0, 0, .25), (0, 0, .33)), 'Spine': ((0, 0, .33), (0, 0, .44)), 'neck': ((0, 0, .44), (0, 0, .46)),
+              'Head': ((0, 0, .46), (0, 0, 1.2))}
+    for side, sign in (('Left', 1), ('Right', -1)):
+        joints.update({side+'Shoulder': ((sign*.02, 0, .44), (sign*.16, 0, .43)),
+                       side+'Arm': ((sign*.16, 0, .43), (sign*.28, 0, .43)),
+                       side+'ForeArm': ((sign*.28, 0, .43), (sign*.39, 0, .43)),
+                       side+'Hand': ((sign*.39, 0, .43), (sign*.47, 0, .43))})
+    bones = []
+    for name, (head, tail) in joints.items():
+        bones.append(bone(name, head))
+        bones[-1].tail_local = Vector(tail)
+    return armature(scene, 'rig', bones)
+
+
+def weights(obj):
+    names = {group.index: group.name for group in obj.vertex_groups}
+    return [{names[entry.group]: entry.weight for entry in vertex.groups if entry.weight} for vertex in obj.data.vertices]
+
+
+def tube(xs, radius, height=.43, sides=8):
+    """A T-pose arm's skin: a ring of `sides` points round the line y = 0, z = `height` at each of `xs`, joined by
+    triangles, turned half a step so that a face, not an edge, is uppermost."""
+    points = [(x, radius*math.cos(2*math.pi*(i+.5)/sides), height+radius*math.sin(2*math.pi*(i+.5)/sides))
+              for x in xs for i in range(sides)]
+    triangles = []
+    for ring in range(len(xs)-1):
+        for i in range(sides):
+            a, b = ring*sides+i, ring*sides+(i+1) % sides
+            triangles += [(a, b, b+sides), (a, b+sides, a+sides)]
+    return points, triangles
+
+
+def unchanged_binding(height):
+    """The Head weight bind_body_head gave skin at `height` before it told the arms apart."""
+    blend = max(0, min(1, (height-.42)/.04))
+    return blend*blend*(3-2*blend)
+
+
+def test_t_pose_arms_and_hands_keep_their_bones_beside_the_head(monkeypatch):
+    bpy, modules = fake_blender.install(monkeypatch, 'avatar_fit_geometry')
+    fit = modules['avatar_fit_geometry']
+    scene = bpy.context.scene
+    rig = sd_rig(scene)
+    # The left arm's joints sit high in it, its upper side less than 1 cm above their line. The right arm is a
+    # provider's before slimming, 4 cm round its line, with a big hand past its wrist.
+    left, left_faces = tube((.12, .2, .28, .36), .024, height=.414)
+    right, right_faces = tube((-.12, -.2, -.28, -.36), .04)
+    rows = [((.22, 0, .44), {'LeftArm': 1.}),          # the head's lower side 1, 2.5 and 4 cm above the upper arm's
+            ((.22, 0, .455), {'LeftArm': 1.}),         # line and beside the shoulder joint, which auto-rigging gave
+            ((.22, 0, .47), {'LeftArm': 1.}),          # to the arm and the shoulder
+            ((.14, -.02, .46), {'LeftShoulder': 1.}),
+            ((-.22, 0, .475), {'RightArm': 1.}),       # 5 mm above the thick arm
+            ((-.43, 0, .455), {'RightHand': 1.}),      # the back of the hand
+            ((-.42, -.01, .48), {'RightHand': 1.}),    # a raised thumb 5 cm above the line
+            ((.03, 0, .44), {'neck': 1.}),             # the neck and the chin blend into the head
+            ((0, -.05, .455), {'neck': .5, 'Spine': .5}),
+            ((0, -.25, .7), {'LeftShoulder': 1.}),     # the face auto-rigging gave a shoulder
+            ((0, 0, 1.2), {'Head': 1.})]
+    arms = left+right
+    body = mesh(scene, 'body', arms+[point for point, _ in rows],
+                left_faces+[tuple(len(left)+i for i in face) for face in right_faces], rig=rig,
+                weights=[{'LeftArm': 1.}]*len(left)+[{'RightArm': 1.}]*len(right)+[row for _, row in rows])
+    report = fit.bind_body_head([body], rig, SD_SPEC)
+    bound = weights(body)
+    assert report['collar_height_m'] == pytest.approx(.46)
+    # The arms' own skin keeps its bones, its upper half in the band at shoulder height included.
+    assert sum(point[2] > .42 for point in arms) == len(arms)//2
+    assert bound[:len(arms)] == [{'LeftArm': 1.}]*len(left)+[{'RightArm': 1.}]*len(right)
+    probes = bound[len(arms):]
+    # However close the head comes, the arm's skin lies between: it is bound as before.
+    assert [row['Head'] for row in probes[:5]] == pytest.approx([unchanged_binding(point[2]) for point, _ in rows[:5]])
+    assert probes[5:7] == [{'RightHand': 1.}]*2
+    assert 0 < probes[7]['Head'] < 1 and 0 < probes[8]['Head'] < 1
+    assert probes[9:] == [{'Head': 1.}]*2
+    assert all(sum(row.values()) == pytest.approx(1.) for row in bound)
+
+
+def test_the_head_is_measured_without_arms_an_earlier_binding_gave_to_head(monkeypatch):
+    bpy, modules = fake_blender.install(monkeypatch, 'avatar_fit_geometry')
+    fit = modules['avatar_fit_geometry']
+    scene = bpy.context.scene
+    rig = sd_rig(scene)
+    # A provider's thick arm whose upper side, hand and raised thumb an earlier binding gave to Head.
+    arm, faces = tube((-.12, -.2, -.28, -.36), .04)
+    head = [(-.3, 0, .8), (.3, 0, .8), (0, -.3, .8), (0, .3, .8), (0, 0, 1.2), (0, 0, .47),
+            (-.22, 0, .475)]                           # the head's lower side just above the arm
+    hand = [((-.43, 0, .455), {'Head': .96, 'RightHand': .04}), ((-.42, -.01, .48), {'Head': 1.})]
+    body = mesh(scene, 'body', arm+head+[point for point, _ in hand], faces, rig=rig,
+                weights=[{'Head': .78, 'RightArm': .22} if point[2] > .45 else {'RightArm': 1.} for point in arm]
+                + [{'Head': 1.}]*len(head)+[row for _, row in hand])
+    assert fit.head_weighted_vertices([body], rig) == {body: set(range(len(arm), len(arm)+len(head)))}
+    lo, hi, _ = fit.head_region([body], rig, SD_SPEC)
+    assert (lo.x, hi.x) == pytest.approx((-.3, .3))
+
+
+def test_the_upper_side_of_a_t_pose_arm_is_slimmed_like_its_lower_side(monkeypatch):
+    bpy, modules = fake_blender.install(monkeypatch, 'avatar_fit_geometry')
+    fit = modules['avatar_fit_geometry']
+    scene = bpy.context.scene
+    rig = sd_rig(scene)
+    # The underlayer round a provider's arm 4 cm from its line, the head's lower side above it and the blank head, all
+    # as white as the underlayer.
+    arm, faces = tube((.12, .22, .32), .04)
+    heads = [(.22, 0, .48), (0, 0, 1.2)]
+    body = mesh(scene, 'body', arm+heads, faces, rig=rig, weights=[{'LeftArm': 1.}]*(len(arm)+1)+[{'Head': 1.}])
+    body.data.uv_layers = types.SimpleNamespace(active=None)
+    body.data.materials = [types.SimpleNamespace(use_nodes=False, get=lambda key, default=None: key == 'base_underlayer')]
+    body.data.polygons = [types.SimpleNamespace(index=index, material_index=0, vertices=list(face))
+                          for index, face in enumerate(faces+[(len(arm), len(arm)+1)])]
+    fit.slim_base_body([body], rig, SD_SPEC)
+    slimmed = [vertex.co for vertex in body.data.vertices]
+    # The ring round the upper arm, its upper side as its lower, is the slimmed arm's.
+    assert [(point-Vector((.22, 0, .43))).length for point in slimmed[8:16]] == pytest.approx([.018]*8)
+    assert [list(point) for point in slimmed[len(arm):]] == [pytest.approx(list(point)) for point in heads]

@@ -127,10 +127,11 @@ export function HairBatch({baseId, version, disabled, setup, onJob}: {baseId?: s
       if (!pending) {
         if(!baseId || !version || !selected.length)throw new Error('기준 몸과 생성할 스타일을 선택하세요.');
       }
-      // With a saved request this resumes it as it was saved; a request saved since this render is refused by `create`.
+      // With a saved request this resumes it as it was saved, under its key even if another tab has since had its answer
+      // and forgotten it; a request saved since this render is refused by `create`.
       const input = pending?.input || {base_job_id:baseId!,base_version:version!,items:selected.flatMap(i=>items[i]?[{name:items[i].name.trim(),views:items[i].views}]:[]),concurrency:4,meshy_options:meshyDefaultsFor('hair'),
         redraw:{notes:redrawNotes.trim(),source_side_facing:sourceSideFacing,...(worn ? {worn:true} : {})}};
-      const created = await hairBatchesApi.create(input);
+      const created = await hairBatchesApi.create(input, pending?.key);
       setPanel('saved');setExpandedBatch(created.id);
       batches.setValue(current => ({items:[created, ...(current?.items || []).filter(batch => batch.id !== created.id)]}));
       void batches.refresh();

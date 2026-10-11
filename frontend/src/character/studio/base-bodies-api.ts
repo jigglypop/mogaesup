@@ -49,8 +49,9 @@ export const baseBodiesApi = {
   upload: (file: File) => request<UploadedBodyImage>('/api/avatar-blueprints/assets', {
     method: 'POST', headers: { 'Content-Type': file.type || 'image/png' }, body: file, timeoutMs: 60000,
   }),
-  create: (input: BaseBodyInput) => baseBodies(input.body_type).send(input, pending => request<FactoryJob>('/api/avatar-factory/base-bodies', {
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (input: BaseBodyInput, key?: string) => baseBodies(input.body_type).send(input, pending => request<FactoryJob>('/api/avatar-factory/base-bodies', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
     body: JSON.stringify(pending.input), timeoutMs: 60000,
-  })),
+  }), key ? { key } : {}),
 };

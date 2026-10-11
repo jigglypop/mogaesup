@@ -15,7 +15,11 @@ param(
   [switch]$Preview,
   [switch]$SkipBuild,
   # Uploads to the stack as it is and does not touch its resources (the pipeline's release).
-  [switch]$SkipProvision
+  [switch]$SkipProvision,
+  # After the release, lists what the bucket holds that this build does not (files older releases shipped, source maps);
+  # with -Apply, deletes them and invalidates the whole distribution once.
+  [switch]$Prune,
+  [switch]$Apply
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +27,8 @@ $env:AWS_PAGER = ''
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $template = Join-Path $projectRoot 'infra/aws-static.yaml'
 $dist = Join-Path $projectRoot 'dist'
+if ($Apply -and -not $Prune) { throw '-Apply deletes what -Prune lists; pass both.' }
+if ($Prune -and ($ProvisionOnly -or $Preview)) { throw '-Prune follows a release, which -ProvisionOnly and -Preview do not make.' }
 
 function Invoke-Native {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -71,7 +77,11 @@ if ($DomainName) {
 }
 # The server stack's VPC origin carries /api/*; without it the site deploys static-only.
 if (-not $SkipProvision) {
+  # A stack that is missing or cannot be read is an aws error on stderr, which Windows PowerShell turns into a stop under
+  # 'Stop'; the exit code decides instead.
+  $ErrorActionPreference = 'Continue'
   $serverOutputs = & aws cloudformation describe-stacks --region $Region --stack-name $ServerStackName --query 'Stacks[0].Outputs' --output json 2>$null
+  $ErrorActionPreference = 'Stop'
   if ($LASTEXITCODE -eq 0 -and $serverOutputs) {
     $server = @{}; foreach ($item in ($serverOutputs | ConvertFrom-Json)) { $server[$item.OutputKey] = $item.OutputValue }
     if ($server.VpcOriginId -and $server.ApiPrivateDns) {
@@ -142,6 +152,18 @@ try {
     Invoke-Native aws s3 cp $dist $bucket --recursive --region $Region '--exclude=*' "--include=$($entry.Pattern)" '--exclude=assets/*' '--exclude=wasm/*' --content-type $entry.Type --cache-control $entry.Cache --no-progress --only-show-errors
   }
 
+  # Invalidations name what changes in place: the files without a content hash and release.json. The edges keep assets/
+  # (Vite's bundles) and models/ (the server's catalog files, named by their SHA-256).
+  $paths = @(foreach ($item in Get-ChildItem -LiteralPath $dist -Force) {
+    if ($item.Name -in @('assets', 'models', 'release.json')) { continue }
+    $name = [Uri]::EscapeDataString($item.Name)
+    if ($item.PSIsContainer) { "/$name/*" } else { "/$name" }
+  }) + '/release.json'
+  # One `--option=value` token like the patterns above, in the AWS CLI's shorthand, with a reference of its own each time.
+  function New-InvalidationBatch {
+    "--invalidation-batch=Paths={Quantity=$($paths.Count),Items=[$($paths -join ',')]},CallerReference=$([guid]::NewGuid().ToString('N'))"
+  }
+
   # What is live now, to put back if the published release fails its checks below.
   $previous = Join-Path ([IO.Path]::GetTempPath()) "mogaesup-web-previous-$([guid]::NewGuid().ToString('N'))"
   New-Item -ItemType Directory -Path (Join-Path $previous 'wasm') -Force | Out-Null
@@ -169,7 +191,7 @@ try {
         [IO.File]::WriteAllText($previousRelease, '{"git_commit":null}', (New-Object System.Text.UTF8Encoding $false))
       }
       Invoke-Native aws s3 cp $previousRelease "$bucket/release.json" --region $Region --cache-control no-cache --content-type 'application/json' --no-progress --only-show-errors
-      Invoke-Native aws cloudfront create-invalidation --distribution-id $outputs.DistributionId '--paths=/*' --output json | Out-Null
+      Invoke-Native aws cloudfront create-invalidation --distribution-id $outputs.DistributionId (New-InvalidationBatch) --output json | Out-Null
     } else {
       Write-Warning 'There was no previous index.html to put back.'
     }
@@ -186,7 +208,7 @@ try {
     [IO.File]::WriteAllText($releaseFile, (([ordered]@{ git_commit = $releaseCommit; deployed_at = (Get-Date).ToUniversalTime().ToString('o'); by = $(if ($inPipeline) { 'pipeline' } else { 'manual' }) }) | ConvertTo-Json -Compress), $utf8)
     Invoke-Native aws s3 cp $releaseFile "$bucket/release.json" --region $Region --cache-control no-cache --content-type 'application/json' --no-progress --only-show-errors
 
-    $invalidation = Invoke-Native aws cloudfront create-invalidation --distribution-id $outputs.DistributionId '--paths=/*' --output json | ConvertFrom-Json
+    $invalidation = Invoke-Native aws cloudfront create-invalidation --distribution-id $outputs.DistributionId (New-InvalidationBatch) --output json | ConvertFrom-Json
     # index.html is served without caching; the wait covers the edges' older models and engine files. One that runs out
     # leaves the checks below to decide.
     $invalidated = $false
@@ -243,6 +265,36 @@ try {
     Remove-Item -LiteralPath $previous -Recurse -Force -ErrorAction SilentlyContinue
   }
   Write-Host "Deployed and verified: $site $releaseCommit (invalidation $($invalidation.Invalidation.Id))"
+
+  # Uploads never delete, so files a release dropped stay public until pruned. assets/ keeps older bundles for tabs still
+  # open on them (only their source maps go), models/ is the server's catalog and release.json is written above.
+  if ($Prune) {
+    $keys = Invoke-Native aws s3api list-objects-v2 --bucket $outputs.BucketName --region $Region --query 'Contents[].Key' --output json | ConvertFrom-Json
+    $stale = @(foreach ($key in $keys) {
+      if ($key -like 'models/*' -or $key -eq 'release.json') { continue }
+      if ($key -like '*.map' -or ($key -notlike 'assets/*' -and -not (Test-Path -LiteralPath (Join-Path $dist $key) -PathType Leaf))) { $key }
+    })
+    if ($Apply -and $stale.Count -gt 0) {
+      # Only while this build is the live one: a release that went up since holds files this build does not.
+      $live = (Invoke-Native aws s3 cp "$bucket/release.json" '-' --region $Region --only-show-errors) -join "`n" | ConvertFrom-Json
+      if ($live.git_commit -ne $releaseCommit) { throw "The live release is now $($live.git_commit), not $releaseCommit; nothing was deleted." }
+    }
+    foreach ($key in $stale) {
+      if ($Apply) {
+        Invoke-Native aws s3 rm "$bucket/$key" --region $Region --only-show-errors | Out-Null
+        Write-Host "Deleted: $key"
+      } else {
+        Write-Host "Not in this build: $key"
+      }
+    }
+    if ($Apply -and $stale.Count -gt 0) {
+      # The edges keep assets/ copies for a year, so the whole distribution is cleared once.
+      $cleared = Invoke-Native aws cloudfront create-invalidation --distribution-id $outputs.DistributionId '--paths=/*' --output json | ConvertFrom-Json
+      Write-Host "Deleted $($stale.Count) files; CloudFront invalidation $($cleared.Invalidation.Id) clears them from the edges."
+    } else {
+      Write-Host "$($stale.Count) files in $bucket are not in this build."
+    }
+  }
 } finally {
   Pop-Location
 }

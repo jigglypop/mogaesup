@@ -80,21 +80,22 @@ export const expressionGenerationApi = {
   saveReference: (job: string, version: string, assets: string[], revision: string) => request<ExpressionReference>(referenceEndpoint(job, version), {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assets, revision }),
   }),
-  create: (job: string, version: string, input: ExpressionGenerationInput) => expressionGenerations(job, version).send(input, pending =>
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (job: string, version: string, input: ExpressionGenerationInput, key?: string) => expressionGenerations(job, version).send(input, pending =>
     request<ExpressionGeneration>(endpoint(job, version), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
       body: JSON.stringify(pending.input),
       timeoutMs: 60000,
-    }), { answered }),
+    }), { ...(key ? { key } : {}), answered }),
   resume: (job: string, version: string, id: string) => request<ExpressionGeneration>(
     `${endpoint(job, version)}/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 },
   ),
-  createBatch: (job: string, version: string, input: ExpressionBatchInput) => expressionBatches(job, version).send(input, pending =>
+  createBatch: (job: string, version: string, input: ExpressionBatchInput, key?: string) => expressionBatches(job, version).send(input, pending =>
     request<ExpressionBatch>(`${endpoint(job, version)}/batch`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
       body: JSON.stringify(pending.input), timeoutMs: 60000,
-    }), { answered }),
+    }), { ...(key ? { key } : {}), answered }),
   resumeBatch: (job: string, version: string, id: string) => request<ExpressionBatch>(
     `${endpoint(job, version)}/batch/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 },
   ),

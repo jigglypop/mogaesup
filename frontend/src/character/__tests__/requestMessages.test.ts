@@ -34,12 +34,24 @@ describe('스튜디오 요청이 실패했을 때 화면에 닿는 문장', () =
     setSessionOwner('u1');
     try {
       fetchMock.mockResolvedValueOnce(answer(401, { detail: '토큰이 맞지 않습니다.' }));
-      expect(await messageOf(request('/api/avatar-factory/wardrobe/bodies'))).toBe('토큰이 맞지 않습니다.');
+      expect(await messageOf(request('/api/avatar-factory/wardrobe/bodies'))).toBe('요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.');
       expect(sessionLapsed()).toBe(false);
       fetchMock.mockResolvedValueOnce(answer(401, { code: 'login_required', message: '로그인이 필요해요' }));
       expect(await messageOf(request('/api/avatar-factory/wardrobe/bodies'))).toBe('로그인이 필요해요');
       expect(sessionLapsed()).toBe(true);
     } finally { setSessionOwner(null); }
+  });
+
+  it.each([
+    [500, { detail: 'Internal server error', requestId: 'req-500' }, '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.'],
+    [401, { detail: 'Unauthorized', requestId: 'req-401' }, '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.'],
+    [403, { detail: 'Studio operator access required' }, '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.'],
+    [503, { detail: '토큰을 확인할 수 없습니다. 서버의 JWT_SECRET 설정이 없거나 올바르지 않습니다.' }, '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.'],
+    [422, { detail: [{ type: 'value_error', loc: ['body'], msg: 'Value error, too many selected faces', input: {} }], requestId: 'req-422' },
+      '요청을 처리하지 못했습니다. 입력을 확인해 주세요.'],
+  ])('캐릭터 서버(FastAPI)가 detail로 답한 %i은 그 문장 대신 무슨 일인지만 알린다', async (status, body, message) => {
+    fetchMock.mockResolvedValueOnce(answer(status, body));
+    expect(await messageOf(request('/api/avatar-factory/wardrobe/bodies'))).toBe(message);
   });
 
   it('서버가 준 이유는 그대로 보인다', async () => {

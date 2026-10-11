@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '../use-polling';
 import { studioHref } from '../../studio/screens';
+import { PAID_WORK_OFF, usePaidWork } from '../../studio/usage';
 import { generationsApi, type Generation, type VectorColors } from './generations-api';
 import { EmoticonRig } from './EmoticonRig';
 import './generations.css';
@@ -22,6 +23,7 @@ function readDraft() {
 }
 
 export default function Emoticons() {
+  const paid = usePaidWork();
   const read = useCallback((signal: AbortSignal) => generationsApi.list('illustration', signal), []);
   const listing = usePolling(read, 5000);
   const selection = usePolling(generationsApi.illustrationSelection, 10000);
@@ -76,12 +78,8 @@ export default function Emoticons() {
   return <div className="workspace-content generations emoticons">
     <section className="generation-compose">
       <h1>2D 이모티콘</h1>
-      <form onSubmit={event => { event.preventDefault(); void perform(async () => {
-        const input = pending?.input || { kind: 'illustration' as const, category: 'character', size: 1024 as const,
-          name: draft.name.trim(), prompt: draft.prompt.trim(), ...(draft.useReference && base ? { reference_id: base.id } : {}) };
-        remember(await generationsApi.create(input));
-        await listing.refresh();
-      }); }}>
+      {/* Enter in a field submits nothing: the paid request goes only from its button. */}
+      <form onSubmit={event => event.preventDefault()}>
         <label>원화 이름<input required maxLength={80} value={pending?.input.name ?? draft.name} disabled={inputLocked}
           onChange={event => setDraft(value => ({ ...value, name: event.target.value }))} /></label>
         <label>기준 원화<select disabled={inputLocked || !selection.value} value={draft.useReference && base ? 'selected' : 'new'}
@@ -93,11 +91,19 @@ export default function Emoticons() {
           onChange={event => setDraft(value => ({ ...value, prompt: event.target.value, edited: true }))} /></label>
         <div className="generation-form-actions">
           <button type="button" disabled={inputLocked || !defaultPrompt} onClick={() => setDraft(value => ({ ...value, prompt: defaultPrompt, edited: false }))}>기본 표정 프롬프트</button>
-          <button className="generation-submit is-primary" disabled={busy || !!recovery.error || (!pending && (!listing.value?.capabilities.ready || !selection.value || !draft.name.trim() || !draft.prompt.trim()))}>
+          <button type="button" className="generation-submit is-primary" disabled={busy || !paid || !!recovery.error || (!pending && (!listing.value?.capabilities.ready || !selection.value || !draft.name.trim() || !draft.prompt.trim()))}
+            onClick={() => void perform(async () => {
+              // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
+              const input = pending?.input || { kind: 'illustration' as const, category: 'character', size: 1024 as const,
+                name: draft.name.trim(), prompt: draft.prompt.trim(), ...(draft.useReference && base ? { reference_id: base.id } : {}) };
+              remember(await generationsApi.create(input, pending?.key));
+              await listing.refresh();
+            })}>
             {busy ? '요청 확인 중' : pending ? '같은 요청 복구' : '원화 생성 · 이미지 1회'}
           </button>
         </div>
         {listing.value && !listing.value.capabilities.ready && <p>{listing.value.capabilities.reason}</p>}
+        {!paid && <p>{PAID_WORK_OFF}</p>}
         {pending && <p className="generation-recovery">응답 확인 안 됨</p>}
       </form>
     </section>
@@ -130,7 +136,7 @@ export default function Emoticons() {
         <div className="generation-form-actions">
           <button disabled={inputLocked} onClick={() => setDraft(value => ({ ...value, name: current.name, prompt: current.prompt, edited: true }))}>프롬프트 가져오기</button>
           <button disabled={busy || !selection.value || current.status !== 'complete' || !currentImage || base?.id === current.id} onClick={() => void perform(selectBase)}>기준 원화로 선택</button>
-          {current.can_resume && <button disabled={busy} onClick={() => void perform(async () => remember(await generationsApi.resume(current.id)))}>계속 진행</button>}
+          {current.can_resume && <button disabled={busy || !paid} onClick={() => void perform(async () => remember(await generationsApi.resume(current.id)))}>계속 진행 · 유료 최대 이미지 1회</button>}
           {currentImage && <a href={`${currentImage.url}?download=1`}>PNG 다운로드</a>}
           {currentVector && <a href={`${versioned(currentVector)}&download=1`}>SVG 다운로드</a>}
         </div>
@@ -143,7 +149,7 @@ export default function Emoticons() {
         <span className="generation-card-copy"><strong>{item.name}{base?.id === item.id ? ' · 기준 원화' : ''}</strong><small>{labels[item.status]} · {new Date(item.created_at).toLocaleString()}</small></span>
       </button>)}</div>
       {items.length > limit && <button onClick={() => setLimit(value => value + 24)}>더 보기</button>}
-      {!items.length && <p className="generation-empty">{listing.loading ? '불러오는 중' : '저장된 원화 없음'}</p>}
+      {!items.length && <p className="generation-empty">{listing.loading ? '불러오는 중' : listing.value ? '저장된 원화 없음' : '목록을 불러오지 못했습니다.'}</p>}
     </section>
   </div>;
 }

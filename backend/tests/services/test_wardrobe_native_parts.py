@@ -62,6 +62,27 @@ def test_accepting_a_refit_keeps_the_sealed_version_offered_until_the_refit_is_s
     assert offered(library) == [(state['version'], 'c' * 64)]
 
 
+def test_hair_fitted_before_the_two_way_seat_offers_a_refit_that_seats_it(refit):
+    library, native, root = refit
+    # A version fitted under the rules before the seat, from the job's spec of then.
+    record = read_json(root/VERSION/'record.json')
+    record['result']['fitting_revision'] = 'uniform-parts-v1-slot'
+    _write_json(root/VERSION/'record.json', record)
+    _write_json(root/VERSION/'input.json', {'contract': {'recipe': avatar_native_parts.RECIPE}})
+    saved = production_spec()
+    saved['fitting'].pop('hair_cavity_seat', None)
+    saved['fitting']['revision'] = 'uniform-parts-v1-slot'
+    pipeline = read_json(root.parent/'pipeline.json')
+    _write_json(root.parent/'pipeline.json', {**pipeline, 'production_spec': saved})
+    assert native.get(OWNER, JOB)['fit_update_available'] is True
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    payload = read_json(root/state['version']/'input.json')
+    # Blender fits the saved generated hair again under the current rules; no provider is asked for anything.
+    assert created and payload['production_spec']['fitting']['hair_cavity_seat'] == 'two-way-v1'
+    [hair] = [part for part in payload['parts'] if part['slot'] == 'hair']
+    assert hair['part_method'] == 'isolated' and hair['path'].endswith('generated-hair.glb')
+
+
 class FakeProcess:
     pid = os.getpid()
 

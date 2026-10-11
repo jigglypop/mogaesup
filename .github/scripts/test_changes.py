@@ -186,10 +186,14 @@ class ReleaseRouting(unittest.TestCase):
         self.assertEqual(self.route(), set(KEYS[:4]))
 
     def test_deployment_script_changes_roll_out_after_their_tests(self):
-        # server/scripts are tested with the character server's tests (backend/tests/infra).
+        # Both are tested with the character server's tests (backend/tests/infra).
         self.commit("frontend/scripts/deploy-aws.ps1", "server/scripts/deploy-rust-server.py")
         self.assertEqual(self.route(), {"server_check", "backend_check", "frontend_check", "infra_check",
                                       "deploy_server", "deploy_web"})
+
+    def test_web_deploy_script_runs_its_tests(self):
+        self.commit("frontend/scripts/deploy-aws.ps1")
+        self.assertEqual(self.route(), {"backend_check", "frontend_check", "infra_check", "deploy_web"})
 
     def test_studio_screens_the_mcp_mirrors_run_its_tests(self):
         self.commit("frontend/src/character/studio/garment-styles.json")

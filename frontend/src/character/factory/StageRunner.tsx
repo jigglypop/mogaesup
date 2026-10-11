@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { isDefinitiveRejection } from '../api';
+import { isDefinitiveRejection, PendingRequestConflict } from '../api';
 import { usePolling } from '../use-polling';
 import { factoryApi, type FactoryStage } from './api';
 
@@ -27,7 +27,14 @@ export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () =
   }
   async function start(stage: FactoryStage) {
     if (locked.current) return;
-    const intent = readPending(storage) || pending || { stage, key: crypto.randomUUID() };
+    // Storage is read as it is sent, so a stage saved since this screen looked (another tab) is not sent in place of the
+    // one asked for: it shows here to be recovered first, as a saved request does elsewhere (savedRequest).
+    const saved = readPending(storage) || pending;
+    if (saved && saved.stage !== stage) {
+      setPending(saved); setError(new PendingRequestConflict({ key: saved.key, input: saved.stage }).message);
+      return;
+    }
+    const intent = saved || { stage, key: crypto.randomUUID() };
     locked.current = true; setSending(true); setError('');
     try {
       localStorage.setItem(storage, JSON.stringify(intent));

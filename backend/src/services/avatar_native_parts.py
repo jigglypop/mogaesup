@@ -598,6 +598,7 @@ class AvatarNativeParts:
                     'expression_uv_sha256': digest(Path(__file__).with_name('avatar_expression_uv_blender.py')),
                     # The rest of what the Blender worker imports: a change to any of them must make a new version.
                     'limb_fit_sha256': digest(Path(__file__).with_name('avatar_limb_fit.py')),
+                    'bone_names_sha256': digest(Path(__file__).with_name('avatar_bone_names.py')),
                     'hood_room_sha256': digest(Path(__file__).with_name('avatar_hood_room.py')),
                     'wardrobe_coverage_sha256': digest(Path(__file__).with_name('avatar_wardrobe_coverage.py')),
                     'glb_sha256': digest(Path(__file__).with_name('glb.py')),

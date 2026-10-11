@@ -74,4 +74,19 @@ describe('헤어 일괄 생성의 저장된 요청', () => {
     expect(localStorage.getItem(PENDING)).toBeNull();
     await unmount();
   });
+
+  it('다른 탭이 이미 복구해 지운 요청도 이 화면의 복구 버튼은 같은 요청 키로만 보낸다', async () => {
+    localStorage.setItem(PENDING, JSON.stringify({ key: 'lost-key', input: input('단발') }));
+    const { container, unmount } = await open();
+    // Another tab got the answer and forgot the saved request after this screen last looked.
+    localStorage.removeItem(PENDING);
+    fetchMock.mockResolvedValueOnce(json(200, { id: 'batch-1', status: 'accepted', completed: 0, created_at: '2026-10-02T00:00:00Z', input: input('단발'), items: [] }));
+    await act(async () => button(container, '접수 복구')!.click());
+    await settle();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Idempotency-Key')).toBe('lost-key');
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).items[0].name).toBe('단발');
+    expect(localStorage.getItem(PENDING)).toBeNull();
+    await unmount();
+  });
 });

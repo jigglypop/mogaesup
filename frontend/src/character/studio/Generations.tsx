@@ -2,11 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ModelViewer } from '../viewer';
 import { usePolling } from '../use-polling';
 import { studioHref } from '../../studio/screens';
+import { PAID_WORK_OFF, usePaidWork } from '../../studio/usage';
 import { generationsApi, type Generation, type GenerationSize } from './generations-api';
 import './generations.css';
 
-// The props screen: one image and one Meshy model per object.
+// The props screen: one image and one 3D model (Meshy or Tripo) per object.
 const kind = 'prop';
+const providerLabels = { meshy: 'Meshy', tripo: 'Tripo' } as const;
+// One 3D request, named by its provider once the studio says which.
+const modelRequest = (provider?: keyof typeof providerLabels | null) => `${provider ? providerLabels[provider] : '3D'} 1회`;
 const categoryOptions = [['furniture', '가구'], ['tree', '나무'], ['prop', '소품']] as const;
 const statusLabels: Record<Generation['status'], string> = {
   accepted: '접수됨', running: '생성 중', paused: '일시 중지', blocked: '중단됨', complete: '완료',
@@ -40,6 +44,7 @@ function upsert(items: Generation[] | undefined, generation: Generation) {
 }
 
 export default function Generations() {
+  const paid = usePaidWork();
   const readList = useCallback((signal: AbortSignal) => generationsApi.list(kind, signal), []);
   const listing = usePolling(readList, 5000);
   const initialDraft = useRef(readDraft());
@@ -50,6 +55,8 @@ export default function Generations() {
   const [size, setSize] = useState<GenerationSize>(initialDraft.current.size);
   const [selected, setSelected] = useState('');
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  // Why the shown model did not load; it belongs to that model and goes when another is shown.
+  const [viewerError, setViewerError] = useState('');
   const locked = useRef(false), viewerMount = useRef<HTMLDivElement>(null);
   const recovery = generationsApi.recovery(kind), pending = recovery.pending;
   const current = listing.value?.items.find(item => item.id === selected)
@@ -74,10 +81,11 @@ export default function Generations() {
     setPromptEdited(true); setSize(pending.input.size);
   }, [pending?.key]);
   useEffect(() => {
+    setViewerError('');
     if (!glb || !viewerMount.current) return;
     let active = true;
     const viewer = new ModelViewer(viewerMount.current, 'studio');
-    void viewer.load(glb.url).catch(cause => { if (active) setError((cause as Error).message); });
+    void viewer.load(glb.url).catch(cause => { if (active) setViewerError((cause as Error).message); });
     return () => { active = false; viewer.dispose(); };
   }, [glb?.url]);
 
@@ -102,13 +110,15 @@ export default function Generations() {
         <label>최대 텍스처 크기<select value={pending?.input.size || size} disabled={inputLocked} onChange={event => setSize(Number(event.target.value) as GenerationSize)}>{[256, 512, 1024].map(value => <option key={value} value={value}>{value} × {value}</option>)}</select></label>
         <label className="generation-prompt">프롬프트<textarea value={pending?.input.prompt ?? prompt} maxLength={8000} disabled={inputLocked} onChange={event => { setPrompt(event.target.value); setPromptEdited(true); }} /></label>
         <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: kind })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
-        <div className="generation-form-actions"><button type="button" disabled={inputLocked || !currentDefault} onClick={() => { setPrompt(currentDefault); setPromptEdited(false); }}>기본값 복원</button><button className="generation-submit is-primary" disabled={!canCreate && !pending} onClick={() => void perform(async () => {
+        <div className="generation-form-actions"><button type="button" disabled={inputLocked || !currentDefault} onClick={() => { setPrompt(currentDefault); setPromptEdited(false); }}>기본값 복원</button><button className="generation-submit is-primary" disabled={!paid || (!canCreate && !pending)} onClick={() => void perform(async () => {
+          // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
           const input = pending?.input || { kind, category, name: name.trim(), prompt: prompt.trim(), size };
-          const result = await generationsApi.create(input);
+          const result = await generationsApi.create(input, pending?.key);
           setSelected(result.id);
           listing.setValue(previous => ({ ...(previous || { capabilities: capability || { ready: true }, defaults: listing.value?.defaults || {} }), items: upsert(previous?.items, result) }));
-        })}>{busy ? '요청 확인 중' : pending ? '같은 요청 복구' : '유료 생성 · 이미지 1장 + Meshy 1회'}</button></div>
+        })}>{busy ? '요청 확인 중' : pending ? '같은 요청 복구' : `유료 생성 · 이미지 1장 + ${modelRequest(capability?.default_provider)}`}</button></div>
         {capability && !capability.ready && <small className="generation-capability">{capability.reason || '현재 생성 기능을 사용할 수 없습니다.'}</small>}
+        {!paid && <small className="generation-capability">{PAID_WORK_OFF}</small>}
         {pending && <small className="generation-recovery">응답 확인 안 됨</small>}
       </div>
     </section>
@@ -121,14 +131,16 @@ export default function Generations() {
           {image ? <img src={image.url} loading="lazy" decoding="async" alt={`${item.name} 생성 이미지`} /> : <span className="generation-no-preview">미리보기 없음</span>}
           <span className="generation-card-copy"><strong>{item.name}</strong><small>{statusLabels[item.status]} · {stageLabels[item.stage]}{item.progress != null ? ` · ${Math.round(item.progress)}%` : ''}</small>{item.error && <small className="generation-item-error">{item.error}</small>}</span>
         </button>;
-      })}</div> : !listing.loading && <p className="generation-empty">저장된 결과가 없습니다.</p>}
+      })}</div> : !listing.value && listing.error ? <p className="generation-empty">목록을 불러오지 못했습니다. <button onClick={() => void listing.refresh()}>다시 불러오기</button></p>
+        : !listing.loading && <p className="generation-empty">저장된 결과가 없습니다.</p>}
     </section>
     {current && <section className="generation-result">
-      <div className="generation-result-heading"><div><h2>{current.name}</h2><small>{statusLabels[current.status]} · {stageLabels[current.stage]} · {new Date(current.created_at).toLocaleString()}</small></div>{current.can_resume && <button disabled={busy} onClick={() => void perform(async () => {
+      <div className="generation-result-heading"><div><h2>{current.name}</h2><small>{statusLabels[current.status]} · {stageLabels[current.stage]} · {new Date(current.created_at).toLocaleString()}</small></div>{current.can_resume && <button disabled={busy || !paid} onClick={() => void perform(async () => {
         const result = await generationsApi.resume(current.id); setSelected(result.id);
         listing.setValue(previous => previous && ({ ...previous, items: upsert(previous.items, result) }));
-      })}>계속 진행</button>}</div>
+      })}>{`계속 진행 · 유료 최대 ${current.stage === 'image' ? '이미지 1장 + ' : ''}${modelRequest(current.provider)}`}</button>}</div>
       {glb && <div ref={viewerMount} className="generation-model" />}
+      {glb && viewerError && <p role="alert">{viewerError}</p>}
       <p className="generation-result-prompt">{current.prompt}</p>
       <div className="artifact-grid">{current.artifacts.map(artifact => <a key={`${artifact.name}:${artifact.sha256}`} href={artifact.url} download>{artifact.name}</a>)}</div>
     </section>}

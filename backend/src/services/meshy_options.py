@@ -68,8 +68,9 @@ def upload_texture(factory, owner, content):
     return AvatarBlueprints(factory.data).upload(owner, output.getvalue())
 
 
-def freeze_options(factory, owner, value, slot, prompts, *, shared=False):
-    """shared: one submitted setting covers a whole part set, so each slot keeps its own budget and pose."""
+def freeze_options(factory, owner, value, slot, prompts, *, shared=False, checked=None):
+    """shared: one submitted setting covers a whole part set, so each slot keeps its own budget and pose. checked: the
+    texture references (asset ID -> MIME) that the calls for the request's other slots read, so each is read once."""
     from src.services.avatar_blueprints import AvatarBlueprints
     options = MeshyPartOptions.model_validate(value or {}).model_dump()
     if value is None and slot == 'body':
@@ -94,16 +95,17 @@ def freeze_options(factory, owner, value, slot, prompts, *, shared=False):
         frozen['texture_prompt'] = prompt
     elif options['texture_mode'] in ('image', 'images'):
         assets = AvatarBlueprints(factory.data)
+        checked = {} if checked is None else checked
         for asset in options['texture_image_assets']:
-            content = assets.asset(owner, asset).read_bytes()
-            if hashlib.sha256(content).hexdigest() != asset:
-                raise PipelineError('texture_source_changed', '텍스처 참조 원본이 변경되었습니다.', 409)
-            with Image.open(io.BytesIO(content)) as reference:
-                mime = {'PNG': 'image/png', 'JPEG': 'image/jpeg'}.get(reference.format)
-                reference.verify()
-            if not mime:
-                raise PipelineError('invalid_texture_image', 'PNG 또는 JPEG 텍스처를 선택하세요.', 422)
-            frozen['texture_images'].append({'asset': asset, 'sha256': asset, 'mime': mime})
+            if asset not in checked:
+                # The bytes come checked against the asset ID, which is their SHA-256.
+                with Image.open(io.BytesIO(assets.asset_bytes(owner, asset))) as reference:
+                    mime = {'PNG': 'image/png', 'JPEG': 'image/jpeg'}.get(reference.format)
+                    reference.verify()
+                if not mime:
+                    raise PipelineError('invalid_texture_image', 'PNG 또는 JPEG 텍스처를 선택하세요.', 422)
+                checked[asset] = mime
+            frozen['texture_images'].append({'asset': asset, 'sha256': asset, 'mime': checked[asset]})
     return frozen
 
 

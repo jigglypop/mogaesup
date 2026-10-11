@@ -23,7 +23,13 @@ const SETTLE_MS = Number(process.env['PERF_SETTLE_MS'] ?? 0);
 const browser = await chromium.launch({
   channel: 'chrome',
   headless: true,
-  args: ['--enable-unsafe-webgpu', '--use-angle=d3d11', '--enable-gpu', '--disable-gpu-vsync', '--disable-frame-rate-limit'],
+  args: [
+    '--enable-unsafe-webgpu',
+    '--enable-gpu',
+    '--disable-gpu-vsync',
+    '--disable-frame-rate-limit',
+    ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : []),
+  ],
 });
 const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
 const page = await context.newPage();
@@ -101,13 +107,19 @@ async function phase(label, act) {
       if (window.__probe.on !== false) requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
-    new PerformanceObserver((list) => {
+    // Kept to be disconnected with the phase: it pushes to whichever __probe is current, so one left running would count
+    // the next phase's long tasks again.
+    window.__probe.observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) window.__probe.long.push(entry.duration);
-    }).observe({ type: 'longtask', buffered: false });
+    });
+    window.__probe.observer.observe({ type: 'longtask', buffered: false });
   });
   await act();
   const stats = await page.evaluate(() => {
     window.__probe.on = false;
+    // Long tasks noted but not yet handed to the observer still belong to this phase.
+    for (const entry of window.__probe.observer.takeRecords()) window.__probe.long.push(entry.duration);
+    window.__probe.observer.disconnect();
     const { frames, long } = window.__probe;
     const deltas = frames.slice(1).map((t, i) => t - frames[i]).sort((a, b) => a - b);
     const at = (q) => deltas[Math.min(deltas.length - 1, Math.floor(q * deltas.length))] ?? 0;

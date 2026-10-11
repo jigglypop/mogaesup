@@ -19,6 +19,8 @@ export type Generation = {
   error?: string;
   can_resume: boolean;
   created_at: string;
+  /** A prop's 3D provider, frozen when it was accepted. */
+  provider?: 'meshy' | 'tripo' | null;
   progress?: number;
   task_id?: string;
   artifacts: GenerationArtifact[];
@@ -57,7 +59,8 @@ type GenerationInput = {
 
 type GenerationList = {
   items: Generation[];
-  capabilities: { ready: boolean; reason?: string };
+  /** For props, the 3D providers with keys and the one a new prop is sent to. */
+  capabilities: { ready: boolean; reason?: string; providers?: ('meshy' | 'tripo')[]; default_provider?: 'meshy' | 'tripo' };
   defaults: Record<string, string>;
 };
 
@@ -80,12 +83,13 @@ export const generationsApi = {
     method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({generation_id,revision}),
   }),
   recovery: (kind: GenerationKind) => generations(kind).read(),
-  create: (input: GenerationInput) => generations(input.kind).send(input, pending => request<Generation>('/api/studio/generations', {
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (input: GenerationInput, key?: string) => generations(input.kind).send(input, pending => request<Generation>('/api/studio/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
     body: JSON.stringify(pending.input),
     timeoutMs: 60000,
-  }), { answered: (result, key) => result.request_key === key }),
+  }), { ...(key ? { key } : {}), answered: (result, sent) => result.request_key === sent }),
   resume: (id: string) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 }),
   vectorize: (id: string, colors: VectorColors) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/vector`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ colors }), timeoutMs: 60000,

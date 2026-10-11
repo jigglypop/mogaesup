@@ -151,12 +151,13 @@ def can_resume(directory, state):
     return True
 
 
-def _remove_edge_white(raw):
-    """Remove only near-white pixels connected to an opaque image border."""
+def _remove_edge_white(raw, *, opaque_min=255):
+    """Remove only near-white pixels connected to an opaque image border. An image whose alpha never drops below
+    `opaque_min` counts as opaque; one with lower alpha keeps the provider's."""
     with Image.open(io.BytesIO(raw)) as opened:
         image = opened.convert('RGBA')
     alpha = image.getchannel('A')
-    if alpha.getextrema()[0] < 255:
+    if alpha.getextrema()[0] < opaque_min:
         return raw, {'method': 'provider_alpha_preserved', 'removed_pixels': 0}
     rgb = image.convert('RGB')
     mask = Image.new('L', image.size)

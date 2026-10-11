@@ -240,15 +240,19 @@ def register_garment(generated, key_render, key_name, *, search_scale=.15, searc
     return buffer.getvalue(), report
 
 
+# An answer whose alpha never drops below this has no provider alpha, only noise on an opaque image.
+OPAQUE_ALPHA = 250
+
+
 def ensure_alpha(content):
     """Keep provider alpha; remove a flat border background only when there is none."""
     with Image.open(io.BytesIO(content)) as image:
         rgba = image.convert('RGBA')
         low, _ = rgba.getchannel('A').getextrema()
-    if low < 250:
+    if low < OPAQUE_ALPHA:
         return content, {'background': 'provider_alpha'}
     from src.services.avatar_reference_preparation import _remove_edge_white
-    cleaned, report = _remove_edge_white(content)
+    cleaned, report = _remove_edge_white(content, opaque_min=OPAQUE_ALPHA)
     return cleaned, {'background': 'border_removed', **report}
 
 

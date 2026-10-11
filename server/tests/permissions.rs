@@ -292,7 +292,7 @@ async fn 섬_보기는_주인과_공개_범위와_명시적_부여를_따른다(
     let host = app.register("host_v", "주인").await;
     let guest = app.register("guest_v", "손님").await;
     let pal = app.register("pal_v", "그룹 친구").await;
-    let boss = app.register("boss_v", "관리자").await;
+    let boss = app.register("boss_v", "대장").await;
     app.make_admin("boss_v").await;
     let home = "/api/homes/host_v";
     assert_eq!(app.call("GET", home, None, None).await.status, StatusCode::OK);
@@ -637,7 +637,7 @@ async fn 라우트마다_필요한_권한만_통과한다() {
 
     // FACTORY_ACCESS stays the upper bound, whoever asks.
     let app = studio_app(FactoryAccess::Read).await;
-    let boss = app.register("boss_y", "관리자").await;
+    let boss = app.register("boss_y", "대장").await;
     app.make_admin("boss_y").await;
     let outfit = app.call("PUT", "/api/avatar-factory/wardrobe/outfits/mine", Some(json!({})), Some(&boss)).await;
     assert_eq!(outfit.body["code"], "factory_read_only");

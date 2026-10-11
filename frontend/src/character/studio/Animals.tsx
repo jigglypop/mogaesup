@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { PAID_WORK_OFF, usePaidWork } from '../../studio/usage';
 import { ModelViewer } from '../viewer';
 import { usePolling } from '../use-polling';
-import { studioApi, type Animal, type AnimalProgress, type AnimalRegenerateInput, type AnimalStep, type AnimalView } from './api';
+import { studioApi, type Animal, type AnimalProduction, type AnimalProgress, type AnimalRegenerateInput, type AnimalStep, type AnimalView } from './api';
 import { AssetDetailDialog } from './AssetDetailDialog';
 import { AssetModelPreview } from './AssetModelPreview';
 import './generations.css';
@@ -53,6 +54,14 @@ function progressLabel(progress?: AnimalProgress | null) {
   return '';
 }
 
+// A paused job runs its steps not yet done; a saved view or a recovered Meshy task is not bought again.
+function resumeLabel(job: AnimalProduction, meshy: number) {
+  const left = job.steps.filter(step => !job.done.includes(step));
+  return left.includes('views') ? `이어서 실행 · 유료 최대 이미지 ${job.views.length}장 + Meshy ${meshy}크레딧`
+    : left.includes('model') ? `이어서 실행 · 유료 최대 Meshy ${meshy}크레딧`
+    : left.includes('rig') ? `이어서 실행 · ${stepLabels.rig}` : '이어서 실행';
+}
+
 // Files keep their names when regenerated; the content hash makes viewers and images reload.
 const artifact = (animal: Animal, name: string) => {
   const item = animal.artifacts.find(entry => entry.name === name);
@@ -61,6 +70,7 @@ const artifact = (animal: Animal, name: string) => {
 
 function CreateAnimal({ onCreated }: { onCreated(animal: Animal): void }) {
   const id = useId();
+  const paid = usePaidWork();
   const [name, setName] = useState(''), [species, setSpecies] = useState<Animal['species']>('dog');
   const [file, setFile] = useState<File>(), [preview, setPreview] = useState('');
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [dragging, setDragging] = useState(false);
@@ -94,13 +104,15 @@ function CreateAnimal({ onCreated }: { onCreated(animal: Animal): void }) {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError('');
     try {
-      let input = studioApi.animalCreateRecovery().pending?.input;
+      // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
+      const saved = studioApi.animalCreateRecovery().pending || pending;
+      let input = saved?.input;
       if (!input) {
         if (!file || !name.trim()) return;
         const reference = await studioApi.uploadAnimalReference(file);
         input = { name: name.trim(), species, reference: reference.id };
       }
-      const animal = await studioApi.createAnimal(input);
+      const animal = await studioApi.createAnimal(input, saved?.key);
       setName(''); setFile(undefined);
       onCreated(animal);
     } catch (cause) { setError((cause as Error).message); }
@@ -131,11 +143,12 @@ function CreateAnimal({ onCreated }: { onCreated(animal: Animal): void }) {
           {Object.entries(speciesLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <div className="animal-create-actions">
           {pending
-            ? <button disabled={busy} onClick={() => void submit()}>같은 요청 복구</button>
-            : <button disabled={unavailable || !file || !name.trim()} onClick={() => void submit()}>{busy ? '추가 중' : '동물 추가'}</button>}
+            ? <button disabled={busy || !paid} onClick={() => void submit()}>같은 요청 복구</button>
+            : <button disabled={unavailable || !paid || !file || !name.trim()} onClick={() => void submit()}>{busy ? '추가 중' : '동물 추가'}</button>}
         </div>
       </div>
     </div>
+    {!paid && <p>{PAID_WORK_OFF}</p>}
     {(error || recovery.error) && <p role="alert">{error || recovery.error}</p>}
   </section>;
 }
@@ -150,7 +163,9 @@ function Regenerate({ animal, onChange }: { animal: Animal; onChange(animal: Ani
   const recovery = studioApi.animalRecovery(animal.id), pending = recovery.pending;
   const job = animal.production;
   const active = !!job && ['accepted', 'running'].includes(job.status);
-  const disabled = busy || active || !!pending || !!recovery.error;
+  // Every request below is paid studio work, which the server may keep closed here.
+  const paid = usePaidWork();
+  const disabled = busy || active || !!pending || !!recovery.error || !paid;
   const has = (name: string) => animal.artifacts.some(item => item.name === name);
   const hasReference = has('reference.png'), hasModel = has('model.glb');
   const missing = viewChoices.map(([view]) => view).filter(view => !has(`${view}.png`));
@@ -183,9 +198,10 @@ function Regenerate({ animal, onChange }: { animal: Animal; onChange(animal: Ani
         선택한 면 다시 그리기 · 유료 이미지 {redraw.length}장 + Meshy {meshy}크레딧</button>
       <button disabled={disabled || missing.length > 0} onClick={() => void submit({ views: [], note: '', model: true, rig: true })}>3D 다시 만들기 · 유료 Meshy {meshy}크레딧</button>
       <button disabled={disabled || !hasModel} onClick={() => void submit({ views: [], note: '', model: false, rig: true })}>표준 골격 다시 씌우기</button>
-      {pending && <button disabled={busy} onClick={() => void submit(pending.input, pending.key)}>같은 요청 복구</button>}
-      {job?.status === 'paused' && !pending && <button disabled={busy} onClick={resume}>이어서 실행</button>}
+      {pending && <button disabled={busy || !paid} onClick={() => void submit(pending.input, pending.key)}>같은 요청 복구</button>}
+      {job?.status === 'paused' && !pending && <button disabled={busy || !paid} onClick={resume}>{resumeLabel(job, meshy)}</button>}
     </div>
+    {!paid && <p>{PAID_WORK_OFF}</p>}
     {job && <p className="animal-production">{job.steps.map(step => stepLabels[step]).join(' → ')} · {statusLabels[job.status]}
       {job.step && active ? ` · ${stepLabels[job.step]} (${job.done.length + 1}/${job.steps.length})${progressLabel(job.progress)}` : ''}</p>}
     {(error || recovery.error || job?.error) && <p role="alert">{error || recovery.error || job?.error}</p>}
@@ -240,7 +256,8 @@ export default function Animals() {
           <div className="asset-gallery-info"><strong title={item.name}>{item.name}</strong><span>{speciesLabels[item.species] || item.species} · {summary(item)}</span></div>
           <div className="asset-gallery-actions"><button className="asset-open" onClick={() => { setOpened(item.id); setModelName(''); }}>크게 보기</button></div>
         </article>;
-      })}</div> : !listing.loading && <p className="asset-gallery-empty">저장된 동물이 없습니다.</p>}
+      })}</div> : !listing.value && listing.error ? <p className="asset-gallery-empty">목록을 불러오지 못했습니다. <button onClick={() => void listing.refresh()}>다시 불러오기</button></p>
+        : !listing.loading && <p className="asset-gallery-empty">저장된 동물이 없습니다.</p>}
     </section>
     {current && <AssetDetailDialog title={current.name} onClose={() => setOpened('')}>
       {error && <p role="alert">{error}</p>}

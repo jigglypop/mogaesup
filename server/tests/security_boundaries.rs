@@ -573,6 +573,46 @@ async fn names_that_read_as_staff_are_kept_from_new_accounts() {
 }
 
 #[tokio::test]
+async fn display_names_that_read_as_staff_or_hide_themselves_are_kept_from_new_accounts() {
+    let app = TestApp::new(None).await;
+    let sign_up = |username: &str, name: &str| {
+        let body = json!({"username": username, "displayName": name, "password": "correct horse battery"});
+        app.call("POST", "/api/auth/register", Some(body), None)
+    };
+    // However it is spaced, cased or joined, with the message the sign-up form shows.
+    for (username, name) in
+        [("staff_a", "운영자"), ("staff_b", " 관 리 자 "), ("staff_c", "ＡＤＭＩＮ"), ("staff_d", "운\u{200d}영자")]
+    {
+        let reply = sign_up(username, name).await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str(), reply.body["message"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("reserved_name"), Some("운영진처럼 보이는 이름은 쓸 수 없어요.")),
+            "{name:?}"
+        );
+    }
+    // A name that shows as nothing, or reads turned around.
+    for (username, name) in [("hidden_a", "\u{200b}"), ("hidden_b", "\u{202e}abc")] {
+        let reply = sign_up(username, name).await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid_name")),
+            "{name:?}"
+        );
+    }
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users").fetch_one(&app.state.db).await.unwrap(), 0);
+    // An account that has such a name from before keeps it.
+    let cookie = app.register("made_before", "모개").await;
+    sqlx::query("UPDATE users SET display_name = '운영자' WHERE username = 'made_before'")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(app.call("GET", "/api/auth/me", None, Some(&cookie)).await.body["user"]["displayName"], "운영자");
+    let again = app.call("POST", "/api/auth/login", login("made_before", "correct horse battery"), None).await;
+    assert_eq!((again.status, again.body["user"]["displayName"].as_str()), (StatusCode::OK, Some("운영자")));
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn text_is_refused_for_control_characters_and_line_breaks_go_only_into_text_areas() {
     let app = TestApp::new(None).await;
     let host = app.register("text_host", "Host").await;
@@ -580,7 +620,10 @@ async fn text_is_refused_for_control_characters_and_line_breaks_go_only_into_tex
     let book = "/api/homes/text_host/guestbook";
     let entry = |body: &str| Some(json!({"body": body}));
     assert_eq!(app.call("POST", book, entry("두 줄\n방명록"), Some(&guest)).await.status, StatusCode::CREATED);
-    for body in ["벨\u{7}소리", "널\u{0}문자", "탈출\u{1b}[31m"] {
+    assert_eq!(app.call("POST", book, entry("👩\u{200d}🏫 다녀가요"), Some(&guest)).await.status, StatusCode::CREATED);
+    // Nor what hides itself or turns the text around where everyone reads it.
+    for body in ["벨\u{7}소리", "널\u{0}문자", "탈출\u{1b}[31m", "\u{202e}요어맞", "\u{200b}", "글\u{2066}자"]
+    {
         let reply = app.call("POST", book, entry(body), Some(&guest)).await;
         assert_eq!(
             (reply.status, reply.body["code"].as_str()),
@@ -589,8 +632,12 @@ async fn text_is_refused_for_control_characters_and_line_breaks_go_only_into_tex
         );
     }
     let ask = |name: &str, message: &str| Some(json!({"name": name, "theirName": "친구", "message": message}));
-    for (body, code) in [(ask("탭\t이름", ""), "invalid_ilchon_name"), (ask("친구", "줄\n바꿈"), "invalid_message")]
-    {
+    for (body, code) in [
+        (ask("탭\t이름", ""), "invalid_ilchon_name"),
+        (ask("친\u{202e}구", ""), "invalid_ilchon_name"),
+        (ask("친구", "줄\n바꿈"), "invalid_message"),
+        (ask("친구", "\u{feff}"), "invalid_message"),
+    ] {
         let reply = app.call("POST", "/api/ilchon/text_host/request", body, Some(&guest)).await;
         assert_eq!((reply.status, reply.body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some(code)));
     }
@@ -598,7 +645,12 @@ async fn text_is_refused_for_control_characters_and_line_breaks_go_only_into_tex
     let status =
         app.call("PATCH", "/api/homes/me", Some(json!({"statusMessage": "오늘은\n느긋하게"})), Some(&host)).await;
     assert_eq!(status.body["profile"]["statusMessage"], "오늘은\n느긋하게");
-    for changes in [json!({"statusMessage": "벨\u{7}"}), json!({"title": "두 줄\n제목"})] {
+    for changes in [
+        json!({"statusMessage": "벨\u{7}"}),
+        json!({"title": "두 줄\n제목"}),
+        json!({"title": "\u{202e}섬"}),
+        json!({"statusMessage": "\u{200b}"}),
+    ] {
         let reply = app.call("PATCH", "/api/homes/me", Some(changes.clone()), Some(&host)).await;
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{changes}");
     }
@@ -775,7 +827,7 @@ async fn database_refusals_are_the_requests_problem_and_outages_the_servers() {
 #[tokio::test]
 async fn visitors_do_not_learn_which_studio_job_an_item_was_copied_from() {
     let app = TestApp::new(None).await;
-    let admin = app.register("source_admin", "Admin").await;
+    let admin = app.register("source_admin", "Boss").await;
     app.make_admin("source_admin").await;
     let member = app.register("source_member", "Member").await;
     sqlx::query(

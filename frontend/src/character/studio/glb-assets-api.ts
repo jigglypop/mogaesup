@@ -33,5 +33,6 @@ export const glbAssetsApi = {
   list: (signal?: AbortSignal) => request<{ items: GlbAssetRecord[] }>(root, { signal, timeoutMs: 25000 }),
   upload: (file: File) => uploadGlb(`${root}/upload`, file),
   create: (input: GlbAssetInput) => registration.send(input, post<GlbAssetRecord>(root)),
-  prepare: (id: string, input: GlbAssetPreparation) => preparation(id).send(input, post<FactoryJob>(`${root}/${encodeURIComponent(id)}/prepare`)),
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  prepare: (id: string, input: GlbAssetPreparation, key?: string) => preparation(id).send(input, post<FactoryJob>(`${root}/${encodeURIComponent(id)}/prepare`), key ? { key } : {}),
 };

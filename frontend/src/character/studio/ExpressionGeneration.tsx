@@ -96,14 +96,15 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
       </select></label>
       <a className="prompt-management-link" href={studioHref({ tab: 'prompts', promptGroup: 'expression' })} target="_blank" rel="noreferrer">프롬프트 관리 열기</a>
       <div className="meshy-buttons">
+        {/* A saved request goes again under its own key, even if another tab has since had its answer and forgotten it. */}
         <button type="button" disabled={!canSubmit} onClick={() => void perform(async () => {
           const input = pending?.input || { name, prompt: defaultPrompt.trim(), reference_assets: referenceIds };
-          const result = await expressionGenerationApi.create(job, version, input);
+          const result = await expressionGenerationApi.create(job, version, input, pending?.key);
           if (currentScope()) listing.setValue(previous => previous && ({ ...previous, items: upsert(previous.items, result) }));
         })}>{busy ? '요청 확인 중' : pending ? '같은 요청 복구' : '표정 텍스처 생성 · 이미지 1회'}</button>
         <button type="button" disabled={!canSubmitBatch} onClick={() => void perform(async () => {
           const input = batchPending?.input || { reference_assets: referenceIds };
-          const result = await expressionGenerationApi.createBatch(job, version, input);
+          const result = await expressionGenerationApi.createBatch(job, version, input, batchPending?.key);
           if (currentScope()) listing.setValue(previous => previous && ({ ...previous, batches: upsertBatch(previous.batches, result) }));
         })}>{busy ? '요청 확인 중' : batchPending ? '기본 5종 같은 요청 복구' : '기본 5종 생성 · 이미지 5회'}</button>
       </div>
@@ -119,7 +120,7 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
       {batch.can_resume && <button type="button" disabled={!ready || busy} onClick={() => void perform(async () => {
         const result = await expressionGenerationApi.resumeBatch(job, version, batch.id);
         if (currentScope()) listing.setValue(previous => previous && ({ ...previous, batches: upsertBatch(previous.batches, result) }));
-      })}>계속 진행</button>}
+      })}>계속 진행 · 유료 최대 이미지 {batch.items.filter(item => item.status !== 'complete').length}회</button>}
     </article>)}</div>}
     <div className="expression-library">
       {listing.value?.items.map(item => {
@@ -132,13 +133,13 @@ export function ExpressionGenerationPanel({ job, version, ready, onApply }: {
             {item.can_resume && <button type="button" disabled={!ready || busy} onClick={() => void perform(async () => {
               const result = await expressionGenerationApi.resume(job, version, item.id);
               if (currentScope()) listing.setValue(previous => previous && ({ ...previous, items: upsert(previous.items, result) }));
-            })}>계속 진행</button>}
+            })}>계속 진행 · 유료 최대 이미지 1회</button>}
             {item.status === 'complete' && face && <button type="button" disabled={!ready || busy} onClick={() => void perform(() => onApply(item))}>얼굴에 적용</button>}
             {face && <a href={face.url} download>PNG</a>}
           </div>
         </article>;
       })}
-      {!listing.loading && !listing.value?.items.length && <p>생성한 표정 텍스처가 없습니다.</p>}
+      {!listing.loading && !listing.value?.items.length && <p>{listing.value ? '생성한 표정 텍스처가 없습니다.' : '목록을 불러오지 못했습니다.'}</p>}
     </div>
   </section>;
 }

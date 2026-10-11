@@ -84,6 +84,127 @@ def fit_hair_cavity(meshes, body, rig, spec):
     return report
 
 
+SEAT_ROUNDS = 6          # the seat casts its rays again after each of at most this many moves
+SEAT_KEEP = .7           # each round's fit is made again over this share of its rays, the ones it fits best,
+SEAT_TRIMS = 3           # this many times
+SEAT_STEP = (.8, 1.25)   # one round's uniform scale about the head centre
+SEAT_SCALE_MIN = .6      # the seat shrinks a hairstyle to no less than this (it grows it to hair_cavity_scale_limit)
+SEAT_MOVE_M = .15        # and moves it no further than this
+SEAT_ENCLOSED = .9       # the head centre is inside the hair when this share of rays from it cross the hair oddly often
+
+
+def _scalp_rays():
+    """Directions from the head centre through the scalp; the face below the brow is left out, as in fit_hair_cavity."""
+    rays = [Vector((0, 0, 1))]
+    for elevation in (.05, .3, .55, .8, .95):
+        horizontal = math.sqrt(1-elevation*elevation)
+        for step in range(24):
+            angle = step*math.tau/24
+            ray = Vector((math.sin(angle)*horizontal, math.cos(angle)*horizontal, elevation))
+            if ray.y >= -.25 or elevation >= .75:
+                rays.append(ray)
+    return rays
+
+
+def _encloses(surface, origin, limit=12):
+    """Whether `origin` lies inside a closed surface: nearly every ray from it, downward too, crosses it an odd number
+    of times. A wig's cavity is crossed an even number of times, and an open hair shell not at all through the face
+    and neck openings."""
+    odd = total = 0
+    for elevation in (-.9, -.5, -.1, .3, .7):
+        horizontal = math.sqrt(1-elevation*elevation)
+        for step in range(8):
+            angle = (step+.5)*math.tau/8
+            ray = Vector((math.sin(angle)*horizontal, math.cos(angle)*horizontal, elevation))
+            point, crossings = origin, 0
+            while crossings < limit and (hit := surface.cast(point, ray)) is not None:
+                point, crossings = hit[0]+ray*1e-4, crossings+1
+            odd += crossings % 2
+            total += 1
+    return odd >= SEAT_ENCLOSED*total
+
+
+def seat_step(found, rays, wanted):
+    """(scale about the head centre, move) bringing the first hair surfaces `found` along the unit `rays` to `wanted`.
+    Scaled by s and moved by t, the surface along a ray comes to about s*found + t.ray. The least-squares fit is made
+    again over the rays it fits best, so interior locks and far strands drop out."""
+    system = np.column_stack([found, rays])
+    solution = np.linalg.lstsq(system, wanted, rcond=None)[0]
+    for _ in range(SEAT_TRIMS):
+        residual = np.abs(system @ solution-wanted)
+        best = residual <= np.percentile(residual, SEAT_KEEP*100)
+        solution = np.linalg.lstsq(system[best], wanted[best], rcond=None)[0]
+    return float(solution[0]), solution[1:]
+
+
+def seat_hair_cavity(meshes, body, rig, spec):
+    """Seat the inner hair surface on the scalp with one uniform scale and a move, down and in as well as up and out.
+
+    fit_hair puts the outer crown a fixed height over the head (hair_crown_clearance_m) at a size measured round the
+    outside, which lifts a thin or close-fitting hairstyle off the scalp, and fit_hair_cavity only ever enlarges it.
+    Rays from the head centre meet the skull and the first hair surface. Each round fits the scale about the head
+    centre and the move that bring that surface to the skull plus scalp_clearance_m along the rays, by least squares
+    over the rays that agree best (interior locks and far strands drop out, as in fit_hair_cavity), and the rays are
+    cast again. A hairstyle whose surface closes round the head centre (a solid mass) has no cavity to seat and keeps
+    fit_hair's placement.
+    """
+    lo, hi, collar = head_region(body, rig, spec)
+    center = (lo+hi)/2
+    center.z = (max(lo.z, collar)+hi.z)/2
+    skull = _Surface(body)
+    clearance = spec['fitting'].get('scalp_clearance_m', .003)
+    limit = float(spec['fitting'].get('hair_cavity_scale_limit', 1.25))
+    rays = [(ray, hit[2]+clearance) for ray in _scalp_rays() if (hit := skull.cast(center, ray)) is not None]
+
+    def gaps(hair):
+        """(ray, wanted, first hair distance) of the rays whose first hair surface may be the cavity."""
+        rows = []
+        for ray, wanted in rays:
+            hit = hair.cast(center, ray)
+            if hit is not None and hit[2] > 1e-8 and .5 <= wanted/hit[2] <= 2:
+                rows.append((ray, wanted, hit[2]))
+        return rows
+
+    def crown_gap(rows):
+        """The median distance from the skin to the first hair surface over the crown."""
+        crown = [found-(wanted-clearance) for ray, wanted, found in rows if ray.z >= .75]
+        return float(np.median(crown)) if crown else None
+    report = {'method': 'two_way_inner_hair_seat_v1', 'scale': 1., 'move_gltf_m': [0., 0., 0.], 'rounds': 0,
+              'center_blender': list(center), 'scale_limits': [SEAT_SCALE_MIN, limit], 'move_limit_m': SEAT_MOVE_M,
+              'source_proportions_preserved': True}
+    hair = _Surface(meshes)
+    if _encloses(hair, center):
+        return {**report, 'reason': 'hair_encloses_head_centre'}
+    rows = gaps(hair)
+    report['crown_gap_before_m'] = crown_gap(rows)
+    scale, move = 1., Vector((0, 0, 0))
+    for _ in range(SEAT_ROUNDS):
+        # As in fit_hair_cavity: rays in at least three quarters round the head.
+        if len(rows) < 12 or len({int(math.atan2(ray.x, ray.y) % math.tau//(math.tau/4)) for ray, _, _ in rows}) < 3:
+            report['reason'] = 'insufficient_cavity_surface'
+            break
+        step, shift = seat_step(np.array([found for _, _, found in rows]), np.array([tuple(ray) for ray, _, _ in rows]),
+                                np.array([wanted for _, wanted, _ in rows]))
+        step = min(max(step, SEAT_STEP[0]), SEAT_STEP[1])
+        total = min(max(scale*step, SEAT_SCALE_MIN), limit)
+        step = total/scale
+        target = move*step+Vector(shift)
+        if target.length > SEAT_MOVE_M:
+            target = target*(SEAT_MOVE_M/target.length)
+        shift = target-move*step
+        if abs(step-1) < 1e-4 and shift.length < 1e-4:
+            break
+        place(meshes, Matrix.Translation(center+shift) @ Matrix.Scale(step, 4) @ Matrix.Translation(-center))
+        scale, move = total, target
+        report['rounds'] += 1
+        hair = _Surface(meshes)
+        rows = gaps(hair)
+    report.update(scale=scale, move_gltf_m=[move.x, move.z, -move.y], samples=len(rows),
+                  crown_gap_m=crown_gap(rows),
+                  limited=bool(scale <= SEAT_SCALE_MIN+1e-9 or scale >= limit-1e-9 or move.length >= SEAT_MOVE_M-1e-9))
+    return report
+
+
 SIDE_MARGIN_M = .02   # a derived rear surface reaches this far beyond the head's width
 SCALP_CAP_M = .0015   # the scalp cap lies this far outside the skin, under the strands' 3 mm
 SCALP_TOP = .45       # skin whose normal rises this steeply is scalp (the forehead and face stay below)
