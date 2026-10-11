@@ -163,6 +163,29 @@ def build_body_shell_part(part, body, rig, spec):
     return meshes, report, covered
 
 
+# Worn hair whose top lies this far below the frozen head's top lost its crown when the provider's mannequin head was
+# smaller: the vertices inside the head were removed, and a seat cannot bring them back.
+WORN_CROWN_MISSING_M = .02
+
+
+def seat_worn_hair(extracted, body, rig, spec):
+    """Seat worn hair's inner surface on the frozen scalp, as a hair fitted on its own is.
+
+    A provider rebuilds the mannequin head at another size, so the hair it was worn on floats above the frozen head
+    (a larger head) or is buried in it (a smaller head). The seat, one uniform scale and a move about the head centre,
+    measures the frozen body, never the provider's mannequin. Hair without a crown is left as extracted: the seat
+    would only move the strands that remain. Returns the seat's report, or None when the spec does not seat hair.
+    """
+    if spec['fitting'].get('hair_cavity_seat') != 'two-way-v1':
+        return None
+    _, hi, _ = head_region(body, rig, spec)
+    top = max(((obj.matrix_world @ v.co).z for obj in extracted for v in obj.data.vertices), default=None)
+    if top is None or top < hi.z - WORN_CROWN_MISSING_M:
+        return {'method': 'two_way_inner_hair_seat_v1', 'reason': 'crown_missing',
+                'top_below_head_m': None if top is None else round(float(hi.z - top), 4)}
+    return seat_hair_cavity(extracted, body, rig, spec)
+
+
 def extract_worn_meshes(part, meshes, body, rig, spec):
     """Provider model worn on the key mannequin: register, remove the body, bind like the slot.
 
@@ -180,6 +203,8 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
                 raise InputChanged('Part drawing changed')
             drawings.append(CanvasView(view, path, dict(spec['canvas'])))
     extracted, report = extract_worn_part(meshes, body, rig, part['slot'], key_rgb=part.get('key_rgb'), drawings=drawings)
+    if part['slot'] == 'hair':
+        report['cavity_fitting'] = seat_worn_hair(extracted, body, rig, spec)
     garment_kind = (part.get('fit_profile') or {}).get('kind') or part.get('garment_kind')
     centring = centre_limbs(extracted, body, rig, part['slot'], garment_kind)
     runtime_policy = spec.get('runtime') or {}
