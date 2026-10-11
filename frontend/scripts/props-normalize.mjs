@@ -7,9 +7,9 @@
 // Usage: node scripts/props-normalize.mjs [ids...]    (default: every manifest item that has a generated model)
 // PROPS_SOURCE=<dir> reads generated models from another out/ directory; PROPS_OUTPUT=<dir> writes somewhere other than
 // public/gltf.
-// --replace writes public/gltf/<file> instead, fitted to the package model's own box and pivot, which the app then serves
-// in place of the package's model (vite/gaesupAssets.ts: a public/ file of the same path wins), changing the village
-// itself. That was tried once and reverted (bbdbe31); it writes no picture.
+// --replace <ids...> writes public/gltf/<file> for those ids instead, fitted to the package model's own box and pivot,
+// which the app then serves in place of the package's model (vite/gaesupAssets.ts: a public/ file of the same path wins),
+// changing the village itself. That was tried once and reverted (bbdbe31); it writes no picture.
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,9 +59,12 @@ async function placedScale(item) {
 
 /** The box `item` takes on the island, or null when the manifest's `fit` sizes it. */
 async function targetOf(item) {
+  const packageModel = join(packageGltf, item.file);
+  // --replace stands in for the package model, so it takes that model's own box and pivot whatever `fit` says: `fit` is
+  // the placed size of catalog furniture, and the engine catalog's defaultScale would multiply it again.
+  if (replace && existsSync(packageModel)) return boxOf(await io.read(packageModel));
   if (item.fit) return null;
-  const box = boxOf(await io.read(join(packageGltf, item.file)));
-  if (replace) return box;
+  const box = boxOf(await io.read(packageModel));
   const scale = await placedScale(item);
   const times = (values) => values.map((value) => value * scale);
   return { min: times(box.min), max: times(box.max), size: times(box.size) };
@@ -140,6 +143,7 @@ async function fit(item) {
   return `${item.id}: ${metres(fitted.size)} m (${was}), yaw ${Math.round((yaw * 180) / Math.PI)}°`;
 }
 
+if (replace && !wanted.size) throw new Error('--replace changes the village on every island: name the ids to replace');
 const unknown = [...wanted].filter((id) => !manifest.items.some((item) => item.id === id));
 if (unknown.length) throw new Error(`not in scripts/props/manifest.json: ${unknown.join(', ')}`);
 for (const item of manifest.items) {

@@ -1,7 +1,9 @@
 //! Catalog imports from the character server. The request only queues one and answers 202; a task copies the model
 //! step by step (source, download, checks, textures, store, picture, catalog) while the admin page polls it. Every check
 //! lands in a report, so an admin sees everything wrong at once, and a finished import becomes a version of its catalog
-//! item. Re-importing into an item replaces its model and keeps its status, order, name and emoji.
+//! item. Re-importing into an item replaces its model and keeps its status, order, name and emoji. An import for a new
+//! item never replaces one: asked to `create`, it is refused an id already taken, and one queued as new fails when an
+//! item took its id meanwhile.
 
 use axum::{
     Json,
@@ -65,6 +67,7 @@ const NOT_RESIDENT: ApiError = bad("not_playable", "주민으로 쓰려면 리�
 /** Engine clips a resident needs: it stands where the island's owner put it, so a walk is optional. */
 const RESIDENT_CLIPS: [&str; 1] = ["idle"];
 const RUNNING: ApiError = conflict("import_running", "이 항목은 이미 가져오는 중입니다. 끝난 뒤 다시 시도해 주세요.");
+const TAKEN: ApiError = conflict("item_exists", "이미 있는 항목의 ID입니다. 다른 ID로 가져오세요.");
 const NOT_FOUND: ApiError = not_found("import_not_found", "없는 가져오기 작업입니다.");
 const INTERRUPTED: &str = "서버가 다시 시작되어 가져오기가 멈췄습니다. 다시 시도해 주세요.";
 /// A running import records its progress at least every step, and about every second while it downloads; one silent
@@ -312,6 +315,9 @@ pub struct ImportBody {
     /// Where a new item starts; an existing item keeps its own.
     status: Option<String>,
     sort_order: Option<i32>,
+    /// A new item only: an id another item has is refused instead of updated.
+    #[serde(default)]
+    create: bool,
 }
 
 /// A checked import request.
@@ -383,11 +389,14 @@ pub async fn enqueue(
         .fetch_optional(&state.db)
         .await?;
     if let Some(row) = &existing {
+        if body.create {
+            return Err(TAKEN);
+        }
         check_target(row.get("kind"), row.get("source"), &order.kind)?;
     }
     let id = Uuid::new_v4();
     let replaces = existing.is_some();
-    let task = Task { state: state.clone(), id, username: admin.username, user: admin.id, order };
+    let task = Task { state: state.clone(), id, username: admin.username, user: admin.id, order, replaces };
     // Queued and started on a task of its own: a request dropped between the two (its connection closing) would leave
     // a queued import that nothing runs, holding its item until the server restarts.
     let queued = tokio::spawn(async move {
@@ -482,6 +491,8 @@ struct Task {
     username: String,
     user: Uuid,
     order: Order,
+    /// The item existed when the import was queued; queued as new, it never takes over an item made since.
+    replaces: bool,
 }
 
 impl Task {
@@ -642,7 +653,8 @@ impl Task {
     /// Makes the copy the item's model in one transaction, with its version and the finished import. A new item starts
     /// with the order's name, emoji, status and place; an existing one keeps all of those and, when no new picture came,
     /// its picture. A copy identical to the version the item shows adds no version. An import no longer active (one
-    /// `interrupt_stale` gave up on, already reported failed and its item freed for another import) writes nothing.
+    /// `interrupt_stale` gave up on, already reported failed and its item freed for another import) writes nothing, and
+    /// neither does one queued as new whose id an item took meanwhile (another import that ended first).
     async fn save(
         &self,
         source: &studio::Source,
@@ -670,6 +682,7 @@ impl Task {
         .fetch_optional(&mut *tx)
         .await?;
         let thumbnail_url = match &existing {
+            Some(_) if !self.replaces => return Err(TAKEN),
             Some(row) => {
                 check_target(row.get("kind"), row.get("source"), &self.order.kind)?;
                 let previous: Option<String> = row.get("thumbnail_url");

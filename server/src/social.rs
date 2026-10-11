@@ -20,6 +20,8 @@ use crate::{
     security::{client_address, rate_limit},
 };
 
+/// Entries standing in one guestbook from its visitors, and apart from them its owner's: visitors filling it never
+/// stop the owner writing there.
 const MAX_GUESTBOOK_ENTRIES: i64 = 2_000;
 /// One member's entries standing in one guestbook, and written there in a day (deleted ones too). A few accounts cannot
 /// fill someone's guestbook to its cap in a day, and the owner clears one writer's entries at once (`clear_author`).
@@ -155,17 +157,22 @@ async fn write(
     let (home, _) = visible_home(&state, &name, Some(&author)).await?;
     rate_limit(&state, format!("guestbook-address:{}", client_address(&headers)), ENTRIES_PER_ADDRESS)?;
     let id = Uuid::new_v4();
+    let owner = author.id == home.owner_id;
     let mut tx = state.db.begin().await?;
     sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(home.owner_id).execute(&mut *tx).await?;
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM guestbook_entries WHERE home_owner_id = $1 AND deleted_at IS NULL")
-            .bind(home.owner_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // Only the entries on the writer's side of the guestbook: the owner's, or all visitors'.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM guestbook_entries
+         WHERE home_owner_id = $1 AND deleted_at IS NULL AND (author_id = home_owner_id) = $2",
+    )
+    .bind(home.owner_id)
+    .bind(owner)
+    .fetch_one(&mut *tx)
+    .await?;
     if count >= MAX_GUESTBOOK_ENTRIES {
         return Err(conflict("guestbook_full", "방명록이 가득 찼어요. 글을 정리한 뒤 다시 남겨 주세요."));
     }
-    if author.id != home.owner_id {
+    if !owner {
         let (standing, today): (i64, i64) = sqlx::query_as(
             "SELECT count(*) FILTER (WHERE deleted_at IS NULL), count(*) FILTER (WHERE created_at > now() - interval '1 day')
              FROM guestbook_entries WHERE home_owner_id = $1 AND author_id = $2",

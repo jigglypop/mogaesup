@@ -11,6 +11,10 @@ use mogaesup_server::{
     rebac::{self, Actor, Checker, Object, PERMISSIONS, RevokeError, Subject, SubjectRef, Tuple},
 };
 use serde_json::{Value, json};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 
 const SYSTEM: &str = "system:mogaesup";
@@ -35,6 +39,18 @@ async fn held(app: &TestApp, username: &str) -> Vec<&'static str> {
     names
 }
 
+/// The same, each permission asked of a checker of its own, as a route asks.
+async fn each(app: &TestApp, username: &str) -> Vec<&'static str> {
+    let id = app.user_id(username).await;
+    let mut names = Vec::new();
+    for permission in PERMISSIONS {
+        if Checker::new(&app.state.db).allows(Subject::User(id), &permission).await.unwrap() {
+            names.push(permission.name);
+        }
+    }
+    names
+}
+
 async fn is(app: &TestApp, username: &str, object: &Object, relation: &str) -> bool {
     let id = app.user_id(username).await;
     Checker::new(&app.state.db).check(Subject::User(id), object, relation).await.unwrap()
@@ -44,6 +60,43 @@ async fn is(app: &TestApp, username: &str, object: &Object, relation: &str) -> b
 fn has(tree: &Value, key: &str, value: &str) -> bool {
     tree[key] == value
         || tree["children"].as_array().is_some_and(|children| children.iter().any(|c| has(c, key, value)))
+}
+
+/// The nodes of an explanation or expansion.
+fn nodes(tree: &Value) -> usize {
+    1 + tree["children"].as_array().map_or(0, |children| children.iter().map(nodes).sum())
+}
+
+/// `group:<name><step>` for each step from 2 to `deep` holds the one before it, and `<name>1` holds `first`.
+async fn chain(app: &TestApp, name: &str, deep: u32, first: SubjectRef) {
+    tuple(app, Object::group(&format!("{name}1")), "member", first).await;
+    for step in 2..=deep {
+        let inner = SubjectRef::members(&format!("{name}{}", step - 1));
+        tuple(app, Object::group(&format!("{name}{step}")), "member", inner).await;
+    }
+}
+
+/// What the server logs on this thread while `run` runs, and what `run` returns.
+async fn logged<T>(run: impl Future<Output = T>) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Lines(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let lines = Lines::default();
+    let writer = lines.clone();
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || writer.clone()).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let result = run.await;
+    drop(guard);
+    let text = String::from_utf8_lossy(&lines.0.lock().unwrap()).into_owned();
+    (result, text)
 }
 
 fn change(object: &str, relation: &str, subject: &str, reason: &str) -> Option<Value> {
@@ -159,6 +212,77 @@ async fn 너무_깊은_그룹_사슬은_거절하고_이유를_보인다() {
     .unwrap();
     assert_eq!(trace["allowed"], false);
     assert!(has(&trace, "limit", "depth"), "{trace}");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 서로를_구성원으로_둔_그룹이_많아도_검사와_설명은_금방_끝난다() {
+    let app = TestApp::new(None).await;
+    app.register("inside_k", "안").await;
+    app.register("outside_k", "밖").await;
+    // Ten groups, each a member of every other; the first one's members moderate, and one user is in the last.
+    let ring: Vec<String> = (0..10).map(|at| format!("ring{at}")).collect();
+    for group in &ring {
+        for other in ring.iter().filter(|other| *other != group) {
+            tuple(&app, Object::group(group), "member", SubjectRef::members(other)).await;
+        }
+    }
+    tuple(&app, Object::system(), "moderator", SubjectRef::members("ring0")).await;
+    tuple(&app, Object::group("ring9"), "member", SubjectRef::user(app.user_id("inside_k").await)).await;
+
+    let started = Instant::now();
+    assert_eq!(held(&app, "inside_k").await, ["moderator", "catalog_editor", "studio_viewer"]);
+    assert!(held(&app, "outside_k").await.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    // The explanation goes through each group a few times, not once for every path around the ring.
+    let outside = app.user_id("outside_k").await;
+    let trace = serde_json::to_value(
+        Checker::new(&app.state.db).explain(Subject::User(outside), &Object::system(), "studio_viewer").await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(trace["allowed"], false);
+    assert!(has(&trace, "limit", "cycle"), "{trace}");
+    assert!(nodes(&trace) < 2_000, "{} nodes", nodes(&trace));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 권한을_한_검사기로_모아_물어도_하나씩_물을_때와_같다() {
+    let app = TestApp::new(None).await;
+    let paid = ["paid_operator", "operator", "studio_viewer"];
+    // Paid operation through eleven and twelve nested groups: what it includes holds as deep.
+    for (name, deep) in [("eleven_n", 11), ("twelve_n", 12)] {
+        app.register(name, name).await;
+        chain(&app, name, deep, SubjectRef::user(app.user_id(name).await)).await;
+        tuple(&app, Object::system(), "paid_operator", SubjectRef::members(&format!("{name}{deep}"))).await;
+        assert_eq!(held(&app, name).await, paid, "{name}");
+        assert_eq!(each(&app, name).await, paid, "{name}");
+    }
+    // Moderators reach a paid operators' group only past the depth limit: that the group was found, for paid
+    // operation, does not make it count for moderation.
+    app.register("both_n", "둘").await;
+    tuple(&app, Object::group("paid_n"), "member", SubjectRef::user(app.user_id("both_n").await)).await;
+    tuple(&app, Object::system(), "paid_operator", SubjectRef::members("paid_n")).await;
+    chain(&app, "far_n", 12, SubjectRef::members("paid_n")).await;
+    tuple(&app, Object::system(), "moderator", SubjectRef::members("far_n12")).await;
+    assert_eq!(held(&app, "both_n").await, paid);
+    assert_eq!(each(&app, "both_n").await, paid);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 깊이에서_여러_번_잘린_검사도_경고는_한_번_남긴다() {
+    let app = TestApp::new(None).await;
+    app.register("wide_w", "넓이").await;
+    // Twelve nested groups under paid operation, and five more in the innermost: each of the five is too deep.
+    chain(&app, "wide", 12, SubjectRef::members("leaf0")).await;
+    for leaf in 1..5 {
+        tuple(&app, Object::group("wide1"), "member", SubjectRef::members(&format!("leaf{leaf}"))).await;
+    }
+    tuple(&app, Object::system(), "paid_operator", SubjectRef::members("wide12")).await;
+    let (allowed, lines) = logged(is(&app, "wide_w", &Object::system(), "paid_operator")).await;
+    assert!(!allowed);
+    assert_eq!(lines.matches("Permission check cut short").count(), 1, "{lines}");
     app.cleanup().await;
 }
 

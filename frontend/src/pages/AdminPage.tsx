@@ -230,7 +230,14 @@ export function AdminPage() {
               imports={queue.imports}
               problem={queue.problem}
               onRetry={(item) =>
-                void startImport({ id: item.itemId, kind: item.kind, label: item.label, emoji: item.emoji, factoryJobId: item.factoryJobId })
+                void startImport({
+                  id: item.itemId,
+                  kind: item.kind,
+                  label: item.label,
+                  emoji: item.emoji,
+                  factoryJobId: item.factoryJobId,
+                  create: !item.replaces,
+                })
               }
             />
             <PipelineBoard

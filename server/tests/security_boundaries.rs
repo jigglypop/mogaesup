@@ -262,7 +262,9 @@ async fn guestbook_spam_and_concurrent_storage_growth_are_bounded() {
     let app = TestApp::new(None).await;
     let host = app.register("book_host", "Host").await;
     let guest = app.register("book_guest", "Guest").await;
+    app.register("book_regular", "Regular").await;
     let owner = app.user_id("book_host").await;
+    let regular = app.user_id("book_regular").await;
     for _ in 0..30 {
         assert_eq!(
             app.call("POST", "/api/homes/book_host/guestbook", Some(json!({"body": "hello"})), Some(&host))
@@ -275,11 +277,13 @@ async fn guestbook_spam_and_concurrent_storage_growth_are_bounded() {
         app.call("POST", "/api/homes/book_host/guestbook", Some(json!({"body": "spam"})), Some(&host)).await.status,
         StatusCode::TOO_MANY_REQUESTS
     );
+    // Visitors' entries are counted apart from the owner's thirty.
     sqlx::query(
         "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body)
-        SELECT gen_random_uuid(), $1, $1, 'kept entry' FROM generate_series(1, 1969)",
+        SELECT gen_random_uuid(), $1, $2, 'kept entry' FROM generate_series(1, 1999)",
     )
     .bind(owner)
+    .bind(regular)
     .execute(&app.state.db)
     .await
     .unwrap();
@@ -290,10 +294,12 @@ async fn guestbook_spam_and_concurrent_storage_growth_are_bounded() {
     .await;
     assert_eq!(replies.iter().filter(|reply| reply.status == StatusCode::CREATED).count(), 1);
     assert_eq!(replies.iter().filter(|reply| reply.body["code"] == "guestbook_full").count(), 1);
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM guestbook_entries WHERE deleted_at IS NULL")
-        .fetch_one(&app.state.db)
-        .await
-        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM guestbook_entries WHERE deleted_at IS NULL AND author_id <> home_owner_id",
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap();
     assert_eq!(count, 2000);
     app.cleanup().await;
 }
@@ -415,6 +421,52 @@ async fn a_few_writers_cannot_fill_someone_elses_guestbook_and_the_owner_clears_
     .await
     .unwrap();
     assert_eq!(write(&friend).await.body["code"], "guestbook_author_full");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn visitors_filling_a_guestbook_never_stop_its_owner_writing_there() {
+    let app = TestApp::new(None).await;
+    let host = app.register("full_host", "Host").await;
+    let late = app.register("full_late", "Late").await;
+    let book = "/api/homes/full_host/guestbook";
+    let owner = app.user_id("full_host").await;
+    // Two hundred writers, ten entries each today: within every writer's caps, and the guestbook is full.
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, password_hash)
+         SELECT gen_random_uuid(), 'filler_' || n, 'Filler', 'unused fixture' FROM generate_series(1, 200) AS n",
+    )
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body)
+         SELECT gen_random_uuid(), $1, u.id, 'filler' FROM users u, generate_series(1, 10)
+         WHERE u.username LIKE 'filler_%'",
+    )
+    .bind(owner)
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let write = |cookie: &str| {
+        let cookie = cookie.to_owned();
+        let app = &app;
+        async move { app.call("POST", book, Some(json!({"body": "hello"})), Some(&cookie)).await }
+    };
+    let refused = write(&late).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::CONFLICT, Some("guestbook_full")));
+    assert_eq!(write(&host).await.status, StatusCode::CREATED, "the owner still writes");
+    // The owner's own entries are bounded apart, as many again.
+    sqlx::query(
+        "INSERT INTO guestbook_entries (id, home_owner_id, author_id, body)
+         SELECT gen_random_uuid(), $1, $1, 'kept entry' FROM generate_series(1, 1999)",
+    )
+    .bind(owner)
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let full = write(&host).await;
+    assert_eq!((full.status, full.body["code"].as_str()), (StatusCode::CONFLICT, Some("guestbook_full")));
     app.cleanup().await;
 }
 

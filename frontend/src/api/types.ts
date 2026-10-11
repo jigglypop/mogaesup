@@ -154,6 +154,8 @@ export type FactoryImport = Pick<CatalogItem, 'id' | 'kind' | 'label' | 'emoji'>
   factoryJobId: string;
   status?: CatalogStatus;
   sortOrder?: number;
+  /** A new item only: the server refuses an id another item has instead of updating that item. */
+  create?: boolean;
 };
 
 /** Why a catalog copy is behind its character: remade in another job, sealed again, another face, or a later stage. */

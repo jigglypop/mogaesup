@@ -44,13 +44,15 @@ describe('섬 목록 주소', () => {
     });
 
     it('AI 배치의 재시도는 같은 요청키를 전달한다', async () => {
-      fetchMock.mockResolvedValue(new Response(JSON.stringify({ kind: 'cafe' }), { status: 200 }));
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ kind: 'cafe' }), { status: 200 }));
       const body = { description: '12m 카페', mode: 'ai' as const, requestId: 'layout-request-123' };
       await layoutApi.interpret(body);
       await layoutApi.interpret(body);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
       for (const [url, options] of fetchMock.mock.calls) {
         expect(url).toBe('/api/studio/layouts/interpret');
-        expect(options?.headers).toMatchObject({ 'Idempotency-Key': body.requestId, 'content-type': 'application/json' });
+        const headers = new Headers(options?.headers);
+        expect([headers.get('idempotency-key'), headers.get('content-type')]).toEqual([body.requestId, 'application/json']);
         expect(JSON.parse(options?.body as string)).toEqual(body);
       }
     });

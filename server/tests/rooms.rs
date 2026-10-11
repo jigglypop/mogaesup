@@ -520,12 +520,17 @@ async fn 붐비는_공개_섬에도_주인은_들어오고_한_주소는_자리�
             request
         }
     };
-    // One address (a /64) fills only part of the room, whatever accounts it signs up.
-    let mut crowd = Vec::new();
-    let mut refused = 0;
+    // One address (a /64) fills only part of the room, whatever accounts it signs up. The accounts and tickets come
+    // first: signing up is slow on a busy machine, and a socket that has not joined within ten seconds is closed.
+    let mut tickets = Vec::new();
     for at in 0..12 {
         let cookie = app.register(&format!("crowd_{at}"), "방문객").await;
-        let request = from("2001:db8:1:2::9")(&base, &ticket(&app, &cookie).await);
+        tickets.push(ticket(&app, &cookie).await);
+    }
+    let mut crowd = Vec::new();
+    let mut refused = 0;
+    for ticket in &tickets {
+        let request = from("2001:db8:1:2::9")(&base, ticket);
         match connect_async(request).await {
             Ok((stream, _)) => crowd.push(stream),
             Err(_) => refused += 1,
@@ -535,5 +540,40 @@ async fn 붐비는_공개_섬에도_주인은_들어오고_한_주소는_자리�
     // The owner gets in from that very address.
     let request = from("2001:db8:1:2::77")(&base, &ticket(&app, &host).await);
     assert!(connect_async(request).await.is_ok());
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 참가만_하고_어디에도_서지_않는_소켓은_꽉_찬_섬의_자리를_내준다() {
+    let app = TestApp::new(None).await;
+    app.register("host_u", "호스트").await;
+    let guest = app.register("guest_u", "손님").await;
+    let base = serve(&app).await;
+    let from = |address: &str, ticket: &str| {
+        let mut request = format!("{base}/api/rooms/host_u?ticket={ticket}").into_client_request().unwrap();
+        request.headers_mut().insert(header::ORIGIN, ORIGIN.parse().unwrap());
+        request.headers_mut().insert("x-forwarded-for", address.parse().unwrap());
+        request
+    };
+    // Every visitor seat, from eight accounts on three /64s. Each socket joins, so the join deadline lets it stay, and
+    // never says where it stands, so nobody sees it.
+    let mut unseen = Vec::new();
+    for account in 0..8 {
+        let cookie = app.register(&format!("unseen_{account}"), "조용").await;
+        for _ in 0..3 {
+            let address = format!("2001:db8:0:{}::1", unseen.len() / 10);
+            let (mut socket, _) = connect_async(from(&address, &ticket(&app, &cookie).await)).await.unwrap();
+            send(&mut socket, json!({"type": "Join", "room_id": "host_u", "color": "#fff"})).await;
+            next(&mut socket, "Welcome").await.unwrap();
+            unseen.push(socket);
+        }
+    }
+    assert!(connect_async(from("203.0.113.5", &ticket(&app, &guest).await)).await.is_err());
+    // Fifteen seconds standing nowhere, and the full island takes the guest in place of the one that came first.
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    let (mut guest_socket, _) = connect_async(from("203.0.113.5", &ticket(&app, &guest).await)).await.unwrap();
+    send(&mut guest_socket, json!({"type": "Join", "room_id": "host_u", "color": "#fff"})).await;
+    assert_eq!(next(&mut guest_socket, "Welcome").await.unwrap()["room_state"], json!({}));
+    assert_eq!(closed(&mut unseen[0]).await, Some(4408));
     app.cleanup().await;
 }

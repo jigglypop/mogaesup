@@ -4,9 +4,12 @@ import { problemText } from '../../api/client';
 import { permissionsApi, type GroupRow, type UserNames } from '../../api/permissions';
 import { Icon } from '../../ui/icons';
 import type { Apply } from './PermissionsPage';
-import { ROLES, grantLabel, groupIdProblem, subjectLabel } from './view';
+import { ROLES, grantLabel, groupIdProblem, subjectLabel, type Role } from './view';
 
 const GROUP_ROLES = ROLES.filter((role) => role.groups);
+
+/** Roles a group gets only once the admin confirms: every member may then spend on or change the studio. */
+const ASK_FIRST: readonly Role['name'][] = ['paid_operator', 'operator'];
 
 /** A member typed in: `group:<id>` for a group inside the group, else a username. */
 const memberSubject = (text: string) => (text.startsWith('group:') ? `${text}#member` : `user:${text}`);
@@ -16,6 +19,10 @@ export function GroupsPanel({ apply, revision }: { apply: Apply; revision: numbe
   const [groups, setGroups] = useState<GroupRow[] | null>(null);
   const [users, setUsers] = useState<UserNames>({});
   const [problem, setProblem] = useState('');
+  /** Counts asks to read the groups again after a failure. */
+  const [tries, setTries] = useState(0);
+  /** What is wrong with the new group's name. */
+  const [nameProblem, setNameProblem] = useState('');
   const [name, setName] = useState('');
   const [first, setFirst] = useState('');
   const [busy, setBusy] = useState(false);
@@ -27,13 +34,14 @@ export function GroupsPanel({ apply, revision }: { apply: Apply; revision: numbe
         if (!live) return;
         setGroups(result.groups);
         setUsers(result.users);
+        setProblem('');
       },
       (reason: unknown) => live && setProblem(problemText(reason)),
     );
     return () => {
       live = false;
     };
-  }, [revision]);
+  }, [revision, tries]);
 
   const run = async (change: Parameters<Apply>[0]) => {
     setBusy(true);
@@ -46,8 +54,8 @@ export function GroupsPanel({ apply, revision }: { apply: Apply; revision: numbe
     const id = name.trim();
     const member = first.trim().toLowerCase();
     const invalid = groupIdProblem(id);
-    if (invalid) return setProblem(invalid);
-    setProblem('');
+    if (invalid) return setNameProblem(invalid);
+    setNameProblem('');
     if (await run({ action: 'grant', object: `group:${id}`, relation: 'member', subject: memberSubject(member), done: `그룹 ${id}을 만들었어요` })) {
       setName('');
       setFirst('');
@@ -63,7 +71,15 @@ export function GroupsPanel({ apply, revision }: { apply: Apply; revision: numbe
           <Icon name="plus" /> 만들기
         </button>
       </form>
-      {problem && <p className="mg-error">{problem}</p>}
+      {nameProblem && <p className="mg-error">{nameProblem}</p>}
+      {problem && (
+        <div className="mg-admin-message is-error" role="alert">
+          <span>{problem}</span>
+          <button type="button" className="mg-btn is-small" onClick={() => setTries((count) => count + 1)}>
+            다시 불러오기
+          </button>
+        </div>
+      )}
       {groups === null ? (
         !problem && <p className="mg-empty">불러오는 중…</p>
       ) : groups.length === 0 ? (
@@ -91,7 +107,7 @@ function GroupCard({
   run: (change: Parameters<Apply>[0]) => Promise<boolean>;
 }) {
   const [member, setMember] = useState('');
-  const [role, setRole] = useState(GROUP_ROLES[0]?.name ?? 'operator');
+  const [role, setRole] = useState<Role['name'] | ''>('');
   const object = `group:${group.id}`;
   const members = `${object}#member`;
 
@@ -103,7 +119,9 @@ function GroupCard({
   const give = (event: FormEvent) => {
     event.preventDefault();
     const chosen = GROUP_ROLES.find((item) => item.name === role);
-    if (chosen) void run({ action: 'grant', object: chosen.object, relation: chosen.relation, subject: members, done: `그룹 ${group.id}: ${chosen.label} 부여` });
+    if (!chosen) return;
+    if (ASK_FIRST.includes(chosen.name) && !window.confirm(`그룹 ${group.id}(구성원 ${group.members.length})에게 ${chosen.label} 권한을 줄까요?`)) return;
+    void run({ action: 'grant', object: chosen.object, relation: chosen.relation, subject: members, done: `그룹 ${group.id}: ${chosen.label} 부여` });
   };
 
   return (
@@ -150,13 +168,16 @@ function GroupCard({
       </div>
       <form className="mg-perm-inline" onSubmit={give}>
         <select className="mg-field mg-admin-select" value={role} aria-label={`그룹 ${group.id}에 줄 역할`} onChange={(event) => setRole(event.target.value as typeof role)}>
+          <option value="" disabled>
+            역할 고르기
+          </option>
           {GROUP_ROLES.map((item) => (
             <option key={item.name} value={item.name}>
               {item.label}
             </option>
           ))}
         </select>
-        <button type="submit" className="mg-btn is-small" disabled={busy}>
+        <button type="submit" className="mg-btn is-small" disabled={busy || !role}>
           역할 주기
         </button>
       </form>

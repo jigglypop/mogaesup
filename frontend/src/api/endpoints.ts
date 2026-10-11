@@ -1,4 +1,5 @@
 import { sessionEpoch } from '../auth/sessionWork';
+import { request } from '../character/api';
 import { api } from './client';
 import type {
   AdminCatalogItem,
@@ -180,11 +181,16 @@ export const lookApi = {
   wear: (worn: boolean) => api<{ look: Look }>('/looks/me', { method: 'PATCH', body: { worn } }),
 };
 
+/**
+ * Store layouts are the character server's, reached through the app server, so they take the studio's client: it reads
+ * the character server's `{error: {code, message}}` as well as the app server's `{code, message}`, and turns a lost
+ * connection into its own words.
+ */
 export const layoutApi = {
-  capabilities: (signal?: AbortSignal) => api<LayoutCapabilities>('/studio/layouts/capabilities', { signal }),
+  capabilities: (signal?: AbortSignal) => request<LayoutCapabilities>('/api/studio/layouts/capabilities', { signal }),
   interpret: (body: LayoutInterpretInput, signal?: AbortSignal) =>
-    api<LayoutInterpretation>('/studio/layouts/interpret', {
-      method: 'POST', body, signal, timeoutMs: 60_000,
-      headers: body.requestId ? { 'Idempotency-Key': body.requestId } : undefined,
+    request<LayoutInterpretation>('/api/studio/layouts/interpret', {
+      method: 'POST', body: JSON.stringify(body), signal, timeoutMs: 60_000,
+      headers: { 'Content-Type': 'application/json', ...(body.requestId ? { 'Idempotency-Key': body.requestId } : {}) },
     }),
 };

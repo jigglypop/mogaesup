@@ -55,6 +55,10 @@ pub(crate) const ACCOUNT_ISLAND_CAPACITY: usize = 3;
 const ADDRESS_ISLAND_CAPACITY: usize = 10;
 /// How long a socket may stay open before it joins its room.
 const JOIN_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a peer holds its seat while it stands nowhere: one that has sent no position by then gives its seat up to
+/// whoever comes to a full room or server. A Join carries no position and a page sends one within a second of its body
+/// loading, so a socket that only joins is seen by nobody.
+const UNPLACED_LIMIT: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -435,6 +439,8 @@ struct Peer {
     /// Whether the others know this peer: a Join carries no position, so the peer is announced with its first
     /// positioned Update instead of at the island's origin, where it would appear and then slide to the spawn.
     placed: bool,
+    /// When its socket came in (see [`UNPLACED_LIMIT`]).
+    since: Instant,
     acked: VecDeque<String>,
     messages: RateWindow,
     updates: RateWindow,
@@ -448,6 +454,41 @@ struct Hub {
     connections: usize,
     /// Open sockets per account.
     accounts: HashMap<Uuid, usize>,
+}
+
+impl Hub {
+    /// Takes peer `id` out of `room_key`, telling the others when they knew it; the peer, if it was there.
+    fn remove(&mut self, room_key: &str, id: &str) -> Option<Peer> {
+        let room = self.rooms.get_mut(room_key)?;
+        let peer = room.remove(id)?;
+        if peer.placed {
+            broadcast(room, id, &json!({"type": "PlayerLeft", "client_id": id}));
+        }
+        if room.is_empty() {
+            self.rooms.remove(room_key);
+        }
+        self.connections -= 1;
+        if let Some(open) = self.accounts.get_mut(&peer.user.id) {
+            *open -= 1;
+            if *open == 0 {
+                self.accounts.remove(&peer.user.id);
+            }
+        }
+        Some(peer)
+    }
+
+    /// The peer that has stood nowhere the longest, once for [`UNPLACED_LIMIT`]: of `room`, where an owner's peer takes
+    /// no one's seat, or of any room without one. Its room key and id.
+    fn unplaced(&self, room: Option<&str>, now: Instant) -> Option<(String, String)> {
+        self.rooms
+            .iter()
+            .filter(|(key, _)| room.is_none_or(|room| room == key.as_str()))
+            .flat_map(|(key, peers)| peers.iter().map(move |(id, peer)| (key, id, peer)))
+            .filter(|(_, _, peer)| !(room.is_some() && peer.owner))
+            .filter(|(_, _, peer)| !peer.placed && now.duration_since(peer.since) >= UNPLACED_LIMIT)
+            .min_by_key(|(_, _, peer)| peer.since)
+            .map(|(key, id, _)| (key.clone(), id.clone()))
+    }
 }
 
 /// One access check shared by every socket of a login session on one island (its room's and its game's).
@@ -496,6 +537,17 @@ fn malformed(invalid: &mut RateWindow, now: Instant) -> Flow {
 
 fn text(message: &Value) -> Message {
     Message::Text(message.to_string().into())
+}
+
+/// The seats of `peers` as [`seat`] counts them, peer `without` aside.
+fn seated<'a>(
+    peers: &'a HashMap<String, Peer>,
+    without: Option<&'a str>,
+) -> impl Iterator<Item = (Uuid, &'a str, bool)> + 'a {
+    peers
+        .iter()
+        .filter(move |(id, _)| without != Some(id.as_str()))
+        .map(|(_, peer)| (peer.user.id, peer.address.as_str(), peer.owner))
 }
 
 /// Sends to everyone else in the room who has joined. A peer whose queue is full has stopped reading; dropping its
@@ -563,9 +615,14 @@ impl Rooms {
         standing: Standing,
         address: String,
     ) -> ApiResult<Registration> {
+        let now = Instant::now();
         let mut hub = self.hub();
+        // A full server or room takes a newcomer in place of the peer that has stood nowhere the longest (see
+        // UNPLACED_LIMIT): sockets nobody can see hold no seats for good. It goes only once the newcomer is let in.
+        let mut spare = None;
         if hub.connections >= SERVER_CAPACITY {
-            return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "room", "실시간 서버가 가득 찼습니다."));
+            let full = ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "room", "실시간 서버가 가득 찼습니다.");
+            spare = Some(hub.unplaced(None, now).ok_or(full)?);
         }
         if hub.accounts.get(&user.id).is_some_and(|open| *open >= ACCOUNT_CAPACITY) {
             return Err(ApiError::new(
@@ -574,14 +631,24 @@ impl Rooms {
                 "이 계정으로 열어 둔 실시간 연결이 너무 많습니다. 다른 탭을 닫고 다시 시도해 주세요.",
             ));
         }
-        let peers = hub.rooms.entry(room.to_owned()).or_default();
-        let seated = peers.values().map(|peer| (peer.user.id, peer.address.as_str(), peer.owner));
-        if let Err(refused) = seat(standing, user.id, &address, seated, ROOM_CAPACITY, "room") {
-            if peers.is_empty() {
-                hub.rooms.remove(room);
+        let none = HashMap::new();
+        let peers = hub.rooms.get(room).unwrap_or(&none);
+        let reason = match seat(standing, user.id, &address, seated(peers, None), ROOM_CAPACITY, "room") {
+            Ok(()) => "server full",
+            // Only a full room gives a seat up: the newcomer's own account and address caps stay.
+            Err(refused) if refused.status == StatusCode::CONFLICT => {
+                let (key, id) = hub.unplaced(Some(room), now).ok_or(refused)?;
+                seat(standing, user.id, &address, seated(peers, Some(&id)), ROOM_CAPACITY, "room")?;
+                // One of this room's frees a place on the server too.
+                spare = Some((key, id));
+                "room full"
             }
-            return Err(refused);
+            Err(refused) => return Err(refused),
+        };
+        if let Some(peer) = spare.and_then(|(key, id)| hub.remove(&key, &id)) {
+            peer.close.send_replace(Some((4408, reason)));
         }
+        let peers = hub.rooms.entry(room.to_owned()).or_default();
         let id = Uuid::new_v4().to_string();
         let viewer = user.clone();
         let (close, cancelled) = watch::channel(None);
@@ -598,6 +665,7 @@ impl Rooms {
                 address,
                 state: None,
                 placed: false,
+                since: now,
                 acked: VecDeque::new(),
                 messages: RateWindow::over(MESSAGE_WINDOW),
                 updates: RateWindow::new(),
@@ -611,22 +679,7 @@ impl Rooms {
     }
 
     fn remove(&self, room_key: &str, id: &str) {
-        let mut hub = self.hub();
-        let Some(room) = hub.rooms.get_mut(room_key) else { return };
-        let Some(peer) = room.remove(id) else { return };
-        if peer.placed {
-            broadcast(room, id, &json!({"type": "PlayerLeft", "client_id": id}));
-        }
-        if room.is_empty() {
-            hub.rooms.remove(room_key);
-        }
-        hub.connections -= 1;
-        if let Some(open) = hub.accounts.get_mut(&peer.user.id) {
-            *open -= 1;
-            if *open == 0 {
-                hub.accounts.remove(&peer.user.id);
-            }
-        }
+        self.hub().remove(room_key, id);
     }
 
     /// Everyone with a socket in `room` now: client id, account and position. One account may hold several peers (tabs).
@@ -1325,5 +1378,86 @@ mod tests {
             joined.pop();
         }
         assert_eq!(*slow.cancelled.borrow(), Some((4408, "too slow")));
+    }
+
+    /// Makes peer `id` of `room` one that came in `ago` and stands somewhere or not.
+    fn waited(rooms: &Rooms, room: &str, id: &str, ago: Duration, placed: bool) {
+        let mut hub = rooms.hub();
+        let peer = hub.rooms.get_mut(room).and_then(|peers| peers.get_mut(id)).unwrap();
+        peer.since = Instant::now().checked_sub(ago).unwrap();
+        peer.placed = placed;
+    }
+
+    #[test]
+    fn a_full_room_takes_a_newcomer_for_the_peer_that_stood_nowhere_longest() {
+        let rooms = Rooms::default();
+        let island = "isle";
+        // Every seat a visitor may take, ten of them from one address.
+        let held: Vec<Registration> = (0..ROOM_CAPACITY - ILCHON_SEATS)
+            .map(|at| {
+                let address = if at < ADDRESS_ISLAND_CAPACITY { "crowd".to_owned() } else { format!("10.0.0.{at}") };
+                enter(&user(), island, &rooms, Standing::Visitor, &address).unwrap()
+            })
+            .collect();
+        // One that only joins: what the join deadline lets stay.
+        let join = json!({"type": "Join", "room_id": island, "color": "#ffffff"}).to_string();
+        assert!(matches!(rooms.receive(island, &held[0].id, &join, &origins()), Flow::Continue));
+        // Sockets that have only just come in keep their seats, standing anywhere or not.
+        let refused = enter(&user(), island, &rooms, Standing::Visitor, "10.0.1.1").err().unwrap();
+        assert_eq!((refused.status, refused.code), (StatusCode::CONFLICT, "room"));
+        // All came in a while ago and all but two stand somewhere; of those two, the first came in earlier.
+        for (index, registration) in held.iter().enumerate() {
+            let ago = UNPLACED_LIMIT + Duration::from_secs(if index == 0 { 10 } else { 5 });
+            waited(&rooms, island, &registration.id, ago, index >= 2);
+        }
+        // A newcomer turned away by its own address's cap takes no one's seat.
+        let crowded = enter(&user(), island, &rooms, Standing::Visitor, "crowd").err().unwrap();
+        assert_eq!(crowded.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(held.iter().all(|registration| registration.cancelled.borrow().is_none()));
+        let _first = enter(&user(), island, &rooms, Standing::Visitor, "10.0.1.1").unwrap();
+        assert_eq!(*held[0].cancelled.borrow(), Some((4408, "room full")));
+        assert_eq!(*held[1].cancelled.borrow(), None);
+        let _second = enter(&user(), island, &rooms, Standing::Visitor, "10.0.1.2").unwrap();
+        assert_eq!(*held[1].cancelled.borrow(), Some((4408, "room full")));
+        assert_eq!(rooms.count(), ROOM_CAPACITY - ILCHON_SEATS);
+        // Everyone left stands somewhere or has just come: full again.
+        let full = enter(&user(), island, &rooms, Standing::Visitor, "10.0.1.3").err().map(|error| error.status);
+        assert_eq!(full, Some(StatusCode::CONFLICT));
+        // The seats given up are gone already: those sockets' own ends take nothing more.
+        drop(held);
+        assert_eq!(rooms.count(), 2);
+    }
+
+    #[test]
+    fn an_owners_peer_that_stands_nowhere_frees_no_visitor_seat() {
+        let rooms = Rooms::default();
+        let owner = user();
+        let host = enter(&owner, "isle", &rooms, Standing::Owner, "a").unwrap();
+        let visitors: Vec<Registration> =
+            (0..ROOM_CAPACITY - ILCHON_SEATS).map(|_| peer(&user(), "isle", &rooms).unwrap()).collect();
+        waited(&rooms, "isle", &host.id, UNPLACED_LIMIT * 2, false);
+        assert_eq!(peer(&user(), "isle", &rooms).err().map(|error| error.status), Some(StatusCode::CONFLICT));
+        assert_eq!(*host.cancelled.borrow(), None);
+        // A visitor's that has stood nowhere a shorter while gives its seat up instead.
+        waited(&rooms, "isle", &visitors[3].id, UNPLACED_LIMIT, false);
+        let _newcomer = peer(&user(), "isle", &rooms).unwrap();
+        assert_eq!(*visitors[3].cancelled.borrow(), Some((4408, "room full")));
+        assert_eq!(*host.cancelled.borrow(), None);
+    }
+
+    #[test]
+    fn a_full_server_takes_a_newcomer_for_the_peer_that_stood_nowhere_longest() {
+        let rooms = Rooms::default();
+        let room = |at: usize| format!("isle{}", at / (ROOM_CAPACITY - ILCHON_SEATS));
+        let held: Vec<Registration> =
+            (0..SERVER_CAPACITY).map(|at| peer(&user(), &room(at), &rooms).unwrap()).collect();
+        let refused = peer(&user(), "elsewhere", &rooms).err().unwrap();
+        assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+        waited(&rooms, &room(100), &held[100].id, UNPLACED_LIMIT, false);
+        let _newcomer = peer(&user(), "elsewhere", &rooms).unwrap();
+        assert_eq!(*held[100].cancelled.borrow(), Some((4408, "server full")));
+        assert_eq!(rooms.count(), SERVER_CAPACITY);
+        let again = peer(&user(), "elsewhere", &rooms).err().map(|error| error.status);
+        assert_eq!(again, Some(StatusCode::SERVICE_UNAVAILABLE));
     }
 }

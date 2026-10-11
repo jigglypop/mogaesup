@@ -7,10 +7,14 @@ import { MeshoptDecoder } from 'meshoptimizer';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createBuildingStore, DEFAULT_BUILDING_OBJECT_CATALOG, type BuildingSerializedState } from 'gaesup-world/building';
 import { createVillage, SPAWN } from '../village';
-import { applyLayout, footprintsOverlap, interpretLayout, objectFootprint, proposeLayout, type LayoutCatalogItem, type XZ } from '../edit/layout';
+import { LayoutError, applyLayout, footprintsOverlap, interpretLayout, measureLayoutCatalog, objectFootprint, proposeLayout, type LayoutCatalogItem, type XZ } from '../edit/layout';
 import { createEditHistory } from '../edit/history';
 import type { EditSession } from '../edit/session';
 import type { LocalBox } from '../edit/objects';
+
+// What the browser's loader measures; the GLBs themselves are read below.
+const load = vi.hoisted(() => vi.fn<(url: string) => Promise<LocalBox>>());
+vi.mock('../edit/bounds', () => ({ loadModelBounds: load }));
 
 // Vite serves public overrides before engine files. Read those actual GLBs with their node transforms,
 // never invented dimensions. Production browser measurements also include the build's quantization.
@@ -104,5 +108,26 @@ describe('실제 섬 매장 자동 배치', () => {
   it('측정되지 않은 기존 모델을 가정해 배치하지 않는다', () => {
     const { snapshot } = island();
     expect(() => proposeLayout(snapshot, interpretLayout('카페'), measured, [0, 0])).toThrow('기존 기물');
+  });
+
+  it('배치에 쓰는 기본 기물과 섬에 놓인 모델만 재고, 재지 못한 놓인 모델은 로더 원문 대신 배치의 이유로 거절한다', async () => {
+    const broken = '/gltf/decor/broken.glb';
+    load.mockImplementation(async url => {
+      const box = bounds.get(url);
+      if (!box) throw new Error(`Could not load ${url}: HTTP 404`);
+      return box;
+    });
+    const { snapshot } = island();
+    const placed = snapshot.objects.flatMap(v => v.config?.modelUrl ? [v.config.modelUrl] : []);
+    const catalog = await measureLayoutCatalog([...placed, broken]);
+    expect(catalog).toEqual(measured);
+    expect(new Set(load.mock.calls.map(([url]) => url))).toEqual(new Set([...measured.map(v => v.modelUrl), ...placed, broken]));
+    expect(proposal(snapshot).objects.length).toBeGreaterThan(0);
+    // The broken model placed on the island: its footprint is unknown, and the planner says so in its own words.
+    const withBroken = structuredClone(snapshot);
+    withBroken.objects.push({ ...structuredClone(withBroken.objects.find(v => v.type === 'model')!), id: 'obj-broken',
+      config: { ...withBroken.objects.find(v => v.type === 'model')!.config, modelUrl: broken } });
+    expect(() => proposal(withBroken)).toThrow(LayoutError);
+    expect(() => proposal(withBroken)).toThrow('기존 기물의 크기를 확인하지 못했어요');
   });
 });

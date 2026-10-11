@@ -3,10 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createBuildingStore } from 'gaesup-world/building';
 import { mount, type } from '../../__tests__/mount';
 import { LayoutComposer } from '../edit/LayoutComposer';
-import { interpretLayout, type LayoutProposal } from '../edit/layout';
+import { LayoutError, interpretLayout, type LayoutProposal } from '../edit/layout';
 import { createResidentStore } from '../residents';
 import type { EditSession } from '../edit/session';
 import type { User } from '../../api/types';
+import { onSessionLapse, sessionLapsed, setSessionOwner } from '../../auth/sessionWork';
 
 const state = vi.hoisted(() => ({ user: null as User | null, ready: false }));
 const api = vi.hoisted(() => ({ interpret: vi.fn(), capabilities: vi.fn() }));
@@ -42,6 +43,10 @@ async function create(container: HTMLElement, text = '12m × 12m 카페 2인') {
   if (!field.value) await type(field, text);
   await act(async () => button(container, '배치 만들기').click());
 }
+const alertText = (container: HTMLElement) => container.querySelector('[role=alert]')?.textContent;
+/** The real client, so a test sees what the browser receives turned into what the owner reads. */
+const realLayoutApi = async () => (await vi.importActual<typeof import('../../api/endpoints')>('../../api/endpoints')).layoutApi;
+const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks(); canvases.mounted = 0;
@@ -52,7 +57,7 @@ beforeEach(() => {
     objects: [], walls: [], floor: { min: [-2, -2], max: [10, 10], color: '#ffffff' }, entrance: [4, 10], corridorX: 4,
     corridor: { minZ: 0, maxZ: 10 }, measured: [], notice: [] } satisfies LayoutProposal));
 });
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('매장 배치 화면', () => {
   it('회원은 무료로 설명을 입력하고 별도 미리보기 후에만 적용한다', async () => {
@@ -186,6 +191,99 @@ describe('매장 배치 화면', () => {
     expect(stored).toHaveLength(20);
     expect(stored[0]!.description).toBe('old 1');
     expect(stored.at(-1)!.description).toBe('새 카페');
+    await unmount();
+  });
+
+  it('확인되지 않은 유료 해석은 캐릭터 서버의 안내를 보이고, 새 유료 요청은 주인이 고를 때만 보낸다', async () => {
+    state.user!.permissions = ['paid_operator'];
+    api.capabilities.mockResolvedValue({ rules: true, ai: true });
+    api.interpret.mockImplementation((await realLayoutApi()).interpret);
+    const unconfirmed = 'AI 해석 결과를 확인하지 못했습니다. 같은 요청은 다시 결제하지 않습니다.';
+    const sent = '이 요청은 이미 전송되었습니다. 확인되지 않은 요청을 다시 결제하지 않습니다.';
+    const refusal = (status: number, message: string) => json(status, { error: { code: 'layout_interpretation_uncertain', message } });
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(refusal(504, unconfirmed))
+      .mockResolvedValueOnce(refusal(409, sent))
+      .mockResolvedValueOnce(json(200, { ...interpretLayout('12m × 12m 카페'), interpretation: 'ai' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const keys = () => fetchMock.mock.calls.map(([, init]) => new Headers(init?.headers).get('idempotency-key'));
+    const { container, unmount } = await render(<LayoutComposer {...props()} />);
+    await open(container);
+    await act(async () => container.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+    await create(container);
+    expect(alertText(container)).toBe(unconfirmed);
+    // Pressing again replays the same receipt, which the server refuses to charge twice.
+    await create(container);
+    expect(alertText(container)).toBe(sent);
+    expect(keys()).toEqual([keys()[0], keys()[0]]);
+    await act(async () => button(container, '새 요청으로 다시 해석 (유료)').click());
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(keys()[2]).not.toBe(keys()[0]);
+    expect(alertText(container)).toBeUndefined();
+    expect(container.querySelector('[aria-label="실제 미리보기 장면"]')).not.toBeNull();
+    expect(JSON.parse(localStorage.getItem('mogaesup:draft:1:layout-interpretations')!)).toEqual([{ description: '12m × 12m 카페 2인', id: keys()[2] }]);
+    await unmount();
+  });
+
+  it('캐릭터 서버의 401은 회원 세션을 풀지 않는다', async () => {
+    state.user!.permissions = ['paid_operator'];
+    api.capabilities.mockImplementation((await realLayoutApi()).capabilities);
+    vi.stubGlobal('fetch', vi.fn(async () => json(401, { detail: 'Unauthorized' })));
+    setSessionOwner('1');
+    const lapsed = vi.fn();
+    const stop = onSessionLapse(lapsed);
+    try {
+      const { container, unmount } = await render(<LayoutComposer {...props()} />);
+      await open(container);
+      expect(api.capabilities).toHaveBeenCalledOnce();
+      expect(container.querySelector('input[type=checkbox]')).toBeNull();
+      expect(lapsed).not.toHaveBeenCalled();
+      expect(sessionLapsed()).toBe(false);
+      await unmount();
+    } finally { stop(); setSessionOwner(null); }
+  });
+
+  it('브라우저와 모델 로더의 원문 대신 정해진 문구를 보이고, 배치가 밝힌 이유는 그대로 보인다', async () => {
+    state.user!.permissions = ['paid_operator'];
+    api.capabilities.mockResolvedValue({ rules: true, ai: true });
+    api.interpret.mockImplementation((await realLayoutApi()).interpret);
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    const { container, unmount } = await render(<LayoutComposer {...props()} />);
+    await open(container);
+    const paid = container.querySelector<HTMLInputElement>('input[type=checkbox]')!;
+    await act(async () => paid.click());
+    await create(container);
+    expect(alertText(container)).toBe('서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+    // A request lost on the way may still be answered under its receipt, so no new paid request is offered.
+    expect(button(container, '새 요청으로 다시 해석 (유료)')).toBeUndefined();
+    await act(async () => paid.click());
+    actions.measure.mockRejectedValueOnce(new Error('Could not load /gltf/decor/a.glb: HTTP 404'));
+    await create(container);
+    expect(alertText(container)).toBe('배치를 만들지 못했어요.');
+    const crowded = '12m × 12m의 빈 땅과 출입 경로가 없어요.';
+    actions.propose.mockImplementationOnce(() => { throw new LayoutError(crowded); });
+    await create(container);
+    expect(alertText(container)).toBe(crowded);
+    await unmount();
+  });
+
+  it('캐릭터 서버가 코드 없이 보낸 원문 대신 정해진 문구를 보이고, 새 유료 요청을 권하지 않는다', async () => {
+    state.user!.permissions = ['paid_operator'];
+    api.capabilities.mockResolvedValue({ rules: true, ai: true });
+    api.interpret.mockImplementation((await realLayoutApi()).interpret);
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json(500, { detail: 'Internal server error', requestId: 'request-1' }))
+      .mockResolvedValueOnce(json(422, { detail: [{ loc: ['body', 'description'], msg: 'String should have at most 2000 characters' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container, unmount } = await render(<LayoutComposer {...props()} />);
+    await open(container);
+    await act(async () => container.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+    for (let i = 0; i < 2; i++) {
+      await create(container);
+      expect(alertText(container)).toBe('배치를 만들지 못했어요.');
+      expect(button(container, '새 요청으로 다시 해석 (유료)')).toBeUndefined();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     await unmount();
   });
 });

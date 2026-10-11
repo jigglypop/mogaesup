@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { rememberStudioQuery, studioHref } from '../../studio/screens';
 import { usePaidWork } from '../../studio/usage';
+import { isRevisionConflict } from '../api';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { NativeAssembly } from '../factory/NativeAssembly';
 import { usePolling } from '../use-polling';
@@ -23,6 +24,8 @@ const Generations = lazy(() => import('./Generations'));
 const Emoticons = lazy(() => import('./Emoticons'));
 const Prompts = lazy(() => import('./Prompts'));
 const tabs = { admin: '관리자페이지', animals: '동물', character: '캐릭터', props: '기물', textures: '기본 바닥 타일', emoticons: '2D 이모티콘', prompts: '프롬프트 관리' };
+// The read a screen keeps in place of a shared list it does not show.
+const unread = async () => undefined;
 
 export function Workspace() {
   const navigate = useNavigate();
@@ -42,8 +45,10 @@ export function Workspace() {
   const [showInfo, setShowInfo] = useState(false);
   const [deletedAsset, setDeletedAsset] = useState<{ id: string; slot: string; name: string }>();
   const [composeId, setComposeId] = useState('');
-  // The server refreshes its job snapshot every 10 seconds; child screens share these three reads.
-  const jobs = usePolling(factoryApi.list, 10000), catalog = usePolling(studioApi.catalog, 15000), bodyProfile = usePolling(factoryApi.bodyProfile, 15000);
+  // The server refreshes its job snapshot every 10 seconds; the character and admin screens share these three reads.
+  // The other screens use none of them, so they never read them.
+  const shared = tab === 'character' || tab === 'admin';
+  const jobs = usePolling(shared ? factoryApi.list : unread, shared ? 10000 : null), catalog = usePolling(shared ? studioApi.catalog : unread, shared ? 15000 : null), bodyProfile = usePolling(shared ? factoryApi.bodyProfile : unread, shared ? 15000 : null);
   const candidates = (jobs.value?.jobs || []).filter(j => j.production_mode === 'character_parts').sort((a,b) => b.created_at.localeCompare(a.created_at));
   const baseCandidates = candidates.filter(j => !j.base_job_id);
   const composeJob = candidates.find(j => j.id === composeId && !isCatalogJobDeleted(j, catalog.value));
@@ -99,7 +104,11 @@ export function Workspace() {
   async function perform(action: () => Promise<void>) {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError('');
-    try { await action(); } catch (e) { setError((e as Error).message); }
+    try { await action(); } catch (e) {
+      setError((e as Error).message);
+      // Someone saved first: the revision sent is stale, so read the lists again before the next try.
+      if (isRevisionConflict(e)) await Promise.all([catalog.refresh(), bodyProfile.refresh()]);
+    }
     finally { locked.current = false; setBusy(false); }
   }
   const name = (j: FactoryJob) => catalog.value?.parts?.[`${j.id}:${j.requested_slots?.[0] || 'body'}`]?.name || catalog.value?.items[j.id]?.name || j.part_name || `${j.character_name} · ${new Date(j.created_at).toLocaleString()}`;

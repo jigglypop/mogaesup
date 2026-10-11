@@ -9,13 +9,14 @@ import { layoutApi } from '../../api/endpoints';
 import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
 import { draftKey } from '../../auth/drafts';
+import { ApiError } from '../../character/api';
 import { createWorldRenderer } from '../../rendering/worldRenderer';
 import { useFocusTrap } from '../../ui/focus';
 import type { ResidentStore } from '../residents';
 import { randomId } from '../stored';
 import { SPAWN } from '../village';
 import { modelBounds } from './bounds';
-import { applyLayout, interpretLayout, measureLayoutCatalog, proposeLayout, type LayoutProposal } from './layout';
+import { LayoutError, applyLayout, interpretLayout, measureLayoutCatalog, proposeLayout, type LayoutProposal } from './layout';
 import type { EditSession } from './session';
 
 /** A colour token from tokens.css, for the preview's materials the stylesheet cannot reach. */
@@ -95,9 +96,10 @@ const receiptsKey = (ownerId: string) => draftKey(ownerId, 'layout-interpretatio
 /**
  * The request id for a paid interpretation of `description`: the one already asked under, or a new one written down
  * before the request goes, so a refresh or another preview of the same words replays the server's receipt instead of
- * paying again. Different owners cannot share it. Throws when the id cannot be kept.
+ * paying again. Different owners cannot share it. `renew` is the owner's choice once the server could not confirm the
+ * last request: that receipt is dropped for a new one, paid again. Throws when the id cannot be kept.
  */
-function receiptFor(ownerId: string, description: string): string {
+function receiptFor(ownerId: string, description: string, renew = false): string {
   const key = receiptsKey(ownerId);
   let receipts: Receipt[] = [];
   try {
@@ -107,12 +109,20 @@ function receiptFor(ownerId: string, description: string): string {
     // An unreadable record is replaced by the one written below.
   }
   const found = receipts.find(value => value.description === description);
-  if (found) return found.id;
+  if (found && !renew) return found.id;
   const receipt = { description, id: randomId() };
-  try { localStorage.setItem(key, JSON.stringify([...receipts, receipt].slice(-MAX_RECEIPTS))); }
-  catch { throw new Error('AI 요청 기록을 저장하지 못했어요.'); }
+  const kept = receipts.filter(value => value !== found);
+  try { localStorage.setItem(key, JSON.stringify([...kept, receipt].slice(-MAX_RECEIPTS))); }
+  catch { throw new LayoutError('AI 요청 기록을 저장하지 못했어요.'); }
   return receipt.id;
 }
+
+/**
+ * The layout's own refusals and the servers' coded messages as they are. A loader's or the browser's words give way to
+ * `fallback`, and so does an uncoded answer (`request_failed`): it carries the character server's framework `detail`.
+ */
+const problemText = (cause: unknown, fallback: string) =>
+  cause instanceof LayoutError || (cause instanceof ApiError && cause.code !== 'request_failed') ? cause.message : fallback;
 
 /**
  * The dialog over the island: the keyboard stays in it (the decorating shortcuts stand down while a modal is open) and
@@ -145,6 +155,8 @@ export function LayoutComposer({ session, residents, ownerId }: Props) {
   const [aiReady, setAiReady] = useState(false);
   const [working, setWorking] = useState<'interpreting' | 'measuring' | null>(null);
   const [error, setError] = useState('');
+  /** The description whose paid interpretation the server could not confirm; only a new request, paid again, answers it. */
+  const [uncertain, setUncertain] = useState<string | null>(null);
   // The last proposal stays in the canvas while the next is made or the description changes; `fresh` says it is the
   // proposal for what is entered now, and only then can it be applied.
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -174,16 +186,16 @@ export function LayoutComposer({ session, residents, ownerId }: Props) {
     request.current?.abort(); request.current = null;
     setOpen(false); setWorking(null); setPreview(null); setFresh(false);
   };
-  const create = async () => {
+  const create = async (renew = false) => {
     const text = description.trim();
     if (busy || !allowed || !text) return;
     const controller = new AbortController(); request.current?.abort(); request.current = controller;
-    setError(''); setFresh(false);
+    setError(''); setUncertain(null); setFresh(false);
     try {
       let intent;
       if (ai && paid && aiReady) {
         setWorking('interpreting');
-        intent = await layoutApi.interpret({ description: text, mode: 'ai', requestId: receiptFor(ownerId, text) }, controller.signal);
+        intent = await layoutApi.interpret({ description: text, mode: 'ai', requestId: receiptFor(ownerId, text, renew) }, controller.signal);
       } else intent = interpretLayout(text);
       if (controller.signal.aborted) return;
       setWorking('measuring');
@@ -197,15 +209,17 @@ export function LayoutComposer({ session, residents, ownerId }: Props) {
       setPreview({ proposal, residentsRevision: residentRevision });
       setFresh(true);
     } catch (cause) {
-      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '배치를 만들지 못했어요.');
+      if (controller.signal.aborted) return;
+      setError(problemText(cause, '배치를 만들지 못했어요.'));
+      if (cause instanceof ApiError && cause.code === 'layout_interpretation_uncertain') setUncertain(text);
     } finally { if (request.current === controller) { request.current = null; setWorking(null); } }
   };
   const apply = () => {
     if (!preview || !fresh || busy || !allowed) return;
     try {
-      if (residents.revision() !== preview.residentsRevision) throw new Error('주민 위치가 바뀌었어요. 배치를 다시 만들어 주세요.');
+      if (residents.revision() !== preview.residentsRevision) throw new LayoutError('주민 위치가 바뀌었어요. 배치를 다시 만들어 주세요.');
       applyLayout(session, preview.proposal); close();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '배치를 적용하지 못했어요.'); }
+    } catch (cause) { setError(problemText(cause, '배치를 적용하지 못했어요.')); }
   };
   return <>
     <button className="mg-btn is-small" disabled={!allowed} onClick={() => { setOpen(true); setError(''); }}>매장 배치</button>
@@ -219,6 +233,7 @@ export function LayoutComposer({ session, residents, ownerId }: Props) {
         </button>
       </div>
       {error && <p role="alert" className="mg-error">{error}</p>}
+      {error && ai && uncertain === description.trim() && <button className="mg-btn" disabled={!allowed} onClick={() => void create(true)}>새 요청으로 다시 해석 (유료)</button>}
       {preview && <>
         <p className="mg-layout-result">{({ cafe: '카페', shop: '매장', office: '사무실' } as const)[preview.proposal.intent.kind]} · {preview.proposal.intent.widthCells * 4}m × {preview.proposal.intent.depthCells * 4}m · 기물 {preview.proposal.objects.length}개 · 좌석 {preview.proposal.intent.seats}개</p>
         <LayoutPreview proposal={preview.proposal} stale={!fresh} />

@@ -826,6 +826,62 @@ async fn 다시_가져와도_공개_상태와_이름을_지키고_버전을_되�
 }
 
 #[tokio::test]
+async fn 새_항목으로_가져오면_이미_있는_항목을_덮어쓰지_않는다() {
+    let seen = Seen::default();
+    let studio = Studio::standard();
+    studio.add(factory_job("job_2", "c_job_2", "2026-09-04T00:00:00Z"));
+    let app = factory_app(&seen, studio.clone()).await;
+    let admin = app.register("operator_n", "운영자").await;
+    app.make_admin("operator_n").await;
+    let new_item = |job: &str, id: &str, label: &str| {
+        let mut body = import_body(job, id, label);
+        body["create"] = json!(true);
+        body
+    };
+
+    let fox = import(&app, &admin, new_item("job_1", "fox", "여우")).await;
+    assert_eq!((fox["status"].as_str(), fox["replaces"].as_bool()), (Some("done"), Some(false)), "{fox}");
+    app.call("PATCH", "/api/catalog/admin/items/fox", Some(json!({"status": "published"})), Some(&admin)).await;
+    // Another character asked for as a new item under a taken id is refused before anything is queued.
+    let taken = app.call("POST", IMPORT, Some(new_item("job_2", "fox", "여우2")), Some(&admin)).await;
+    assert_eq!((taken.status, taken.body["code"].as_str()), (StatusCode::CONFLICT, Some("item_exists")));
+    let item = admin_item(&app, &admin, "fox").await;
+    assert_eq!(
+        (item["label"].as_str(), item["status"].as_str(), item["characterId"].as_str()),
+        (Some("여우"), Some("published"), Some("c_job_1"))
+    );
+    assert_eq!(item["versionCount"], 1);
+    // Without `create` an id that is taken is still an update, as the form's update and older pages send it.
+    let again = import(&app, &admin, import_body("job_1", "fox", "여우")).await;
+    assert_eq!((again["status"].as_str(), again["replaces"].as_bool()), (Some("done"), Some(true)), "{again}");
+
+    // Queued as new, an import whose id an item took meanwhile ends failed and leaves that item as it is.
+    studio.slow("job_2", Duration::from_millis(1500));
+    let queued = app.call("POST", IMPORT, Some(new_item("job_2", "wolf", "늑대")), Some(&admin)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    sqlx::query(
+        "INSERT INTO catalog_items (id, kind, label, emoji, model_url, source, status)
+         VALUES ('wolf', 'minime', '먼저 온 늑대', '🐺', '/models/first.glb', 'factory', 'published')",
+    )
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let late = finished(&app, &admin, queued.body["id"].as_str().unwrap()).await;
+    assert_eq!(
+        (late["status"].as_str(), late["step"].as_str(), late["errorCode"].as_str()),
+        (Some("failed"), Some("save"), Some("item_exists")),
+        "{late}"
+    );
+    let wolf = admin_item(&app, &admin, "wolf").await;
+    assert_eq!(
+        (wolf["label"].as_str(), wolf["modelUrl"].as_str(), wolf["characterId"].as_str()),
+        (Some("먼저 온 늑대"), Some("/models/first.glb"), None)
+    );
+    assert_eq!(wolf["versionCount"], 0);
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변화를_알린다() {
     let seen = Seen::default();
     let studio = Studio::with(vec![factory_job("textured", "c_tex", "2026-09-05T00:00:00Z")]);
