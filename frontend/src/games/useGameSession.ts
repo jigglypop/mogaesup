@@ -3,10 +3,18 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import type { RapierRigidBody } from '@react-three/rapier';
 
 import { authApi } from '../api/endpoints';
+import { doubtSession } from '../auth/sessionWork';
 import { readServerMessage, type ClientMessage, type GameEvent, type GameProblem, type GameSession, type Vec3 } from './protocol';
 
 const RETRY_FIRST_MS = 1_000;
 const RETRY_LAST_MS = 30_000;
+/** How the server shuts a socket on its viewer for good: their login ended (4401), the island closed to them (4403). */
+const SHUT_OUT = new Set([4401, 4403]);
+/**
+ * How long the session stays as last shown while the socket is off. The server takes a player out of its game after ten
+ * seconds out of the island's live room, and one shut out of the room may not hear the game socket's own word.
+ */
+const KEEP_OFF_MS = 15_000;
 
 /** The island's game socket: like the live room's, with the room's `client_id` for this page as `peer`. */
 export const gameUrl = (username: string, ticket: string, peer: string | null) =>
@@ -14,7 +22,10 @@ export const gameUrl = (username: string, ticket: string, peer: string | null) =
   `?ticket=${encodeURIComponent(ticket)}${peer ? `&peer=${encodeURIComponent(peer)}` : ''}`;
 
 export type GameState = {
-  /** The island's session as the server last showed it; null when it has none, or while the socket is down. */
+  /**
+   * The island's session as the server last showed it, kept while the socket is down (the game goes on without it);
+   * null when it has none, or once the server has shut the socket on this viewer.
+   */
   session: GameSession | null;
   connected: boolean;
   /** The server's last refusal, until the next message goes out. */
@@ -54,8 +65,8 @@ export type GameClient = {
   clearError: () => void;
   /** Opens a socket at `url` in place of any other; `closed` hears when it ends, and whether a session came first. */
   connect: (url: string, closed: (welcomed: boolean) => void) => void;
-  /** Closes the socket and forgets the session. */
-  disconnect: () => void;
+  /** Closes the socket; the session stays as last shown unless `forget` (it is no longer the viewer's). */
+  disconnect: (forget?: boolean) => void;
 };
 
 const same = (a: GameState, b: GameState) => a.session === b.session && a.connected === b.connected && a.error === b.error;
@@ -140,17 +151,19 @@ export function createGameClient(): GameClient {
           set({ error: { code: message.code, message: message.message } });
         }
       };
-      current.onclose = () => {
+      current.onclose = (event: CloseEvent) => {
         if (socket !== current) return;
         socket = null;
-        // What the session is now is unknown until the next socket says.
-        set({ connected: false, session: null });
+        // A dropped socket leaves the session as last shown (what a game keeps hidden stays hidden, the viewer stays in
+        // its arena, a folded panel stays folded) until the next socket says what it is now; one the server shut on
+        // this viewer takes it away.
+        set(SHUT_OUT.has(event.code) ? { connected: false, session: null } : { connected: false });
         closed(welcomed);
       };
     },
-    disconnect() {
+    disconnect(forget) {
       drop();
-      set({ connected: false, session: null, error: null });
+      set(forget ? { connected: false, session: null, error: null } : { connected: false, error: null });
     },
   };
 }
@@ -174,7 +187,8 @@ export type GameSessionApi = GameState &
 /**
  * The island page's game socket. While `enabled`, it asks for a realtime ticket and connects; when the socket drops it
  * connects again with a fresh ticket, waiting longer after each try that got no session (from a second up to half a
- * minute). Turned off or unmounted, it closes the socket and stops.
+ * minute). Turned off or unmounted, it closes the socket and stops. The session stays as last shown while it is off for
+ * a little while (the live room connecting again, say), and goes with the island or the account.
  */
 export function useGameSession({ username, viewerId, peer, enabled }: GameSessionOptions): GameSessionApi {
   const [client] = useState(createGameClient);
@@ -195,8 +209,12 @@ export function useGameSession({ username, viewerId, peer, enabled }: GameSessio
     const attempt = async () => {
       try {
         const { ticket, user } = await authApi.realtimeTicket();
-        // Another account signed in meanwhile: its own page connects.
-        if (stopped || user.id !== viewerId) return;
+        if (stopped) return;
+        // Another account signed in meanwhile (in another tab): the app asks who is signed in, and its page connects.
+        if (user.id !== viewerId) {
+          doubtSession();
+          return;
+        }
         client.connect(gameUrl(username, ticket, peerRef.current), (welcomed) => {
           if (welcomed) delay = RETRY_FIRST_MS;
           retry();
@@ -213,6 +231,14 @@ export function useGameSession({ username, viewerId, peer, enabled }: GameSessio
       client.disconnect();
     };
   }, [client, username, viewerId, enabled]);
+  // Another island or account starts with no session.
+  useEffect(() => () => client.disconnect(true), [client, username, viewerId]);
+  // Off for longer than the live room takes to come back: the session as last shown is no longer the viewer's.
+  useEffect(() => {
+    if (enabled && viewerId) return undefined;
+    const timer = setTimeout(() => client.disconnect(true), KEEP_OFF_MS);
+    return () => clearTimeout(timer);
+  }, [client, enabled, viewerId]);
 
   return useMemo(
     () => ({

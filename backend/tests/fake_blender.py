@@ -7,6 +7,7 @@ point, a Matrix a 4x4 (or 3x3) array, a BVH tree a brute-force nearest-triangle 
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 import importlib
 import math
 from pathlib import Path
@@ -163,6 +164,9 @@ class Matrix:
     def copy(self):
         return Matrix(self._m)
 
+    def identity(self):
+        self._m = np.eye(len(self._m))
+
     @property
     def translation(self):
         return Vector(self._m[:3, 3])
@@ -254,6 +258,12 @@ class Mesh:
         self.materials = []
         self.shape_keys = None
         self.users = 1
+
+    def copy(self):
+        """Blender's ID.copy() as the workers use it, given to one object: its own vertices, the same materials."""
+        duplicate = deepcopy(self, {id(material): material for material in self.materials})
+        duplicate.users = 1
+        return duplicate
 
     def calc_loop_triangles(self):
         self.loop_triangles = [types.SimpleNamespace(vertices=triangle) for triangle in self._triangles]
@@ -350,6 +360,9 @@ class Objects:
 
     def __getitem__(self, name):
         return next(obj for obj in self.items if obj.name == name)
+
+    def get(self, name, default=None):
+        return next((obj for obj in self.items if obj.name == name), default)
 
     def __contains__(self, name):
         return any(obj.name == name for obj in self.items)

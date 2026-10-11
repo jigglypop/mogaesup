@@ -9,17 +9,24 @@ import { useFocusTrap } from '../ui/focus';
 export const PASSWORD_MIN = 10;
 export const PASSWORD_MAX = 128;
 
+/** What the current password is asked for: a new one, or signing out every other device of the account. */
+export type PasswordAction = 'change' | 'others';
+
+const TITLES: Record<PasswordAction, string> = { change: '비밀번호 바꾸기', others: '다른 기기에서 모두 로그아웃' };
+
 /**
- * Changing the password: the current one and the new one, sent once; what the server says went wrong stays on the form.
- * A modal dialog over the page, closed by Escape, 취소 or 닫기, after which the keyboard goes back where it was.
+ * Changing the password (the current one and the new one), or signing out other devices (the current one), sent once;
+ * what the server says went wrong stays on the form. A modal dialog over the page, closed by Escape, 취소 or 닫기, after
+ * which the keyboard goes back where it was.
  */
-export function PasswordDialog({ onClose }: { onClose: () => void }) {
+export function PasswordDialog({ action = 'change', onClose }: { action?: PasswordAction; onClose: () => void }) {
   const dialog = useRef<HTMLDivElement>(null);
   const first = useRef<HTMLInputElement>(null);
   useFocusTrap(dialog, first);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [done, setDone] = useState(false);
+  /** What was done, once it is. */
+  const [done, setDone] = useState('');
   const sending = useRef(false);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -33,7 +40,7 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
       setError('현재 비밀번호를 입력해 주세요.');
       return;
     }
-    if (length < PASSWORD_MIN || length > PASSWORD_MAX) {
+    if (action === 'change' && (length < PASSWORD_MIN || length > PASSWORD_MAX)) {
       setError(`새 비밀번호는 ${PASSWORD_MIN}자 이상 ${PASSWORD_MAX}자 이하예요.`);
       return;
     }
@@ -41,8 +48,13 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
     setBusy(true);
     setError('');
     try {
-      await authApi.changePassword({ currentPassword, newPassword });
-      setDone(true);
+      if (action === 'change') {
+        await authApi.changePassword({ currentPassword, newPassword });
+        setDone('비밀번호를 바꿨어요');
+      } else {
+        const { ended } = await authApi.logoutOthers({ currentPassword });
+        setDone(`다른 기기 ${ended}곳에서 로그아웃했어요`);
+      }
     } catch (problem) {
       setError(problemText(problem));
     } finally {
@@ -64,11 +76,11 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
     >
       <div ref={dialog} className="mg-modal mg-glass" role="dialog" aria-modal="true" aria-labelledby="mg-password-title" aria-busy={busy} tabIndex={-1}>
         <h2 id="mg-password-title" className="mg-heading">
-          비밀번호 바꾸기
+          {TITLES[action]}
         </h2>
         {done ? (
           <>
-            <p role="status">비밀번호를 바꿨어요</p>
+            <p role="status">{done}</p>
             <div className="mg-row-end">
               <button className="mg-btn is-primary" onClick={onClose} autoFocus>
                 닫기
@@ -81,19 +93,21 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
               현재 비밀번호
               <input ref={first} className="mg-field" name="currentPassword" type="password" required readOnly={busy} autoComplete="current-password" />
             </label>
-            <label className="mg-label">
-              새 비밀번호
-              <input
-                className="mg-field"
-                name="newPassword"
-                type="password"
-                required
-                minLength={PASSWORD_MIN}
-                maxLength={PASSWORD_MAX}
-                readOnly={busy}
-                autoComplete="new-password"
-              />
-            </label>
+            {action === 'change' && (
+              <label className="mg-label">
+                새 비밀번호
+                <input
+                  className="mg-field"
+                  name="newPassword"
+                  type="password"
+                  required
+                  minLength={PASSWORD_MIN}
+                  maxLength={PASSWORD_MAX}
+                  readOnly={busy}
+                  autoComplete="new-password"
+                />
+              </label>
+            )}
             {error && (
               <p className="mg-error" role="alert">
                 {error}
@@ -104,7 +118,7 @@ export function PasswordDialog({ onClose }: { onClose: () => void }) {
                 취소
               </button>
               <button className="mg-btn is-primary" type="submit" aria-disabled={busy || undefined}>
-                {busy ? '바꾸는 중…' : '바꾸기'}
+                {action === 'change' ? (busy ? '바꾸는 중…' : '바꾸기') : busy ? '로그아웃하는 중…' : '로그아웃'}
               </button>
             </div>
           </form>

@@ -1,4 +1,5 @@
-"""Stage runs whose saves fail: a run that cannot be saved as running or as finished never keeps every stage busy."""
+"""Stage runs whose saves fail: a run that cannot be saved as running or as finished never keeps every stage busy;
+and a stopped run never hides where newer saved records place the job."""
 import json
 from types import SimpleNamespace
 
@@ -71,9 +72,10 @@ def stale_worker_records(directory):
     return directory / 'native-parts' / version
 
 
-def flow(directory):
+def flow(directory, **saved):
     from src.services.avatar_character_flow import character_flow
-    job = {'status': 'review_required', 'progress': {'stage': 'rig', 'message': ''}, 'next_actions': [], 'error': None}
+    job = {'status': 'review_required', 'progress': {'stage': 'rig', 'message': ''}, 'next_actions': [], 'error': None,
+           **saved}
     return character_flow(directory, job), job['next_actions']
 
 
@@ -93,3 +95,56 @@ def test_workers_whose_last_save_failed_do_not_keep_the_job_running(job):
             assert not any(action['enabled'] for action in actions)
         finally:
             workers.release(key)
+
+
+BEFORE, STOPPED, AFTER = '2026-10-11T01:00:00+00:00', '2026-10-11T02:00:00+00:00', '2026-10-11T03:00:00+00:00'
+
+
+def assembly(directory, version, **record):
+    (directory / 'native-parts' / version).mkdir(parents=True)
+    (directory / 'native-parts' / 'current.json').write_text(json.dumps({'version': version}))
+    (directory / 'native-parts' / version / 'record.json').write_text(json.dumps(record))
+
+
+@pytest.mark.parametrize('stage', ['models', 'rig', 'assemble'])
+def test_a_run_stopped_by_the_faces_of_the_assembly_it_sealed_leaves_the_character_finished(job, stage):
+    directory, _ = job
+    assembly(directory, 'b' * 24, status='review_required', created_at=BEFORE)
+    error = 'smile: 표정 이미지 생성 실패'
+    save_run(directory, stage=stage, status='paused', error=error, updated_at=STOPPED)
+    faces = {'status': 'paused', 'busy': False, 'error': error, 'completed': 4, 'total': 5}
+    state, _ = flow(directory, default_expressions=faces, updated_at=BEFORE)
+    # The plain assembly is used while a face is missing: the character stays with the finished ones.
+    assert (state['stage'], state['status'], state['message']) == ('expressions', 'paused', error)
+
+
+def test_a_sealed_assembly_with_parts_to_refit_is_not_finished_by_a_stopped_expressions_run(job):
+    directory, _ = job
+    assembly(directory, 'b' * 24, status='review_required', created_at=BEFORE,
+             result={'incomplete_parts': [{'slot': 'top', 'status': 'needs_anchors'}]})
+    save_run(directory, stage='expressions', status='paused', error='smile: 표정 이미지 생성 실패', updated_at=STOPPED)
+    faces = {'status': 'paused', 'busy': False, 'error': 'smile: 표정 이미지 생성 실패', 'completed': 4, 'total': 5}
+    state, _ = flow(directory, default_expressions=faces, updated_at=BEFORE)
+    assert (state['stage'], state['message']) == ('assemble', '상의 피팅 기준점 보정 필요')
+
+
+def test_a_stopped_run_gives_way_to_work_saved_after_it_or_past_its_stage(job):
+    directory, _ = job
+    (directory / 'meshy').mkdir()
+    save_run(directory, stage='rig', status='paused', error='저장된 3D 파츠가 없거나 변경되었습니다.', updated_at=STOPPED)
+    # Nothing saved since: where the operator's run stopped, with its error.
+    state, _ = flow(directory, updated_at=BEFORE)
+    assert (state['stage'], state['status'], state['message']) == ('rig', 'paused', '저장된 3D 파츠가 없거나 변경되었습니다.')
+    # Images requested again since then stopped at their own stage.
+    state, _ = flow(directory, status='pipeline_paused', progress={'stage': 'images', 'message': ''}, error='정면 이미지 실패',
+                    updated_at=AFTER)
+    assert (state['stage'], state['message']) == ('images', '정면 이미지 실패')
+    # The rig was received since: the job waits at the assembly.
+    (directory / 'meshy' / 'worker.json').write_text(json.dumps({'status': 'complete', 'error': None}))
+    state, _ = flow(directory, updated_at=BEFORE)
+    assert (state['stage'], state['message']) == ('assemble', '저장된 작업에서 이어가기 대기')
+    # An assembly started after an assembly run stopped (a refit) reports its own failure.
+    save_run(directory, stage='assemble', status='paused', error='일부 파츠 피팅 보정 필요', updated_at=STOPPED)
+    assembly(directory, 'c' * 24, status='failed', error='Blender 조립 중단', created_at=AFTER)
+    state, _ = flow(directory, updated_at=BEFORE)
+    assert (state['stage'], state['message']) == ('assemble', 'Blender 조립 중단')

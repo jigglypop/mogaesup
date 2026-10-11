@@ -134,6 +134,10 @@ def trusted_loopback(request: Request) -> bool:
     return _loopback_host(request.headers.get("host")) and (origin is None or _loopback_origin(origin))
 
 
+# An app account name as the Rust server allows it, with room to spare (server/src/auth.rs).
+_STUDIO_USER = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
 def _local_dev_user(request: Request) -> Optional[UserContext]:
     raw_user_id = (request.headers.get("x-user-id") or "").strip()
     if not raw_user_id:
@@ -144,7 +148,21 @@ def _local_dev_user(request: Request) -> Optional[UserContext]:
         user_id = int(raw_user_id)
     except ValueError:
         return None
-    return UserContext(user_id=user_id, username=f"dev:{user_id}", roles=["ADMIN"]) if user_id > 0 else None
+    # nginx signs a request without a token in as the studio owner; the app's gateway, which sends none without
+    # FACTORY_JWT_SECRET, names who it acts for, kept as the audit name (a reviewer's, for example).
+    name = (request.headers.get("x-studio-user") or "").strip()
+    username = name if _STUDIO_USER.fullmatch(name) else f"dev:{user_id}"
+    return UserContext(user_id=user_id, username=username, roles=["ADMIN"]) if user_id > 0 else None
+
+
+def _scoped(request: Request, user: UserContext) -> UserContext:
+    """`user` with the MEMBER role when the app's gateway marks the request as a member's wardrobe read
+    (`x-studio-scope: member`). The gateway sends the mark with a token and without one (server/src/factory.rs), and
+    it only narrows what is listed and served (src/api/avatar_factory.py `wardrobe_operator`)."""
+    member = (request.headers.get("x-studio-scope") or "").strip().lower() == "member"
+    if not member or any(str(role).upper() == "MEMBER" for role in user.roles):
+        return user
+    return UserContext(user_id=user.user_id, username=user.username, roles=[*user.roles, "MEMBER"])
 
 
 def _decode_claims(token: str) -> dict:
@@ -223,7 +241,7 @@ async def get_current_user(request: Request) -> UserContext:
     with MEMBER, and the AWS container's nginx (like the SSM port) adds X-User-Id on its way in, so the header must not
     turn such a request into the operator. A token that cannot be verified is refused (401, or 503 when this server
     has no JWT_SECRET); it never falls back to the header. Only a request without any Authorization header may use
-    the loopback X-User-Id identity.
+    the loopback X-User-Id identity. Either way the gateway's member mark narrows the answer to a member's (_scoped).
 
     async: it reads headers and the environment and checks an HMAC signature, with no I/O, so authentication runs on
     the event loop and never waits for a worker thread that long background jobs may all be holding."""
@@ -231,7 +249,7 @@ async def get_current_user(request: Request) -> UserContext:
     if not token:
         dev_user = _local_dev_user(request)
         if dev_user:
-            return dev_user
+            return _scoped(request, dev_user)
     claims = _decode_claims(token)
     user_id = _extract_user_id(claims)
     # The gateway uses a fixed factory owner for storage and signs the actual
@@ -240,4 +258,4 @@ async def get_current_user(request: Request) -> UserContext:
     user = UserContext(user_id=user_id, username=username, roles=_extract_roles(claims))
     if user.level != _ADMIN_LEVEL:
         raise HTTPException(status_code=403, detail="Studio operator access required")
-    return user
+    return _scoped(request, user)

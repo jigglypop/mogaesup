@@ -23,7 +23,8 @@ _COMPONENT = {
 _WIDTH = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 
 
-def _accessor(doc, binary, index):
+def _accessor_rows(doc, binary, index):
+    """The values of accessor `index`, read one row at a time."""
     item = doc["accessors"][index]
     if item.get("sparse") or "bufferView" not in item:
         raise PipelineError("unsupported_body", "희소 GLB 접근자가 있는 몸은 표정 텍스처를 적용할 수 없습니다.", 422)
@@ -32,14 +33,16 @@ def _accessor(doc, binary, index):
     width = _WIDTH[item["type"]]
     stride = view.get("byteStride", size * width)
     offset = view.get("byteOffset", 0) + item.get("byteOffset", 0)
-    values = []
     for row in range(item["count"]):
         value = struct.unpack_from("<" + code * width, binary, offset + row * stride)
         if item.get("normalized") and code in "bBhH":
             maximum = (1 << (size * 8)) - 1 if code in "BH" else (1 << (size * 8 - 1)) - 1
             value = tuple(max(-1.0, component / maximum) for component in value)
-        values.append(value)
-    return values
+        yield value
+
+
+def _accessor(doc, binary, index):
+    return list(_accessor_rows(doc, binary, index))
 
 
 def _multiply(a, b):

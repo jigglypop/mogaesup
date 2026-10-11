@@ -107,6 +107,8 @@ def unresolved_image_attempt(directory, part, *, idle=True):
     `idle`: no worker can be writing the answer now, so a complete partial answer is moved into place; otherwise an
     answer of a request in flight is only read."""
     image = part['image']
+    if image['status'] == 'answer_invalid':
+        return True  # Its kept answer holds no usable image: going on would read it again.
     if image['status'] not in ('submitting', 'submission_uncertain', 'rejected', 'failed'):
         return False
     receipt = directory/'output'/f'{part["slot"]}-provider'

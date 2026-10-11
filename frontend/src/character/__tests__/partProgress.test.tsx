@@ -44,3 +44,21 @@ describe('파츠 수신 현황의 피팅 복구', () => {
     await unmount();
   });
 });
+
+describe('파츠 수신 현황', () => {
+  it('이미지로 쓸 수 없는 응답을 받은 뷰는 그 상태와 유료 다시 요청을 보여 준다', async () => {
+    const failed = {
+      id: 'job', status: 'pipeline_paused', artifacts: [],
+      parts: [{ slot: 'top', image_status: 'pending', model_status: 'pending',
+        views: { front: { status: 'answer_invalid', failure: { id: 'f1' } }, side: { status: 'pending' } } }],
+      next_actions: [{ id: 'retry_image', enabled: true, slot: 'top', view: 'front', failure_id: 'f1' }],
+    } as unknown as FactoryJob;
+    const { container, unmount } = await mount(<PartProgress job={failed} busy={false} retryImage={async () => undefined} />);
+    const [front, side] = container.querySelectorAll('.part-view');
+    expect(front!.querySelector('span')!.textContent).toBe('정면 · 응답 이미지 오류');
+    expect(front!.querySelector('button')!.textContent).toBe('다시 요청 · 유료 1장');
+    expect(front!.querySelector('.part-retry-warning')).toBeNull();
+    expect(side!.textContent).toBe('좌측면 · 대기');
+    await unmount();
+  });
+});

@@ -23,7 +23,8 @@ import { mount } from '../../__tests__/mount';
 import { GameDock } from '../GameDock';
 import type { GameSession } from '../protocol';
 import { GameContext, type GameRoomValue } from '../room';
-import type { GameClient, GameState } from '../useGameSession';
+import { createGameClient, type GameClient, type GameState } from '../useGameSession';
+import { FakeSocket } from './socket';
 
 const NOW = 9_000_000;
 const me = { id: 'me', name: '나', peer: 'peer-me' };
@@ -88,6 +89,7 @@ async function dock(initial: Partial<GameState>, live = true) {
 describe('섬의 게임 패널', () => {
   afterEach(async () => {
     for (const view of mounted.splice(0)) await view.unmount();
+    vi.unstubAllGlobals();
   });
 
   it('실시간 방에 없으면 아무것도 두지 않는다', async () => {
@@ -208,6 +210,43 @@ describe('섬의 게임 패널', () => {
     set({ session: session({ phase: 'playing', players: [me, friend], game: { ask: 1 }, seq: 2 }) });
     expect(panel()).toBeNull();
     set({ session: session({ phase: 'playing', players: [me, friend], game: { ask: 2 }, seq: 3 }) });
+    expect(panel()).not.toBeNull();
+  });
+
+  it('게임 소켓이나 실시간 방이 끊겼다 다시 붙어도 접어 둔 패널은 접힌 채로 있고, 다음 질문에만 다시 열린다', async () => {
+    vi.stubGlobal('WebSocket', FakeSocket);
+    const client = createGameClient();
+    const tree = (live: boolean) => (
+      <GameContext.Provider value={{ client, live, building: createVillage, playerRef: { current: null } }}>
+        <GameDock />
+      </GameContext.Provider>
+    );
+    const view = await mount(tree(true));
+    mounted.push(view);
+    const panel = () => view.container.querySelector('.mg-game');
+    const asking = (ask: number, seq: number) => ({ type: 'Session', session: session({ phase: 'playing', players: [me, friend], game: { ask }, seq }) });
+    const socket = () => FakeSocket.made.at(-1)!;
+    client.connect('ws://island/1', () => {});
+    socket().open();
+    socket().receive(asking(1, 1));
+    expect(panel()).not.toBeNull();
+    await act(() => view.container.querySelector<HTMLButtonElement>('.mg-game-toggle')!.click());
+    expect(panel()).toBeNull();
+    // The game socket drops and comes back with the same question.
+    socket().drop();
+    client.connect('ws://island/2', () => {});
+    socket().open();
+    socket().receive(asking(1, 2));
+    expect(panel()).toBeNull();
+    // The live room drops: the room turns the game socket off (useGameSession's cleanup), then on again.
+    await act(async () => client.disconnect());
+    await view.rerender(tree(false));
+    await view.rerender(tree(true));
+    client.connect('ws://island/3', () => {});
+    socket().open();
+    socket().receive(asking(1, 3));
+    expect(panel()).toBeNull();
+    socket().receive(asking(2, 4));
     expect(panel()).not.toBeNull();
   });
 

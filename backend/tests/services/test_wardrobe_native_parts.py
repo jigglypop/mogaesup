@@ -10,6 +10,7 @@ from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_glb_bodies import AvatarGlbBodies
 from src.services.avatar_native_parts import AvatarNativeParts, workspace_inputs
+from src.services.avatar_production_spec import production_spec, seal_production_spec
 from src.services.character_pipeline import PipelineError, read_json
 from wardrobe_fixture import OWNER, Library
 
@@ -327,3 +328,33 @@ def test_an_assembly_file_is_found_from_the_job_record_alone(refit, monkeypatch)
     with pytest.raises(PipelineError) as changed:
         native.artifact(OWNER, JOB, VERSION, 'hair.glb', record=record)
     assert changed.value.code == 'artifact_changed'
+
+
+def test_a_refit_of_glasses_sealed_at_the_neck_places_them_on_the_head(refit):
+    library, native, root = refit
+    job = root.parent
+    # The spec a GLB registration sealed before glasses were placed on the head: the hair target its body's head was
+    # measured for (.72 m wide, its front at z .30, with the hair clearance), and the glasses at the neck.
+    spec = production_spec('source', ('front', 'side'))
+    spec['fitting']['bounds']['hair'] = [[-.385, .46, -.305], [.385, 1.27, .325]]
+    spec['frozen_body'] = True
+    spec['equipment'] = {'glasses': {'bone': 'Head', 'position_m': [0, .48, .298], 'pivot_fraction': [.5, .5, 1.0],
+                                     'size_m': [.5616, .1184, .364]},
+                         'weapon': {'bone': 'RightHand', 'position_m': [-.39, .43, 0], 'pivot_fraction': [.5, .2, .5],
+                                    'size_m': [.144, .504, .096]},
+                         'tool': {'bone': 'LeftHand', 'position_m': [.39, .43, 0], 'pivot_fraction': [.5, .2, .5],
+                                  'size_m': [.144, .336, .096]}}
+    sealed = seal_production_spec(spec)
+    pipeline = read_json(job/'pipeline.json')
+    pipeline['parts'].append({'slot': 'glasses'})
+    pipeline['production_spec'] = sealed
+    _write_json(job/'pipeline.json', pipeline)
+    _write_json(root/VERSION/'input.json', {'production_spec': sealed})
+    (job/'output/generated-glasses.glb').write_bytes(b'raw glasses model')
+    record = read_json(job/'job.json')
+    record['files']['generated-glasses.glb'] = digest(job/'output/generated-glasses.glb')
+    _write_json(job/'job.json', record)
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'glasses', 'refit-key-0001')
+    # The worker places them two fifths up the head from the neck (.46) to the crown (1.2), on its front.
+    worker_spec = read_json(root/state['version']/'input.json')['production_spec']
+    assert created and worker_spec['equipment']['glasses']['position_m'] == pytest.approx([0, .756, .308])

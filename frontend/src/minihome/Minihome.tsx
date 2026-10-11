@@ -321,7 +321,8 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
   const saveNow = useCallback(() => void save(), [save]);
   // Leaving saves first; with nothing unsaved (or nothing that can be saved yet) it just leaves. When the save fails the
   // owner may stay with the edits or leave without them. One leaving at a time, and none once the island is gone (the
-  // save can answer after Back or a sign-out took the page elsewhere).
+  // save can answer after Back or a sign-out took the page elsewhere). Going to the island itself keeps it open, so the
+  // edits go at once (the stored island is loaded again); any other page closes it, and closing drops them.
   const leaving = useRef(false);
   const leave = useCallback(
     (to: string) => {
@@ -335,14 +336,15 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
         .then((ok) => {
           if (!active.current) return;
           if (!ok && !window.confirm('저장하지 못한 변경이 있어요. 나가면 사라져요. 계속할까요?')) return;
-          discarding.current = !ok;
+          if (!ok && to === home) void saver.reloadLatest().then((loaded) => loaded && reloaded());
+          discarding.current = !ok && to !== home;
           navigate(to);
         })
         .finally(() => {
           leaving.current = false;
         });
     },
-    [saver, save, navigate],
+    [saver, save, navigate, home],
   );
   const exit = () => leave(home);
   // The router here has no way to block a navigation, so a link out of the editor (the rail, the brand) is caught as it
@@ -376,9 +378,11 @@ export default function Minihome({ view, viewer, viewerMinime, minimes, studioIt
     const timer = setTimeout(() => setProfileError(''), PROFILE_ERROR_MS);
     return () => clearTimeout(timer);
   }, [profileError]);
-  // Finishing decorating saves what is left, rather than waiting for the autosave.
+  // Finishing decorating saves what is left, rather than waiting for the autosave. Decorating again starts with nothing
+  // chosen to be dropped: leaving keeps the new edits unless the owner chooses again.
   useEffect(() => {
     if (!decorating) return undefined;
+    discarding.current = false;
     return () => void saver.flush();
   }, [decorating, saver]);
   // Hiding the tab saves; closing or reloading it with edits still unsaved asks first.

@@ -91,23 +91,36 @@ describe('비밀번호 바꾸기', () => {
 });
 
 describe('다른 기기에서 모두 로그아웃', () => {
-  it('끝낸 세션 수를 보인다', async () => {
-    api.logoutOthers.mockResolvedValueOnce({ ended: 3 });
+  it('현재 비밀번호를 받아 보내고, 서버가 말한 문제를 그대로 보이며, 끝낸 세션 수를 보인다', async () => {
     const { container, unmount } = await mount(shell());
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="내 메뉴"]')!;
     await openMenu(container);
     await act(async () => button('다른 기기에서 모두 로그아웃')!.click());
-    expect(api.logoutOthers).toHaveBeenCalledOnce();
-    expect(container.querySelector('[role=status]')?.textContent).toBe('다른 기기 3곳에서 로그아웃했어요');
-    expect(auth.logout).not.toHaveBeenCalled();
-    await unmount();
-  });
+    const dialog = document.querySelector<HTMLElement>('[role=dialog][aria-modal=true]')!;
+    expect(dialog.querySelector('#mg-password-title')?.textContent?.trim()).toBe('다른 기기에서 모두 로그아웃');
+    const fields = [...dialog.querySelectorAll<HTMLInputElement>('input[type=password]')];
+    expect(fields).toHaveLength(1);
+    expect(document.activeElement).toBe(fields[0]);
 
-  it('실패하면 서버가 말한 문제를 보인다', async () => {
-    api.logoutOthers.mockRejectedValueOnce(new ApiRequestError(429, 'rate_limited', '잠시 후 다시 시도해 주세요.'));
-    const { container, unmount } = await mount(shell());
-    await openMenu(container);
-    await act(async () => button('다른 기기에서 모두 로그아웃')!.click());
-    expect(container.querySelector('[role=alert]')?.textContent).toBe('잠시 후 다시 시도해 주세요.');
+    // Nothing is sent without it.
+    await act(async () => button('로그아웃')!.click());
+    expect(api.logoutOthers).not.toHaveBeenCalled();
+    expect(dialog.querySelector('[role=alert]')?.textContent).toBe('현재 비밀번호를 입력해 주세요.');
+
+    api.logoutOthers.mockRejectedValueOnce(new ApiRequestError(400, 'wrong_password', '현재 비밀번호가 올바르지 않습니다.'));
+    await type(fields[0]!, 'old-password');
+    await act(async () => button('로그아웃')!.click());
+    expect(api.logoutOthers).toHaveBeenCalledExactlyOnceWith({ currentPassword: 'old-password' });
+    expect(dialog.querySelector('[role=alert]')?.textContent).toBe('현재 비밀번호가 올바르지 않습니다.');
+
+    api.logoutOthers.mockResolvedValueOnce({ ended: 3 });
+    await act(async () => button('로그아웃')!.click());
+    expect(dialog.querySelector('[role=status]')?.textContent).toBe('다른 기기 3곳에서 로그아웃했어요');
+    expect(dialog.querySelector('input')).toBeNull();
+    expect(auth.logout).not.toHaveBeenCalled();
+    await act(async () => button('닫기')!.click());
+    expect(document.querySelector('[role=dialog][aria-modal=true]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
     await unmount();
   });
 });

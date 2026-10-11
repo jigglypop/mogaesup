@@ -18,6 +18,8 @@ export type Credentials = { username: string; password: string };
 export type Registration = Credentials & { displayName: string };
 /** `POST /api/auth/password`; the new one is 10 to 128 characters, as at sign-up. */
 export type PasswordChange = { currentPassword: string; newPassword: string };
+/** The account's current password, asked before an account-wide change such as signing out other devices. */
+export type PasswordConfirm = { currentPassword: string };
 
 /** A single-use pass into a live room; `expiresAt` is in epoch seconds, a minute after issue. */
 export type RealtimeTicket = { ticket: string; expiresAt: number; user: User };

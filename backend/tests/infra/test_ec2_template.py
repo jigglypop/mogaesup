@@ -143,7 +143,17 @@ def test_the_security_group_keeps_the_description_it_was_created_with(template):
 
 def test_the_gateway_key_is_part_of_the_cache_key(template):
     # An origin 403 for a request without the key must never be served from the cache to one that has it.
-    assert 'HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization, x-gateway-key]}' in template
+    assert 'HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization, x-gateway-key, x-studio-scope]}' in template
+
+
+def test_the_member_scope_is_part_of_the_cache_key(template):
+    # A member's wardrobe read and studio staff's share an address but not an answer (no parts left unfitted, no failed
+    # checks, a 404 for an assembly file): neither may be answered with the other's response, collapsed or cached.
+    headers = re.search(r'HeadersConfig: \{HeaderBehavior: whitelist, Headers: \[(.*)\]\}', template).group(1)
+    assert 'x-studio-scope' in headers.split(', ')
+    # The header the app's gateway marks a member's read with.
+    gateway = (Path(__file__).resolve().parents[3] / 'server' / 'src' / 'factory.rs').read_text(encoding='utf-8')
+    assert '"x-studio-scope"' in gateway
 
 
 def test_the_template_does_not_promise_a_static_site(template):

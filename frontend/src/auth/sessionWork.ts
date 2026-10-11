@@ -62,6 +62,22 @@ export function onSessionLapse(listener: () => void): () => void {
   return () => { lapseListeners.delete(listener); };
 }
 
+const doubtListeners = new Set<() => void>();
+
+/**
+ * The server answered a request for someone other than the member signed in here (another tab signed in as them): who
+ * the session belongs to is asked again.
+ */
+export function doubtSession(): void {
+  for (const listener of [...doubtListeners]) listener();
+}
+
+/** Calls `listener` when the session is in doubt; returns the stop for it. */
+export function onSessionDoubt(listener: () => void): () => void {
+  doubtListeners.add(listener);
+  return () => { doubtListeners.delete(listener); };
+}
+
 const unsavedChecks = new Set<() => boolean>();
 
 /**

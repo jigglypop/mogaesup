@@ -127,6 +127,9 @@ def bind(meshes, body, rig, contract, *, transform=None):
         if any(mod.type == 'ARMATURE' for mod in obj.modifiers):
             raise ValueError('Part is already rigged; supply the unrigged generated shape')
         world = transform @ obj.matrix_world
+        if obj.data.users > 1:
+            # Instances of one imported mesh: each object moves its own copy into place, never the shared one twice.
+            obj.data = obj.data.copy()
         obj.parent = None; obj.matrix_world = Matrix.Identity(4)
         obj.data.transform(world, shape_keys=True)
         obj.vertex_groups.clear()

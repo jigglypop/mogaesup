@@ -11,10 +11,12 @@ LOGGER = logging.getLogger(__name__)
 def character_flow(directory, job):
     """Summarize saved receipts only; GET must never poll a paid provider. A worker of this process whose last save
     failed runs no more, so its record does not keep the job busy (assembly_state, rig_state, stage_run_active)."""
-    from src.services.avatar_stage_resume import assembly_state, rig_state, stage_run_active
+    from src.services.avatar_stage_resume import STAGES, assembly_state, rig_state, stage_run_active
 
     progress = job['progress']
     problem = None
+    sealed = False
+    latest = job.get('updated_at') or ''  # The last save of the job or of its assembly.
     busy = job['status'] in ('pipeline_queued', 'pipeline_running', 'accepted', 'running')
     status = 'running' if busy else 'paused'
     stage, message = progress['stage'], job.get('error') or progress['message']
@@ -24,7 +26,9 @@ def character_flow(directory, job):
         busy = assembling or rigging
         problem = saved_problem(directory/'meshy')
         blocked = bool(problem)
-        if native.get('status') == 'review_required' and not busy:
+        latest = max(latest, native.get('created_at') or '')
+        sealed = native.get('status') == 'review_required' and not busy
+        if sealed:
             status, stage, message = 'review_required', 'complete', '조립 완료'
             if native.get('result', {}).get('origin') == 'uploaded_glb':
                 message = 'GLB 등록 완료'
@@ -75,8 +79,12 @@ def character_flow(directory, job):
                        'rig': '리깅·동작부터 이어서 실행', 'assemble': '피팅·조립부터 실행',
                        'expressions': '기본 표정 텍스처부터 이어서 실행'}[stage]
         job['next_actions'] = []
-    elif (operation.get('status') == 'paused' and operation.get('error') and not busy
-          and stage != 'complete' and not (job['status'] == 'review_required' and worker.get('origin') == 'rig_transfer')):
+    elif (operation.get('status') == 'paused' and operation.get('error') and not busy and not sealed
+          and stage != 'complete' and not (job['status'] == 'review_required' and worker.get('origin') == 'rig_transfer')
+          # A stopped run tells where the job stands only while nothing newer does: a sealed assembly, a later stage
+          # the saved records reached, or work saved after it. Its stage runner still shows its error.
+          and stage not in STAGES[STAGES.index(operation['stage'])+1:]
+          and (operation.get('updated_at') or '') >= latest):
         status, stage, message = 'paused', operation['stage'], operation['error']
     if problem and not busy and native.get('status') != 'review_required':
         message = worker.get('error') if worker.get('origin') == 'rig_transfer' and worker.get('error') else problem['message']

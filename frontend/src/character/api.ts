@@ -27,7 +27,8 @@ export class ApiError extends Error {
 // A sleeping studio is answered by the app server before or instead of reaching it; a saved request stays pending
 // and is replayed under the same key once the studio is up. The app server's other refusals (a spent budget, a paid
 // action it does not allow, who may ask) keep their own code: the request never reached the studio, so it is settled.
-const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled', 'studio_waking', 'studio_stopping']);
+// Its `factory_timeout` is no refusal: the studio took the request and may have started it, so it stays pending too.
+const transportCodes = new Set(['request_failed', 'connection', 'timeout', 'incomplete_response', 'cancelled', 'studio_waking', 'studio_stopping', 'factory_timeout']);
 
 // A coded server error (including 409 conflicts and 503 configuration errors) means the
 // request was not accepted, so its saved identity can be discarded. Connection losses,

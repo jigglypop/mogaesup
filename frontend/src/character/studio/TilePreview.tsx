@@ -129,17 +129,19 @@ function ActivePreview(props: Props) {
     const renderer = new WebGPURenderer({ canvas, antialias: true, alpha: false });
     const size = () => ({ width: container.clientWidth, height: container.clientHeight, top: 0, left: 0 });
     const active = () => inViewport && !document.hidden;
+    // Every configure passes all of these: R3F resets one a call leaves out (the loop to 'always', the ratio to [1, 2]).
+    const settings = () => ({ size: size(), dpr: Math.min(devicePixelRatio, 1.5), frameloop: active() ? 'demand' : 'never' } as const);
     const resize = new ResizeObserver(() => {
-      if (root && configured && !disposed) void root.configure({ size: size() }).then(() => invalidateRef.current());
+      if (root && configured && !disposed) void root.configure(settings()).then(() => invalidateRef.current());
     });
     const visibility = new IntersectionObserver(entries => {
       inViewport = entries.some(entry => entry.isIntersecting);
-      if (root && configured && !disposed) void root.configure({ frameloop: active() ? 'demand' : 'never' }).then(() => {
+      if (root && configured && !disposed) void root.configure(settings()).then(() => {
         if (active()) invalidateRef.current();
       });
     });
     const documentVisibility = () => {
-      if (root && configured && !disposed) void root.configure({ frameloop: active() ? 'demand' : 'never' }).then(() => {
+      if (root && configured && !disposed) void root.configure(settings()).then(() => {
         if (active()) invalidateRef.current();
       });
     };
@@ -150,14 +152,14 @@ function ActivePreview(props: Props) {
       await renderer.init();
       if (disposed) { renderer.dispose(); return; }
       renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.toneMapping = THREE.NeutralToneMapping;
       const mode = (renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend ? 'webgpu' : 'webgl-fallback';
       container.dataset.renderer = mode;
       setBackend(mode);
       root = createRoot(canvas);
-      await root.configure({ gl: renderer, size: size(), dpr: Math.min(devicePixelRatio, 1.5), events,
-        frameloop: active() ? 'demand' : 'never',
+      await root.configure({ gl: renderer, ...settings(), events,
         camera: { fov: 42, position: [3.1, 2.5, 3.8] }, onCreated: state => state.events.connect?.(canvas) });
+      // The first configure sets R3F's own tone mapping (ACES Filmic) on the renderer it is given.
+      renderer.toneMapping = THREE.NeutralToneMapping;
       if (!disposed) {
         configured = true;
         rootRef.current = root;

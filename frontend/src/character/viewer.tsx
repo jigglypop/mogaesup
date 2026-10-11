@@ -21,6 +21,14 @@ type Model = { gltf: GLTF; url: string; rigged: boolean; restorePose(): void };
 export type CardView = 'front' | 'side' | 'back' | 'opposite';
 type ViewProps = { model: Model; animation: number; studio?: boolean; card?: boolean; cardView: CardView; onReady(): void; onError(error: Error): void; onWorld(position: { x: number; y: number; z: number }, meshes: number): void };
 const worldMode = { type: 'character', controller: 'keyboard', control: 'thirdPerson' } as const;
+/**
+ * gaesup-world's controller runs only with a character URL and loads that file itself. The viewer draws the model it
+ * already downloaded and checked, so the engine gets an empty glTF: no second download of the model, no copy of it in
+ * the engine's cache. The engine fetches that address, so it is a blob: one, which the site's connect-src allows (data:
+ * is refused): one for the page, made on first use and kept, so every viewer and load uses the same engine cache entry.
+ */
+let emptyCharacter: { characterUrl: string } | undefined;
+const engineUrls = () => emptyCharacter ??= { characterUrl: URL.createObjectURL(new Blob([JSON.stringify({ asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [] }], nodes: [] })], { type: 'model/gltf+json' })) };
 
 const release = (gltf: GLTF) => disposeObjectResources(gltf.scenes);
 /** Where the walking preview drops the character; one vector, so re-renders do not respawn it. */
@@ -53,11 +61,6 @@ function CharacterScene({ model, animation, onReady, onWorld }: ViewProps) {
   const bounds = useMemo(() => new THREE.Box3().setFromObject(model.gltf.scene), [model]);
   const size = useMemo(() => bounds.getSize(new THREE.Vector3()), [bounds]);
   const origin = useMemo(() => [-((bounds.min.x + bounds.max.x) / 2), -bounds.min.y, -((bounds.min.z + bounds.max.z) / 2)] as [number, number, number], [bounds]);
-  const excluded = useMemo(() => {
-    const names: string[] = [];
-    model.gltf.scene.traverse(node => { if (node instanceof THREE.Mesh) names.push(node.name); });
-    return names;
-  }, [model]);
   useEffect(() => {
     const canvas = gl.domElement;
     canvas.tabIndex = 0; canvas.setAttribute('aria-label', '개숲월드 캐릭터 이동 영역');
@@ -98,8 +101,7 @@ function CharacterScene({ model, animation, onReady, onWorld }: ViewProps) {
   });
   return <GaesupController key={model.url} clickToMove={false} position={START}
     rigidBodyRef={body} outerGroupRef={outer} innerGroupRef={inner}
-    colliderSize={{ height: Math.max(size.y, .3), radius: Math.max(.15, Math.min(size.x, size.z) * .3) }}
-    excludeBaseNodes={excluded}>
+    colliderSize={{ height: Math.max(size.y, .3), radius: Math.max(.15, Math.min(size.x, size.z) * .3) }}>
     <group rotation={[0, Math.PI, 0]}><group position={origin}><primitive object={model.gltf.scene} dispose={null} /></group></group>
   </GaesupController>;
 }
@@ -263,7 +265,6 @@ function SoftLights() {
 }
 
 function CharacterViewport(props: ViewProps) {
-  const urls = useMemo(() => ({ characterUrl: props.model.url }), [props.model.url]);
   const cameraOption = useMemo(() => {
     const height = Math.max(new THREE.Box3().setFromObject(props.model.gltf.scene).getSize(new THREE.Vector3()).y, 1);
     return { type: 'thirdPerson' as const, xDistance: 0, yDistance: height * 1.6, zDistance: height * 3.6,
@@ -271,20 +272,20 @@ function CharacterViewport(props: ViewProps) {
       minZoom: .75, maxZoom: 1.6, zoomSpeed: .001, enableCollision: false,
       smoothing: { position: .14, rotation: .14, fov: .12 }, bounds: { minX: -54, maxX: 54, minY: .35, maxY: 24, minZ: -54, maxZ: 54 } };
   }, [props.model]);
-  if (props.card) return <GaesupWorld urls={urls}>
+  if (props.card) return <GaesupWorld urls={engineUrls()}>
     <PreviewBoundary onError={props.onError}>
       <SoftLights />
       <CardScene {...props} />
     </PreviewBoundary>
   </GaesupWorld>;
-  if (props.studio) return <GaesupWorld urls={urls}>
+  if (props.studio) return <GaesupWorld urls={engineUrls()}>
     <PreviewBoundary onError={props.onError}>
       <SoftLights />
       <gridHelper args={[20, 40, ...studioGrid()]} position={[0, -.02, 0]} />
       <EditingScene {...props} />
     </PreviewBoundary>
   </GaesupWorld>;
-  return <GaesupWorld urls={urls} mode={worldMode} cameraOption={cameraOption}>
+  return <GaesupWorld urls={engineUrls()} mode={worldMode} cameraOption={cameraOption}>
     <PreviewBoundary onError={props.onError}>
         <Suspense fallback={null}>
           <Physics gravity={[0, -9.81, 0]}>
@@ -327,7 +328,7 @@ export class ModelViewer {
     this.badge.textContent = 'WebGPU 초기화 중';
     container.append(this.mount, this.badge);
     this.mount.append(this.canvas);
-    this.observer = new ResizeObserver(() => { if (this.root && !this.disposed) void this.root.configure({ size: this.size() }); });
+    this.observer = new ResizeObserver(() => { if (this.root && !this.disposed) void this.root.configure(this.settings()); });
     this.observer.observe(container);
     this.visibilityObserver = new IntersectionObserver(entries => {
       this.inViewport = entries.some(entry => entry.isIntersecting);
@@ -340,9 +341,11 @@ export class ModelViewer {
     return document.hidden || !this.inViewport ? 'never' : this.presentation === 'world' ? 'always' : 'demand';
   }
   private updateVisibility = () => {
-    if (this.root && !this.disposed) void this.root.configure({ frameloop: this.frameLoop() }).then(() => this.render());
+    if (this.root && !this.disposed) void this.root.configure(this.settings()).then(() => this.render());
   };
   private size() { return { width: this.container.clientWidth, height: this.container.clientHeight, top: 0, left: 0 }; }
+  /** Every configure passes all of these: R3F resets one a call leaves out (the loop to 'always', the ratio to [1, 2]). */
+  private settings() { return { size: this.size(), dpr: Math.min(devicePixelRatio, 1.5), frameloop: this.frameLoop() } as const; }
   private initialize() {
     if (this.initializing) return this.initializing;
     // A try after a failed one starts from "initializing" again; the badge always says what is true now.
@@ -354,16 +357,16 @@ export class ModelViewer {
         if (this.disposed) { renderer.dispose(); return; }
         this.renderers.add(renderer);
         renderer.outputColorSpace = THREE.SRGBColorSpace;
-        renderer.toneMapping = THREE.NeutralToneMapping;
         renderer.setClearColor(0x000000, 0);
         const backend = renderer.backend as { isWebGPUBackend?: boolean };
         this.onBackend(backend.isWebGPUBackend ? 'webgpu' : 'webgl-fallback');
         // Initialize before creating an R3F root so a removed panel cannot finish an async Canvas mount.
         this.root = createRoot(this.canvas);
-        await this.root.configure({ gl: renderer, size: this.size(), dpr: Math.min(devicePixelRatio, 1.5),
-          frameloop: this.frameLoop(),
+        await this.root.configure({ gl: renderer, ...this.settings(),
           camera: { fov: 42, position: [0, 3, 7] }, events,
           onCreated: state => state.events.connect?.(this.canvas) });
+        // The first configure sets R3F's own tone mapping (ACES Filmic) on the renderer it is given.
+        renderer.toneMapping = THREE.NeutralToneMapping;
         if (this.disposed) this.root.unmount();
       } catch (error) {
         try { this.root?.unmount(); } catch { /* best-effort cleanup after configure failure */ }

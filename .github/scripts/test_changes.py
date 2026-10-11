@@ -89,7 +89,7 @@ class ReleaseRouting(unittest.TestCase):
     def test_pull_request_never_deploys(self):
         self.commit("server/src/main.rs", "backend/src/auth.py", "frontend/src/main.tsx")
         self.assertEqual(self.route(event="pull_request"),
-                         {"server_check", "backend_check", "frontend_check"})
+                         {"server_check", "backend_check", "frontend_check", "infra_check"})
 
     def test_non_main_manual_run_never_deploys(self):
         self.assertEqual(self.route(event="workflow_dispatch", ref="refs/heads/topic", target="all"),
@@ -116,7 +116,7 @@ class ReleaseRouting(unittest.TestCase):
             ("frontend/src/main.tsx", {"frontend_check", "deploy_web"}),
             ("frontend/vendor/gaesup-world-fixed.tgz", {"frontend_check", "deploy_web"}),
             ("server/migrations/003.sql", {"server_check", "deploy_server"}),
-            ("backend/src/services/job.py", {"backend_check", "deploy_studio"}),
+            ("backend/src/services/job.py", {"backend_check", "infra_check", "deploy_studio"}),
         ):
             with self.subTest(path=path):
                 self.commit(path)
@@ -131,19 +131,29 @@ class ReleaseRouting(unittest.TestCase):
         self.commit("server/build.rs", "frontend/postcss.config.js")
         self.assertEqual(self.route(), {"server_check", "frontend_check", "deploy_server", "deploy_web"})
 
+    def test_new_studio_paths_run_the_release_check(self):
+        # They deploy the studio without being listed, and only the infra check (ReleasePaths) sees whether
+        # backend/infra/prepare-aws.ps1 packs them too.
+        for path in ("backend/prompts/garment.txt", "backend/config.json"):
+            with self.subTest(path=path):
+                self.commit(path)
+                self.assertEqual(self.route(event="pull_request"), {"backend_check", "infra_check"})
+                self.assertEqual(self.route(), {"backend_check", "infra_check", "deploy_studio"})
+                self.base = self.head()
+
     def test_tests_and_documents_do_not_deploy(self):
         self.commit("frontend/src/__tests__/page.test.ts", "server/tests/api.rs",
                     "backend/tests/test_api.py", "backend/README.md")
-        self.assertEqual(self.route(), {"frontend_check", "server_check", "backend_check"})
+        self.assertEqual(self.route(), {"frontend_check", "server_check", "backend_check", "infra_check"})
 
     def test_notes_inside_runtime_folders_do_not_deploy(self):
         self.commit("frontend/src/character/AGENTS.md", "backend/src/AGENTS.md",
                     "frontend/vendor/engine.patch", "frontend/vendor/engine.provenance.json")
-        self.assertEqual(self.route(), {"frontend_check", "backend_check"})
+        self.assertEqual(self.route(), {"frontend_check", "backend_check", "infra_check"})
 
     def test_python_auth_change_checks_server_contract(self):
         self.commit("backend/src/auth.py")
-        self.assertEqual(self.route(), {"server_check", "backend_check", "deploy_studio"})
+        self.assertEqual(self.route(), {"server_check", "backend_check", "infra_check", "deploy_studio"})
 
     def test_workflow_change_checks_and_deploys_everything(self):
         self.commit(".github/workflows/pipeline.yml")
@@ -190,7 +200,8 @@ class ReleaseRouting(unittest.TestCase):
         self.commit("server/src/main.rs", "frontend/src/main.tsx", "backend/src/services/job.py")
         self.deployed.update(server=self.head(), web=self.head())
         self.commit("docs/notes.txt")
-        self.assertEqual(self.route(), {"server_check", "frontend_check", "backend_check", "deploy_studio"})
+        self.assertEqual(self.route(), {"server_check", "frontend_check", "backend_check", "infra_check",
+                                        "deploy_studio"})
 
     def test_a_part_already_deployed_past_the_check_base_is_not_deployed_again(self):
         self.commit("server/src/main.rs")
@@ -209,29 +220,48 @@ class ReleaseRouting(unittest.TestCase):
 class ReleasePaths(unittest.TestCase):
     """The studio release (backend/infra/prepare-aws.ps1) and its routing hold the same files."""
 
-    def release_paths(self):
-        text = (ROOT / "backend/infra/prepare-aws.ps1").read_text(encoding="utf-8")
+    def release_paths(self, repo):
+        text = (repo / "backend/infra/prepare-aws.ps1").read_text(encoding="utf-8")
         found = re.search(r"\$releasePaths = @\((.*?)\)", text, re.S)
         self.assertIsNotNone(found, "prepare-aws.ps1 must list $releasePaths")
         return re.findall(r"'([^']+)'", found.group(1))
 
-    def test_every_packed_file_deploys_the_studio_and_nothing_else_does(self):
-        tracked = subprocess.run(["git", "-C", ROOT.as_posix(), "ls-files"], check=True, capture_output=True,
-                                 text=True).stdout.split()
-        released = self.release_paths()
+    def mismatched(self, repo):
+        """The files tracked in `repo` that its routing and its studio release disagree on."""
+        # Paths as they are, one per line, as changes.sh and prepare-aws.ps1 read them (the default quoting would hide a
+        # Hangul name from both lists, and splitting on blanks would cut a name with a space).
+        tracked = subprocess.run(["git", "-C", repo.as_posix(), "-c", "core.quotePath=false", "ls-files"], check=True,
+                                 capture_output=True, encoding="utf-8").stdout.splitlines()
+        released = self.release_paths(repo)
 
         def packed(path):
             return any(path == item or path.startswith(item + "/") for item in released)
-        routes = parts_of(tracked)
-        for path in tracked:
-            with self.subTest(path=path):
-                if path == ".github/workflows/pipeline.yml":
-                    # A changed pipeline deploys every part on purpose.
-                    self.assertEqual(routes[path], set(PARTS))
-                elif path.endswith(".md"):
-                    self.assertNotIn("studio", routes[path])
-                else:
-                    self.assertEqual("studio" in routes[path], packed(path))
+
+        def agrees(path, parts):
+            if path == ".github/workflows/pipeline.yml":
+                # A changed pipeline deploys every part on purpose.
+                return parts == set(PARTS)
+            if path.endswith(".md"):
+                return "studio" not in parts
+            return ("studio" in parts) == packed(path)
+        return [path for path, parts in parts_of(tracked).items() if not agrees(path, parts)]
+
+    def test_every_packed_file_deploys_the_studio_and_nothing_else_does(self):
+        self.assertEqual(self.mismatched(ROOT), [])
+
+    def test_hangul_and_spaced_paths_are_compared(self):
+        # Both deploy the studio (release_parts.sh), but prepare-aws.ps1 does not pack them.
+        unpacked = ["backend/new prompts/x.txt", "backend/프롬프트/의상.txt"]
+        with tempfile.TemporaryDirectory(prefix="release-paths-") as temp:
+            repo = Path(temp)
+            (repo / "backend/infra").mkdir(parents=True)
+            shutil.copy(ROOT / "backend/infra/prepare-aws.ps1", repo / "backend/infra")
+            for name in unpacked:
+                (repo / name).parent.mkdir(parents=True)
+                (repo / name).write_text("test\n", encoding="utf-8")
+            for args in (("init", "--quiet"), ("add", "--all")):
+                subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+            self.assertEqual(self.mismatched(repo), unpacked)
 
 
 class DeployBases(unittest.TestCase):

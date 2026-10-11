@@ -26,6 +26,11 @@ struct Call {
     uri: String,
     /// Whether it came with a body's framing: a `Transfer-Encoding` or a `Content-Length`.
     framed: bool,
+    /// Its `x-studio-scope` and `x-studio-user`, which the studio's nginx passes on as they came.
+    scope: Option<String>,
+    user: Option<String>,
+    /// Its `Authorization`, signed when this server has FACTORY_JWT_SECRET.
+    authorization: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -34,10 +39,14 @@ struct Seen(Arc<Mutex<Vec<Call>>>);
 impl Seen {
     fn record(&self, request: &Request) {
         let headers = request.headers();
+        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_owned);
         self.0.lock().unwrap().push(Call {
             method: request.method().to_string(),
             uri: request.uri().to_string(),
             framed: headers.contains_key(header::TRANSFER_ENCODING) || headers.contains_key(header::CONTENT_LENGTH),
+            scope: header("x-studio-scope"),
+            user: header("x-studio-user"),
+            authorization: header("authorization"),
         });
     }
 
@@ -623,5 +632,82 @@ async fn 캐릭터_서버가_이_서버의_인증을_거절하면_앱_로그인�
     assert_eq!((missing.status, missing.body["detail"].as_str()), (StatusCode::NOT_FOUND, Some("no such part")));
     let me = app.call("GET", "/api/auth/me", None, Some(&member)).await;
     assert_eq!(me.body["user"]["username"], "member_auth");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 토큰이_없어도_회원의_읽기는_회원_범위와_이름을_싣고_조립_전체는_스튜디오에_닿지_않는다() {
+    // No FACTORY_JWT_SECRET (set-factory-jwt.py not run): no Authorization goes out, so the studio's nginx signs the
+    // request in as its owner; the scope and the name reach the character server as headers of their own.
+    let (app, seen) = gateway(FactoryAccess::Write, 0).await;
+    let member = app.register("member_scope", "회원").await;
+    let boss = admin(&app, "admin_scope").await;
+    let read = |path: &str, cookie: &str| {
+        axum::http::Request::builder()
+            .uri(path)
+            .header(header::COOKIE, cookie)
+            // What a browser adds of its own never reaches the character server.
+            .header("x-studio-scope", "operator")
+            .header("x-studio-user", "admin_scope")
+            .body(Body::empty())
+            .unwrap()
+    };
+    for path in ["/api/avatar-factory/wardrobe/bodies", "/api/avatar-factory/jobs/j1/native-parts/v2/hair.glb"] {
+        assert_eq!(app.send(read(path, &member)).await.status, StatusCode::OK, "{path}");
+        assert_eq!(app.send(read(path, &boss)).await.status, StatusCode::OK, "{path}");
+    }
+    let member_read = (Some("member".to_owned()), Some("member_scope".to_owned()));
+    let staff_read = (None, Some("admin_scope".to_owned()));
+    let sent = || seen.calls().into_iter().map(|call| (call.scope, call.user)).collect::<Vec<_>>();
+    assert_eq!(sent(), [member_read.clone(), staff_read.clone(), member_read, staff_read.clone()]);
+    assert!(seen.calls().iter().all(|call| call.authorization.is_none()));
+
+    // The whole assembly is no part a member puts on: refused here, whatever the character server would answer.
+    for name in ["model.glb", "model.runtime.glb"] {
+        let path = format!("/api/avatar-factory/jobs/j1/native-parts/v2/{name}");
+        let refused = app.send(read(&path, &member)).await;
+        assert_eq!(
+            (refused.status, refused.body["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some("studio_viewer_only"))
+        );
+        assert_eq!(app.send(read(&path, &boss)).await.status, StatusCode::OK, "{name}");
+    }
+    assert_eq!(seen.calls().len(), 6);
+
+    // Changes, and what this server reads for itself, name who they are for as well.
+    let outfit = app.call("PUT", "/api/avatar-factory/wardrobe/outfits/mine", Some(json!({})), Some(&boss)).await;
+    assert_eq!(outfit.status, StatusCode::OK);
+    factory::fetch_json(&app.state, "looker", "avatar-factory/wardrobe/bodies").await.unwrap();
+    assert_eq!(sent()[6..], [staff_read, (None, Some("looker".to_owned()))]);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 토큰이_있으면_회원의_읽기는_member_역할_토큰과_범위_헤더를_함께_싣는다() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let seen = Seen::default();
+    let url = fake_factory(seen.clone()).await;
+    let token = mogaesup_server::config::FactoryToken {
+        key: vec![b'x'; 32],
+        issuer: "mogaesup".into(),
+        audience: "mogaesup-client".into(),
+        owner_id: 1,
+    };
+    let app = TestApp::new(Some(Factory { token: Some(token), ..settings(url, FactoryAccess::Read, 0) })).await;
+    let member = app.register("member_token", "회원").await;
+    let boss = admin(&app, "admin_token").await;
+    for cookie in [&member, &boss] {
+        let reply = app.call("GET", "/api/avatar-factory/jobs/j1/native-parts/v2/hair.glb", None, Some(cookie)).await;
+        assert_eq!(reply.status, StatusCode::OK);
+    }
+    let roles = |call: &Call| {
+        let bearer = call.authorization.as_deref().and_then(|value| value.strip_prefix("Bearer ")).unwrap();
+        let payload = URL_SAFE_NO_PAD.decode(bearer.split('.').nth(1).unwrap()).unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        (claims["roles"].clone(), claims["name"].as_str().unwrap().to_owned(), call.scope.clone())
+    };
+    let calls = seen.calls();
+    assert_eq!(roles(&calls[0]), (json!(["ADMIN", "MEMBER"]), "member_token".to_owned(), Some("member".to_owned())));
+    assert_eq!(roles(&calls[1]), (json!(["ADMIN"]), "admin_token".to_owned(), None));
     app.cleanup().await;
 }

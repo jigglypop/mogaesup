@@ -2,6 +2,7 @@
 from collections import OrderedDict
 from copy import deepcopy
 import hashlib
+from itertools import islice
 import json
 import re
 from threading import Lock
@@ -40,9 +41,24 @@ def body_facts(path, sha256):
         return facts
 
 
+# Accessor rows hashed at a time by geometry_identity.
+IDENTITY_ROWS = 65536
+
+
+def _hash_rows(signature, rows):
+    """Feed `signature` the JSON text of the list of `rows` a slice at a time: the same bytes, without ever holding a
+    large body's value lists or that whole text."""
+    signature.update(b'[')
+    separator = b''
+    while chunk := list(islice(rows, IDENTITY_ROWS)):
+        signature.update(separator + json.dumps(chunk, separators=(',', ':'))[1:-1].encode())
+        separator = b','
+    signature.update(b']')
+
+
 def geometry_identity(content):
     """Texture-independent identity; changing geometry or bind transforms changes it."""
-    from src.services.avatar_expression_bake import _accessor as accessor
+    from src.services.avatar_expression_bake import _accessor_rows as rows
     doc, binary = parse_glb(content, strict=True)
     signature = hashlib.sha256()
     structure = {'nodes': [{k: n[k] for k in ('name', 'children', 'matrix', 'translation', 'rotation', 'scale', 'skin')
@@ -51,17 +67,16 @@ def geometry_identity(content):
     signature.update(json.dumps(structure, sort_keys=True, separators=(',', ':')).encode())
     for skin in doc.get('skins', []):
         if 'inverseBindMatrices' in skin:
-            signature.update(json.dumps(accessor(doc, binary, skin['inverseBindMatrices']), separators=(',', ':')).encode())
+            _hash_rows(signature, rows(doc, binary, skin['inverseBindMatrices']))
     for mesh in doc.get('meshes', []):
         for primitive in mesh.get('primitives', []):
             for key in ('POSITION', 'JOINTS_0', 'WEIGHTS_0'):
                 index = primitive.get('attributes', {}).get(key)
                 if index is not None:
-                    values = accessor(doc, binary, index)
-                    signature.update(key.encode()); signature.update(str(len(values)).encode())
-                    signature.update(json.dumps(values, separators=(',', ':')).encode())
+                    signature.update(key.encode()); signature.update(str(doc['accessors'][index]['count']).encode())
+                    _hash_rows(signature, rows(doc, binary, index))
             if 'indices' in primitive:
-                signature.update(json.dumps(accessor(doc, binary, primitive['indices']), separators=(',', ':')).encode())
+                _hash_rows(signature, rows(doc, binary, primitive['indices']))
     return signature.hexdigest()
 
 

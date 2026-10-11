@@ -21,6 +21,7 @@ vi.mock('../../api/endpoints', () => ({ authApi: { realtimeTicket: ticket } }));
 import { MemoryRouter } from 'react-router-dom';
 
 import type { RealtimeTicket, User } from '../../api/types';
+import { onSessionDoubt } from '../../auth/sessionWork';
 import { mount } from '../../__tests__/mount';
 import { useUIConfigStore } from 'gaesup-world';
 
@@ -106,6 +107,8 @@ describe('방문자 연결과 캐릭터 전달', () => {
   });
 
   it('계정이 바뀐 뒤 도착한 이전 계정 티켓으로 연결하지 않는다', async () => {
+    const doubted = vi.fn();
+    const stopDoubt = onSessionDoubt(doubted);
     let finish!: (result: RealtimeTicket) => void;
     ticket.mockReturnValueOnce(new Promise<RealtimeTicket>((resolve) => { finish = resolve; }))
       .mockResolvedValueOnce(pass('b-pass', other));
@@ -117,16 +120,23 @@ describe('방문자 연결과 캐릭터 전달', () => {
     expect(live.connect).toHaveBeenCalledTimes(1);
     expect(live.connect.mock.calls[0]![0].playerName).toBe(other.displayName);
     expect(live.updateConfig.mock.calls[0]![0].websocket.url).toContain('ticket=b-pass');
+    // The room it was asked for is gone; that ticket says nothing about the session now.
+    expect(doubted).not.toHaveBeenCalled();
     await view.unmount();
+    stopDoubt();
   });
 
-  it('티켓 발급 시 쿠키 계정이 이미 바뀌었다면 이전 이름으로 방에 들어가지 않는다', async () => {
+  it('티켓 발급 시 쿠키 계정이 이미 바뀌었다면 이전 이름으로 방에 들어가지 않고, 누가 로그인했는지 다시 묻게 한다', async () => {
+    const doubted = vi.fn();
+    const stopDoubt = onSessionDoubt(doubted);
     ticket.mockResolvedValue(pass('wrong-owner', other));
     const view = await mount(room());
     await flush();
     expect(live.connect).not.toHaveBeenCalled();
     expect(live.updateConfig).not.toHaveBeenCalled();
+    expect(doubted).toHaveBeenCalledTimes(1);
     await view.unmount();
+    stopDoubt();
   });
 
   it('로그인하지 않은 방문자는 티켓을 발급하지 않는다', async () => {

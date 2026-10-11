@@ -5,46 +5,11 @@ const { ticket } = vi.hoisted(() => ({ ticket: vi.fn() }));
 vi.mock('../../api/endpoints', () => ({ authApi: { realtimeTicket: ticket } }));
 
 import type { RealtimeTicket, User } from '../../api/types';
+import { onSessionDoubt } from '../../auth/sessionWork';
 import { mount } from '../../__tests__/mount';
 import { readServerMessage } from '../protocol';
 import { useGameSession, type GameSessionApi, type GameSessionOptions } from '../useGameSession';
-
-/** A WebSocket the test opens, feeds and drops by hand. */
-class FakeSocket {
-  static readonly CONNECTING = 0;
-  static readonly OPEN = 1;
-  static readonly CLOSING = 2;
-  static readonly CLOSED = 3;
-  static made: FakeSocket[] = [];
-  readyState = FakeSocket.CONNECTING;
-  sent: unknown[] = [];
-  closedWith: number | undefined;
-  onopen: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor(readonly url: string) {
-    FakeSocket.made.push(this);
-  }
-  send(data: string) {
-    this.sent.push(JSON.parse(data));
-  }
-  close(code?: number) {
-    this.readyState = FakeSocket.CLOSED;
-    this.closedWith = code;
-  }
-  open() {
-    this.readyState = FakeSocket.OPEN;
-    act(() => this.onopen?.());
-  }
-  receive(message: unknown) {
-    act(() => this.onmessage?.({ data: JSON.stringify(message) }));
-  }
-  drop(code = 1006) {
-    this.readyState = FakeSocket.CLOSED;
-    act(() => this.onclose?.({ code }));
-  }
-}
+import { FakeSocket } from './socket';
 
 const viewer: User = { id: 'viewer-a', username: 'a', displayName: '에이', role: 'user' };
 const other: User = { id: 'viewer-b', username: 'b', displayName: '비', role: 'user' };
@@ -131,13 +96,15 @@ describe('섬의 게임 소켓', () => {
     expect(ticket).toHaveBeenCalledTimes(1);
   });
 
-  it('끊기면 세션을 비우고 새 티켓으로 다시 연결하며, 세션을 받지 못한 시도마다 더 오래 기다린다', async () => {
+  it('끊겨도 세션은 다음 소켓이 말할 때까지 그대로 두고, 새 티켓으로 다시 연결하며, 세션을 받지 못한 시도마다 더 오래 기다린다', async () => {
     const view = await mount(<Probe {...options()} />);
     await flush();
     latest().open();
     latest().receive({ type: 'Session', session: lobby() });
+    const shown = api.session;
     latest().drop();
-    expect(api.session).toBeNull();
+    // The game goes on without the socket: what it showed stays.
+    expect(api.session).toBe(shown);
     expect(api.connected).toBe(false);
     // Had a session: back after a second, with a fresh ticket.
     await wait(999);
@@ -156,9 +123,11 @@ describe('섬의 게임 소켓', () => {
     expect(FakeSocket.made).toHaveLength(3);
     await wait(1);
     expect(FakeSocket.made).toHaveLength(4);
-    // A session again: the wait starts over.
+    expect(api.session).toBe(shown);
+    // A session again: the wait starts over. The new socket's word is what the session is now.
     latest().open();
     latest().receive({ type: 'Session', session: null });
+    expect(api.session).toBeNull();
     latest().drop();
     await wait(1_000);
     expect(FakeSocket.made).toHaveLength(5);
@@ -175,7 +144,23 @@ describe('섬의 게임 소켓', () => {
     await view.unmount();
   });
 
-  it('꺼져 있거나 로그인하지 않았거나 다른 계정의 티켓이면 소켓을 열지 않고, 꺼지면 닫는다', async () => {
+  it('서버가 이 사람에게 소켓을 닫으면(로그인 끝 4401, 섬 닫힘 4403) 세션을 비운다', async () => {
+    const view = await mount(<Probe {...options()} />);
+    await flush();
+    for (const code of [4401, 4403]) {
+      latest().open();
+      latest().receive({ type: 'Session', session: lobby() });
+      expect(api.session).not.toBeNull();
+      latest().drop(code);
+      expect(api.session).toBeNull();
+      expect(api.connected).toBe(false);
+      await wait(1_000);
+    }
+    expect(FakeSocket.made).toHaveLength(3);
+    await view.unmount();
+  });
+
+  it('꺼져 있거나 로그인하지 않았거나 다른 계정의 티켓이면 소켓을 열지 않고, 꺼지면 닫되 세션은 바로 비우지 않으며, 섬이나 계정이 바뀌면 비운다', async () => {
     const off = await mount(<Probe {...options({ enabled: false })} />);
     await flush();
     await off.rerender(<Probe {...options({ enabled: false, viewerId: null })} />);
@@ -183,20 +168,65 @@ describe('섬의 게임 소켓', () => {
     expect(ticket).not.toHaveBeenCalled();
     await off.unmount();
 
+    const doubted = vi.fn();
+    const stopDoubt = onSessionDoubt(doubted);
     ticket.mockResolvedValueOnce(pass('theirs', other));
     const switched = await mount(<Probe {...options()} />);
     await flush();
     expect(FakeSocket.made).toHaveLength(0);
+    // The session cookie is someone else's: the app is asked who is signed in.
+    expect(doubted).toHaveBeenCalledTimes(1);
     await switched.unmount();
+    stopDoubt();
 
     const live = await mount(<Probe {...options()} />);
     await flush();
     latest().open();
     latest().receive({ type: 'Session', session: lobby() });
+    const shown = api.session;
+    // Out of the live room while it connects again: the socket closes, the session stays as last shown.
     await live.rerender(<Probe {...options({ enabled: false })} />);
     expect(latest().closedWith).toBe(1000);
+    expect(api.session).toBe(shown);
+    expect(api.connected).toBe(false);
+    await live.rerender(<Probe {...options()} />);
+    await flush();
+    expect(FakeSocket.made).toHaveLength(2);
+    expect(api.session).toBe(shown);
+    // Another island, or another account, starts with none.
+    await live.rerender(<Probe {...options({ username: 'other' })} />);
+    expect(FakeSocket.made[1]!.closedWith).toBe(1000);
+    expect(api.session).toBeNull();
+    await flush();
+    latest().open();
+    latest().receive({ type: 'Session', session: lobby() });
+    await live.rerender(<Probe {...options({ username: 'other', viewerId: other.id, enabled: false })} />);
     expect(api.session).toBeNull();
     await live.unmount();
+  });
+
+  it('꺼진 채 실시간 방이 돌아오지 않으면 서버가 게임에서 뺄 무렵 세션도 비운다', async () => {
+    const view = await mount(<Probe {...options()} />);
+    await flush();
+    latest().open();
+    latest().receive({ type: 'Session', session: lobby() });
+    const shown = api.session;
+    // The live room comes back in time: the session goes on as shown.
+    await view.rerender(<Probe {...options({ enabled: false })} />);
+    await wait(14_999);
+    expect(api.session).toBe(shown);
+    await view.rerender(<Probe {...options()} />);
+    await flush();
+    await wait(15_000);
+    expect(api.session).toBe(shown);
+    // Shut out of the live room, its game socket closed before the server's own word came: it goes in the end.
+    await view.rerender(<Probe {...options({ enabled: false })} />);
+    await wait(14_999);
+    expect(api.session).toBe(shown);
+    await wait(1);
+    expect(api.session).toBeNull();
+    expect(FakeSocket.made).toHaveLength(2);
+    await view.unmount();
   });
 });
 

@@ -6,10 +6,10 @@ import { ApiRequestError, ApiTimeoutError } from '../../api/client';
 import type { Credentials, Registration, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
 import { Loading } from '../../pages/Loading';
-import { AuthProvider, SESSION_RENEW_MS, useAuth } from '../AuthProvider';
+import { AuthProvider, SESSION_MARK, SESSION_RENEW_MS, useAuth } from '../AuthProvider';
 import { draftKey } from '../drafts';
 import { followSession, SESSION_RETRY_MS, SESSION_UNREACHABLE_AFTER } from '../session';
-import { expireSession, followSessionOwner, sessionEpoch, sessionLapsed, setSessionOwner } from '../sessionWork';
+import { doubtSession, expireSession, followSessionOwner, sessionEpoch, sessionLapsed, setSessionOwner } from '../sessionWork';
 
 const { me, login, register, logout } = vi.hoisted(() => ({
   me: vi.fn<() => Promise<{ user: User | null }>>(),
@@ -21,6 +21,11 @@ vi.mock('../../api/endpoints', () => ({ authApi: { me, login, register, logout }
 
 const mogae: User = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user' };
 const flush = () => vi.advanceTimersByTimeAsync(0);
+/** Another tab signing in or out: it changes the mark in storage, and this tab hears it. */
+const anotherTab = () => {
+  localStorage.setItem(SESSION_MARK, String(Math.random()));
+  window.dispatchEvent(new StorageEvent('storage', { key: SESSION_MARK }));
+};
 
 describe('세션 확인', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -380,6 +385,148 @@ describe('로그인 상태 제공자', () => {
       expect(sessionLapsed()).toBe(false);
       expireSession();
       expect(sessionLapsed()).toBe(true);
+    });
+  });
+
+  describe('다른 탭에서 로그인하거나 로그아웃했을 때', () => {
+    const other: User = { ...mogae, id: 'u2', username: 'other' };
+    beforeEach(() => Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true }));
+    afterEach(() => localStorage.clear());
+
+    it('다른 계정으로 로그인했다면 바로 알아채고, 이전 계정의 작업을 멈추고 초안을 지운다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn();
+      followSessionOwner(mogae.id, stop);
+      localStorage.setItem(draftKey(mogae.id, 'status'), JSON.stringify({ text: '쓰다 만 글', base: '' }));
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { anotherTab(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(localStorage.getItem(draftKey(mogae.id, 'status'))).toBeNull();
+      await unmount();
+    });
+
+    it('로그아웃했다면 이 탭의 세션도 풀린 것으로 보고, 그 계정의 작업은 다시 로그인할 때까지 지킨다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const stop = vi.fn(); const resume = vi.fn();
+      const unwatch = followSessionOwner(mogae.id, stop, resume);
+      me.mockResolvedValueOnce({ user: null });
+      await act(async () => { anotherTab(); await flush(); });
+      expect(shown(container)).toBe('anonymous:-');
+      expect(auth.lapsed).toEqual(mogae);
+      expect(stop).not.toHaveBeenCalled();
+
+      me.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { anotherTab(); await flush(); });
+      expect(shown(container)).toBe('signedIn:mogae');
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(stop).not.toHaveBeenCalled();
+      unwatch(); await unmount();
+    });
+
+    it('그 소식을 놓친 탭은 다시 보일 때 바뀐 표시를 보고 묻고, 표시가 그대로면 묻지 않는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const back = () => { document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event('focus')); };
+      await act(async () => { back(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(1);
+      // Asleep (or kept for Back and Forward) while another tab signed in: the mark changed without a word.
+      localStorage.setItem(SESSION_MARK, 'elsewhere');
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { back(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      await unmount();
+    });
+
+    it('이 탭에서 로그인·로그아웃하면 다른 탭이 듣도록 표시를 바꾸고, 그 표시로 스스로 다시 묻지는 않는다', async () => {
+      me.mockResolvedValueOnce({ user: null });
+      const { unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const before = localStorage.getItem(SESSION_MARK);
+      login.mockResolvedValueOnce({ user: mogae });
+      await act(async () => { await auth.login({ username: 'mogae', password: 'password' }); });
+      const signedIn = localStorage.getItem(SESSION_MARK);
+      expect(signedIn).not.toBeNull();
+      expect(signedIn).not.toBe(before);
+      logout.mockResolvedValueOnce(undefined);
+      await act(async () => { await auth.logout(); });
+      expect(localStorage.getItem(SESSION_MARK)).not.toBe(signedIn);
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await flush(); });
+      expect(me).toHaveBeenCalledTimes(1);
+      await unmount();
+    });
+
+    it('로그인하는 동안 다른 탭의 표시가 바뀌어도 그 답을 기다리고, 로그인이 실패하면 다시 보일 때 묻는다', async () => {
+      me.mockResolvedValueOnce({ user: null });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      let refuse!: (error: Error) => void;
+      login.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+      let signingIn!: Promise<User>;
+      await act(async () => { signingIn = auth.login({ username: 'mogae', password: 'wrong' }); await flush(); });
+      await act(async () => { anotherTab(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(1);
+      await act(async () => { refuse(new Error('wrong')); await signingIn.catch(() => undefined); });
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      await unmount();
+    });
+
+    it('로그인하는 동안 다른 탭도 로그인했다면 로그인이 끝난 뒤 다시 물어 쿠키의 주인을 따른다', async () => {
+      me.mockResolvedValueOnce({ user: null });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      let signedIn!: (value: { user: User }) => void;
+      login.mockImplementationOnce(() => new Promise((resolve) => { signedIn = resolve; }));
+      let signingIn!: Promise<User>;
+      await act(async () => { signingIn = auth.login({ username: 'mogae', password: 'password' }); await flush(); });
+      await act(async () => { anotherTab(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(1);
+      // The other tab's answer came last: the cookie is theirs.
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { signedIn({ user: mogae }); await signingIn; await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      // No other tab meanwhile: signing out asks nothing more.
+      logout.mockResolvedValueOnce(undefined);
+      await act(async () => { await auth.logout(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      await unmount();
+    });
+
+    it('오래 열어 둔 화면이 다시 물었을 때 다른 계정이라고 하면 그 계정으로 바뀐다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { await vi.advanceTimersByTimeAsync(SESSION_RENEW_MS + SESSION_RENEW_MS / 12); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(shown(container)).toBe('signedIn:other');
+      await unmount();
+    });
+
+    it('실시간 방이 쿠키 주인이 다르다고 알려 오면 다시 묻는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { container, unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      me.mockResolvedValueOnce({ user: other });
+      await act(async () => { doubtSession(); await flush(); });
+      expect(shown(container)).toBe('signedIn:other');
+      await unmount();
+    });
+
+    it('다시 물어도 같은 사람이면 아무것도 바꾸지 않는다', async () => {
+      me.mockResolvedValueOnce({ user: mogae });
+      const { unmount } = await mount(<AuthProvider><Actions /></AuthProvider>);
+      const signedIn = auth.user;
+      const epoch = sessionEpoch();
+      me.mockResolvedValueOnce({ user: { ...mogae } });
+      await act(async () => { anotherTab(); await flush(); });
+      expect(me).toHaveBeenCalledTimes(2);
+      expect(auth.user).toBe(signedIn);
+      expect(sessionEpoch()).toBe(epoch);
+      await unmount();
     });
   });
 

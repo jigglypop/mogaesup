@@ -6,11 +6,14 @@ the final key is atomic, and a temporary object that is renamed afterwards costs
 import base64
 from collections import Counter
 from contextlib import contextmanager
+import copy
 from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import logging
 from pathlib import Path as LocalPath
+from types import SimpleNamespace
 
 from botocore.exceptions import ClientError
 import httpx
@@ -20,7 +23,8 @@ import pytest
 from api.test_characters import rigged_glb
 from src.services import avatar_openai_images as images
 from src.services import object_storage, run_lock
-from src.services.avatar_image_recovery import classify_image_failure, decorate_job, settle_interrupted
+from src.services.avatar_image_recovery import (UNCONFIRMED_RETRY, classify_image_failure, decorate_job, has_dependents,
+                                                retry_views, settle_interrupted)
 from src.services.avatar_multiview_images import can_resume
 from src.services.character_pipeline import PipelineError
 from src.services.object_storage import StoredPath
@@ -262,6 +266,9 @@ def failed_attempt(tmp_path, request=None, response=None):
      httpx.ReadError('reset'), ('submission_uncertain', 'provider_connection')),
     ({'phase': 'response_saved', 'http_status': 200}, json.dumps(answer()).encode(),
      OSError('local disk'), ('submitting', 'local_processing')),
+    # A kept answer with no usable image fails the same way each time it is read: only an explicit request replaces it.
+    ({'phase': 'response_saved', 'http_status': 200}, b'{"data": []}',
+     PipelineError('image_missing', 'no image', 422), ('answer_invalid', 'provider_response')),
     (None, None, OSError('before any request'), ('failed', 'local_processing')),
 ])
 def test_an_image_failure_is_classified_from_its_receipt(tmp_path, request_saved, response, error, expected):
@@ -307,6 +314,185 @@ def test_an_answer_lost_before_it_was_stored_can_only_be_requested_again_explici
     assert not can_resume(tmp_path, state)
     decorate_job(tmp_path, public)
     assert [action['failure_id'] for action in public['next_actions'] if action['id'] == 'retry_image'] == ['f00d']
+
+
+# --- a kept answer that holds no usable image is replaced by one explicit request, never read again ----------------------
+
+class Pipeline:
+    """What retry_views uses of the image pipeline: one job's directory and records, and their publication."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.factory = SimpleNamespace(instance='fixture', directory=lambda owner, job_id: directory,
+                                       get=lambda owner, job_id: json.loads((directory / 'job.json').read_text()))
+
+    def publish(self, owner, job_id, state):
+        (self.directory / 'pipeline.json').write_text(json.dumps(state))
+
+
+SAVED_BODY = {'slot': 'body', 'image': {'status': 'succeeded'}, 'model': {'status': 'ready', 'task_id': None},
+              'views': {'front': {'status': 'succeeded'}, 'side': {'status': 'succeeded'}}}
+
+
+def paused_job(directory, parts, reference=None):
+    """A paused job's records as can_resume, decorate_job and retry_views read them, and its public view."""
+    (directory / 'output').mkdir(exist_ok=True)
+    state = {'production_spec': {'generated_views': ['front', 'side']}, 'parts': copy.deepcopy(parts)}
+    public = {'status': 'pipeline_paused', 'next_actions': [], 'progress': {'message': ''},
+              'parts': [{'slot': part['slot'], 'views': copy.deepcopy(part['views'])} for part in parts]}
+    if reference is not None:
+        state['reference_preparation'] = copy.deepcopy(reference)
+        public['reference_preparation'] = copy.deepcopy(reference)
+    (directory / 'pipeline.json').write_text(json.dumps(state))
+    (directory / 'job.json').write_text(json.dumps({'id': JOB, 'status': 'pipeline_paused'}))
+    return state, public
+
+
+def offered(public):
+    """(slot, view, failure ID) of every explicit image request the job offers."""
+    return [(action['slot'], action['view'], action['failure_id'])
+            for action in public['next_actions'] if action['id'] == 'retry_image' and action['enabled']]
+
+
+def retried(directory, slot, view, failure_id):
+    """The job's records once an explicit request for the view is accepted."""
+    _, created = retry_views(Pipeline(directory), 1, JOB, [{'slot': slot, 'view': view, 'failure_id': failure_id}])
+    assert created
+    return json.loads((directory / 'pipeline.json').read_text())
+
+
+def oversized():
+    content = io.BytesIO()
+    Image.new('RGBA', (4097, 1), 'blue').save(content, format='PNG')
+    return content.getvalue()
+
+
+@pytest.mark.parametrize('body', [
+    b'{"data": []}', b'{"error": {"code": "server_error"}}', b'<html>gateway</html>',
+    json.dumps({'data': [{'b64_json': '%%%'}]}).encode(),
+    json.dumps({'data': [{'b64_json': base64.b64encode(b'not an image').decode()}]}).encode(),
+    json.dumps({'data': [{'b64_json': base64.b64encode(oversized()).decode()}]}).encode(),
+])
+def test_an_answer_with_no_usable_image_is_replaced_by_one_explicit_request_instead_of_read_again(tmp_path, source,
+                                                                                                    monkeypatch, body):
+    receipt = tmp_path / 'output' / 'top-front-provider'
+    receipt.parent.mkdir()
+    sent = []
+    serve(monkeypatch, lambda request: (sent.append(request), httpx.Response(200, content=body))[1])
+    for _ in range(2):  # The paid request, then going on from its kept answer.
+        with pytest.raises(Exception) as stopped:
+            images.generate_standard_part_image([source], 'top', images.DEFAULT_MODEL, images.DEFAULT_BASE, receipt=receipt)
+        status, failure = classify_image_failure(stopped.value, receipt)
+        assert (status, failure['category']) == ('answer_invalid', 'provider_response')
+    assert len(sent) == 1 and receipt.with_suffix('.response.json').read_bytes() == body
+    top = {'slot': 'top', 'image': {'status': 'pending'}, 'model': {'status': 'pending'},
+           'views': {'front': {'status': status, 'failure': failure}, 'side': {'status': 'pending'}}}
+    state, public = paused_job(tmp_path, [SAVED_BODY, top])
+    # Going on would read the same answer and stop again, so it is not offered; one explicit request is.
+    assert not can_resume(tmp_path, state)
+    decorate_job(tmp_path, public)
+    assert offered(public) == [('top', 'front', failure['id'])]
+    # The answer arrived and was paid for: a new request is not a resend of one of unknown acceptance.
+    assert not [action for action in public['next_actions'] if action.get('warning')]
+    state = retried(tmp_path, 'top', 'front', failure['id'])
+    front = state['parts'][1]['views']['front']
+    assert front['status'] == 'pending' and front['receipt'] == f'top-front-retry-{failure["id"]}-provider'
+    assert can_resume(tmp_path, state)
+
+
+def test_a_reference_whose_answer_holds_no_usable_image_is_replaced_by_one_explicit_request(tmp_path):
+    receipt = tmp_path / 'output' / 'canonical-reference-provider'
+    receipt.parent.mkdir()
+    receipt.with_suffix('.response.json').write_bytes(b'{"data": []}')
+    status, failure = classify_image_failure(PipelineError('image_missing', 'no image', 422), receipt)
+    reference = {'status': status, 'failure': failure,
+                 'views': {'front': {'status': status, 'failure': failure, 'prompt': 'front'}, 'side': {'status': 'pending'}}}
+    body = {'slot': 'body', 'image': {'status': 'pending'}, 'model': {'status': 'pending'},
+            'views': {'front': {'status': 'pending'}, 'side': {'status': 'pending'}}}
+    state, public = paused_job(tmp_path, [body], reference)
+    assert status == 'answer_invalid' and not can_resume(tmp_path, state)
+    decorate_job(tmp_path, public)
+    assert offered(public) == [('reference', 'front', failure['id'])]
+    reference = retried(tmp_path, 'reference', 'front', failure['id'])['reference_preparation']
+    assert reference['status'] == 'pending'
+    assert reference['views']['front']['receipt'] == f'canonical-reference-front-retry-{failure["id"]}-provider'
+
+
+def test_a_reference_whose_answer_holds_no_usable_image_stops_its_own_step(tmp_path):
+    from src.services.avatar_production_progress import production_progress
+    waiting = {'front': {'status': 'pending'}, 'side': {'status': 'pending'}}
+    job = {'id': JOB, 'status': 'pipeline_paused', 'progress': {'stage': 'reference', 'message': ''},
+           # A run from the images stage prepares the reference first, and stopped there.
+           'character_flow': {'status': 'paused', 'stage': 'images', 'message': '', 'busy': False},
+           'production_spec': {'generated_views': ['front', 'side']},
+           'reference_preparation': {'status': 'answer_invalid',
+                                     'views': {'front': {'status': 'answer_invalid'}, 'side': {'status': 'pending'}}},
+           'parts': [{'slot': 'top', 'model_status': 'pending', 'views': waiting}]}
+    progress = production_progress(tmp_path, job)
+    steps = {step['id']: step['state'] for step in progress['steps']}
+    assert (steps['reference'], steps['images'], progress['current']) == ('blocked', 'pending', 'reference')
+
+
+def test_an_expression_whose_answer_holds_no_usable_image_is_blocked_for_a_request_under_a_new_key(tmp_path):
+    from native_assembly_fixture import JOB as BODY_JOB, VERSION, seed_native_assembly
+    from src.services.avatar_expression_generation import AvatarExpressionGeneration
+    from src.services.avatar_expression_pipeline import unconfirmed_generation
+    factory, _ = seed_native_assembly(tmp_path, 'fixture')
+    service = AvatarExpressionGeneration(factory, 1, BODY_JOB, VERSION)
+    generation = 'a' * 24
+    directory = service.directory(generation)
+    directory.mkdir(parents=True)
+    (directory / 'reference.png').write_bytes(png())
+    prompt = 'smile'
+    (directory / 'record.json').write_text(json.dumps({
+        'id': generation, 'job_id': BODY_JOB, 'body_version': VERSION, 'status': 'accepted', 'stage': 'image',
+        'provider_prompt': prompt, 'provider_prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
+        'prompt_revision': 'fixture', 'files': {}, 'created_at': '2026-10-01T00:00:00+00:00',
+        'references': [{'file': 'reference.png', 'kind': 'source.png', 'sha256': hashlib.sha256(png()).hexdigest()}],
+        'image_model': images.DEFAULT_MODEL, 'image_base': images.DEFAULT_BASE}))
+    (directory / 'image-provider.response.json').write_bytes(b'{"data": []}')
+    service.execute(generation)
+    item = service.get(generation)
+    # Resuming would read the same answer again; the default expressions' explicit run asks under a new key instead,
+    # without the double-charge warning: the answer arrived.
+    assert item['status'] == 'blocked' and not item['can_resume'] and item['error']
+    assert service.resume(generation)[1] is False
+    assert not unconfirmed_generation(directory)
+
+
+# --- a body shell's views are used only by its later views and its assembly ----------------------------------------------
+
+BODY_SHELL_MODEL = {'status': 'ready', 'task_id': None, 'origin': 'body_shell'}  # As AvatarVariants.create accepts it.
+
+
+@pytest.mark.parametrize('method, model, side, used', [
+    ('body_shell', BODY_SHELL_MODEL, 'pending', False),
+    ('body_shell', BODY_SHELL_MODEL, 'succeeded', True),
+    ('worn', {'status': 'pending'}, 'pending', False),
+    ('worn', {'status': 'PENDING', 'task_id': 'task-1'}, 'pending', True),
+    ('isolated', {'status': 'ready', 'task_id': 'task-1'}, 'pending', True),
+])
+def test_a_view_is_kept_only_while_later_work_uses_it(method, model, side, used):
+    part = {'slot': 'top', 'part_method': method, 'model': model,
+            'views': {'front': {'status': 'rejected'}, 'side': {'status': side}}}
+    state = {'production_spec': {'generated_views': ['front', 'side']}, 'parts': [SAVED_BODY, part]}
+    assert has_dependents(state, part, 'front') is used
+
+
+@pytest.mark.parametrize('stopped, failure, warning', [
+    ('rejected', {'id': 'shellfront01', 'category': 'policy', 'message': '이미지 안전 필터로 생성 중단'}, None),
+    ('submission_uncertain', {'id': 'shellfront01', 'category': 'provider_connection',
+                              'message': '생성 서버 연결 끊김 · 수신된 응답 없음'}, UNCONFIRMED_RETRY),
+])
+def test_a_failed_view_of_a_body_shell_part_is_replaced_by_one_explicit_request(tmp_path, stopped, failure, warning):
+    top = {'slot': 'top', 'part_method': 'body_shell', 'image': {'status': 'pending'}, 'model': BODY_SHELL_MODEL,
+           'views': {'front': {'status': stopped, 'failure': failure}, 'side': {'status': 'pending'}}}
+    _, public = paused_job(tmp_path, [SAVED_BODY, top])
+    decorate_job(tmp_path, public)
+    assert offered(public) == [('top', 'front', 'shellfront01')]
+    assert next(action for action in public['next_actions'] if action['id'] == 'retry_image').get('warning') == warning
+    top = retried(tmp_path, 'top', 'front', 'shellfront01')['parts'][1]
+    assert top['views']['front']['status'] == 'pending' and top['model'] == BODY_SHELL_MODEL
 
 
 # --- one PUT of the final key in S3, temporary file and rename on disk ---------------------------------------------------

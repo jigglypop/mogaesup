@@ -56,6 +56,9 @@ def run(p):
         world = obj.matrix_world.copy()
         obj.parent = None
         obj.matrix_world = world
+        if obj.data.users > 1:
+            # Instances of one garment mesh: each object is fitted and weighted on its own copy.
+            obj.data = obj.data.copy()
         obj.modifiers.clear()
         obj.vertex_groups.clear()
     for obj in imported - set(garments):

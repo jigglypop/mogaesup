@@ -386,3 +386,33 @@ def test_a_single_image_that_resume_takes_is_offered_for_resume(setup, monkeypat
         receipt = factory.directory(1, job['id'])/'output'/'hair-provider'
         assert receipt.with_suffix('.response.json').is_file() and not receipt.with_suffix('.response.partial').exists()
     service.resume(1, job['id'])
+
+
+def test_a_single_image_whose_kept_answer_holds_no_image_is_not_offered_for_resume(setup, monkeypatch):
+    from src.services.avatar_stage_resume import AvatarStageResume
+    service, factory, payload, _, _, _ = setup
+
+    def image(source, prompt, model, base, **kwargs):
+        receipt = kwargs['receipt']
+        if 'voluminous hairstyle' not in prompt:
+            return png()
+        # The paid answer is kept, but it holds no image: read again, it fails the same way.
+        receipt.with_suffix('.request.json').write_text(json.dumps(
+            {'phase': 'response_saved', 'http_status': 200, 'request_started': True}))
+        receipt.with_suffix('.response.json').write_text(json.dumps({'data': []}))
+        raise PipelineError('image_missing', 'no image', 422)
+    monkeypatch.setattr(module, 'generate_openai_part_image', image)
+    job, _ = service.create(1, 'character-parts-answer-invalid',
+                            {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS})
+    service.execute(1, job['id'], poll_seconds=0)
+    public = factory.get(1, job['id'])
+    hair = next(part for part in public['parts'] if part['slot'] == 'hair')
+    assert hair['image_status'] == 'answer_invalid'
+    assert next(step for step in public['production_progress']['steps'] if step['id'] == 'images')['state'] == 'blocked'
+    # resume() would skip it and stop at the same incomplete images, so neither the job nor its images stage offers it.
+    assert not next(action for action in public['next_actions'] if action['id'] == 'resume')['enabled']
+    images = next(action for action in AvatarStageResume(factory).get(1, job['id'])['actions'] if action['stage'] == 'images')
+    assert not images['enabled'] and images['reason'] == '기존 이미지 응답 확인 또는 실패 이미지 재요청이 필요합니다.'
+    with pytest.raises(PipelineError) as refused:
+        service.resume(1, job['id'])
+    assert refused.value.code == 'image_attempt_recorded'

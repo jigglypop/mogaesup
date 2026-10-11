@@ -75,4 +75,16 @@ describe('잠든 스튜디오', () => {
     expect(localStorage.getItem(storage)).toBeNull();
     expect(saved.read()).toEqual({ pending: null, error: '' });
   });
+
+  it('앱 서버가 제때 답을 받지 못한 유료 요청은 시작됐을 수 있으므로 같은 키로 다시 보내도록 남긴다', async () => {
+    const storage = 'test.studio-timeout';
+    const saved = savedRequest<{ name: string }>(storage, ({ input }) => typeof input.name === 'string', '읽을 수 없음');
+    fetchMock.mockResolvedValueOnce(json(504, { code: 'factory_timeout', message: '캐릭터 서버가 제때 답하지 않았습니다.' }));
+    const post = () => request('/api/studio/generations', { method: 'POST' });
+    const error = await saved.send({ name: 'a' }, post).catch((problem: unknown) => problem);
+    expect(error).toMatchObject({ status: 504, code: 'factory_timeout', message: '캐릭터 서버가 제때 답하지 않았습니다.' });
+    expect(isDefinitiveRejection(error)).toBe(false);
+    expect(saved.read().pending?.input).toEqual({ name: 'a' });
+    localStorage.removeItem(storage);
+  });
 });

@@ -1,8 +1,8 @@
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, HttpBody},
     extract::{OriginalUri, RawQuery, State},
-    http::{HeaderMap, HeaderName, Method, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     response::Response,
     routing::any,
 };
@@ -14,6 +14,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
+use tokio::time::Instant;
 
 use crate::{
     AppState,
@@ -34,6 +35,10 @@ const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 const JSON_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a member's wardrobe read or part download may take in all, slow phone networks included.
 const MEMBER_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a change may take in all before this server answers `factory_timeout` itself: under the minute CloudFront
+/// waits for this server (frontend/infra/aws-static.yaml), so the screen reads this server's answer, not CloudFront's
+/// page. A change that sends a file has no such limit (see [`time_limit`]).
+const CHANGE_TIMEOUT: Duration = Duration::from_secs(57);
 /// The largest JSON answer read: the job listing is the biggest and stays far below this.
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const LISTING_ATTEMPTS: u32 = 3;
@@ -226,6 +231,14 @@ fn signed_as(
         }
         None => request,
     };
+    // The scope and the name go as headers as well: the studio's nginx signs a request without a token in as its owner
+    // (no FACTORY_JWT_SECRET here), and the character server reads them there. A browser's own headers never get this
+    // far (see FORWARDED_REQUEST_HEADERS). The studio's CloudFront keys its cache on the scope (backend/infra/ec2.yaml).
+    let request = if member { request.header("x-studio-scope", "member") } else { request };
+    let request = match HeaderValue::from_str(username) {
+        Ok(name) => request.header("x-studio-user", name),
+        Err(_) => request,
+    };
     let request = match &factory.gateway_key {
         Some(key) => request.header("x-gateway-key", key),
         None => request,
@@ -343,7 +356,10 @@ fn need(method: &Method, segments: &[String]) -> Need {
     if matches!(*method, Method::GET | Method::HEAD) {
         let member = match segments.as_slice() {
             ["avatar-factory", "wardrobe", ..] => true,
-            ["avatar-factory", "jobs", _, "native-parts", _, file] => file.ends_with(".glb"),
+            // The part models a member puts on; the whole assembly is the studio's own.
+            ["avatar-factory", "jobs", _, "native-parts", _, file] => {
+                file.ends_with(".glb") && !matches!(*file, "model.glb" | "model.runtime.glb")
+            }
             _ => false,
         };
         return if member { Need::Member } else { Need::Read };
@@ -502,9 +518,25 @@ async fn proxy(
     relay(&state, &user, need, call).await
 }
 
+/// How long a request may take in all, its answer included: a member's read, and a change that sends JSON or nothing.
+/// A change that sends a file takes as long as the file and the connection need, and staff reads are not bounded.
+fn time_limit(need: Need, call: &Call) -> Option<Duration> {
+    let json = call
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    match need {
+        Need::Member => Some(MEMBER_TIMEOUT),
+        Need::Write | Need::Paid if json || call.body.size_hint().exact() == Some(0) => Some(CHANGE_TIMEOUT),
+        Need::Read | Need::Write | Need::Paid => None,
+    }
+}
+
 /// What every studio request goes through once its sender is known: the server-wide ceiling (`FACTORY_ACCESS` and the
 /// month's paid budget), the record of a change in `factory_requests`, then the request itself.
 async fn relay(state: &AppState, user: &User, need: Need, call: Call) -> ApiResult<Response> {
+    let started = Instant::now();
     let factory = factory(state)?;
     let paid = need == Need::Paid;
     let key = idempotency_key(&call.method, &call.segments, &call.headers);
@@ -530,7 +562,8 @@ async fn relay(state: &AppState, user: &User, need: Need, call: Call) -> ApiResu
     } else {
         None
     };
-    let timeout = (need == Need::Member).then_some(MEMBER_TIMEOUT);
+    // Counted from here: the budget check, waking check and record above come out of the same limit.
+    let timeout = time_limit(need, &call).map(|limit| limit.saturating_sub(started.elapsed()));
     // A member's wardrobe read goes out member-scoped; studio staff keep the operator's full view on the same routes.
     let member = need == Need::Member
         && !Checker::new(&state.db).allows(Subject::User(user.id), &STUDIO_VIEWER).await.unwrap_or(false);
@@ -915,8 +948,20 @@ mod tests {
         for path in ["avatar-factory/wardrobe/bodies", "avatar-factory/%77ardrobe/colors/j/hat"] {
             assert_eq!(need_of(&Method::GET, path), Need::Member, "{path}");
         }
-        assert_eq!(need_of(&Method::GET, "avatar-factory/jobs/j1/native-parts/v2/body.glb"), Need::Member);
-        for path in ["avatar-factory/jobs", "avatar-factory/jobs/j1/native-parts/v2/model.json", "studio/catalog"] {
+        for path in [
+            "avatar-factory/jobs/j1/native-parts/v2/body.glb",
+            "avatar-factory/jobs/j1/native-parts/v2/hair.runtime.glb",
+        ] {
+            assert_eq!(need_of(&Method::GET, path), Need::Member, "{path}");
+        }
+        // The whole assembly is no part a member puts on.
+        for path in [
+            "avatar-factory/jobs",
+            "avatar-factory/jobs/j1/native-parts/v2/model.json",
+            "avatar-factory/jobs/j1/native-parts/v2/model.glb",
+            "avatar-factory/jobs/j1/native-parts/v2/%6dodel.runtime.glb",
+            "studio/catalog",
+        ] {
             assert_eq!(need_of(&Method::GET, path), Need::Read, "{path}");
         }
         assert_eq!(need_of(&Method::HEAD, "avatar-factory/wardrobe/bodies"), Need::Member);
@@ -994,6 +1039,62 @@ mod tests {
             gateway_key: None,
             instance: None,
         }
+    }
+
+    fn call(method: Method, content_type: Option<&str>, body: Body) -> Call {
+        let mut headers = HeaderMap::new();
+        if let Some(kind) = content_type {
+            headers.insert(header::CONTENT_TYPE, kind.parse().unwrap());
+        }
+        Call::read(method, headers, "studio/generations", None, body).unwrap()
+    }
+
+    #[test]
+    fn a_change_sending_json_or_nothing_is_cut_short_of_cloudfront_and_a_file_is_not() {
+        let json = || Body::from("{}");
+        for (need, method, kind) in [
+            (Need::Paid, Method::POST, Some("application/json")),
+            (Need::Write, Method::PUT, Some("application/json; charset=utf-8")),
+        ] {
+            assert_eq!(time_limit(need, &call(method, kind, json())), Some(CHANGE_TIMEOUT), "{need:?} {kind:?}");
+        }
+        // A bake or a delete sends nothing at all.
+        for method in [Method::POST, Method::DELETE] {
+            assert_eq!(time_limit(Need::Write, &call(method, None, Body::empty())), Some(CHANGE_TIMEOUT));
+        }
+        // An upload takes as long as its file does, typed or not.
+        for kind in [Some("model/gltf-binary"), Some("application/octet-stream"), Some(""), None] {
+            assert_eq!(time_limit(Need::Write, &call(Method::POST, kind, Body::from(vec![7u8; 64]))), None, "{kind:?}");
+        }
+        assert_eq!(time_limit(Need::Member, &call(Method::GET, None, Body::empty())), Some(MEMBER_TIMEOUT));
+        assert_eq!(time_limit(Need::Read, &call(Method::GET, None, Body::empty())), None);
+        assert!(CHANGE_TIMEOUT < Duration::from_secs(60), "CloudFront waits a minute for this server");
+    }
+
+    #[tokio::test]
+    async fn a_request_that_outlasts_its_time_is_answered_with_this_servers_json_504() {
+        // A character server that takes the request and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _taken = listener.accept().await;
+            std::future::pending::<()>().await
+        });
+        let models = std::env::temp_dir().join(format!("models-{}", uuid::Uuid::new_v4().simple()));
+        let config = crate::config::Config {
+            origins: Vec::new(),
+            cookie_secure: false,
+            ticket_secret: vec![0; 32],
+            models: crate::models::Models::open(models.to_str().unwrap()).unwrap(),
+            factory: Some(settings(&url)),
+        };
+        // Nothing here reads the database.
+        let db = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://127.0.0.1:1/none").unwrap();
+        let state = AppState::new(db, config);
+        let request = call(Method::POST, Some("application/json"), Body::from("{}"));
+        let error = forward(&state, "operator", request, Some(Duration::from_millis(200)), false).await.unwrap_err();
+        assert_eq!((error.status, error.code), (StatusCode::GATEWAY_TIMEOUT, "factory_timeout"));
+        std::fs::remove_dir_all(models).unwrap();
     }
 
     #[test]

@@ -27,6 +27,7 @@ import type {
   LayoutInterpretation,
   LayoutCapabilities,
   PasswordChange,
+  PasswordConfirm,
   ProfileChanges,
   RealtimeTicket,
   Registration,
@@ -56,8 +57,8 @@ export const authApi = {
   logout: () => api<void>('/auth/logout', { method: 'POST' }),
   /** 204 once the password is changed; `wrong_password` when the current one is not it. */
   changePassword: (body: PasswordChange) => api<void>('/auth/password', { method: 'POST', body }),
-  /** Ends every other session of the member; `ended` counts them. */
-  logoutOthers: () => api<{ ended: number }>('/auth/logout-others', { method: 'POST' }),
+  /** Ends every other session of the member once the current password is checked; `ended` counts them. */
+  logoutOthers: (body: PasswordConfirm) => api<{ ended: number }>('/auth/logout-others', { method: 'POST', body }),
   realtimeTicket: () => api<RealtimeTicket>('/auth/realtime-ticket', { method: 'POST' }),
 };
 

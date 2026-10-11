@@ -287,7 +287,9 @@ Resources:
               DomainName: !Ref ApiPrivateDns
               VpcOriginConfig:
                 VpcOriginId: !Ref ApiVpcOriginId
-                OriginReadTimeout: 30
+                # The most CloudFront allows without a quota increase. Studio changes (baking a face, an overlay) can take
+                # most of a minute; the server answers a JSON factory_timeout at 57 s (server/src/factory.rs), before this.
+                OriginReadTimeout: 60
                 OriginKeepaliveTimeout: 5
             - !Ref AWS::NoValue
         DefaultCacheBehavior:

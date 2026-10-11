@@ -1,6 +1,7 @@
 """A member's wardrobe reads as they reach the API in the AWS container: from the loopback, with Host 127.0.0.1 and the
 X-User-Id 1 nginx adds on the SSM port, carrying the token the studio gateway signs with MEMBER (server/src/factory.rs).
-The token decides: a member is listed and served only what the wardrobe offers, whatever header came with it."""
+The token decides: a member is listed and served only what the wardrobe offers, whatever header came with it. Without a
+token the gateway's member mark (x-studio-scope) narrows the owner nginx names the same way."""
 import jwt as pyjwt
 import pytest
 from fastapi import FastAPI
@@ -24,6 +25,9 @@ def token(*roles, name='member-7', exp=4102444800):
 MEMBER = {'authorization': token('ADMIN', 'MEMBER')}
 OPERATOR = {'authorization': token('ADMIN', name='studio-admin')}
 OWNER = {}   # the owner's own studio requests carry no token
+# Without FACTORY_JWT_SECRET the gateway sends no token either: it marks a member's read and names who sent it.
+SCOPED = {'x-studio-scope': 'member', 'x-studio-user': 'member-7'}
+STAFF = {'x-studio-user': 'studio-admin'}
 
 
 @pytest.fixture
@@ -76,6 +80,19 @@ def test_a_member_listing_has_no_unavailable_parts_or_fit_messages(client):
     assert member['unavailable'] == [] and [part['slot'] for part in member['parts']] == ['hair']
 
 
+def test_without_a_token_the_gateways_member_mark_narrows_the_same_way(client):
+    assert files(client, SCOPED, 'hair.glb').content == b'hair'
+    for name in ('model.glb', 'body.glb', 'record.json'):
+        assert files(client, SCOPED, name).status_code == 404
+    assert files(client, STAFF, 'model.glb').content == b'whole character'
+    parts = f'/api/avatar-factory/wardrobe/bodies/{BODY}/parts'
+    member, staff = client.get(parts, headers=SCOPED), client.get(parts, headers=STAFF)
+    assert member.json()['unavailable'] == [] and [part['slot'] for part in member.json()['parts']] == ['hair']
+    assert [row['slot'] for row in staff.json()['unavailable']] == ['top']
+    # One address, two answers: the studio's CloudFront must give neither to the other's request.
+    assert member.headers['cache-control'] == staff.headers['cache-control'] == 'private, no-store'
+
+
 @pytest.mark.parametrize('authorization', [token('ADMIN', 'MEMBER', exp=1), token('ADMIN', 'MEMBER')[:-3] + 'abc',
                                            'Bearer garbage'], ids=['expired', 'bad-signature', 'not-a-jwt'])
 def test_a_token_that_fails_is_refused_not_served_as_the_owner(client, authorization):
@@ -89,7 +106,8 @@ def test_without_jwt_secret_a_token_is_refused_not_served_as_the_owner(client, m
     assert response.status_code == 503 and response.content != b'whole character'
 
 
-def test_a_member_reads_previews_colours_and_coverage_only_at_the_offered_version(client, library):
+@pytest.mark.parametrize('member', [MEMBER, SCOPED], ids=['token', 'no-token'])
+def test_a_member_reads_previews_colours_and_coverage_only_at_the_offered_version(client, library, member):
     # A later assembly of the part job that the job does not offer (its current version stays V1).
     library.assembly(PART, LATER, contents={'hair': b'later hair'})
     for job, version in ((PART, LATER), (PART, V1)):
@@ -116,8 +134,11 @@ def test_a_member_reads_previews_colours_and_coverage_only_at_the_offered_versio
                            headers=headers)]
 
     # The drawing is cached per version: the pipeline names the one written last (LATER's loop ran first, so V1's).
-    assert [response.status_code for response in reads(MEMBER, V1)] == [200, 200, 200, 200]
-    assert [response.status_code for response in reads(MEMBER, LATER)] == [404, 404, 404, 404]
-    assert all(response.json()['error']['code'] == 'not_found' for response in reads(MEMBER, LATER))
+    offered = reads(member, V1)
+    assert [response.status_code for response in offered] == [200, 200, 200, 200]
+    # Staff are answered at more versions at the same addresses: no shared answer for the two (colours, coverage).
+    assert [response.headers['cache-control'] for response in offered[1::2]] == ['private, no-store'] * 2
+    assert [response.status_code for response in reads(member, LATER)] == [404, 404, 404, 404]
+    assert all(response.json()['error']['code'] == 'not_found' for response in reads(member, LATER))
     # The studio's operators still look at any version.
     assert [response.status_code for response in reads(OWNER, LATER)][1:] == [200, 200, 200]

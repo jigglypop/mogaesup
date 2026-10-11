@@ -5,7 +5,7 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 import { problemText } from '../api/client';
-import { authApi, socialApi } from '../api/endpoints';
+import { socialApi } from '../api/endpoints';
 import type { IlchonRequest } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
@@ -13,7 +13,7 @@ import { can } from '../auth/can';
 import { hasUnsavedWork } from '../auth/sessionWork';
 import { Icon, type IconName } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
-import { PasswordDialog } from './PasswordDialog';
+import { PasswordDialog, type PasswordAction } from './PasswordDialog';
 
 /** Where an arrow, Home or End key moves to in a menu of `count` items from `index` (-1: none focused yet). */
 export function nextMenuIndex(key: string, index: number, count: number): number | null {
@@ -278,35 +278,29 @@ function UserMenu() {
   const trigger = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useTheme();
   const [leaving, setLeaving] = useState(false);
-  const [endingOthers, setEndingOthers] = useState(false);
   const [error, setError] = useState('');
-  const [status, setStatus] = useState('');
-  const [password, setPassword] = useState(false);
+  /** What the password dialog is open for, if it is. */
+  const [password, setPassword] = useState<PasswordAction | null>(null);
   const pending = useRef(false);
   const userId = user?.id ?? null;
   useEffect(() => {
     setError('');
-    setStatus('');
-    setPassword(false);
+    setPassword(null);
   }, [userId]);
+  const ask = (action: PasswordAction) => {
+    // Closing the dialog hands the keyboard back to the menu's button.
+    trigger.current?.focus();
+    setOpen(false);
+    setPassword(action);
+  };
   const signOut = async () => {
     if (pending.current) return;
     if (hasUnsavedWork() && !window.confirm(UNSAVED_QUESTION)) return;
     pending.current = true;
-    setLeaving(true); setError(''); setStatus('');
+    setLeaving(true); setError('');
     try { await logout(); setOpen(false); navigate('/'); }
     catch (problem) { setError(problemText(problem)); }
     finally { pending.current = false; setLeaving(false); }
-  };
-  const endOthers = async () => {
-    if (pending.current) return;
-    pending.current = true;
-    setEndingOthers(true); setError(''); setStatus('');
-    try {
-      const { ended } = await authApi.logoutOthers();
-      setStatus(`다른 기기 ${ended}곳에서 로그아웃했어요`);
-    } catch (problem) { setError(problemText(problem)); }
-    finally { pending.current = false; setEndingOthers(false); }
   };
   if (!user) {
     return (
@@ -359,32 +353,21 @@ function UserMenu() {
                 ))}
               </div>
             </div>
-            <button
-              role="menuitem"
-              aria-haspopup="dialog"
-              onClick={() => {
-                // Closing the dialog hands the keyboard back to the menu's button.
-                trigger.current?.focus();
-                setOpen(false);
-                setStatus('');
-                setPassword(true);
-              }}
-            >
+            <button role="menuitem" aria-haspopup="dialog" onClick={() => ask('change')}>
               <Icon name="edit" /> 비밀번호 바꾸기
             </button>
-            <button role="menuitem" aria-disabled={endingOthers || undefined} onClick={() => void endOthers()}>
-              <Icon name="logout" /> {endingOthers ? '로그아웃하는 중…' : '다른 기기에서 모두 로그아웃'}
+            <button role="menuitem" aria-haspopup="dialog" onClick={() => ask('others')}>
+              <Icon name="logout" /> 다른 기기에서 모두 로그아웃
             </button>
             <button role="menuitem" aria-disabled={leaving || undefined} onClick={() => void signOut()}>
               <Icon name="logout" /> {leaving ? '로그아웃 중…' : '로그아웃'}
             </button>
           </div>
-          {/* A menu holds only its items; what one did, or what went wrong with it, is said beside it. */}
-          {status && <p className="mg-menu-status" role="status">{status}</p>}
+          {/* A menu holds only its items; what went wrong with one is said beside it. */}
           {error && <p className="mg-error mg-menu-error" role="alert">{error}</p>}
         </div>
       )}
-      {password && <PasswordDialog onClose={() => setPassword(false)} />}
+      {password && <PasswordDialog action={password} onClose={() => setPassword(null)} />}
     </div>
   );
 }

@@ -50,11 +50,13 @@ const SESSION_RENEW_BELOW: &str = "29 days";
 /// However often it is renewed, a session ends this long after the sign-in that made it: a stolen one cannot be kept.
 const SESSION_LIFETIME: &str = "90 days";
 /// Wrong passwords from one address, for one account, and from one device known to the account, in the rate window
-/// (ten minutes).
+/// (ten minutes). Of the account's budget, sign-ins from devices it does not know spend at most
+/// `LOGIN_FAILURES_PER_ACCOUNT_ADDRESS` from one address, so a few addresses cannot shut its owner out of a new device.
 const LOGIN_FAILURES_PER_ADDRESS: u32 = 30;
 const LOGIN_FAILURES_PER_ACCOUNT: u32 = 50;
+const LOGIN_FAILURES_PER_ACCOUNT_ADDRESS: u32 = 10;
 const LOGIN_FAILURES_PER_DEVICE: u32 = 10;
-/// Wrong current passwords one session may send while changing the password, in the rate window.
+/// Wrong current passwords one session may send (changing the password, signing out other devices), in the rate window.
 const PASSWORD_FAILURES_PER_SESSION: u32 = 10;
 /// Password checks for one account (or one known device, or one session) waiting or running at once: a burst for one
 /// account cannot fill the hashing queue everyone signs in through.
@@ -145,7 +147,8 @@ async fn signed_in(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<(U
     let hash = token_hash(presented.token);
     let row = sqlx::query(&format!(
         "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN} FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)"
+         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)
+           AND s.created_at > now() - interval '{SESSION_LIFETIME}'"
     ))
     .bind(&hash)
     .bind(presented.legacy)
@@ -163,9 +166,10 @@ pub async fn current_user(state: &AppState, headers: &HeaderMap) -> ApiResult<Us
 }
 
 pub(crate) async fn active_session(state: &AppState, hash: &str, user: Uuid) -> ApiResult<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = $1 AND user_id = $2 AND expires_at > now())",
-    )
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = $1 AND user_id = $2 AND expires_at > now()
+         AND created_at > now() - interval '{SESSION_LIFETIME}')"
+    ))
     .bind(hash)
     .bind(user)
     .fetch_one(&state.db)
@@ -289,7 +293,7 @@ async fn check_hash(hash: Option<String>, password: String) -> ApiResult<bool> {
 }
 
 /// The budgets one password check runs under: wrong passwords from the request's address, and for `key` (the account,
-/// a device known to it, or a session changing its password), in the rate window.
+/// a device known to it, or a session confirming its password), in the rate window.
 ///
 /// Only a password found wrong counts. A check still waiting or running holds nothing against anyone, so a burst of
 /// them cannot shut the owner out before a single one was found wrong; at most [`CHECKS_UNDER_WAY`] of one key wait or
@@ -300,16 +304,27 @@ struct PasswordCheck {
     address: String,
     key: String,
     max: u32,
+    /// For a sign-in from a device the account does not know: the part of the account's budget this address may spend.
+    share: Option<(String, u32)>,
     _under_way: Running,
 }
 
 impl PasswordCheck {
-    fn start(state: &AppState, headers: &HeaderMap, key: String, max: u32) -> ApiResult<Self> {
+    fn start(
+        state: &AppState,
+        headers: &HeaderMap,
+        key: String,
+        max: u32,
+        share: Option<(String, u32)>,
+    ) -> ApiResult<Self> {
         let address = format!("login-failed-address:{}", client_address(headers));
         rate_exceeded(state, &address, LOGIN_FAILURES_PER_ADDRESS)?;
         rate_exceeded(state, &key, max)?;
+        if let Some((share, max)) = &share {
+            rate_exceeded(state, share, *max)?;
+        }
         let under_way = rate_running(state, &key, CHECKS_UNDER_WAY)?.ok_or(BUSY)?;
-        Ok(Self { address, key, max, _under_way: under_way })
+        Ok(Self { address, key, max, share, _under_way: under_way })
     }
 
     /// Whether `password` matches `hash` (None for a name nobody has, which is never right). A wrong one counts
@@ -319,12 +334,18 @@ impl PasswordCheck {
         let slot = hashing_slot(state).await?;
         rate_exceeded(state, &self.address, LOGIN_FAILURES_PER_ADDRESS)?;
         rate_exceeded(state, &self.key, self.max)?;
+        if let Some((share, max)) = &self.share {
+            rate_exceeded(state, share, *max)?;
+        }
         let someone = hash.is_some();
         let right = check_hash(hash, password).await?;
         if !right {
             rate_record(state, self.address);
             if someone {
                 rate_record(state, self.key);
+                if let Some((share, _)) = self.share {
+                    rate_record(state, share);
+                }
             }
         }
         // The slot goes back only once the failure counts, so the next check waiting for it sees the budget spent.
@@ -523,13 +544,18 @@ pub async fn login(
         return Err(bad("invalid_password", "비밀번호를 확인해 주세요."));
     }
     // Only wrong passwords count, per address and per account (see `PasswordCheck`); a limit shared by everyone would
-    // let one client lock all players out. A device that signed in to the account before has a budget of its own.
+    // let one client lock all players out. A device that signed in to the account before has a budget of its own; other
+    // devices share the account's, of which one address spends a part at most.
     let device = known_device(&state, &headers, &name);
-    let (key, max) = match &device {
-        Some(id) => (format!("login-failed-device:{id}"), LOGIN_FAILURES_PER_DEVICE),
-        None => (format!("login-failed:{name}"), LOGIN_FAILURES_PER_ACCOUNT),
+    let (key, max, share) = match &device {
+        Some(id) => (format!("login-failed-device:{id}"), LOGIN_FAILURES_PER_DEVICE, None),
+        None => (
+            format!("login-failed:{name}"),
+            LOGIN_FAILURES_PER_ACCOUNT,
+            Some((format!("login-failed:{name}:{}", client_address(&headers)), LOGIN_FAILURES_PER_ACCOUNT_ADDRESS)),
+        ),
     };
-    let check = PasswordCheck::start(&state, &headers, key, max)?;
+    let check = PasswordCheck::start(&state, &headers, key, max, share)?;
     let row = sqlx::query(&format!(
         "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, u.password_hash FROM users u WHERE u.username = $1"
     ))
@@ -555,12 +581,47 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok(response)
 }
 
-/// `POST /api/auth/logout-others`: ends every other session of the signed-in account (other devices and browsers) and
-/// closes their realtime sockets; this one stays. Answers `{"ended": <sessions ended>}`.
-pub async fn logout_others(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordConfirm {
+    current_password: String,
+}
+
+/// `POST /api/auth/logout-others` with `{currentPassword}`: ends every other session of the signed-in account (other
+/// devices and browsers) and closes their realtime sockets; this one stays. Answers `{"ended": <sessions ended>}`.
+/// It asks for the password as changing it does: a stolen session alone cannot end the owner's sessions (again and
+/// again, each new one), so the owner can always sign in and end the stolen one.
+pub async fn logout_others(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PasswordConfirm>,
+) -> ApiResult<Json<Value>> {
     let (user, session) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
+    if !plausible_password(&body.current_password) {
+        return Err(WRONG_PASSWORD);
+    }
+    confirm_password(&state, &headers, user.id, &session, body.current_password).await?;
     let ended = end_other_sessions(&state, user.id, &session).await?;
     Ok(Json(json!({"ended": ended})))
+}
+
+/// The account's password hash, once `password` is found to be it. A wrong one counts against session `session` and
+/// the address, not the account, so a stolen session cannot shut the owner out of signing in.
+async fn confirm_password(
+    state: &AppState,
+    headers: &HeaderMap,
+    user: Uuid,
+    session: &str,
+    password: String,
+) -> ApiResult<String> {
+    let key = format!("login-failed-session:{session}");
+    let check = PasswordCheck::start(state, headers, key, PASSWORD_FAILURES_PER_SESSION, None)?;
+    let current: String =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await?;
+    if !check.verify(state, Some(current.clone()), password).await? {
+        return Err(WRONG_PASSWORD);
+    }
+    Ok(current)
 }
 
 #[derive(Deserialize)]
@@ -584,17 +645,7 @@ pub async fn change_password(
         return Err(WRONG_PASSWORD);
     }
     new_password(&body.new_password)?;
-    let check = PasswordCheck::start(
-        &state,
-        &headers,
-        format!("login-failed-session:{session}"),
-        PASSWORD_FAILURES_PER_SESSION,
-    )?;
-    let current: String =
-        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1").bind(user.id).fetch_one(&state.db).await?;
-    if !check.verify(&state, Some(current.clone()), body.current_password).await? {
-        return Err(WRONG_PASSWORD);
-    }
+    let current = confirm_password(&state, &headers, user.id, &session, body.current_password).await?;
     let hash = hash_password(&state, body.new_password).await?;
     let mut tx = state.db.begin().await?;
     // Only over the password just checked: of two changes at once, the second finds it gone.
@@ -639,7 +690,8 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
          SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, EXISTS (SELECT 1 FROM renewed) AS renewed,
            floor(extract(epoch FROM coalesce((SELECT expires_at FROM renewed), s.expires_at) - now()))::int8 AS seconds_left
          FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)"
+         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)
+           AND s.created_at > now() - interval '{SESSION_LIFETIME}'"
     ))
     .bind(&hash)
     .bind(presented.legacy)

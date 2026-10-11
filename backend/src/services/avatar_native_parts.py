@@ -15,7 +15,7 @@ from src.services.keyed_lock import keyed_lock
 from src.services.process_identity import identity, state as process_state
 from src.services.object_storage import WorkspaceUploadError, copy_file, local_workspace, publish_checkpoint
 from src.services.avatar_production_spec import production_spec, refresh_fitting_spec
-from src.services.avatar_equipment import is_native_part_set
+from src.services.avatar_equipment import NATIVE_EQUIPMENT, equipment_spec, head_bounds, is_native_part_set
 from src.services.run_lock import WorkerLocks, final_write, this_process, worker_alive
 from src.services.worker_env import worker_environment
 from src.services.avatar_pipeline_quality import REVISION as QUALITY_REVISION, verify_quality
@@ -324,6 +324,12 @@ class AvatarNativeParts:
                                        pipeline.get('hair_length') or 'source',
                                        body_profile=record.get('result', {}).get('body_profile'))
         fit_spec['frozen_body'] = True
+        if slot in NATIVE_EQUIPMENT:
+            # The saved socket may sit on the whole body's box (sealed before the head was measured): place it
+            # again on the measured head and wrists, as a new part would be.
+            if head_bounds(fit_spec) is None:
+                raise PipelineError('head_unmeasured', '기본 몸의 머리 측정값을 확인할 수 없습니다. 피팅·조립을 다시 실행하세요.', 409)
+            equipment_spec(fit_spec)
         if selected_profile:
             from src.services.avatar_production_spec import configure_fit_profiles
             profiles = deepcopy(fit_spec.get('fit_profiles', {}))

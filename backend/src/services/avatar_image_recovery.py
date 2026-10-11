@@ -10,9 +10,10 @@ from src.services.asset_editor import _write_json
 from src.services.character_pipeline import PipelineError, now, read_json
 from src.services.process_identity import identity
 from src.services.avatar_openai_images import (OpenAIImageHTTPError, OpenAIImageUnconfirmed, image_error_message,
-                                               _busy_refusal, _error_category, never_sent, saved_response)
+                                               _busy_refusal, _error_category, never_sent, saved_response,
+                                               standard_image_bytes)
 
-RETRYABLE = {'submission_uncertain', 'rejected', 'failed', 'qc_failed'}
+RETRYABLE = {'submission_uncertain', 'rejected', 'failed', 'qc_failed', 'answer_invalid'}
 REFERENCE = 'reference'
 REFERENCE_KEPT_FIELDS = ('prompt', 'prompt_sha256', 'layout')
 LABELS = {'body': '몸', 'hair': '머리카락', 'head': '기존 머리 파츠', 'hairBack': '뒷머리', 'hairFront': '앞머리',
@@ -60,19 +61,38 @@ def _server_error_message(http_status):
     return f'생성 서버 오류 응답 (HTTP {http_status}) · 접수 여부 확인 불가'
 
 
+def answer_unusable(receipt):
+    """True when the answer kept as .response.json holds no image an image stage can use (not JSON, not one image, or
+    an image that does not decode or exceeds the canvas): read again, it fails the same way. An answer that cannot be
+    read now is not judged."""
+    try:
+        raw = receipt.with_suffix('.response.json').read_bytes()
+    except Exception:
+        return False
+    try:
+        standard_image_bytes(json.loads(raw))
+    except Exception:
+        return True
+    return False
+
+
 def classify_image_failure(exc, receipt, *, messages=None):
     """(status, failure) of an image request that stopped with `exc`, from what its receipt kept; the one rule of every
     image stage (part views, the appearance reference, single part images).
 
-    An answer saved as .response.json is processed again without a request. A provider refusal (4xx, or a busy 429/503
-    after its retries) is final. A request its receipt shows never left is sent again. A request that started without
-    a recorded outcome, a connection lost after the request left and a server error answer (500, 502, 504) are
-    unconfirmed: the provider may have made and billed the image. An answer that arrived (HTTP 2xx) but could not be
-    stored was paid for: it is unconfirmed as well, never a plain local failure, and a kept copy of it is used before
-    any new request is offered (saved_response). `messages` replaces the message given for a status."""
+    An answer saved as .response.json is processed again without a request, unless it holds no usable image: that one
+    is replaced only by an explicit request (answer_invalid). A provider refusal (4xx, or a busy 429/503 after its
+    retries) is final. A request its receipt shows never left is sent again. A request that started without a recorded
+    outcome, a connection lost after the request left and a server error answer (500, 502, 504) are unconfirmed: the
+    provider may have made and billed the image. An answer that arrived (HTTP 2xx) but could not be stored was paid
+    for: it is unconfirmed as well, never a plain local failure, and a kept copy of it is used before any new request
+    is offered (saved_response). `messages` replaces the message given for a status."""
     transport = read_json(receipt.with_suffix('.request.json'))
     http_status = _http_status(transport)
-    if receipt.with_suffix('.response.json').is_file():
+    kept = receipt.with_suffix('.response.json').is_file()
+    if kept and answer_unusable(receipt):
+        status, category, message = 'answer_invalid', 'provider_response', '수신 응답에 사용할 이미지 없음'
+    elif kept:
         status, category, message = 'submitting', 'local_processing', '수신 이미지 처리 중단'
     elif isinstance(exc, httpx.HTTPStatusError):
         status, category = 'rejected', getattr(exc, 'category', 'provider_http')
@@ -159,7 +179,8 @@ def has_dependents(state, part, view):
     if not part.get('views'):
         return True
     model = part.get('model', {})
-    if model.get('task_id') or model.get('status', 'pending') != 'pending':
+    # A body shell has no provider model: its model is marked ready at acceptance and built from the views at assembly.
+    if part.get('part_method') != 'body_shell' and (model.get('task_id') or model.get('status', 'pending') != 'pending'):
         return True
     generated = state.get('production_spec', {}).get('generated_views', list(part['views']))
     if view in generated:
@@ -238,7 +259,7 @@ def decorate_job(directory, public):
             if failure.get('message'):
                 failure_message = f'{LABELS.get(part["slot"], part["slot"])} {VIEW_LABELS.get(view, view)}: {failure["message"]}'
                 failure_count += 1
-            if paused and failure.get('id') and (image['status'] == 'qc_failed' or not saved_response(receipt)):
+            if paused and failure.get('id') and (image['status'] in ('qc_failed', 'answer_invalid') or not saved_response(receipt)):
                 from src.services.avatar_production_spec import can_reuse_image
                 if image['status'] == 'qc_failed' and can_reuse_image(image):
                     continue
@@ -259,7 +280,7 @@ def decorate_job(directory, public):
         if failure.get('message'):
             failure_message = f'{LABELS[REFERENCE]} {REFERENCE_VIEW_LABELS.get(view, view)}: {failure["message"]}'
             failure_count += 1
-        if failure.get('id') and not saved_response(receipt):
+        if failure.get('id') and (image['status'] == 'answer_invalid' or not saved_response(receipt)):
             blocked = reference_has_dependents(state, view)
             public['next_actions'].append(_retry_action(REFERENCE, view, failure, shown, blocked))
     enabled = [action for action in public['next_actions'] if action['id'] == 'retry_image' and action['enabled']]
@@ -320,8 +341,9 @@ def retry_views(service, owner, job_id, images):
                 raise PipelineError('failure_changed', '이미지 상태가 변경되었습니다.', 409)
             receipt = (reference_receipt(directory, view, image) if part is None
                        else receipt_path(directory, part['slot'], view, image))
-            if image['status'] != 'qc_failed' and saved_response(receipt):
-                # A kept answer, also one the store refused at first, is resumed instead of paid for again.
+            if image['status'] not in ('qc_failed', 'answer_invalid') and saved_response(receipt):
+                # A kept answer, also one the store refused at first, is resumed instead of paid for again; one that
+                # holds no usable image cannot be.
                 raise PipelineError('response_saved', '저장된 응답에서 재개할 수 있습니다.', 409)
             if reference_has_dependents(state, view) if part is None else has_dependents(state, part, view):
                 raise PipelineError('dependent_views_exist', '후속 이미지가 있는 작업은 새 버전이 필요합니다.', 409)

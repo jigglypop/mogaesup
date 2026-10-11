@@ -36,6 +36,9 @@ export function describeSaveError(error: unknown, bytes?: number | null): SavePr
     if (error.status === 408 || error.status === 429 || error.status >= 500) {
       return { kind: 'server', message: '서버가 잠시 대답하지 않아요. 조금 뒤에 다시 저장해 볼게요.' };
     }
+    if (error.code === 'invalid_residents') {
+      return { kind: 'invalid', message: '섬에 둘 수 없는 주민이 있어요. 주민의 이름과 인사말을 고치거나 그 주민을 치우고 다시 저장해 주세요.' };
+    }
     if (error.status === 422) {
       return { kind: 'invalid', message: '섬에 저장할 수 없는 내용이 섞여 있어요. 최근에 놓은 물건을 치우고 다시 저장해 주세요.' };
     }
@@ -118,7 +121,7 @@ export type IslandSaver = {
   flush: () => Promise<boolean>;
   /** After a conflict: takes the stored island's latest revision and saves this one over it. */
   overwrite: () => Promise<boolean>;
-  /** After a conflict: drops local changes and loads the stored island. */
+  /** After a conflict, or leaving without edits that could not be saved: drops local changes and loads the stored island. */
   reloadLatest: () => Promise<boolean>;
   /** Tells the saver the world may have changed: updates `dirty` and times the next autosave. */
   changed: () => void;
@@ -328,6 +331,13 @@ export function createIslandSaver({
       return save();
     },
     async reloadLatest() {
+      if (disposed) return false;
+      // The edits are dropped from now on, even while a save already on its way finishes first: nothing sends them again
+      // after it, autosaves them or takes new ones.
+      again = false;
+      stopTimer();
+      stopRetry();
+      set({ phase: 'loading' });
       if (inflight) await inflight;
       return load();
     },

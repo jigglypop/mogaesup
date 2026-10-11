@@ -11,6 +11,7 @@ from PIL import Image
 
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
+from src.services.avatar_image_recovery import answer_unusable
 from src.services.avatar_native_parts import AvatarNativeParts
 from src.services.avatar_openai_images import (
     DEFAULT_BASE,
@@ -113,7 +114,7 @@ class AvatarExpressionGeneration:
         store refused at first and this host kept) is moved into place and used; otherwise one in flight is only read."""
         if record['status'] == 'complete':
             return False, None
-        if record.get('error_code') == 'expression_background':
+        if record.get('error_code') in ('expression_background', 'answer_invalid'):
             return False, record.get('error')
         receipt = directory/'image-provider.json'
         if (saved_response(receipt) if idle else receipt.with_suffix('.response.json').is_file()):
@@ -353,8 +354,13 @@ class AvatarExpressionGeneration:
                 record.update(status='complete', stage='complete', error=None)
                 self._save(directory, record)
             except Exception as exc:
+                if answer_unusable(directory/'image-provider.json'):
+                    # Read again, the kept answer fails the same way: only a request under a new key replaces it.
+                    record.update(error_code='answer_invalid')
                 resumable, reason = self._resume_reason(directory, record)
-                if isinstance(exc, OpenAIImageHTTPError):
+                if record.get('error_code') == 'answer_invalid':
+                    message = '사용할 수 있는 표정 이미지가 반환되지 않았습니다.'
+                elif isinstance(exc, OpenAIImageHTTPError):
                     message = image_error_message(exc.category, exc.response.status_code)
                 elif isinstance(exc, PipelineError):
                     message = exc.message

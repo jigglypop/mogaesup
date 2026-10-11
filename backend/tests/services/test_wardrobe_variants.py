@@ -5,9 +5,11 @@ import pytest
 from src.services import avatar_fitting_management, avatar_variants
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK
+from src.services.avatar_image_pipeline import AvatarImagePipeline
+from src.services.avatar_image_recovery import retry_view
 from src.services.avatar_variants import AvatarVariants
 from src.services.character_pipeline import PipelineError, read_json
-from wardrobe_fixture import seed_variant_base
+from wardrobe_fixture import seed_variant_base, textured_glb
 
 KEY = 'variant-key-0001'
 
@@ -99,6 +101,39 @@ def test_nothing_is_copied_when_a_check_fails(base, monkeypatch):
     assert not (factory.directory(1, hashlib.sha256(f'1:variant:{KEY}'.encode()).hexdigest()[:24])/'job.json').is_file()
 
 
+def test_a_glb_registered_as_it_was_is_refused_before_its_body_is_read(base, monkeypatch):
+    factory, directory, payload = base
+    version = directory/'native-parts'/payload['base_version']
+    record = read_json(version/'record.json')
+    record['result']['origin'] = 'uploaded_glb'
+    _write_json(version/'record.json', record)
+    spy = Spy(monkeypatch)
+    with pytest.raises(PipelineError) as error:
+        AvatarVariants(factory).create_single_part(1, KEY, payload)
+    assert error.value.code == 'body_preparation_required' and spy.parses == []
+
+
+def test_a_version_that_is_not_sealed_is_refused_before_its_body_is_read(base, monkeypatch):
+    factory, directory, payload = base
+    version = directory/'native-parts'/payload['base_version']
+    record = read_json(version/'record.json')
+    record['status'] = 'qc_failed'
+    _write_json(version/'record.json', record)
+    spy = Spy(monkeypatch)
+    with pytest.raises(PipelineError) as error:
+        AvatarVariants(factory).create_single_part(1, KEY, payload)
+    assert error.value.code == 'base_changed' and spy.parses == []
+
+
+def test_a_body_changed_after_sealing_is_refused_before_it_is_read(base, monkeypatch):
+    factory, directory, payload = base
+    (directory/'native-parts'/payload['base_version']/'body.glb').write_bytes(textured_glb())
+    spy = Spy(monkeypatch)
+    with pytest.raises(PipelineError) as error:
+        AvatarVariants(factory).create_single_part(1, KEY, payload)
+    assert error.value.code == 'body_changed' and spy.parses == [] and not avatar_fitting_management._facts
+
+
 def test_a_base_that_cannot_be_parsed_is_reported_by_the_checks_not_by_the_warm_up(base):
     factory, directory, payload = base
     (directory/'native-parts'/payload['base_version']/'body.glb').write_bytes(b'not a glb')
@@ -144,3 +179,61 @@ def test_a_part_is_made_on_the_sealed_version_the_wardrobe_offers_while_a_newer_
     with pytest.raises(PipelineError) as error:
         AvatarVariants(factory).create_single_part(1, 'variant-key-0002', {**payload, 'base_version': newer})
     assert error.value.code == 'base_changed'
+
+
+# A hair target measured around a head .72 m wide and .58 m deep (front at z .30), with the hair clearance.
+HAIR_TARGET = [[-.385, .46, -.305], [.385, 1.27, .325]]
+
+
+def test_equipment_of_a_base_without_a_measured_head_sits_on_its_head_and_hands(base):
+    factory, directory, payload = base
+    version = directory/'native-parts'/payload['base_version']
+    record = read_json(version/'record.json')
+    record['result'].update(fitting_targets={'hair': HAIR_TARGET},
+                            body_profile={'landmarks': {'wrist_right': [-.41, .45, .01], 'wrist_left': [.41, .45, .01]}})
+    _write_json(version/'record.json', record)
+    job, created = AvatarVariants(factory).create_single_part(1, KEY, {**payload, 'slot': 'glasses'})
+    spec = read_json(factory.directory(1, job['id'])/'pipeline.json')['production_spec']
+    glasses = spec['equipment']['glasses']
+    # Two fifths up the head from the neck (.46) to the crown (1.2), on its front: not at the neck (.48 m).
+    assert created and glasses['position_m'] == pytest.approx([0, .756, .308])
+    assert glasses['size_m'][0] == pytest.approx(.72*.72)
+    assert spec['equipment']['weapon']['position_m'] == [-.41, .45, .01]
+    assert spec['equipment']['tool']['position_m'] == [.41, .45, .01]
+
+
+def test_equipment_keeps_the_head_its_base_measured(base):
+    factory, directory, payload = base
+    head = [[-.4, .455, -.3], [.4, 1.2, .33]]
+    saved = read_json(directory/'pipeline.json')['production_spec']
+    _write_json(directory/'native-parts'/payload['base_version']/'input.json',
+                {'production_spec': {**saved, 'measured_head_bounds_m': head}})
+    job, _ = AvatarVariants(factory).create_single_part(1, KEY, {**payload, 'slot': 'glasses'})
+    spec = read_json(factory.directory(1, job['id'])/'pipeline.json')['production_spec']
+    assert spec['measured_head_bounds_m'] == head
+    assert spec['equipment']['glasses']['position_m'] == pytest.approx([0, .455+.4*.745, .338])
+
+
+def test_a_failed_view_of_a_garment_made_on_the_body_is_requested_again_on_its_own(base):
+    # A body-shell garment has no provider model: accepted with its model ready, it is built from its views at
+    # assembly. Until its side view is drawn, nothing uses a front view the provider refused.
+    factory, _, payload = base
+    garment = {'base_job_id': payload['base_job_id'], 'base_version': payload['base_version'], 'slot': 'top',
+               'part_name': '셔츠', 'part_method': 'body_shell'}
+    job, _ = AvatarVariants(factory).create_single_part(1, KEY, garment)
+    directory = factory.directory(1, job['id'])
+    state = read_json(directory/'pipeline.json')
+    top = next(part for part in state['parts'] if part['slot'] == 'top')
+    top['views']['front'].update(status='rejected', attempted_at='2026-10-11T00:00:00+00:00', failure={
+        'id': 'shellfront01', 'category': 'policy', 'message': '이미지 안전 필터로 생성 중단'})
+    pipeline = AvatarImagePipeline(factory)
+    pipeline.publish(1, job['id'], state)
+    record = read_json(directory/'job.json')
+    record.update(status='pipeline_paused', error='상의 정면: 이미지 안전 필터로 생성 중단')
+    _write_json(directory/'job.json', record)
+    offered = [(action['view'], action['enabled']) for action in factory.get(1, job['id'])['next_actions']
+               if action['id'] == 'retry_image' and action['slot'] == 'top']
+    assert offered == [('front', True)]
+    _, accepted = retry_view(pipeline, 1, job['id'], 'top', 'front', 'shellfront01')
+    top = next(part for part in read_json(directory/'pipeline.json')['parts'] if part['slot'] == 'top')
+    assert accepted and top['views']['front']['status'] == 'pending' and top['model']['origin'] == 'body_shell'

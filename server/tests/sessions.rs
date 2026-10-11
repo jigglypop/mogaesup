@@ -205,8 +205,24 @@ async fn change_password(app: &TestApp, cookie: &str, current: &str, new: &str) 
     app.call("POST", "/api/auth/password", Some(body), Some(cookie)).await
 }
 
+async fn logout_others(app: &TestApp, cookie: &str, current: &str) -> Reply {
+    app.call("POST", "/api/auth/logout-others", Some(json!({"currentPassword": current})), Some(cookie)).await
+}
+
 async fn login_with(app: &TestApp, username: &str, password: &str) -> Reply {
     app.call("POST", "/api/auth/login", Some(json!({"username": username, "password": password})), None).await
+}
+
+/// A sign-in from `address`, as CloudFront forwards it.
+async fn login_at(app: &TestApp, address: &str, username: &str, password: &str) -> Reply {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", address);
+    let body = json!({"username": username, "password": password}).to_string();
+    app.send(request.body(Body::from(body)).unwrap()).await
 }
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -327,17 +343,45 @@ async fn 다른_기기_모두_로그아웃은_이_기기만_남긴다() {
     let stranger = app.register("others_keep", "남").await;
     let base = serve(&app).await;
     let mut ended = joined(&app, &base, "others_out", &tablet).await;
-    let reply = app.call("POST", "/api/auth/logout-others", None, Some(&phone)).await;
+    // Without the password (as the app sent it before it asked for one), or with a wrong one, nothing ends; a wrong one
+    // is no sign that the session ended (not 401).
+    let missing = app.call("POST", "/api/auth/logout-others", None, Some(&phone)).await;
+    assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", missing.body);
+    let wrong = logout_others(&app, &phone, "not the password").await;
+    assert_eq!((wrong.status, wrong.body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("wrong_password")));
+    assert_eq!(signed_in(&app, &laptop).await, "others_out");
+    let reply = logout_others(&app, &phone, PASSWORD).await;
     assert_eq!((reply.status, reply.body["ended"].as_i64()), (StatusCode::OK, Some(2)));
     assert_eq!(signed_in(&app, &phone).await, "others_out");
     assert_eq!(signed_in(&app, &laptop).await, Value::Null);
     assert_eq!(signed_in(&app, &tablet).await, Value::Null);
     assert_eq!(signed_in(&app, &stranger).await, "others_keep", "other accounts keep their sessions");
     assert_eq!(closed(&mut ended).await, Some(4401));
-    let again = app.call("POST", "/api/auth/logout-others", None, Some(&phone)).await;
+    let again = logout_others(&app, &phone, PASSWORD).await;
     assert_eq!(again.body["ended"], 0);
-    let anonymous = app.call("POST", "/api/auth/logout-others", None, None).await;
+    let anonymous = app.call("POST", "/api/auth/logout-others", Some(json!({"currentPassword": PASSWORD})), None).await;
     assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 훔친_세션만으로는_주인의_세션을_끝내지_못하고_주인은_다시_로그인해_그_세션을_끝낸다() {
+    let app = TestApp::new(None).await;
+    let stolen = app.register("stolen_out", "주인").await;
+    let laptop = login(&app, "stolen_out").await;
+    // The stolen session does not know the password: its guesses end nothing and count against it alone.
+    for _ in 0..10 {
+        assert_eq!(logout_others(&app, &stolen, "a wrong guess").await.status, StatusCode::BAD_REQUEST);
+    }
+    let spent = logout_others(&app, &stolen, PASSWORD).await;
+    assert_eq!((spent.status, spent.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    assert_eq!(signed_in(&app, &laptop).await, "stolen_out");
+    assert!(rate_exceeded(&app.state, "login-failed:stolen_out", 1).is_ok());
+    // The owner, on the laptop, ends it.
+    let reply = logout_others(&app, &laptop, PASSWORD).await;
+    assert_eq!((reply.status, reply.body["ended"].as_i64()), (StatusCode::OK, Some(1)));
+    assert_eq!(signed_in(&app, &stolen).await, Value::Null);
+    assert_eq!(signed_in(&app, &laptop).await, "stolen_out");
     app.cleanup().await;
 }
 
@@ -347,7 +391,7 @@ async fn 계정_전체를_바꾸는_요청도_다른_사이트에서는_받지_�
     let cookie = app.register("cross_site", "출처").await;
     for (path, body) in [
         ("/api/auth/password", json!({"currentPassword": PASSWORD, "newPassword": NEW_PASSWORD})),
-        ("/api/auth/logout-others", json!({})),
+        ("/api/auth/logout-others", json!({"currentPassword": PASSWORD})),
     ] {
         let request = Request::builder()
             .method("POST")
@@ -390,6 +434,36 @@ async fn 쓰는_세션도_로그인한_지_90일이_지나면_끝난다() {
     .await
     .unwrap();
     assert_eq!(signed_in(&app, &cookie).await, Value::Null);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 예전_서버가_더_늘린_세션도_로그인한_지_90일이_지나면_받지_않는다() {
+    let app = TestApp::new(None).await;
+    let cookie = app.register("lifetime_past", "수명").await;
+    let base = serve(&app).await;
+    let ticket = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await.body["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Renewed past its end by a server from before the lifetime (a rollback): signed in 91 days ago, 20 days left.
+    sqlx::query(
+        "UPDATE sessions SET created_at = now() - interval '91 days', expires_at = now() + interval '20 days'
+         WHERE token_hash = $1",
+    )
+    .bind(hash(&cookie))
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let reply = me(&app, &cookie).await;
+    assert_eq!(reply.body["user"], Value::Null);
+    assert_eq!(set_cookie(&reply), None);
+    let refused = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("login_required")));
+    // Nor does a ticket issued before open a socket on it.
+    let mut request = format!("{base}/api/rooms/lifetime_past?ticket={ticket}").into_client_request().unwrap();
+    request.headers_mut().insert(header::ORIGIN, ORIGIN.parse().unwrap());
+    assert!(connect_async(request).await.is_err());
     app.cleanup().await;
 }
 
@@ -534,7 +608,9 @@ async fn 확인을_기다리는_틀린_비밀번호는_틀리기_전까지_계�
     app.register("in_flight", "대기").await;
     let held = app.state.hashing.clone().acquire_many_owned(2).await.unwrap();
     let waiting = CHECKS_UNDER_WAY as usize;
-    let attempts = join_all((0..=waiting).map(|_| login_with(&app, "in_flight", "a wrong guess")));
+    // Each from an address of its own, so no address's share of the account's budget turns any away.
+    let addresses: Vec<String> = (1..=waiting + 1).map(|at| format!("198.51.100.{at}")).collect();
+    let attempts = join_all(addresses.iter().map(|address| login_at(&app, address, "in_flight", "a wrong guess")));
     let probe = async {
         tokio::time::sleep(Duration::from_millis(300)).await;
         // The checks wait for a hashing slot, and none of them holds the account's budget yet.
@@ -554,6 +630,33 @@ async fn 확인을_기다리는_틀린_비밀번호는_틀리기_전까지_계�
     // A name nobody has keeps no window of its own; its guesses still cost the address.
     assert_eq!(login_with(&app, "nobody_here", "a wrong guess").await.status, StatusCode::UNAUTHORIZED);
     assert!(rate_exceeded(&app.state, "login-failed:nobody_here", 1).is_ok());
-    assert!(rate_exceeded(&app.state, "login-failed-address:local", CHECKS_UNDER_WAY + 1).is_err());
+    assert!(rate_exceeded(&app.state, "login-failed-address:local", 1).is_err());
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 주소_몇_개로는_계정_한도를_다_쓰지_못해_새_기기에서도_로그인한다() {
+    let app = TestApp::new(None).await;
+    app.register("budget_owner", "한도").await;
+    // Fifty wrong passwords from two addresses, as many as the account's budget.
+    let mut checked = 0;
+    for address in ["198.51.100.1", "198.51.100.2"] {
+        for _ in 0..25 {
+            if login_at(&app, address, "budget_owner", "a wrong guess").await.status == StatusCode::UNAUTHORIZED {
+                checked += 1;
+            }
+        }
+    }
+    // The owner still signs in with the right password from a browser never used before, elsewhere.
+    assert_eq!(login_at(&app, "203.0.113.2", "budget_owner", PASSWORD).await.status, StatusCode::OK);
+    // Each address spent ten of the account's fifty and waits out the window, even with the right password.
+    assert_eq!(checked, 20);
+    let spent = login_at(&app, "198.51.100.1", "budget_owner", PASSWORD).await;
+    assert_eq!(spent.status, StatusCode::TOO_MANY_REQUESTS);
+    // More addresses spend the rest: browsers the account does not know wait (known ones do not, see above).
+    for _ in 0..30 {
+        rate_record(&app.state, "login-failed:budget_owner".into());
+    }
+    assert_eq!(login_at(&app, "203.0.113.3", "budget_owner", PASSWORD).await.status, StatusCode::TOO_MANY_REQUESTS);
     app.cleanup().await;
 }

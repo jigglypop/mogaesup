@@ -73,6 +73,57 @@ def test_a_rigid_binding_without_a_bone_of_the_skeleton_is_refused(blender, cont
         common.bind([hat], [body], rig, {'slot': 'hat', **contract}, transform=common.Matrix.Identity(4))
 
 
+def test_objects_that_share_one_mesh_are_each_moved_once(blender):
+    """The glTF importer gives the nodes of one unskinned mesh (two eyes, a pair of shoes) one Mesh datablock."""
+    bpy, common, _ = blender
+    scene = bpy.context.scene
+    rig = armature(scene, 'rig', [bone('Hips'), bone('Head', (0, 0, 1))])
+    body = body_quad(scene, rig)
+    left = mesh(scene, 'left', [(.4, -.01, .4)])
+    right = fake_blender.Object(scene, 'right', 'MESH', left.data, matrix_world=common.Matrix.Translation((.2, 0, 0)))
+    left.data.users = 2
+    common.bind([left, right], [body], rig, {'slot': 'shoes', 'binding': 'transfer', 'max_transfer_distance_m': None},
+                transform=common.Matrix.Translation((0, 0, .1)))
+    assert left.data is not right.data
+    assert list(left.data.vertices[0].co) == pytest.approx([.4, -.01, .5])
+    assert list(right.data.vertices[0].co) == pytest.approx([.6, -.01, .5])
+    assert weights_of(left) == weights_of(right) and sum(weights_of(left)[0].values()) == pytest.approx(1.)
+
+
+def test_the_wardrobe_worker_fits_each_object_of_a_shared_garment_mesh_once(monkeypatch):
+    bpy, modules = fake_blender.install(monkeypatch, 'wardrobe_blender')
+    scene = bpy.context.scene
+    rig = armature(scene, 'rig', [bone('Hips')])
+    rig.data.bones[0].use_deform = True
+    # The baseline garment spans 4 x 2 x 4 m; the generated one, both of its objects together, 2 x 1 x 2 m.
+    source = mesh(scene, 'baseline', [(0, 0, 0), (4, 2, 4)], rig=rig, weights=[{'Hips': 1.}]*2)
+    source.find_armature = lambda: rig
+    garments = []
+
+    def import_garment(filepath):
+        left = mesh(scene, 'left', [(0, 0, 0), (1, 1, 2)])
+        right = fake_blender.Object(scene, 'right', 'MESH', left.data, matrix_world=fake_blender.Matrix.Translation((1, 0, 0)))
+        left.data.users = 2
+        for obj in (left, right):
+            obj.hide_set = lambda value: None
+            garments.append(obj)
+
+    def transfer_weights(modifier):
+        active = bpy.context.view_layer.objects.active
+        hips = next(group for group in active.vertex_groups if group.name == 'Hips')
+        hips.add([vertex.index for vertex in active.data.vertices], 1., 'REPLACE')
+
+    bpy.ops.import_scene.gltf = import_garment
+    bpy.ops.export_scene.gltf = lambda **kwargs: None
+    bpy.ops.object.modifier_apply = transfer_weights
+    modules['wardrobe_blender'].run({'stage': 'fit', 'source_object': 'baseline', 'garment': 'garment.glb', 'fit': 'bounds',
+                                     'output_blend': 'fitted.blend', 'output_glb': 'fitted.glb'})
+    left, right = garments
+    assert left.data is not right.data
+    assert [list(vertex.co) for vertex in left.data.vertices] == [pytest.approx([0, 0, 0]), pytest.approx([2, 2, 4])]
+    assert [list(vertex.co) for vertex in right.data.vertices] == [pytest.approx([2, 0, 0]), pytest.approx([4, 2, 4])]
+
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

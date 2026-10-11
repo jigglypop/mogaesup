@@ -3,7 +3,10 @@
 Every studio tab polls the job listing every 10 s and the app server reads it too. Its megabytes of JSON are encoded in
 the worker thread, once per listing snapshot, into the bytes FastAPI rendered the returned dict to before."""
 import asyncio
+import io
 import json
+from contextlib import contextmanager
+from threading import Event, Thread, current_thread
 
 import fastapi.routing
 import pytest
@@ -11,7 +14,9 @@ from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from PIL import Image
 
+from lock_probe import lock_free
 from src.api.avatar_factory import get_factory, router
 from src.api.characters import pipeline_error_handler
 from src.auth import UserContext, get_current_user
@@ -145,3 +150,93 @@ def test_resume_refuses_a_second_continuation_while_the_character_flow_runs(clie
     assert client.get(f'/api/avatar-factory/jobs/{PART}').json()['character_flow']['busy'] is False
     assert client.post(f'/api/avatar-factory/jobs/{PART}/resume').status_code == 202
     assert continued == [PART]
+
+
+def uploaded_views(factory):
+    """The three views of a base body, uploaded by the owner: {view: asset id}."""
+    from src.services.avatar_blueprints import AvatarBlueprints
+    views = {}
+    for view, color in (('front', 'red'), ('side', 'green'), ('back', 'blue')):
+        stream = io.BytesIO()
+        Image.new('RGBA', (16, 16), color).save(stream, format='PNG')
+        views[view] = AvatarBlueprints(factory.data).upload(OWNER, stream.getvalue())['id']
+    return views
+
+
+def test_a_base_body_asks_meshy_for_its_motions_while_the_process_lock_is_free(tmp_path, monkeypatch,
+                                                                               storage_configured):
+    """Reading Meshy's motion list can take minutes, while every other job action takes the process lock. The same
+    request sent meanwhile waits for the first and gets its job."""
+    from src.services import avatar_base_bodies, character_motion
+    from src.services.avatar_factory import AvatarFactory
+    monkeypatch.setenv('MESHY_API_KEY', 'fixture-key')
+    monkeypatch.setattr(avatar_base_bodies, 'blender_executable', lambda: 'blender')
+    factory = AvatarFactory(tmp_path)
+    payload = {'name': '기본 몸', 'body_type': 'female', 'views': uploaded_views(factory)}
+    asked, answer, free = Event(), Event(), []
+
+    def slow_library(api):
+        free.append(lock_free())
+        asked.set()
+        assert answer.wait(10)
+        return [{'action_id': action_id} for action_id in character_motion.DEFAULT_ACTIONS.values()]
+
+    monkeypatch.setattr(character_motion, 'library', slow_library)
+    results = []
+    first, second = (Thread(target=lambda: results.append(
+        AvatarBaseBodies(factory).create(OWNER, 'base-body-key-0001', payload))) for _ in range(2))
+    first.start()
+    try:
+        assert asked.wait(10)
+        second.start()
+    finally:
+        answer.set()
+        first.join(10)
+    second.join(10)
+    assert free == [True], 'the process lock was held while Meshy was asked'
+    assert sorted(created for _, created in results) == [False, True]
+    assert len({job['id'] for job, _ in results}) == 1
+
+
+def test_base_bodies_sent_together_take_turns_at_the_character_registry(tmp_path, monkeypatch, storage_configured):
+    """The character registry refuses a second writer at once ('busy'). A female and a male base body sent together
+    take turns there, and both are accepted."""
+    from src.services import avatar_base_bodies, character_motion
+    from src.services.avatar_factory import AvatarFactory
+    from src.services.character_pipeline import CharacterPipeline
+    monkeypatch.setenv('MESHY_API_KEY', 'fixture-key')
+    monkeypatch.setattr(avatar_base_bodies, 'blender_executable', lambda: 'blender')
+    monkeypatch.setattr(character_motion, 'library',
+                        lambda api: [{'action_id': action_id} for action_id in character_motion.DEFAULT_ACTIONS.values()])
+    factory = AvatarFactory(tmp_path)
+    views = uploaded_views(factory)
+    inside, release, registry = Event(), Event(), CharacterPipeline.lock
+
+    @contextmanager
+    def held_registry(self, run, *, blender=False):
+        with registry(self, run, blender=blender):
+            if run.name == '.registry' and current_thread().name == 'female':
+                inside.set()
+                assert release.wait(10)
+            yield
+    monkeypatch.setattr(CharacterPipeline, 'lock', held_registry)
+    results = {}
+
+    def accept(body_type, key):
+        try:
+            results[body_type] = AvatarBaseBodies(factory).create(
+                OWNER, key, {'name': body_type, 'body_type': body_type, 'views': views})[1]
+        except PipelineError as exc:
+            results[body_type] = exc.code
+    female = Thread(target=accept, args=('female', 'base-body-female-0001'), name='female')
+    male = Thread(target=accept, args=('male', 'base-body-male-00001'), name='male')
+    female.start()
+    try:
+        assert inside.wait(10)
+        male.start()
+        male.join(1)  # Time for it to reach the registry while the female body holds it.
+    finally:
+        release.set()
+    female.join(10)
+    male.join(10)
+    assert results == {'female': True, 'male': True}

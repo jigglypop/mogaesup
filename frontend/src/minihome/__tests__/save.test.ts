@@ -82,6 +82,34 @@ describe('island saver', () => {
     expect(saver.getState()).toMatchObject({ phase: 'ready', conflict: false, dirty: false, problem: null });
   });
 
+  it('저장이 오가는 중에 버리고 다시 불러오면 그 저장이 끝나기를 기다리는 동안에도 편집을 다시 보내거나 새로 받지 않는다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    let fail!: (error: unknown) => void;
+    world.system.save.mockImplementationOnce(() => new Promise<void>((_done, reject) => (fail = reject)));
+    world.edit();
+    saver.changed();
+    void saver.save();
+    // Leaving asked for another save meanwhile, to follow this one.
+    void saver.save();
+
+    const reloading = saver.reloadLatest();
+    expect(saver.getState().phase).toBe('loading');
+    // Finishing decorating flushes; a new edit and the 저장 button come before the save answers.
+    expect(await saver.flush()).toBe(false);
+    world.edit();
+    saver.changed();
+    expect(await saver.save()).toBe(false);
+    expect(world.system.load).toHaveBeenCalledTimes(1);
+
+    fail(new TypeError('Failed to fetch'));
+    expect(await reloading).toBe(true);
+    expect(world.system.load).toHaveBeenCalledTimes(2);
+    expect(saver.getState()).toMatchObject({ phase: 'ready', dirty: false, problem: null });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(world.system.save).toHaveBeenCalledTimes(1);
+  });
+
   it('너무 큰 섬은 같은 모습으로 다시 보내지 않고, 바뀌면 다시 저장해 본다', async () => {
     const world = fakeWorld();
     const saver = await ready(world, { idleMs: 1_000 });
@@ -402,6 +430,9 @@ describe('save messages', () => {
     expect(large).toMatchObject({ kind: 'tooLarge' });
     expect(large !== 'conflict' && large.message).toContain('2MB');
     expect(describeSaveError(new ApiRequestError(422, 'invalid_world', ''))).toMatchObject({ kind: 'invalid' });
+    const residents = describeSaveError(new ApiRequestError(422, 'invalid_residents', ''));
+    expect(residents).toMatchObject({ kind: 'invalid' });
+    expect(residents !== 'conflict' && residents.message).toContain('주민');
     expect(describeSaveError(new ApiRequestError(400, 'http_error', ''))).toMatchObject({ kind: 'invalid' });
     expect(describeSaveError(new ApiRequestError(404, 'not_found', ''))).toMatchObject({ kind: 'invalid' });
     expect(describeSaveError(new ApiRequestError(401, 'login_required', ''))).toMatchObject({ kind: 'session' });

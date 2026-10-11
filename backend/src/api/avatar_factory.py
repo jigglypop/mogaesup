@@ -425,22 +425,31 @@ def wardrobe_operator(user: UserContext) -> bool:
 
 
 @router.get('/wardrobe/bodies/{job_id}/parts')
-def wardrobe_parts(job_id: str, user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
+def wardrobe_parts(job_id: str, response: Response, user: UserContext = Depends(get_current_user),
+                   factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
+    # A member and studio staff are listed differently at this one address, and CloudFront in front of this server gives
+    # requests that arrive together under one cache key one response unless that response is marked private. The member
+    # scope is part of the key only where the studio stack has it (infra/ec2.yaml StudioCachePolicy).
+    response.headers['Cache-Control'] = 'private, no-store'
     return Wardrobe(factory, user.user_id).parts(job_id, operator=wardrobe_operator(user))
 
 
 @router.get('/wardrobe/bodies/{body_job_id}/coverage/{job_id}/{slot}')
-def wardrobe_coverage(body_job_id: str, job_id: str, slot: str, version: str,
+def wardrobe_coverage(body_job_id: str, job_id: str, slot: str, version: str, response: Response,
                       user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
+    # A member is answered at fewer versions than studio staff at this address (see wardrobe_parts).
+    response.headers['Cache-Control'] = 'private, no-store'
     return Wardrobe(factory, user.user_id).coverage(body_job_id, job_id, slot, version, member=not wardrobe_operator(user))
 
 
 @router.get('/wardrobe/colors/{job_id}/{slot}')
-def wardrobe_colors(job_id: str, slot: str, version: str, user: UserContext = Depends(get_current_user),
-                    factory=Depends(get_factory)):
+def wardrobe_colors(job_id: str, slot: str, version: str, response: Response,
+                    user: UserContext = Depends(get_current_user), factory=Depends(get_factory)):
     from src.services.avatar_wardrobe import Wardrobe
+    # A member is answered at fewer versions than studio staff at this address (see wardrobe_parts).
+    response.headers['Cache-Control'] = 'private, no-store'
     return Wardrobe(factory, user.user_id).colors(job_id, slot, version, member=not wardrobe_operator(user))[0]
 
 

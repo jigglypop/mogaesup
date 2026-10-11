@@ -16,7 +16,7 @@ from src.services.avatar_fit_profiles import normalize_fit_profile, reject_gener
 from src.services.avatar_image_prompts import DEFAULT_DESIGN_PROMPTS
 from src.services.avatar_reference_preparation import initial_state as initial_reference_state, uses_legacy_side_pose
 from src.services.avatar_openai_images import DEFAULT_BASE
-from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
+from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec, head_bounds
 from src.services.character_parts import blender_executable, blender_process, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.model_providers import base_url
@@ -97,10 +97,17 @@ class AvatarVariants:
 
     def _warm_body(self, owner, payload):
         """Parse the base body before the process lock is taken, so the checks under it read the result from memory.
-        What is wrong with the base is reported by those checks; a failure here is not."""
+        What is wrong with the base is reported by those checks; a failure here is not. Only the body of a sealed
+        assembly that is still the file it sealed is read: a version the checks refuse (one not sealed, a GLB
+        registered as it was) is never parsed."""
         try:
-            body_file = self.factory.directory(owner, payload['base_job_id'])/'native-parts'/payload['base_version']/'body.glb'
-            body_facts(body_file, digest(body_file))
+            version = self.factory.directory(owner, payload['base_job_id'])/'native-parts'/payload['base_version']
+            record = read_json(version/'record.json')
+            sealed = record.get('files', {}).get('body.glb')
+            if (record.get('status') != 'review_required' or record.get('result', {}).get('origin') == 'uploaded_glb'
+                    or not sealed or digest(version/'body.glb') != sealed):
+                return
+            body_facts(version/'body.glb', sealed)
         except Exception:
             pass
 
@@ -371,6 +378,12 @@ class AvatarVariants:
                 if photo_input is None:
                     state['production_spec']['design_from_body_template'] = True
             state['production_spec']['fitting']['bounds'].update(deepcopy(native['fitting_targets']))
+            if inherited_spec.get('measured_head_bounds_m'):
+                # The base's body reference measured this same body's head. A part whose images are not drawn again
+                # never measures it, and its glasses socket is placed on it.
+                state['production_spec']['measured_head_bounds_m'] = deepcopy(inherited_spec['measured_head_bounds_m'])
+            if head_bounds(state['production_spec']) is None:
+                raise PipelineError('head_unmeasured', '기본 몸의 머리 측정값을 확인할 수 없습니다. 피팅·조립을 다시 실행하세요.', 409)
             equipment_spec(state['production_spec'])
             state['production_spec'] = seal_production_spec(state['production_spec'])
             historical_hair = ('head', 'hairBack', 'hairFront')

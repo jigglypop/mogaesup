@@ -4,12 +4,12 @@ import { authApi } from '../api/endpoints';
 import type { Credentials, Registration, User } from '../api/types';
 import { clearDrafts } from './drafts';
 import { followSession, SESSION_RETRY_MS, SESSION_UNREACHABLE_AFTER } from './session';
-import { onSessionLapse, sessionLapsed, setSessionOwner } from './sessionWork';
+import { expireSession, onSessionDoubt, onSessionLapse, sessionLapsed, setSessionOwner } from './sessionWork';
 
 type AuthValue = {
   status: 'loading' | 'anonymous' | 'signedIn';
   user: User | null;
-  /** The member whose session ran out while they were signed in here, until anyone signs in or out. */
+  /** The member whose session ran out (or ended in another tab) while signed in here, until anyone signs in or out. */
   lapsed: User | null;
   /** The server has not said who is signed in after several tries; the screens wait and offer `retry`. */
   unreachable: boolean;
@@ -29,9 +29,33 @@ const AuthContext = createContext<AuthValue | null>(null);
 export const SESSION_RENEW_MS = 12 * 60 * 60 * 1000;
 
 /**
- * Asks the server who the session cookie belongs to, then follows sign-in and sign-out. While the server does not
- * answer, nobody is taken for signed out: the screens wait, and it asks again. A session the server stops taking (a 401
- * on any request) signs the member out but keeps their unsaved work: signing in again as them resumes it.
+ * Changed in this browser's storage by a tab that signs in or out. The other tabs hear it (`storage`) and ask whose the
+ * session cookie is now; one that missed it (asleep, or kept for Back and Forward) finds it changed once it is shown.
+ */
+export const SESSION_MARK = 'mogaesup:session';
+
+const readMark = () => {
+  try {
+    return localStorage.getItem(SESSION_MARK);
+  } catch {
+    return null;
+  }
+};
+/** Changes the mark for the other tabs; returns it as it is stored now. */
+const changeMark = () => {
+  try {
+    localStorage.setItem(SESSION_MARK, `${Date.now()}:${Math.random().toString(36).slice(2)}`);
+  } catch {
+    // Storage may be unavailable; the other tabs then learn of it from the server.
+  }
+  return readMark();
+};
+
+/**
+ * Asks the server who the session cookie belongs to, then follows sign-in and sign-out, in other tabs too. While the
+ * server does not answer, nobody is taken for signed out: the screens wait, and it asks again. A session the server
+ * stops taking (a 401 on any request, or a sign-out in another tab) signs the member out but keeps their unsaved work:
+ * signing in again as them resumes it.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -44,16 +68,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const changing = useRef(false);
   /** Whom the session belongs to: the signed-in member, or the one whose session lapsed. */
   const owner = useRef<User | null>(null);
+  /** `SESSION_MARK` as this tab last knew it. */
+  const mark = useRef<string | null>(null);
 
   const accept = (who: User | null, signedOut = false) => {
     setReady(true);
     setFailures(0);
-    // A lapsed session reads as nobody signed in; that alone ends nothing the member left unsaved.
-    if (!who && !signedOut && sessionLapsed()) return;
+    // A member who did not sign out here, taken for nobody, has lost their session (it ran out, or they signed out in
+    // another tab): it lapses, if it has not already, and that alone ends nothing they left unsaved.
+    if (!who && !signedOut && owner.current) {
+      expireSession();
+      return;
+    }
     // Signing in leaves only this member's drafts in the browser, whoever was here before (a page reloaded after a lapse
-    // knows nobody); signing out, or another tab's sign-out, leaves none.
+    // knows nobody); signing out here leaves none.
     if (who) clearDrafts(who.id);
-    else if (signedOut || owner.current) clearDrafts();
+    else if (signedOut) clearDrafts();
     owner.current = who;
     setSessionOwner(who?.id ?? null);
     setUser(who);
@@ -65,7 +95,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     stopChecking.current = followSession(
       authApi.me,
       (who) => {
-        if (current()) accept(who);
+        if (!current()) return;
+        // Still the member signed in here: nothing changes (being asked renewed their session).
+        if (who && who.id === owner.current?.id && !sessionLapsed()) {
+          setFailures(0);
+          return;
+        }
+        accept(who);
       },
       SESSION_RETRY_MS,
       (count) => {
@@ -89,17 +125,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLapsed(owner.current);
       setUser(null);
     });
-    return () => { mounted.current = false; generation.current++; stopChecking.current?.(); stopLapse(); };
+    const stopDoubt = onSessionDoubt(askAgain);
+    return () => { mounted.current = false; generation.current++; stopChecking.current?.(); stopLapse(); stopDoubt(); };
   }, []);
 
-  // Only the renewal is wanted from these asks; who is signed in is followed as before.
+  // These asks renew the session; their answers are followed as any other (another tab may have signed in or out).
   useEffect(() => {
     if (!user) return undefined;
     let asked = Date.now();
     const renew = () => {
       if (document.visibilityState !== 'visible' || Date.now() - asked < SESSION_RENEW_MS) return;
       asked = Date.now();
-      void Promise.resolve().then(authApi.me).catch(() => undefined);
+      askAgain();
     };
     const timer = setInterval(renew, SESSION_RENEW_MS / 12);
     document.addEventListener('visibilitychange', renew);
@@ -123,22 +160,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [lapsed]);
 
+  // Signed in or out in another tab: this one asks whose the session cookie is now.
+  useEffect(() => {
+    mark.current = readMark();
+    const changed = () => {
+      // A sign-in or sign-out of this tab on its way answers it: done, it asks again if the mark changed meanwhile;
+      // failed, the mark is compared again when the tab is next shown.
+      if (changing.current) return;
+      const now = readMark();
+      if (now === mark.current) return;
+      mark.current = now;
+      askAgain();
+    };
+    const heard = (event: StorageEvent) => {
+      if (event.key === SESSION_MARK) changed();
+    };
+    const shown = () => {
+      if (document.visibilityState === 'visible') changed();
+    };
+    window.addEventListener('storage', heard);
+    window.addEventListener('focus', shown);
+    document.addEventListener('visibilitychange', shown);
+    return () => {
+      window.removeEventListener('storage', heard);
+      window.removeEventListener('focus', shown);
+      document.removeEventListener('visibilitychange', shown);
+    };
+  }, []);
+
   async function change<T>(action: () => Promise<T>, who: (result: T) => User | null, signedOut = false): Promise<T> {
     if (changing.current) throw new Error('세션 요청이 진행 중이에요');
     changing.current = true;
     generation.current++;
     stopChecking.current?.();
+    // Another tab signed in or out while this ran: whose the session cookie is now is asked once this is done.
+    let missed = false;
     try {
       const result = await action();
       // Whatever was asked while it ran answers for the session before it.
       generation.current++;
       stopChecking.current?.();
       if (mounted.current) accept(who(result), signedOut);
+      missed = readMark() !== mark.current;
+      mark.current = changeMark();
       return result;
     } catch (error) {
       if (!ready && mounted.current) check();
       throw error;
-    } finally { changing.current = false; }
+    } finally {
+      changing.current = false;
+      if (missed && mounted.current) askAgain();
+    }
   }
 
   const value = useMemo<AuthValue>(

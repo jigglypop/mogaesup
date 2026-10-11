@@ -200,7 +200,10 @@ Resources:
   StudioCachePolicy:
     # Authorization must be part of the cache key for CloudFront to forward it on GET. So is x-gateway-key: CloudFront
     # caches an origin 403 for a few seconds, and the one nginx gives a request without the key (STUDIO_GATEWAY_KEY) must not
-    # be served to a request that has it. DefaultTTL 0 keeps API responses uncached unless the origin asks otherwise.
+    # be served to a request that has it. So is x-studio-scope, which the app's gateway sends with a member's wardrobe
+    # reads (server/src/factory.rs): the API lists and serves a member less than studio staff at the same address, and
+    # CloudFront gives requests that share a key one response when they arrive together, and keeps a 404 for seconds.
+    # DefaultTTL 0 keeps API responses uncached unless the origin asks otherwise.
     Type: AWS::CloudFront::CachePolicy
     Condition: HasPublicStudio
     Properties:
@@ -212,7 +215,7 @@ Resources:
         ParametersInCacheKeyAndForwardedToOrigin:
           EnableAcceptEncodingGzip: true
           EnableAcceptEncodingBrotli: true
-          HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization, x-gateway-key]}
+          HeadersConfig: {HeaderBehavior: whitelist, Headers: [Authorization, x-gateway-key, x-studio-scope]}
           CookiesConfig: {CookieBehavior: none}
           QueryStringsConfig: {QueryStringBehavior: all}
   StudioDistribution:

@@ -172,7 +172,8 @@ jobs:
           REQUIRE_TEST_DATABASE: '1'
 
   # The studio image as the instance builds it (from the release archive prepare-aws.ps1 packs, never pushed anywhere),
-  # and its Blender running the helpers every worker imports. The tests above use a stand-in for Blender.
+  # and its Blender running the helpers every worker imports and one worker's recipe (material separation). The tests
+  # above use a stand-in for Blender.
   studio-image:
     needs: changes
     if: needs.changes.outputs.backend_check == 'true'
@@ -195,6 +196,13 @@ jobs:
         run: >-
           docker run --rm -v "$PWD/.github/scripts/blender_smoke.py:/smoke.py:ro" studio-check
           blender --background --factory-startup --python-exit-code 1 --python /smoke.py
+      # A worker recipe in that Blender: backend/tests/run_blender_parts_check.py has character_parts.py run
+      # character_parts_blender.py on a rigged fixture (the backend tests stand in for that process). The archive leaves
+      # the tests out, so they go in read-only, and the lock's dev group adds the pytest they import.
+      - name: 실제 Blender로 재질 분리
+        run: >-
+          docker run --rm -v "$PWD/backend/tests:/app/backend/tests:ro" -e PYTHONPATH=/app/backend:/app/backend/tests
+          studio-check sh -c 'uv sync --locked && python backend/tests/run_blender_parts_check.py'
       - name: 기록 DB 명령
         run: docker run --rm studio-check python -c "import src.records, src.services.record_store"
       # nginx.conf with the port-80 rules entrypoint.py writes for a public studio (a stand-in key, rotation included).
