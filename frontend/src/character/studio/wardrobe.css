@@ -79,7 +79,7 @@
 .wardrobe-shape{display:grid;grid-template-columns:90px minmax(0,1fr);gap:8px 10px;align-items:start;font-size:12px}
 .wardrobe-shape>span{color:var(--muted);padding-top:4px}
 .wardrobe-shape-controls{display:grid;gap:8px;min-width:0}
-.wardrobe-shape-controls label{display:grid;grid-template-columns:minmax(0,1fr) 44px;gap:4px 8px;align-items:center;color:var(--muted)}
+.wardrobe-shape-controls label{display:grid;grid-template-columns:minmax(0,1fr) 52px;gap:4px 8px;align-items:center;color:var(--muted)}
 .wardrobe-shape-controls input[type=range]{grid-column:1;width:100%;accent-color:var(--accent)}
 .wardrobe-shape-controls output{grid-column:2;text-align:right;color:var(--text)}
 .workspace-content .wardrobe-shape-fit button,.workspace-content .wardrobe-shape-actions button{min-height:30px;padding:0 12px;font-size:12px}

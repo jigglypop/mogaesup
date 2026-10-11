@@ -43,7 +43,11 @@ use uuid::Uuid;
 use super::{BAD_ACTION, BAD_LAYOUT, Ctx, Game, GameError, Kind, Millis, distance_xz, layout_points, pick_many};
 use bots::{Bot, Lane};
 
-pub(crate) const KIND: Kind = Kind::new("kart", 1, MAX_RACERS, create).ticking(20);
+pub(crate) const KIND: Kind = Kind::new("kart", 1, MAX_RACERS, create).ticking(20).moving(TOP_SPEED);
+
+/// How fast a kart goes as the race sees it, in meters a second: the pages' fastest (31 m/s with a booster or a pad) and
+/// room for updates that arrive bunched up. A page may report any move, so a faster one is followed at this speed.
+const TOP_SPEED: f64 = 45.0;
 
 /// People and bots together.
 const MAX_RACERS: usize = 8;
@@ -489,6 +493,15 @@ impl Game for Kart {
                 .map(|(racer, bot)| json!({"id": racer.id, "color": racer.color, "route": bot.route.view()}))
                 .collect::<Vec<_>>(),
         })
+    }
+
+    fn destinations(&self, _now: Millis) -> Vec<(Uuid, [f64; 3])> {
+        // Each person's slot on the grid until they pass the first gate: the page takes them there as the race opens.
+        self.racers
+            .iter()
+            .filter(|racer| !racer.left && racer.bot.is_none() && racer.lap == 0 && racer.next == 1)
+            .map(|racer| (racer.id, racer.slot))
+            .collect()
     }
 
     fn act(&mut self, player: Uuid, action: &Value, ctx: &mut Ctx) -> Result<(), GameError> {

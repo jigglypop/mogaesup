@@ -227,6 +227,32 @@ def draining():
         return True
 
 
+def live_workers():
+    """How many worker processes (Blender past its fixed bootstrap) hold their own lease now, whoever admitted them;
+    None when that cannot be read. A worker runs on after the parent that started it exits, but one not yet past its
+    bootstrap then never gets there: the parent's grant has ended (see _inherited_grant)."""
+    try:
+        with _guard():
+            count = 0
+            for path in (_root() / 'work').glob('*.json'):
+                try:
+                    with path.open('r+b') as stream:
+                        try:
+                            _take_lock(stream, blocking=False)
+                        except OSError as exc:
+                            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                                raise
+                            stream.seek(1)
+                            count += json.loads(stream.read()).get('worker') is True
+                            continue
+                        _unlock(stream)
+                except FileNotFoundError:
+                    continue
+            return count
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _admit(kind, inherit=False):
     """Blocking half of an admission: check the drain under admission.guard and hold a new kernel work lease."""
     path = _root() / 'work' / (uuid.uuid4().hex + '.json')
@@ -237,7 +263,9 @@ def _admit(kind, inherit=False):
         path.parent.mkdir(parents=True, exist_ok=True)
         stream = path.open('x+b')
         try:
-            stream.write(b'0' + json.dumps({'version': 1, 'kind': kind}).encode())
+            # A worker's own lease says so (see live_workers).
+            lease = {'version': 1, 'kind': kind, **({'worker': True} if inherit else {})}
+            stream.write(b'0' + json.dumps(lease).encode())
             stream.flush()
             _take_lock(stream)
         except BaseException:

@@ -20,8 +20,8 @@ function layoutFor(room: GameRoomValue, session: GameSession, options: unknown):
 
 /**
  * The 게임 button and its panel: the games to open; a lobby's players with 참가·나가기 and the host's 시작·닫기; the game's
- * own panel while it plays; its result once it ends, with the host's 다시 하기·닫기. Shown while the viewer is in the
- * island's live room.
+ * own panel while it plays; its result once it ends, with the host's 다시 하기·닫기. The island's owner may 닫기 a lobby or
+ * a result whoever hosts it. Shown while the viewer is in the island's live room.
  */
 export function GameDock() {
   const room = useGameRoom();
@@ -57,6 +57,7 @@ export function GameDock() {
   const definition = gameOf(session?.kind);
   const count = session?.players.length ?? 0;
   const host = !!session && session.host === session.you;
+  const owner = !!room.owner;
   const fold = () => {
     setOpen(false);
     toggle.current?.focus();
@@ -130,7 +131,7 @@ export function GameDock() {
               시작 {count < minimum ? `${count}/${minimum}` : `${count}명`}
             </button>
           )}
-          {host && (
+          {(host || owner) && (
             <button type="button" className="mg-btn is-small is-quiet" onClick={client.close}>
               닫기
             </button>
@@ -146,19 +147,19 @@ export function GameDock() {
       <>
         {active && Panel && <Panel {...active.props} />}
         {active && Result && <Result {...active.props} result={active.result} />}
-        {plays && (
+        {(plays || (ended && owner)) && (
           <div className="mg-game-actions">
             {ended && host && (
               <button type="button" className="mg-btn is-small is-primary" onClick={() => client.open(session.kind)}>
                 다시 하기
               </button>
             )}
-            {(!ended || !host) && (
+            {plays && (!ended || !host) && (
               <button type="button" className="mg-btn is-small" onClick={client.leave}>
                 나가기
               </button>
             )}
-            {host && (
+            {(host || (ended && owner)) && (
               <button type="button" className="mg-btn is-small is-quiet" onClick={client.close}>
                 닫기
               </button>

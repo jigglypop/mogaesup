@@ -11,7 +11,8 @@
 //! Client → server:
 //! - `{"type":"Open","kind":"impostor"}`: opens a lobby when the island has no session; the sender hosts it and is its
 //!   first player. The host of a lobby or of a finished game may open again: a lobby of `kind` with the same players.
-//! - `{"type":"Join"}`, `{"type":"Leave"}`: joins the lobby; leaves the session (in any phase).
+//! - `{"type":"Join"}`, `{"type":"Leave"}`: joins the lobby; leaves the session (in any phase). Opening and joining
+//!   take a peer that stands somewhere in the live room (one its page has said where it is).
 //! - `{"type":"Start","layout":{…}}`: the host starts the lobby's game once it has enough players. `layout` is data the
 //!   host's page computed from the island it has loaded (open spots, say), in the game's own shape; the game checks it.
 //! - `{"type":"Act","action":{…}}`: a player's move, in the game's own shape (from someone watching, see
@@ -36,8 +37,9 @@
 //! `Lobby` → `Playing` (a [`Game`] runs, ticked at its kind's rate) → `Ended` (the result stays until the host opens
 //! again or closes). A host who leaves hands the session to the earliest player left; the last player leaving closes
 //! it, and so does nobody touching it for ten minutes (a game that plays on while its players are in the live room is
-//! being played). A player out of the live room for ten seconds leaves. A game whose code panics ends its session:
-//! everyone watching is told `game_failed`, and every other island plays on.
+//! being played), or its lobby not starting within ten minutes of opening. A player out of the live room for ten
+//! seconds leaves. A game whose code panics ends its session: everyone watching is told `game_failed`, and every other
+//! island plays on.
 //!
 //! # Adding a game
 //!
@@ -103,6 +105,14 @@ pub type Millis = u64;
 /// How far from the island's centre a layout point may be, on each axis.
 pub const MAX_COORDINATE: f64 = 200.0;
 
+/// How fast anyone moves over the ground as games see them unless their [`Kind`] says otherwise, in meters a second:
+/// the engine runs at 20 m/s, and the rest is room for updates that arrive bunched up. A page may report any move, so
+/// a faster one (a jump across the island, say) is followed at this speed from where its player stood (see
+/// [`Ctx::position`]).
+pub const DEFAULT_TOP_SPEED: f64 = 30.0;
+/// The fastest a [`Kind`] may let its players move.
+pub const MAX_TOP_SPEED: f64 = 100.0;
+
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const OUTBOUND_CAPACITY: usize = 256;
 /// Game sockets on one island besides its owner's, as many as its live room holds (see [`seat`]).
@@ -130,6 +140,9 @@ const AWAY_LIMIT: Millis = 10_000;
 /// A session nobody has touched for this long closes; a game playing while its players are in the live room is
 /// touched by every tick.
 const IDLE_LIMIT: Millis = 10 * 60_000;
+/// A lobby that has not started this long after it opened closes, whatever goes on in it: its host opening it again
+/// does not hold the island for longer.
+const LOBBY_LIMIT: Millis = 10 * 60_000;
 const MAX_KIND: usize = 32;
 const MAX_PEER: usize = 64;
 
@@ -233,7 +246,9 @@ impl<'a> Ctx<'a> {
         self.players.iter().find(|player| player.id == id).map(|player| player.name.as_str())
     }
 
-    /// Where `player` stands in the live room, as of this call: None until their page has said, or while they are out.
+    /// Where `player` stands, as of this call: where their page puts them in the live room, reached at no more than
+    /// their game's top speed ([`Kind::moving`]) from where they stood before, or at once on a place the game sends
+    /// them to ([`Game::destinations`]). None until their page has said, or while they are out.
     pub fn position(&self, player: Uuid) -> Option<[f64; 3]> {
         self.positions.get(&player).copied()
     }
@@ -288,6 +303,13 @@ pub trait Game: Send {
     /// belong to.
     fn view(&self, viewer: Option<Uuid>, now: Millis) -> Value;
 
+    /// Where the game sends players now, by id: places their views show and their pages move them to (a seat, a slot on
+    /// a grid). A player is taken to stand there at once, where any other move is followed at the game's top speed (see
+    /// [`Ctx::position`]). Nobody, unless a game sends someone.
+    fn destinations(&self, _now: Millis) -> Vec<(Uuid, [f64; 3])> {
+        Vec::new()
+    }
+
     /// A player's action. Err refuses it, telling that player why; a refused action must change nothing.
     fn act(&mut self, player: Uuid, action: &Value, ctx: &mut Ctx) -> Result<(), GameError>;
 
@@ -317,6 +339,8 @@ pub struct Kind {
     pub max_players: usize,
     /// How many times a second [`Game::tick`] runs while the game plays: 1 to [`MAX_TICK_HZ`].
     pub tick_hz: u32,
+    /// How fast its players move as it sees them, in meters a second (see [`Ctx::position`]).
+    pub top_speed: f64,
     /// Starts a game with the lobby's players (`ctx.players()`) and the host's `layout`, or says why it cannot.
     pub create: Create,
 }
@@ -328,13 +352,19 @@ impl Kind {
         assert!(!kind.is_empty() && kind.len() <= MAX_KIND, "a game's kind is 1 to 32 bytes");
         assert!(1 <= min_players && min_players <= max_players, "a game needs at least one player, and min <= max");
         assert!(max_players <= ISLAND_CAPACITY, "an island holds at most 30 players");
-        Self { kind, min_players, max_players, tick_hz: DEFAULT_TICK_HZ, create }
+        Self { kind, min_players, max_players, tick_hz: DEFAULT_TICK_HZ, top_speed: DEFAULT_TOP_SPEED, create }
     }
 
     /// The same game ticked `hz` times a second while it plays (physics, say): 1 to [`MAX_TICK_HZ`].
     pub const fn ticking(self, hz: u32) -> Self {
         assert!(1 <= hz && hz <= MAX_TICK_HZ, "a game ticks 1 to 30 times a second");
         Self { tick_hz: hz, ..self }
+    }
+
+    /// The same game with its players moving up to `speed` m/s (a kart, say): more than 0, at most [`MAX_TOP_SPEED`].
+    pub const fn moving(self, speed: f64) -> Self {
+        assert!(0.0 < speed && speed <= MAX_TOP_SPEED, "a game's players move more than 0 and at most 100 m/s");
+        Self { top_speed: speed, ..self }
     }
 
     /// The wait between two ticks.
@@ -452,6 +482,38 @@ struct Player {
     peer: Option<String>,
     /// Since when they have had no peer in the live room.
     away_since: Option<Millis>,
+    /// Where games last took them to stand (where they joined, before a game), and when (see [`Player::follow`]).
+    standing: Option<([f64; 3], Millis)>,
+}
+
+impl Player {
+    /// Where games take this player to stand at `now`: where their peer is, reached at no more than `top_speed` since
+    /// they were last taken to stand somewhere, from there or from the nearest of `sent` (where the game sends them)
+    /// when that is nearer. None while they have no placed peer, and that time saves up no move.
+    fn follow(&mut self, room: &[RoomPeer], now: Millis, sent: &[[f64; 3]], top_speed: f64) -> Option<[f64; 3]> {
+        let Some(at) = locate(self, room).and_then(|peer| peer.position) else {
+            if let Some((_, since)) = &mut self.standing {
+                *since = now;
+            }
+            return None;
+        };
+        let standing = match self.standing {
+            None => at,
+            Some((from, since)) => {
+                let nearest = sent.iter().copied().min_by(|a, b| distance_xz(*a, at).total_cmp(&distance_xz(*b, at)));
+                let from = nearest.filter(|place| distance_xz(*place, at) < distance_xz(from, at)).unwrap_or(from);
+                let reach = top_speed * now.saturating_sub(since) as f64 / 1000.0;
+                let gap = distance_xz(from, at);
+                if gap <= reach {
+                    at
+                } else {
+                    [from[0] + (at[0] - from[0]) * reach / gap, at[1], from[2] + (at[2] - from[2]) * reach / gap]
+                }
+            }
+        };
+        self.standing = Some((standing, now));
+        Some(standing)
+    }
 }
 
 struct Session {
@@ -468,6 +530,8 @@ struct Session {
     /// When someone last did something with the session, its game started or ended, or it ticked with players in the
     /// live room.
     active_at: Millis,
+    /// When its lobby opened: a new session, or the host's next after a game (see [`LOBBY_LIMIT`]).
+    lobby_at: Millis,
     /// Wakes the ticker when the game starts, so it ticks at once instead of after its idle wait.
     wake: Arc<Notify>,
 }
@@ -483,6 +547,25 @@ impl Session {
 
     fn members(&self) -> Vec<Member> {
         self.players.iter().map(|player| Member { id: player.id, name: player.name.clone() }).collect()
+    }
+
+    /// Where the players stand for the game as of `now`, by user id (see [`Player::follow`]); those without a placed
+    /// peer are left out. It asks the game where it sends them ([`Game::destinations`]) under [`guarded`].
+    fn positions(&mut self, room: &[RoomPeer], now: Millis) -> Result<HashMap<Uuid, [f64; 3]>, Refused> {
+        let sent = match self.game.as_ref() {
+            Some(game) => guarded(|| game.destinations(now))?,
+            None => Vec::new(),
+        };
+        let top_speed = self.kind.top_speed;
+        Ok(self
+            .players
+            .iter_mut()
+            .filter_map(|player| {
+                let places: Vec<[f64; 3]> =
+                    sent.iter().filter(|(id, _)| *id == player.id).map(|(_, place)| *place).collect();
+                Some((player.id, player.follow(room, now, &places, top_speed)?))
+            })
+            .collect())
     }
 
     /// Ends the game once it has a result.
@@ -505,7 +588,7 @@ impl Session {
         let mut events = Vec::new();
         if self.phase == Phase::Playing {
             let members = self.members();
-            let positions = positions(&self.players, room);
+            let positions = self.positions(room, now)?;
             if let Some(game) = self.game.as_mut() {
                 let mut ctx = Ctx::new(now, &members, &positions, &mut self.rng);
                 guarded(|| game.leave(user, &mut ctx))?;
@@ -543,11 +626,6 @@ fn locate<'a>(player: &Player, room: &'a [RoomPeer]) -> Option<&'a RoomPeer> {
     room.iter()
         .find(|peer| Some(peer.id.as_str()) == bound && peer.user == player.id)
         .or_else(|| room.iter().filter(|peer| peer.user == player.id).max_by_key(|peer| peer.position.is_some()))
-}
-
-/// Where the players stand, by user id; those without a placed peer are left out.
-fn positions(players: &[Player], room: &[RoomPeer]) -> HashMap<Uuid, [f64; 3]> {
-    players.iter().filter_map(|player| Some((player.id, locate(player, room)?.position?))).collect()
 }
 
 // ---- Sockets and islands
@@ -702,16 +780,17 @@ struct Caller {
 }
 
 impl Caller {
-    /// The caller's peer in the room now: the one their socket holds, else another of theirs.
-    fn peer_in(&self, room: &[RoomPeer]) -> Option<String> {
-        room.iter()
-            .find(|peer| peer.id == self.peer && peer.user == self.user)
-            .or_else(|| room.iter().find(|peer| peer.user == self.user))
-            .map(|peer| peer.id.clone())
+    /// The caller's peer in the room now, once it stands somewhere (shown to the others): the one their socket holds,
+    /// else another of theirs.
+    fn peer_in<'a>(&self, room: &'a [RoomPeer]) -> Option<&'a RoomPeer> {
+        let placed = || room.iter().filter(|peer| peer.user == self.user && peer.position.is_some());
+        placed().find(|peer| peer.id == self.peer).or_else(|| placed().next())
     }
 
-    fn player(&self, peer: String) -> Player {
-        Player { id: self.user, name: self.name.clone(), peer: Some(peer), away_since: None }
+    /// The caller as a player on `peer`, standing where it does at `now`.
+    fn player(&self, peer: &RoomPeer, now: Millis) -> Player {
+        let standing = peer.position.map(|at| (at, now));
+        Player { id: self.user, name: self.name.clone(), peer: Some(peer.id.clone()), away_since: None, standing }
     }
 }
 
@@ -1127,12 +1206,15 @@ fn beat(session: &mut Session, room: &[RoomPeer], now: Millis) -> Result<(Option
     if session.phase == Phase::Playing && session.players.iter().any(|player| player.peer.is_some()) {
         session.active_at = now;
     }
-    if session.players.is_empty() || now.saturating_sub(session.active_at) >= IDLE_LIMIT {
+    let over = session.players.is_empty()
+        || now.saturating_sub(session.active_at) >= IDLE_LIMIT
+        || (session.phase == Phase::Lobby && now.saturating_sub(session.lobby_at) >= LOBBY_LIMIT);
+    if over {
         return Ok((None, events));
     }
     if session.phase == Phase::Playing {
         let members = session.members();
-        let positions = positions(&session.players, room);
+        let positions = session.positions(room, now)?;
         if let Some(game) = session.game.as_mut() {
             let mut ctx = Ctx::new(now, &members, &positions, &mut session.rng);
             guarded(|| game.tick(&mut ctx))?;
@@ -1161,23 +1243,32 @@ fn open(
                 id,
                 kind,
                 phase: Phase::Lobby,
-                players: vec![caller.player(peer)],
+                players: vec![caller.player(peer, now)],
                 game: None,
                 result: None,
                 rng,
                 seq: 0,
                 active_at: now,
+                lobby_at: now,
                 wake: Arc::new(Notify::new()),
             });
             Ok(Outcome { opened: Some(id), ..Outcome::default() })
         }
         Some(session) if session.host() == Some(caller.user) && session.phase != Phase::Playing => {
+            if session.phase == Phase::Lobby && session.kind.kind == kind.kind {
+                return Ok(Outcome { unchanged: true, ..Outcome::default() });
+            }
+            // Another game for the lobby under way keeps its times: opening again does not hold the island for longer.
+            // A lobby after a game is a new one.
+            if session.phase == Phase::Ended {
+                session.active_at = now;
+                session.lobby_at = now;
+            }
             session.kind = kind;
             session.phase = Phase::Lobby;
             session.game = None;
             session.result = None;
             session.players.truncate(kind.max_players);
-            session.active_at = now;
             Ok(Outcome::default())
         }
         Some(session) if session.phase == Phase::Playing => Err(IN_PROGRESS.into()),
@@ -1197,7 +1288,7 @@ fn join(place: &mut Island, caller: &Caller, room: &[RoomPeer], now: Millis) -> 
         return Err(FULL.into());
     }
     let peer = caller.peer_in(room).ok_or(NOT_IN_ROOM_GAME)?;
-    session.players.push(caller.player(peer));
+    session.players.push(caller.player(peer, now));
     session.active_at = now;
     Ok(Outcome::default())
 }
@@ -1236,7 +1327,14 @@ fn start(
         return Err(FULL.into());
     }
     let members = session.members();
-    let positions = positions(&session.players, room);
+    // A new game takes everyone to stand where their pages say, to begin with; one whose page says nowhere yet (its room
+    // reconnecting, say) where they last stood, rather than wherever it says first.
+    for player in &mut session.players {
+        if locate(player, room).is_some_and(|peer| peer.position.is_some()) {
+            player.standing = None;
+        }
+    }
+    let positions = session.positions(room, now)?;
     let mut ctx = Ctx::new(now, &members, &positions, &mut session.rng);
     let create = session.kind.create;
     let game = guarded(|| create(layout, &mut ctx))??;
@@ -1262,7 +1360,7 @@ fn act(
     }
     let playing = session.has(caller.user);
     let members = session.members();
-    let positions = positions(&session.players, room);
+    let positions = session.positions(room, now)?;
     let game = session.game.as_mut().ok_or(NOT_PLAYING)?;
     let mut ctx = Ctx::new(now, &members, &positions, &mut session.rng);
     if playing {

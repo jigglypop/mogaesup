@@ -194,8 +194,10 @@ class AnimalProduction:
             if job:
                 if job['request'] != request:
                     raise PipelineError('idempotency_conflict', '같은 요청에 다른 설정이 있습니다.', 409)
-                paused = job['status'] == 'paused' or (job['status'] in ('accepted', 'running')
-                                                       and not worker_alive(job, held or _JOBS.busy(worker), claimed=True))
+                paused = (job['status'] == 'paused'
+                          or (job['status'] in ('accepted', 'running')
+                              and not worker_alive(job, held or _JOBS.busy(worker), claimed=True))
+                          or self.library.model_accepted(animal_id, job))
                 if paused and record.get('production') != job_id:
                     raise PipelineError('job_replaced', '이 작업은 새 요청으로 대체됐습니다.', 409)
                 # A worker still finishing its last save keeps the job; the request can be repeated once it lets go.

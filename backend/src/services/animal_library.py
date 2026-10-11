@@ -12,6 +12,7 @@ import re
 
 from PIL import Image, ImageOps
 
+from src.services import character_jobs
 from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, valid_request_key
@@ -114,10 +115,20 @@ class AnimalLibrary:
         status = job['status']
         if status in ('accepted', 'running') and not worker_alive(job, held or JOBS.busy(str(work)), claimed=True):
             status = 'paused'
+        elif self.model_accepted(animal_id, job):
+            status = 'paused'
         return {'id': job['id'], 'request_key': job['request_key'], 'status': status, 'step': job.get('step'),
                 'steps': job['steps'], 'done': job.get('done', []), 'views': job['request']['views'], 'note': job['request']['note'],
                 'error': job.get('error'), 'created_at': job.get('created_at'), 'updated_at': job.get('updated_at'),
                 'progress': self._progress(animal_id, job) if status == 'running' else None}
+
+    def model_accepted(self, animal_id, job):
+        """A job an earlier version blocked at its model step although Meshy accepted the task, which only the saved
+        answer names: going on polls that task and sends nothing (character_jobs.adopt_submitted_task)."""
+        if job.get('status') != 'blocked' or job.get('step') != 'model':
+            return False
+        run = self.directory(animal_id)/'jobs'/job['id']/'meshy'
+        return character_jobs.submitted_task_id(run, read_json(run/'character.json')) is not None
 
     def _progress(self, animal_id, job):
         """Where the running step is: the view being drawn, or the Meshy task's percentage."""

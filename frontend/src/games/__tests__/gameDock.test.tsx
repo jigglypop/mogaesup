@@ -18,11 +18,12 @@ vi.mock('../registry', async () => {
   return { GAMES, gameOf: (kind: string | null | undefined) => GAMES.find((game) => game.kind === kind) ?? null };
 });
 
+import type { User } from '../../api/types';
 import { createVillage } from '../../minihome/village';
 import { mount } from '../../__tests__/mount';
 import { GameDock } from '../GameDock';
 import type { GameSession } from '../protocol';
-import { GameContext, type GameRoomValue } from '../room';
+import { GameContext, GameRoom, useGameRoom, type GameRoomValue } from '../room';
 import { createGameClient, type GameClient, type GameState } from '../useGameSession';
 import { FakeSocket } from './socket';
 
@@ -69,9 +70,9 @@ const session = (changes: Partial<GameSession> = {}): GameSession => ({
 
 const mounted: { unmount: () => Promise<void> }[] = [];
 
-async function dock(initial: Partial<GameState>, live = true) {
+async function dock(initial: Partial<GameState>, live = true, owner = false) {
   const { client, set } = fakeClient(initial);
-  const room: GameRoomValue = { client, live, building: createVillage, playerRef: { current: null } };
+  const room: GameRoomValue = { client, live, owner, building: createVillage, playerRef: { current: null } };
   const view = await mount(
     <GameContext.Provider value={room}>
       <GameDock />
@@ -157,6 +158,44 @@ describe('섬의 게임 패널', () => {
     const others = [1, 2, 3].map((index) => ({ id: `p${index}`, name: `사람${index}`, peer: null }));
     set({ session: { ...watching, players: others } });
     expect(button('참가')!.disabled).toBe(true);
+  });
+
+  it('섬 주인은 남이 연 대기실과 끝난 게임을 닫을 수 있다', async () => {
+    const theirs = session({ host: friend.id, players: [friend] });
+    const { toggle, button, press, client, set } = await dock({ session: theirs }, true, true);
+    await act(() => toggle().click());
+    expect(button('시작')).toBeUndefined();
+    await press('닫기');
+    expect(client.close).toHaveBeenCalledTimes(1);
+    // A game under way goes on; once it has ended, its result can be closed.
+    set({ session: session({ phase: 'playing', host: friend.id, players: [friend], game: {} }) });
+    expect(button('닫기')).toBeUndefined();
+    set({ session: session({ phase: 'ended', host: friend.id, players: [friend], game: {}, result: {} }) });
+    expect(button('다시 하기')).toBeUndefined();
+    expect(button('나가기')).toBeUndefined();
+    await press('닫기');
+    expect(client.close).toHaveBeenCalledTimes(2);
+  });
+
+  it('섬 주인의 페이지만 주인으로 둔다', async () => {
+    const seen: (boolean | undefined)[] = [];
+    function Probe() {
+      seen.push(useGameRoom()?.owner);
+      return null;
+    }
+    const island = (viewer: User | null) => (
+      <GameRoom username="mogae" viewer={viewer} building={createVillage} playerRef={{ current: null }}>
+        <Probe />
+      </GameRoom>
+    );
+    const owner: User = { id: 'owner', username: 'mogae', displayName: '주인', role: 'user' };
+    const view = await mount(island(owner));
+    mounted.push(view);
+    expect(seen.at(-1)).toBe(true);
+    await view.rerender(island({ ...owner, id: 'visitor', username: 'visitor' }));
+    expect(seen.at(-1)).toBe(false);
+    await view.rerender(island(null));
+    expect(seen.at(-1)).toBe(false);
   });
 
   it('임포스터 방장은 봇과 혼자일 때의 역할을 정하고, 시작은 섬의 배치와 그 설정을 보낸다', async () => {

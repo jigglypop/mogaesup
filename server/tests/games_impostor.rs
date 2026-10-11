@@ -201,12 +201,27 @@ async fn 네_사람이_임포스터를_하며_처치하고_신고해_회의의_�
     let seen = everyone[impostor].session(|session| session["game"]["kill"]["targets"] == json!([target])).await;
     everyone[impostor].act(json!({"do": "kill", "target": target})).await;
     assert_eq!(everyone[impostor].refused().await, "cooldown");
+    // While the cooldown runs, the impostor walks off 150 m and more from everyone.
+    everyone[impostor].walk([-150.0, 0.0, 0.0]).await;
 
-    // Once the cooldown has run (the server's clock, read off the view), the kill goes through. A change's session
-    // view comes before its events.
+    // Once the cooldown has run (the server's clock, read off the view), a page that puts the impostor back beside the
+    // victim and kills at once is refused: the server follows the jump at running speed, so the impostor is not there
+    // yet. (The room has the jump before the kill is sent.)
     let wait =
         seen["game"]["kill"]["readyAt"].as_u64().unwrap().saturating_sub(views[impostor]["now"].as_u64().unwrap());
     idle(&mut everyone, started + Duration::from_millis(wait + 300)).await;
+    everyone[impostor].walk(near).await;
+    send(&mut everyone[impostor].room, json!({"type": "Ping", "ts": 5})).await;
+    next_where(&mut everyone[impostor].room, "Pong", Duration::from_secs(2), |pong| pong["ts"] == 5).await.unwrap();
+    everyone[impostor].act(json!({"do": "kill", "target": target})).await;
+    assert_eq!(everyone[impostor].refused().await, "too_far");
+
+    // Some five seconds on, the server has the impostor beside the victim, and the kill goes through. A change's
+    // session view comes before its events.
+    await_session(&mut everyone, impostor, Duration::from_secs(15), |session| {
+        session["game"]["kill"]["targets"] == json!([target])
+    })
+    .await;
     everyone[impostor].act(json!({"do": "kill", "target": target})).await;
     let dead = everyone[victim].session(|session| session["game"]["alive"] == false).await;
     assert_eq!(dead["game"]["bodies"][0]["victim"], json!(target));

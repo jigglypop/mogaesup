@@ -2,8 +2,8 @@
 
 Paid requests are recorded before POST and are never automatically resubmitted after an
 uncertain result. A request the provider refused outright (key, permission, schema, model,
-quota) produced nothing billable, so its request ID may be tried again. The shared asset
-namespace and process lock cover HTTP/CLI callers.
+quota), or one whose connection never opened, produced nothing billable, so its request ID
+may be tried again. The shared asset namespace and process lock cover HTTP/CLI callers.
 """
 from __future__ import annotations
 
@@ -65,20 +65,26 @@ def interpret_rules(description: str) -> dict:
 
 _KEY = re.compile(r'[A-Za-z0-9_-]{8,80}')
 DEFAULT_MODEL = 'gpt-4.1-mini'
-# Provider statuses that refuse the request before any work. They are answered with 503, which the studio gateway does
-# not count against the paid budget; only timeouts, 5xx and unusable bodies stay uncertain (504, counted).
+# Provider statuses that refuse the request before any work, and connections that never opened (httpx raises these only
+# while connecting or TLS-handshaking, before a byte of the request is written; each request has its own client). They
+# are answered with 503, which the studio gateway does not count against the paid budget; only timeouts after the
+# connection opened, 5xx and unusable bodies stay uncertain (504, counted).
 _REFUSED = {401: 'layout_ai_unavailable', 403: 'layout_ai_unavailable', 429: 'layout_ai_limited',
             400: 'layout_ai_rejected', 404: 'layout_ai_rejected', 422: 'layout_ai_rejected'}
+_UNSENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 _REFUSAL_MESSAGES = {
     'layout_ai_unavailable': 'AI 해석 설정을 확인해 주세요.',
     'layout_ai_limited': 'AI 해석 사용 한도에 걸렸습니다. 잠시 후 다시 시도해 주세요.',
     'layout_ai_rejected': 'AI 해석 요청이 거절되었습니다. 설정을 확인해 주세요.',
+    'layout_ai_unreachable': 'AI 해석 서비스에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.',
 }
 
 
 def _refusal(error: Exception) -> str | None:
     if isinstance(error, httpx.HTTPStatusError):
         return _REFUSED.get(error.response.status_code)
+    if isinstance(error, _UNSENT):
+        return 'layout_ai_unreachable'
     return None
 
 
@@ -161,9 +167,12 @@ class StoreLayouts:
                 except Exception as error:
                     refused = _refusal(error)
                     if refused:
-                        # Refused before any work: nothing was billed, so this request ID may be sent again.
-                        record.update(status='failed', failure=refused, providerStatus=error.response.status_code,
-                                      updatedAt=now())
+                        # Refused before any work or never sent: nothing was billed, so this request ID may go again.
+                        record.update(status='failed', failure=refused, updatedAt=now())
+                        if isinstance(error, httpx.HTTPStatusError):
+                            record['providerStatus'] = error.response.status_code
+                        else:
+                            record['errorType'] = type(error).__name__
                         try:
                             _write_json(path, record)
                         except Exception:
@@ -195,7 +204,8 @@ class StoreLayouts:
                    'input': [{'role': 'system', 'content': _SYSTEM}, {'role': 'user', 'content': description}],
                    'text': {'format': {'type': 'json_schema', 'name': 'store_layout_intent', 'strict': True, 'schema': schema}}}
         base = (os.getenv('OPENAI_API_BASE') or 'https://api.openai.com/v1').rstrip('/')
-        # A later attempt follows a refusal; its own key keeps a provider from answering it with the cached refusal.
+        # A later attempt follows a refusal (or a connection that never opened); its own key keeps a provider from
+        # answering it with the cached refusal.
         scope = f'layout:{self.user_id}:{request_id}' + (f':{attempt}' if attempt > 1 else '')
         provider_key = hashlib.sha256(scope.encode()).hexdigest()
         with httpx.Client(timeout=45, follow_redirects=False) as client:

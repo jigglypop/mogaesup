@@ -4,20 +4,23 @@
 use super::*;
 
 /// A game for these tests: players add to their own count, each sees a number only they know, and the first count to
-/// reach the layout's `goal` ends it. Its view also shows where the last tick saw everyone stand.
+/// reach the layout's `goal` ends it. Its view also shows where the last tick saw everyone stand, `{"where": true}` tells
+/// a player where the game sees them now, and the layout's `send` is a place it sends everyone to.
 struct Tally {
     goal: u64,
     counts: HashMap<Uuid, u64>,
     secrets: HashMap<Uuid, u64>,
     seen: HashMap<Uuid, [f64; 3]>,
+    send: Option<[f64; 3]>,
 }
 
 fn tally(layout: &Value, ctx: &mut Ctx) -> Result<Box<dyn Game>, GameError> {
     let goal = layout.get("goal").and_then(Value::as_u64).filter(|goal| (1..=100).contains(goal)).ok_or(BAD_LAYOUT)?;
+    let send = layout.get("send").map(point).transpose()?;
     let players: Vec<Uuid> = ctx.players().iter().map(|player| player.id).collect();
     let secrets = players.into_iter().map(|id| (id, ctx.rng().gen_range(1..1000))).collect();
     ctx.emit(json!({"type": "started"}));
-    Ok(Box::new(Tally { goal, counts: HashMap::new(), secrets, seen: HashMap::new() }))
+    Ok(Box::new(Tally { goal, counts: HashMap::new(), secrets, seen: HashMap::new(), send }))
 }
 
 impl Game for Tally {
@@ -27,7 +30,15 @@ impl Game for Tally {
         json!({"counts": counts, "seen": seen, "secret": viewer.and_then(|id| self.secrets.get(&id))})
     }
 
+    fn destinations(&self, _now: Millis) -> Vec<(Uuid, [f64; 3])> {
+        self.send.map_or_else(Vec::new, |place| self.secrets.keys().map(|id| (*id, place)).collect())
+    }
+
     fn act(&mut self, player: Uuid, action: &Value, ctx: &mut Ctx) -> Result<(), GameError> {
+        if action.get("where") == Some(&Value::Bool(true)) {
+            ctx.emit_one(player, json!({"type": "at", "at": ctx.position(player)}));
+            return Ok(());
+        }
         let add = action.get("add").and_then(Value::as_u64).filter(|add| *add > 0).ok_or(BAD_ACTION)?;
         *self.counts.entry(player).or_default() += add;
         ctx.emit_one(player, json!({"type": "added", "add": add}));
@@ -187,7 +198,11 @@ fn lobby() -> Lobby {
 fn an_opened_lobby_shows_its_host_and_players_to_everyone_watching() {
     let games = Games::new(TALLY, Some(1));
     let (a, b, c) = (person("a"), person("b"), person("c"));
-    let room = vec![peer("pa", &a, None), peer("pb", &b, None), peer("pc", &c, None)];
+    let room = vec![
+        peer("pa", &a, Some([0.0; 3])),
+        peer("pb", &b, Some([2.0, 0.0, 0.0])),
+        peer("pc", &c, Some([4.0, 0.0, 0.0])),
+    ];
     let (mut sa, mut sb, mut sc) = (connect(&games, &a, "pa"), connect(&games, &b, "pb"), connect(&games, &c, "pc"));
     sa.frames();
     sb.frames();
@@ -215,7 +230,7 @@ fn an_opened_lobby_shows_its_host_and_players_to_everyone_watching() {
     // The tally holds three; a fourth is turned away.
     let d = person("d");
     let mut room_d = room.clone();
-    room_d.push(peer("pd", &d, None));
+    room_d.push(peer("pd", &d, Some([6.0, 0.0, 0.0])));
     let mut sd = connect(&games, &d, "pd");
     sd.send(&games, json!({"type": "Join"}), &room_d, T0);
     assert_eq!(errors(&sd.frames()), ["full"]);
@@ -228,12 +243,17 @@ fn only_someone_in_the_live_room_opens_or_joins() {
     let mut sa = connect(&games, &a, "pa");
     sa.send(&games, json!({"type": "Open", "kind": "tally"}), &[], T0);
     assert_eq!(errors(&sa.frames()), ["not_in_room"]);
+    // Nor someone whose peer stands nowhere yet, shown to nobody in the room.
+    sa.send(&games, json!({"type": "Open", "kind": "tally"}), &[peer("pa", &a, None)], T0);
+    assert_eq!(errors(&sa.frames()), ["not_in_room"]);
     // Another peer of the same account will do (the page's room reconnected); someone else's will not.
-    let room = vec![peer("pa2", &a, None), peer("pb", &b, None)];
+    let room = vec![peer("pa", &a, None), peer("pa2", &a, Some([1.0, 0.0, 1.0])), peer("pb", &b, Some([0.0; 3]))];
     opened(sa.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0));
     assert_eq!(sa.session().unwrap()["players"][0]["peer"], "pa2");
     let mut sb = connect(&games, &b, "pb");
-    sb.send(&games, json!({"type": "Join"}), &[peer("pa2", &a, None)], T0);
+    sb.send(&games, json!({"type": "Join"}), &[room[1].clone()], T0);
+    assert_eq!(errors(&sb.frames()), ["not_in_room"]);
+    sb.send(&games, json!({"type": "Join"}), &[room[1].clone(), peer("pb", &b, None)], T0);
     assert_eq!(errors(&sb.frames()), ["not_in_room"]);
 }
 
@@ -241,7 +261,7 @@ fn only_someone_in_the_live_room_opens_or_joins() {
 fn the_host_starts_with_enough_players_and_a_layout_the_game_takes() {
     let games = Games::new(TALLY, Some(1));
     let (a, b) = (person("a"), person("b"));
-    let room = vec![peer("pa", &a, None), peer("pb", &b, None)];
+    let room = vec![peer("pa", &a, Some([0.0; 3])), peer("pb", &b, Some([2.0, 0.0, 0.0]))];
     let (mut sa, mut sb) = (connect(&games, &a, "pa"), connect(&games, &b, "pb"));
     opened(sa.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0));
     sa.send(&games, json!({"type": "Start", "layout": {"goal": 3}}), &room, T0);
@@ -322,13 +342,55 @@ fn ticks_see_where_each_player_stands_by_their_own_peer() {
     let seen = sa.session().unwrap()["game"]["seen"].clone();
     assert_eq!(seen, json!({a.id.to_string(): [1.0, 0.0, 2.0], b.id.to_string(): [-3.0, 0.5, 4.0]}));
     // B's room reconnected under a new id: B is found there, and the session says which avatar is B's now.
-    let moved = vec![room[0].clone(), peer("pb-again", &b, Some([7.0, 0.0, 7.0]))];
+    let moved = vec![room[0].clone(), peer("pb-again", &b, Some([-1.0, 0.0, 4.0]))];
     games.step(ISLAND, id, &moved, T0 + 200);
     let session = sa.session().unwrap();
-    assert_eq!(session["game"]["seen"][b.id.to_string()], json!([7.0, 0.0, 7.0]));
+    assert_eq!(session["game"]["seen"][b.id.to_string()], json!([-1.0, 0.0, 4.0]));
     assert_eq!(session["players"][1]["peer"], "pb-again");
     // A stale session id does nothing.
     assert_eq!(games.step(ISLAND, id + 1, &moved, T0 + 300), None);
+}
+
+#[test]
+fn a_page_that_jumps_is_followed_at_the_games_top_speed_but_a_place_the_game_sends_to_is_reached_at_once() {
+    let Lobby { games, a, b, mut sa, room, id, .. } = lobby();
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 5, "send": [-33.0, 0.0, 4.0]}}), &room, T0);
+    let seen = |socket: &mut Socket, who: &User| socket.session().unwrap()["game"]["seen"][who.id.to_string()].clone();
+    // A's page puts A 48 m east at once: a tenth of a second later, the game sees A 3 m on (30 m/s).
+    let at = |x: f64| vec![peer("pa", &a, Some([x, 0.0, 2.0])), room[1].clone()];
+    games.step(ISLAND, id, &at(49.0), T0 + 100);
+    assert_eq!(seen(&mut sa, &a), json!([4.0, 0.0, 2.0]));
+    // An act between ticks sees A as far on as the time since allows.
+    sa.send(&games, json!({"type": "Act", "action": {"where": true}}), &at(49.0), T0 + 150);
+    assert_eq!(sa.frames().last().unwrap()["event"], json!({"type": "at", "at": [5.5, 0.0, 2.0]}));
+    // However far ahead the page keeps saying A is, never faster: a second after the jump, 30 m on.
+    for step in 2..=10 {
+        games.step(ISLAND, id, &at(49.0 + 6.0 * step as f64), T0 + step * 100);
+    }
+    assert_eq!(seen(&mut sa, &a), json!([31.0, 0.0, 2.0]));
+    // B's page puts B where the game sends everyone, 30 m away: the game sees B there at once.
+    let sent = vec![peer("pa", &a, Some([49.0, 0.0, 2.0])), peer("pb", &b, Some([-33.0, 0.0, 4.0]))];
+    games.step(ISLAND, id, &sent, T0 + 1_100);
+    assert_eq!(seen(&mut sa, &b), json!([-33.0, 0.0, 4.0]));
+    // A second out of the room saves no move up: back on a new peer 90 m north, A is seen 3 m that way.
+    let without_a = vec![sent[1].clone()];
+    games.step(ISLAND, id, &without_a, T0 + 2_000);
+    games.step(ISLAND, id, &without_a, T0 + 3_100);
+    let back = vec![peer("pa-again", &a, Some([34.0, 0.0, 92.0])), sent[1].clone()];
+    games.step(ISLAND, id, &back, T0 + 3_200);
+    assert_eq!(seen(&mut sa, &a), json!([34.0, 0.0, 5.0]));
+}
+
+#[test]
+fn someone_whose_page_says_nowhere_as_the_game_starts_is_followed_from_where_they_joined() {
+    let Lobby { games, b, mut sa, room, id, .. } = lobby();
+    // A minute on, B's room has just reconnected as the game starts, and B's page has not said where B stands.
+    let unplaced = vec![room[0].clone(), peer("pb-again", &b, None)];
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 5}}), &unplaced, T0 + 60_000);
+    // Then it puts B 60 m from where B joined: a tenth of a second later, the game sees B 3 m on, not there.
+    let far = vec![room[0].clone(), peer("pb-again", &b, Some([57.0, 0.5, 4.0]))];
+    games.step(ISLAND, id, &far, T0 + 60_100);
+    assert_eq!(sa.session().unwrap()["game"]["seen"][b.id.to_string()], json!([0.0, 0.5, 4.0]));
 }
 
 #[test]
@@ -362,7 +424,11 @@ fn a_player_out_of_the_room_for_ten_seconds_leaves_and_the_last_to_leave_closes_
 fn a_host_who_leaves_hands_the_lobby_to_the_earliest_player_left() {
     let games = Games::new(TALLY, Some(1));
     let (a, b, c) = (person("a"), person("b"), person("c"));
-    let room = vec![peer("pa", &a, None), peer("pb", &b, None), peer("pc", &c, None)];
+    let room = vec![
+        peer("pa", &a, Some([0.0; 3])),
+        peer("pb", &b, Some([2.0, 0.0, 0.0])),
+        peer("pc", &c, Some([4.0, 0.0, 0.0])),
+    ];
     let (mut sa, mut sb, mut sc) = (connect(&games, &a, "pa"), connect(&games, &b, "pb"), connect(&games, &c, "pc"));
     opened(sa.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0));
     sb.send(&games, json!({"type": "Join"}), &room, T0);
@@ -492,7 +558,7 @@ fn helpers_measure_on_the_ground_and_pick_without_repeats() {
 fn a_playing_game_ticks_at_its_kinds_rate_and_a_lobby_once_a_second() {
     let games = Games::new(TALLY, Some(1));
     let a = person("a");
-    let room = vec![peer("pa", &a, None)];
+    let room = vec![peer("pa", &a, Some([0.0; 3]))];
     let sa = connect(&games, &a, "pa");
     let id = opened(sa.send(&games, json!({"type": "Open", "kind": "quick"}), &room, T0));
     assert_eq!(games.step(ISLAND, id, &room, T0 + 1), Some(IDLE_TICK));
@@ -517,6 +583,7 @@ fn every_registered_game_has_its_own_kind_and_limits_the_server_keeps() {
         assert!(1 <= kind.min_players && kind.min_players <= kind.max_players, "{}", kind.kind);
         assert!(kind.max_players <= ISLAND_CAPACITY, "{}", kind.kind);
         assert!((1..=MAX_TICK_HZ).contains(&kind.tick_hz), "{}", kind.kind);
+        assert!(0.0 < kind.top_speed && kind.top_speed <= MAX_TOP_SPEED, "{}", kind.kind);
     }
     assert!(KINDS.iter().any(|kind| kind.kind == "impostor"));
 }
@@ -525,7 +592,7 @@ fn every_registered_game_has_its_own_kind_and_limits_the_server_keeps() {
 fn a_game_whose_code_panics_ends_its_own_session_and_nothing_else() {
     let games = Games::new(TALLY, Some(1));
     let a = person("a");
-    let room = vec![peer("pa", &a, None)];
+    let room = vec![peer("pa", &a, Some([0.0; 3]))];
     let mut sa = connect(&games, &a, "pa");
     // Another island's game, playing all along.
     let (tx, _other_rx) = mpsc::channel(256);
@@ -566,7 +633,11 @@ fn a_game_whose_code_panics_ends_its_own_session_and_nothing_else() {
 fn the_islands_owner_closes_a_session_someone_else_hosts() {
     let games = Games::new(TALLY, Some(1));
     let (owner, host, guest) = (person("o"), person("h"), person("g"));
-    let room = vec![peer("po", &owner, None), peer("ph", &host, None), peer("pg", &guest, None)];
+    let room = vec![
+        peer("po", &owner, Some([0.0; 3])),
+        peer("ph", &host, Some([2.0, 0.0, 0.0])),
+        peer("pg", &guest, Some([4.0, 0.0, 0.0])),
+    ];
     let mut so = connect_as(&games, &owner, "po", Standing::Owner);
     let sh = connect(&games, &host, "ph");
     let mut sg = connect(&games, &guest, "pg");
@@ -610,4 +681,195 @@ fn one_account_holds_a_few_game_sockets_on_an_island_and_its_owner_more() {
     let _owner: Vec<Socket> =
         (0..ACCOUNT_CAPACITY).map(|_| connect_as(&games, &owner, "po", Standing::Owner)).collect();
     assert_eq!(games.count(), crate::rooms::ACCOUNT_ISLAND_CAPACITY + ACCOUNT_CAPACITY);
+}
+
+#[test]
+fn a_lobby_that_never_starts_closes_ten_minutes_after_it_opened() {
+    let Lobby { games, mut sa, room, id, .. } = lobby();
+    // Its host opening it again, as the same game or another, and people coming to it, do not keep it any longer.
+    let c = person("c");
+    let mut crowd = room.clone();
+    crowd.push(peer("pc", &c, Some([0.0, 0.0, 9.0])));
+    let sc = connect(&games, &c, "pc");
+    for minute in 1..=9 {
+        sa.send(&games, json!({"type": "Open", "kind": "tally"}), &crowd, T0 + minute * 60_000);
+    }
+    sa.send(&games, json!({"type": "Open", "kind": "quick"}), &crowd, T0 + 9 * 60_000 + 1);
+    sa.send(&games, json!({"type": "Open", "kind": "tally"}), &crowd, T0 + 9 * 60_000 + 2);
+    sc.send(&games, json!({"type": "Join"}), &crowd, T0 + 9 * 60_000 + 30_000);
+    assert_eq!(sa.session().unwrap()["players"].as_array().map(Vec::len), Some(3));
+    assert_eq!(games.step(ISLAND, id, &crowd, T0 + LOBBY_LIMIT - 1), Some(IDLE_TICK));
+    assert_eq!(games.step(ISLAND, id, &crowd, T0 + LOBBY_LIMIT), None);
+    assert_eq!(sa.session(), Some(Value::Null));
+
+    // A lobby opened again after a game has its own ten minutes.
+    let Lobby { games, mut sa, sb, room, id, .. } = lobby();
+    sa.send(&games, json!({"type": "Start", "layout": {"goal": 1}}), &room, T0 + 60_000);
+    sb.send(&games, json!({"type": "Act", "action": {"add": 1}}), &room, T0 + 120_000);
+    sa.send(&games, json!({"type": "Open", "kind": "tally"}), &room, T0 + 180_000);
+    assert_eq!(sa.session().unwrap()["phase"], "lobby");
+    assert_eq!(games.step(ISLAND, id, &room, T0 + 180_000 + LOBBY_LIMIT - 1), Some(IDLE_TICK));
+    assert_eq!(games.step(ISLAND, id, &room, T0 + 180_000 + LOBBY_LIMIT), None);
+}
+
+#[test]
+fn a_visitor_reopening_every_nine_minutes_from_a_peer_nobody_sees_holds_the_island_no_longer() {
+    let games = Games::new(TALLY, Some(1));
+    let (owner, visitor, other) = (person("o"), person("v"), person("w"));
+    let unseen = vec![peer("po", &owner, Some([0.0; 3])), peer("pv", &visitor, None)];
+    let mut so = connect_as(&games, &owner, "po", Standing::Owner);
+    let mut sv = connect(&games, &visitor, "pv");
+    let sw = connect(&games, &other, "pw");
+    // A socket that joined the room but never stood anywhere opens nothing.
+    sv.frames();
+    sv.send(&games, json!({"type": "Open", "kind": "quick"}), &unseen, T0);
+    assert_eq!(errors(&sv.frames()), ["not_in_room"]);
+    // Shown in the room, the visitor opens a lobby; opening it again every nine minutes holds it ten minutes at most.
+    let room = vec![
+        peer("po", &owner, Some([0.0; 3])),
+        peer("pv", &visitor, Some([1.0, 0.0, 0.0])),
+        peer("pw", &other, Some([2.0, 0.0, 0.0])),
+    ];
+    let id = opened(sv.send(&games, json!({"type": "Open", "kind": "quick"}), &room, T0));
+    sv.send(&games, json!({"type": "Open", "kind": "quick"}), &room, T0 + 9 * 60_000);
+    assert_eq!(games.step(ISLAND, id, &room, T0 + 9 * 60_000 + 1), Some(IDLE_TICK));
+    assert_eq!(games.step(ISLAND, id, &room, T0 + LOBBY_LIMIT), None);
+    // Then someone else may open; and the island's owner closes whatever a visitor hosts.
+    opened(sw.send(&games, json!({"type": "Open", "kind": "quick"}), &room, T0 + LOBBY_LIMIT + 1));
+    so.frames();
+    so.send(&games, json!({"type": "Close"}), &room, T0 + LOBBY_LIMIT + 2);
+    assert_eq!(so.session(), Some(Value::Null));
+}
+
+// ---- Where games see players: a page's jump is followed at the game's top speed
+
+/// Every error code and the latest session among the frames queued for `socket` since the last look.
+fn heard(socket: &mut Socket) -> (Vec<String>, Option<Value>) {
+    let frames = socket.frames();
+    let session =
+        frames.iter().filter(|frame| frame["type"] == "Session").map(|frame| frame["session"].clone()).next_back();
+    (errors(&frames), session)
+}
+
+fn home(index: usize) -> [f64; 3] {
+    [index as f64 * 60.0 - 90.0, 80.0, 0.0]
+}
+
+/// The room with everyone at home but those `moved`.
+fn ship(people: &[User], moved: &[(usize, [f64; 3])]) -> Vec<RoomPeer> {
+    people
+        .iter()
+        .enumerate()
+        .map(|(index, user)| {
+            let at = moved.iter().find(|(who, _)| *who == index).map_or(home(index), |(_, at)| *at);
+            peer(&format!("peer{index}"), user, Some(at))
+        })
+        .collect()
+}
+
+#[test]
+fn an_impostor_kills_and_a_crewmate_reports_only_once_the_game_has_them_there() {
+    let games = Games::new(KINDS, Some(11));
+    let people: Vec<User> = (0..4).map(|index| person(&format!("p{index}"))).collect();
+    let mut sockets: Vec<Socket> =
+        people.iter().enumerate().map(|(index, user)| connect(&games, user, &format!("peer{index}"))).collect();
+    let room = ship(&people, &[]);
+    let id = opened(sockets[0].send(&games, json!({"type": "Open", "kind": "impostor"}), &room, T0));
+    for socket in &sockets[1..] {
+        assert!(matches!(socket.send(&games, json!({"type": "Join"}), &room, T0), Flow::Continue));
+    }
+    let stations: Vec<[f64; 3]> = (0..6).map(|index| [index as f64 * 20.0 - 50.0, 80.0, 60.0]).collect();
+    let layout = json!({"table": [0.0, 80.0, -60.0], "stations": stations});
+    sockets[0].send(&games, json!({"type": "Start", "layout": layout}), &room, T0);
+    let views: Vec<Value> = sockets.iter_mut().map(|socket| socket.session().unwrap()).collect();
+    let impostor = views.iter().position(|view| view["game"]["role"] == "impostor").unwrap();
+    // The victim is the crewmate nearest the impostor's home, 60 m off; the finder another.
+    let mut crew: Vec<usize> = (0..4).filter(|index| *index != impostor).collect();
+    crew.sort_by_key(|index| index.abs_diff(impostor));
+    let (victim, finder) = (crew[0], crew[1]);
+    // Everyone stays at home, 60 m or more apart, until the first kill may happen.
+    let mut now = T0;
+    while now < T0 + 16_000 {
+        now += 100;
+        games.step(ISLAND, id, &room, now);
+    }
+    // An unchanged view is not sent again: the last one sent is the one the impostor's page shows.
+    let (_, seen) = heard(&mut sockets[impostor]);
+    let seen = seen.unwrap_or_else(|| views[impostor].clone());
+    assert_eq!(seen["game"]["kill"]["targets"], json!([]), "nobody is within the impostor's reach");
+    let apart = distance_xz(home(impostor), home(victim));
+    assert_eq!(apart, 60.0);
+    // 50 ms after the last tick the impostor's page says it stands 1 m from the victim and kills at once.
+    let fallen = home(victim);
+    let jumped = ship(&people, &[(impostor, [fallen[0] + 1.0, fallen[1], fallen[2]])]);
+    let kill = json!({"type": "Act", "action": {"do": "kill", "target": people[victim].id}});
+    sockets[impostor].send(&games, kill.clone(), &jumped, now + 50);
+    let (refused, _) = heard(&mut sockets[impostor]);
+    assert_eq!(refused, ["too_far"], "a jump of {apart} m is followed at running speed");
+    // Staying there, the impostor is where the page says some two seconds later (30 m/s), and then the kill goes through.
+    for step in 1..=25 {
+        games.step(ISLAND, id, &jumped, now + step * 100);
+    }
+    sockets[impostor].send(&games, kill, &jumped, now + 2_550);
+    let (refused, _) = heard(&mut sockets[impostor]);
+    assert!(refused.is_empty(), "{refused:?}");
+    let (_, dead) = heard(&mut sockets[victim]);
+    assert_eq!(dead.unwrap()["game"]["alive"], false);
+    // The finder, 60 m or more from the body, says it stands beside it for one update: too far to report.
+    let reporting = ship(
+        &people,
+        &[(impostor, [fallen[0] + 1.0, fallen[1], fallen[2]]), (finder, [fallen[0], fallen[1], fallen[2] + 1.0])],
+    );
+    sockets[finder].send(
+        &games,
+        json!({"type": "Act", "action": {"do": "report", "body": 1}}),
+        &reporting,
+        now + 2_600,
+    );
+    let (refused, _) = heard(&mut sockets[finder]);
+    assert_eq!(refused, ["too_far"]);
+}
+
+#[test]
+fn a_kart_that_stands_on_each_gate_in_turn_passes_none_faster_than_it_drives() {
+    let games = Games::new(KINDS, Some(5));
+    let racer = person("racer");
+    let up = |x: f64, z: f64| [x, 80.0, z];
+    // A 200 by 200 m loop, its eight gates 100 m apart: more than a tick's drive (`JUMP`) between any two.
+    let gates: Vec<[f64; 3]> = [
+        (0.0, -100.0),
+        (100.0, -100.0),
+        (100.0, 0.0),
+        (100.0, 100.0),
+        (0.0, 100.0),
+        (-100.0, 100.0),
+        (-100.0, 0.0),
+        (-100.0, -100.0),
+    ]
+    .map(|(x, z)| up(x, z))
+    .to_vec();
+    let grid: Vec<[f64; 3]> =
+        (0..8).map(|index| up(-6.0 - 6.0 * (index / 2) as f64, if index % 2 == 0 { -102.5 } else { -97.5 })).collect();
+    let layout = json!({"checkpoints": gates, "radius": 8.0, "grid": grid, "laps": 3, "bots": 0});
+    let mut socket = connect(&games, &racer, "peer");
+    let at = |position: [f64; 3]| vec![peer("peer", &racer, Some(position))];
+    let id = opened(socket.send(&games, json!({"type": "Open", "kind": "kart"}), &at([4.0, 1.0, -8.0]), T0));
+    socket.send(&games, json!({"type": "Start", "layout": layout}), &at([4.0, 1.0, -8.0]), T0);
+    let started = socket.session().unwrap();
+    let spawn: [f64; 3] = serde_json::from_value(started["game"]["spawn"].clone()).unwrap();
+    // On the grid through the three-second countdown, a tick every 50 ms.
+    let mut now = T0;
+    while now < T0 + 3_000 {
+        now += 50;
+        games.step(ISLAND, id, &at(spawn), now);
+    }
+    // Then each tick the page says the kart stands on its next gate: 2.4 km of track.
+    for hop in 1..=24 {
+        now += 50;
+        games.step(ISLAND, id, &at(gates[hop % 8]), now);
+    }
+    // Followed at a kart's top speed (45 m/s), the kart has not even reached the first gate, 100 m off.
+    let session = socket.session().unwrap();
+    let me = &session["game"]["racers"][0];
+    assert_eq!((me["lap"].clone(), me["next"].clone()), (json!(0), json!(1)), "{me}");
 }

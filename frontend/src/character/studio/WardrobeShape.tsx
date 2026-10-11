@@ -7,8 +7,10 @@ const FITS: { value: NonNullable<GarmentShape['fit']>; label: string }[] = [
   { value: 'tight', label: '붙음' }, { value: 'normal', label: '보통' }, { value: 'loose', label: '넓음' }];
 const HEM_RANGE: Record<string, string> = { top: '허리~가랑이', bottom: '반바지~발목' };
 const sleeveText = (value: number) => value <= 0 ? '없음' : value >= 1 ? '손목' : `${Math.round(value*100)}%`;
+// Only what the part was built with: an unset sleeve or hem keeps the drawing, and is sent only once it is moved.
 const initialShape = (part: WardrobePart): GarmentShape => ({
-  ...(part.slot === 'top' ? { sleeve: part.shape?.sleeve ?? .5 } : {}), hem: part.shape?.hem ?? .5, fit: part.shape?.fit ?? 'normal' });
+  ...(part.slot === 'top' && part.shape?.sleeve != null ? { sleeve: part.shape.sleeve } : {}),
+  ...(part.shape?.hem != null ? { hem: part.shape.hem } : {}), fit: part.shape?.fit ?? 'normal' });
 const POLL_MS = 2000;
 
 type SavedRefit = Pending<{ source_version: string; slot: string }>;
@@ -96,11 +98,11 @@ export function WardrobeShape({ part, label, reload, replace }: {
       {part.slot === 'top' && <label>소매
         <input type="range" min={0} max={1} step={.05} value={draft.sleeve ?? .5} disabled={busy}
           onChange={event => { const sleeve = Number(event.target.value); setDraft(current => ({ ...current, sleeve })); }} />
-        <output>{sleeveText(draft.sleeve ?? .5)}</output></label>}
+        <output>{draft.sleeve == null ? '그림대로' : sleeveText(draft.sleeve)}</output></label>}
       <label>밑단 {HEM_RANGE[part.slot]}
         <input type="range" min={0} max={1} step={.05} value={draft.hem ?? .5} disabled={busy}
           onChange={event => { const hem = Number(event.target.value); setDraft(current => ({ ...current, hem })); }} />
-        <output>{Math.round((draft.hem ?? .5)*100)}%</output></label>
+        <output>{draft.hem == null ? '그림대로' : `${Math.round(draft.hem*100)}%`}</output></label>
       <div className="wardrobe-shape-fit" role="group" aria-label={`${label} 품`}>{FITS.map(fit =>
         <button key={fit.value} type="button" aria-pressed={draft.fit === fit.value} disabled={busy}
           onClick={() => setDraft(current => ({ ...current, fit: fit.value }))}>{fit.label}</button>)}</div>

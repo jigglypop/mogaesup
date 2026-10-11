@@ -27,6 +27,7 @@ TRIPO = 'https://api.tripo3d.ai/v2/openapi'
 MESHY = 'https://api.meshy.ai/openapi/v1/image-to-3d'
 MODEL_URL = 'https://tripo-data.invalid/model.glb'
 MESHY_MODEL_URL = 'https://assets.meshy.invalid/model.glb'
+EXPIRED_MODEL_URL = 'https://assets.meshy.invalid/expired.glb'
 IMAGE_URL = 'https://assets.invalid/provider-inputs/image.png'
 ACCEPTED = {'code': 0, 'data': {'task_id': 'tripo-task-1'}}
 SUCCESS = {'code': 0, 'data': {'status': 'success', 'progress': 100, 'output': {'pbr_model': MODEL_URL}}}
@@ -72,6 +73,9 @@ def studio(tmp_path, monkeypatch, storage_configured):
             assert 'authorization' not in request.headers
             calls['downloads'] += 1
             return httpx.Response(200, content=rigged_glb())
+        if url == EXPIRED_MODEL_URL:
+            # A signed download link past its expiry.
+            return httpx.Response(403)
         for base, provider in ((TRIPO+'/task', 'tripo'), (MESHY, 'meshy')):
             if url.startswith(base):
                 assert request.headers['authorization'] == 'Bearer fixture-key'
@@ -309,6 +313,49 @@ def test_provider_switch_is_refused_once_a_task_was_accepted(studio):
     service.execute(job)
     assert service.get(job)['status'] == 'complete'
     assert len(calls['tripo']) == 1 and not calls['meshy'] and calls['polls'] == 5
+
+
+def test_an_accepted_task_whose_id_was_not_recorded_is_polled_from_its_saved_answer(studio, monkeypatch):
+    service, calls, replies, _ = studio
+    replies['meshy_submit'] = [{'result': 'meshy-task-1'}]
+    final_write = module.character_jobs.final_write
+
+    def store_down(write, what):
+        raise OSError('storage unavailable')
+
+    # Meshy accepted (and bills) the task; its answer is saved, the task ID never reaches the receipt.
+    monkeypatch.setattr(module.character_jobs, 'final_write', store_down)
+    public = run(service)
+    job = public['id']; directory = service.directory(job)
+    task = read_json(directory/'meshy/character.json')
+    assert task['status'] == 'submission_uncertain' and not task.get('task_id')
+    assert public['status'] == 'paused' and public['can_resume'] is True and public['can_change_provider'] is False
+    # A job an earlier version left blocked goes on the same way.
+    _write_json(directory/'record.json', {**read_json(directory/'record.json'), 'status': 'blocked'})
+    assert service.get(job)['can_resume'] is True
+    monkeypatch.setattr(module.character_jobs, 'final_write', final_write)
+    assert service.resume(job)[1] is True
+    service.execute(job)
+    public = service.get(job)
+    assert public['status'] == 'complete' and public['task_id'] == 'meshy-task-1'
+    assert read_json(directory/'meshy/character.json')['recovery_method'] == 'submission_response'
+    assert len(calls['meshy']) == 1 and calls['polls'] == 1 and calls['images'] == 1 and not calls['tripo']
+
+
+def test_a_finished_task_whose_download_failed_renews_its_link_when_resumed(studio):
+    service, calls, replies, _ = studio
+    replies['meshy_submit'] = [{'result': 'meshy-task-1'}]
+    # The link of the first answer has expired by the time it is fetched; each status read gives a new one.
+    replies['meshy_task'] = [{**MESHY_SUCCESS, 'model_urls': {'glb': EXPIRED_MODEL_URL}}, MESHY_SUCCESS]
+    public = run(service)
+    job = public['id']
+    assert public['status'] == 'paused' and public['can_resume'] is True and calls['downloads'] == 0
+    assert read_json(service.directory(job)/'meshy/character.json')['status'] == 'SUCCEEDED'
+    assert service.resume(job)[1] is True
+    service.execute(job)
+    public = service.get(job)
+    assert public['status'] == 'complete' and calls['polls'] == 2 and calls['downloads'] == 1
+    assert len(calls['meshy']) == 1 and calls['images'] == 1
 
 
 def test_resume_route_takes_an_optional_provider(studio):

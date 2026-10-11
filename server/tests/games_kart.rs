@@ -137,5 +137,12 @@ async fn 혼자_봇_셋과_카트를_시작하면_카운트다운_뒤에_봇이_
     })
     .await;
     assert_eq!(moved["game"]["racers"][0]["bot"], true);
+    // The page puts the kart on the first gate at once, 46 m on from its slot: the race follows it at a kart's top
+    // speed, so the gate counts about a second later, not at the next tick.
+    send(&mut room, json!({"type": "Update", "state": {"position": spot(40.0, 0.0)}})).await;
+    let jumped = Instant::now();
+    session(&mut game, Duration::from_secs(5), |session| session["game"]["me"]["next"] == 2).await;
+    let took = jumped.elapsed();
+    assert!(took >= Duration::from_millis(600), "the first gate counted {took:?} after the jump");
     app.cleanup().await;
 }

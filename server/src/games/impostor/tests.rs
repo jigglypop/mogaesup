@@ -1428,3 +1428,38 @@ fn whole_games_with_bots_end_and_every_view_can_be_made_along_the_way() {
 }
 
 const MAX_COORDINATE_TEST: f64 = crate::games::MAX_COORDINATE;
+
+#[test]
+fn the_game_sends_everyone_by_the_table_at_first_to_their_seat_in_a_meeting_and_an_impostor_to_their_vent() {
+    let mut play = Play::new(5, 3);
+    let (impostor, crew) = (play.impostor(), play.crew());
+    let sorted = |mut sent: Vec<(Uuid, [f64; 3])>| {
+        sent.sort_by_key(|(id, _)| *id);
+        sent
+    };
+    // Until the first kill may happen, each one's place by the table, the one their view shows.
+    let spawns: Vec<(Uuid, [f64; 3])> = play
+        .ids()
+        .into_iter()
+        .map(|id| (id, serde_json::from_value(play.view(id)["spawn"].clone()).unwrap()))
+        .collect();
+    assert_eq!(sorted(play.game.destinations(START)), sorted(spawns.clone()));
+    assert_eq!(sorted(play.game.destinations(START + FIRST_KILL - 1)), sorted(spawns));
+    assert!(play.game.destinations(START + FIRST_KILL).is_empty());
+    // An impostor in the vents is sent to the vent they are in, wherever they move to, until they climb out.
+    play.at(FIRST_KILL);
+    play.stand(impostor, VENTS[0]);
+    play.act(impostor, vent(None)).unwrap();
+    assert_eq!(play.game.destinations(play.now), [(impostor, VENTS[0])]);
+    play.act(impostor, vent(Some(2))).unwrap();
+    assert_eq!(play.game.destinations(play.now), [(impostor, VENTS[2])]);
+    play.act(impostor, vent(None)).unwrap();
+    assert!(play.game.destinations(play.now).is_empty());
+    // A meeting sends everyone alive to their seat while it lasts.
+    play.call(crew[0]);
+    assert_eq!(play.game.destinations(play.now), play.meeting().seats);
+    let end = play.open_vote();
+    play.tick(end);
+    assert!(play.game.meeting.is_none());
+    assert!(play.game.destinations(play.now).is_empty(), "nobody is sent to a seat once it is over");
+}

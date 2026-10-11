@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiRequestError } from '../../api/client';
+import { ApiRequestError, ApiTimeoutError } from '../../api/client';
 import { appDestination, hasUnsaved, HeldSaveError, heldSavesSettled, leaveIsland } from '../edit/leave';
 import type { SaverState } from '../edit/save';
 import { IslandTooLargeError } from '../persistence';
@@ -249,6 +249,52 @@ describe('나갈 때 저장하지 않은 변경', () => {
     await expect(heldSavesSettled('mogae')).resolves.toBeUndefined();
     expect(world.system.save).toHaveBeenCalledTimes(1);
     saver.dispose();
+  });
+
+  it('같은 섬을 다시 열 때 떠나며 보낸 저장이 아직 답을 받지 못했다면 그 저장이 끝나기를 기다린다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    let finish!: () => void;
+    world.system.save.mockImplementationOnce(() => new Promise<void>((done) => (finish = done)));
+    world.edit();
+    saver.changed();
+    const release = vi.fn();
+    leaveIsland(saver, release, false, 'mogae');
+    // Closing the page meanwhile asks first, as it does while the island is open and saving.
+    expect(closePage()).toBe(true);
+
+    const settled = vi.fn();
+    void heldSavesSettled('mogae').then(settled);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).not.toHaveBeenCalled();
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalled();
+    expect(closePage()).toBe(false);
+  });
+
+  it('떠나며 보낸 저장이 답 없이 끝나면 바로 다시 보내고, 그래도 안 되면 섬을 열지 않는다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    let fail!: (error: Error) => void;
+    world.system.save.mockImplementationOnce(() => new Promise<void>((_, reject) => (fail = reject)));
+    world.edit();
+    saver.changed();
+    const release = vi.fn();
+    leaveIsland(saver, release, false, 'mogae');
+    world.failing.with = offline();
+    const result = heldSavesSettled('mogae').then(() => 'opened', (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    fail(new ApiTimeoutError(60_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await result).toBeInstanceOf(HeldSaveError);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(release).not.toHaveBeenCalled();
+    // Still held, and saved by its own retry once the line is back.
+    world.failing.with = null;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('주인이 변경을 버리고 나가겠다고 하면 저장하지 않고 바로 놓아 준다', async () => {

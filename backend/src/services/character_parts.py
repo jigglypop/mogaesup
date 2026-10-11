@@ -53,6 +53,8 @@ def blender_process(command, log_path, runner_path, *, env=None, write_json, rec
     command = list(command)
     first_script = command.index('--python')
     command[first_script:first_script] = ['--python', str(Path(__file__).with_name('runtime_blender_bootstrap.py'))]
+    # The log is created before the worker starts: run_lock._worker_gone and character_recovery read a missing log as no
+    # worker ever started.
     with running_task(), log_path.open("wb") as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                    env=admitted_environment(worker_environment() if env is None else env),

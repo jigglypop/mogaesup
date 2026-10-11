@@ -262,6 +262,30 @@ def test_a_resumed_job_adopts_a_task_named_only_by_its_saved_answer(animal, exit
     assert not meshy.posts and meshy.reads == ['/openapi/v1/multi-image-to-3d/task-1']
 
 
+def test_a_job_an_earlier_version_blocked_after_meshy_accepted_goes_on_with_its_request(animal):
+    production, library, meshy = animal.production, animal.library, animal.meshy
+    job_id = request_job_id(1, f'animal-job:{ANIMAL}', 'regen-key-1')
+    work = library.directory(ANIMAL) / 'jobs' / job_id
+    store(work / 'job.json', {
+        'id': job_id, 'request_key': 'regen-key-1', 'request': STEPS, 'steps': STEPS['steps'], 'done': [],
+        'status': 'blocked', 'step': 'model', 'process': None, 'error': 'Meshy 작업 번호가 없어 다시 제출하지 않습니다.',
+        'created_at': 'x', 'updated_at': 'x'})
+    record = read_json(library.directory(ANIMAL) / 'record.json')
+    _write_json(library.directory(ANIMAL) / 'record.json', {**record, 'production': job_id})
+    store(work / 'meshy' / 'character.json', {
+        'stage': 'generation', 'status': 'submission_uncertain', 'generation_endpoint': '/openapi/v1/multi-image-to-3d'})
+    # Without an answer naming the task, its acceptance stays unknown and the job stays blocked.
+    assert library.get(ANIMAL)['production']['status'] == 'blocked'
+    assert production.start(ANIMAL, 'regen-key-1', MODEL)[1] is False
+    _write_json(work / 'meshy' / 'generation-submission-response.json',
+                {'http_status': 202, 'request_id': 'r-1', 'body': json.dumps({'result': 'task-1'})})
+    assert library.get(ANIMAL)['production']['status'] == 'paused'
+    assert production.start(ANIMAL, 'regen-key-1', MODEL)[1]
+    production.execute(ANIMAL, job_id)
+    assert job_record(animal, job_id)['status'] == 'complete'
+    assert not meshy.posts and meshy.reads == ['/openapi/v1/multi-image-to-3d/task-1']
+
+
 def unanswered(request):
     raise httpx.ReadTimeout('sent, no answer', request=request)
 

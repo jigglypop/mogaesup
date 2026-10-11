@@ -2,7 +2,7 @@ import { act } from 'react';
 
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
-import { mount } from '../../__tests__/mount';
+import { mount, type } from '../../__tests__/mount';
 import { PendingRequestConflict } from '../api';
 import { factoryApi, type NativePartsState, type WardrobePart } from '../factory/api';
 import { WardrobeShape } from '../studio/WardrobeShape';
@@ -14,6 +14,8 @@ const wait = (ms: number) =>
     await vi.advanceTimersByTimeAsync(ms);
   });
 const rebuild = (container: HTMLElement) => act(async () => [...container.querySelectorAll('button')].find((item) => item.textContent === '다시 만들기')!.click());
+const fit = (container: HTMLElement, label: string) => act(async () => [...container.querySelectorAll('button')].find((item) => item.textContent === label)!.click());
+const outputs = (container: HTMLElement) => [...container.querySelectorAll('output')].map((item) => item.textContent);
 
 describe('옷 모양 다시 만들기', () => {
   const reload = vi.fn<(signal?: AbortSignal) => Promise<WardrobePart[]>>();
@@ -118,6 +120,34 @@ describe('옷 모양 다시 만들기', () => {
     expect(resume).toHaveBeenCalledWith('top-job');
     expect(replace).toHaveBeenCalledExactlyOnceWith(next);
     await unmount();
+  });
+
+  it('그림대로 만든 옷은 품만 바꿔 다시 만들어도 소매와 밑단을 보내지 않는다', async () => {
+    nativeParts.mockResolvedValue(native({}));
+    // The wardrobe lists a part made as drawn with its fit only.
+    const { container, unmount } = await mount(<WardrobeShape part={{ ...part, shape: { fit: 'normal' } }} label="상의" reload={reload} replace={replace} />);
+    expect(outputs(container)).toEqual(['그림대로', '그림대로']);
+    await fit(container, '넓음');
+    await rebuild(container);
+    expect(factoryApi.refitPart).toHaveBeenCalledExactlyOnceWith('top-job', 'v1', 'top', undefined, 'body_shell', { fit: 'loose' });
+    await unmount();
+  });
+
+  it('움직인 항목과 이미 정해 둔 항목만 보낸다', async () => {
+    nativeParts.mockResolvedValue(native({}));
+    const drawn = await mount(<WardrobeShape part={{ ...part, shape: { fit: 'normal' } }} label="상의" reload={reload} replace={replace} />);
+    await type(drawn.container.querySelectorAll<HTMLInputElement>('input[type=range]')[1]!, '0.8');
+    expect(outputs(drawn.container)).toEqual(['그림대로', '80%']);
+    await rebuild(drawn.container);
+    expect(factoryApi.refitPart).toHaveBeenLastCalledWith('top-job', 'v1', 'top', undefined, 'body_shell', { hem: 0.8, fit: 'normal' });
+    await drawn.unmount();
+
+    const sleeved = await mount(<WardrobeShape part={{ ...part, shape: { sleeve: 0.3, fit: 'normal' } }} label="상의" reload={reload} replace={replace} />);
+    expect(outputs(sleeved.container)).toEqual(['30%', '그림대로']);
+    await fit(sleeved.container, '넓음');
+    await rebuild(sleeved.container);
+    expect(factoryApi.refitPart).toHaveBeenLastCalledWith('top-job', 'v1', 'top', undefined, 'body_shell', { sleeve: 0.3, fit: 'loose' });
+    await sleeved.unmount();
   });
 
   it('옷장 목록을 기다리다 닫혀도 더 읽지 않는다', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 
 import type { GameProps } from '../game';
 import { clock, useRemaining } from '../time';
@@ -12,6 +12,9 @@ const SABOTAGES: SabotageKind[] = ['lights', 'comms', 'reactor'];
 const SPLASH = 2_600;
 
 const seconds = (ms: number) => Math.ceil(ms / 1000);
+
+/** A click leaves the keyboard focus where it was (the island), so WASD keeps walking and Space jumps instead of pressing it again. */
+const keepFocus = (event: MouseEvent) => event.preventDefault();
 
 /** A big line over the island for a moment. */
 type Splash = { key: number; text: string; detail?: string; tone: 'crew' | 'impostor' | 'alarm' };
@@ -77,7 +80,7 @@ function Alarm({ view, act, serverNow }: Pick<GameProps<ImpostorView>, 'view' | 
         </span>
       )}
       {fixing && (
-        <button type="button" className="mg-btn is-small is-primary" onClick={() => act({ do: 'fix' })}>
+        <button type="button" className="mg-btn is-small is-primary" onMouseDown={keepFocus} onClick={() => act({ do: 'fix' })}>
           고치기
         </button>
       )}
@@ -97,7 +100,7 @@ function Actions({ view, act, serverNow }: Pick<GameProps<ImpostorView>, 'view' 
   const impostor = view.role === 'impostor';
   const target = view.kill?.targets[0];
   return (
-    <div className="mg-impostor-actions" role="group" aria-label="행동">
+    <div className="mg-impostor-actions" role="group" aria-label="행동" onMouseDown={keepFocus}>
       {venting !== null && (
         <div className="mg-impostor-vents" role="group" aria-label="환풍구">
           {view.vents.map((_, index) =>

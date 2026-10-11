@@ -1,7 +1,7 @@
 import { request, savedRequest, type Pending } from '../api';
 import type { FactoryJob } from '../factory/api';
 import { variantSlots } from '../factory/parts';
-import type { BodyGlbAsset } from './glb-bodies-api';
+import { uploadGlb, type BodyGlbAsset } from './glb-bodies-api';
 
 export const glbAssetSlots = ['body', ...variantSlots, 'prop'] as const;
 export type GlbAssetSlot = typeof glbAssetSlots[number];
@@ -31,7 +31,7 @@ const post = <R>(url: string) => (pending: Pending<unknown>) => request<R>(url, 
 
 export const glbAssetsApi = {
   list: (signal?: AbortSignal) => request<{ items: GlbAssetRecord[] }>(root, { signal, timeoutMs: 25000 }),
-  upload: (file: File) => request<BodyGlbAsset>(`${root}/upload`, { method: 'POST', headers: { 'Content-Type': 'model/gltf-binary' }, body: file, timeoutMs: 120000 }),
+  upload: (file: File) => uploadGlb(`${root}/upload`, file),
   create: (input: GlbAssetInput) => registration.send(input, post<GlbAssetRecord>(root)),
   prepare: (id: string, input: GlbAssetPreparation) => preparation(id).send(input, post<FactoryJob>(`${root}/${encodeURIComponent(id)}/prepare`)),
 };

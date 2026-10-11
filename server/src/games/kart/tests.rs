@@ -532,3 +532,23 @@ fn karts_side_by_side_keep_their_order_until_one_is_a_step_nearer_the_next_gate(
     play.tick(3_150);
     assert_eq!(play.order(), vec![b, a]);
 }
+
+#[test]
+fn the_race_sends_each_person_to_their_grid_slot_until_they_pass_the_first_gate() {
+    let mut play = Play::new(2, with(json!({"bots": 1})));
+    let [a, b] = play.ids()[..] else { panic!() };
+    let sorted = |mut sent: Vec<(Uuid, [f64; 3])>| {
+        sent.sort_by_key(|(id, _)| *id);
+        sent
+    };
+    let (slot_a, slot_b) = (play.racer(a).slot, play.racer(b).slot);
+    // The people, not the bot, through the countdown and on until each passes the first gate.
+    assert_eq!(sorted(play.game.destinations(play.now)), sorted(vec![(a, slot_a), (b, slot_b)]));
+    play.tick(3_000);
+    play.drive(a, &[gates()[1]], 500);
+    assert_eq!(play.game.destinations(play.now), [(b, slot_b)]);
+    play.drive(b, &[gates()[1]], 500);
+    assert!(play.game.destinations(play.now).is_empty());
+    // The race follows a page no slower than its karts go (31 m/s with a booster), with room to spare.
+    const { assert!(KIND.top_speed >= 31.0 * 1.4) };
+}

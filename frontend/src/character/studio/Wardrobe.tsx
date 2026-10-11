@@ -548,9 +548,10 @@ export default function Wardrobe() {
           })}</ul>
         </div>}
         {shapes.length > 0 && <div className="wardrobe-shapes"><h2>모양</h2>
+          {/* A panel per garment: wearing another ends the wait for this one's rebuild, which replaces only its own garment. */}
           <ul>{shapes.map(([slotName, part]) =>
-            <WardrobeShape key={slotName} part={part} label={labels[slotName] || slotName} reload={reloadParts}
-              replace={next => setWorn(current => ({ ...current, [slotName]: next }))} />)}</ul>
+            <WardrobeShape key={`${slotName}:${part.job_id}`} part={part} label={labels[slotName] || slotName} reload={reloadParts}
+              replace={next => setWorn(current => current[slotName]?.job_id === next.job_id ? { ...current, [slotName]: next } : current)} />)}</ul>
         </div>}
         {Object.keys(worn).some(slotName => (EDITABLE_PARTS as readonly string[]).includes(slotName)) && <div className="wardrobe-part-edits"><h2>크기와 위치</h2>
           {EDITABLE_PARTS.filter(slotName => worn[slotName]).map(slotName => <PartEditControls key={keyOf(worn[slotName]!, slotName)} label={labels[slotName] || slotName}

@@ -470,6 +470,64 @@ describe('옷장', () => {
     });
   });
 
+  it('모양을 다시 만드는 중에 같은 자리의 다른 몸 셸 옷으로 갈아입으면 그 기다림을 끝내고, 이전 옷의 새 버전으로 바꿔 입히지 않는다', async () => {
+    auth.user = user('operator', 'paid_operator');
+    const first = part('shell-a', 'top', '몸 셸 상의 A', { fit_method: 'body-shell-v1' }), second = part('shell-b', 'top', '몸 셸 상의 B', { fit_method: 'body-shell-v1' });
+    parts = [first, second];
+    vi.spyOn(factoryApi, 'refitPart').mockResolvedValue({ status: 'running', artifacts: [], parts: [] });
+    const nativeParts = vi.spyOn(factoryApi, 'nativeParts').mockResolvedValue({ status: 'review_required', version: 'v2', artifacts: [], parts: [] });
+    const { container, unmount } = await open(); await settle();
+    await click(card(container, '몸 셸 상의 A')); await settle();
+    await click(button(container, '다시 만들기'));
+    expect(button(container, '다시 만들기')).toBeUndefined();
+    await click(card(container, '몸 셸 상의 B')); await settle();
+    // B's own panel, not A's rebuild still waiting.
+    expect(button(container, '다시 만들기')?.disabled).toBe(false);
+    parts = [{ ...first, version: 'v2' }, second];
+    await act(async () => { await vi.advanceTimersByTimeAsync(40_000); }); await settle();
+    expect(nativeParts).not.toHaveBeenCalled();
+    expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('몸 셸 상의 B');
+    expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('몸 셸 상의 A');
+    await unmount();
+  });
+
+  it('모양을 다시 만드는 중에 저장한 조합으로 같은 자리의 다른 몸 셸 옷을 입혀도, 이전 옷의 새 버전으로 바꿔 입히지 않는다', async () => {
+    auth.user = user('operator', 'paid_operator');
+    const first = part('shell-a', 'top', '몸 셸 상의 A', { fit_method: 'body-shell-v1' }), second = part('shell-b', 'top', '몸 셸 상의 B', { fit_method: 'body-shell-v1' });
+    parts = [first, second];
+    outfits = { saved: { name: 'B 조합', body: { job_id: body.job_id, version: body.version }, parts: { top: { job_id: second.job_id, version: second.version, sha256: second.sha256 } }, saved_at: '2026-09-30T00:00:00Z' } };
+    vi.spyOn(factoryApi, 'refitPart').mockResolvedValue({ status: 'running', artifacts: [], parts: [] });
+    const nativeParts = vi.spyOn(factoryApi, 'nativeParts').mockResolvedValue({ status: 'review_required', version: 'v2', artifacts: [], parts: [] });
+    const { container, unmount } = await open(); await settle();
+    await click(card(container, '몸 셸 상의 A')); await settle();
+    await click(button(container, '다시 만들기'));
+    await click(button(container, '입히기')); await settle();
+    expect(button(container, '다시 만들기')?.disabled).toBe(false);
+    parts = [{ ...first, version: 'v2' }, second];
+    await act(async () => { await vi.advanceTimersByTimeAsync(40_000); }); await settle();
+    expect(nativeParts).not.toHaveBeenCalled();
+    expect(container.querySelector('.wardrobe-worn')?.textContent).toContain('몸 셸 상의 B');
+    expect(container.querySelector('.wardrobe-worn')?.textContent).not.toContain('몸 셸 상의 A');
+    await unmount();
+  });
+
+  it('모양을 다시 만든 옷을 그대로 입고 있으면 그 옷의 새 버전으로 바꿔 입힌다', async () => {
+    auth.user = user('operator', 'paid_operator');
+    const first = part('shell-a', 'top', '몸 셸 상의 A', { fit_method: 'body-shell-v1' });
+    parts = [first];
+    vi.spyOn(factoryApi, 'refitPart').mockResolvedValue({ status: 'running', artifacts: [], parts: [] });
+    vi.spyOn(factoryApi, 'nativeParts').mockResolvedValue({ status: 'review_required', version: 'v2', artifacts: [], parts: [] });
+    const { container, unmount } = await open(); await settle();
+    await click(card(container, '몸 셸 상의 A')); await settle();
+    await click(button(container, '다시 만들기'));
+    // The list keeps the old version too, so the panel's own replacement is what wears the new one.
+    parts = [first, { ...first, version: 'v2' }];
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); }); await settle();
+    expect(viewers[0]!.wear.mock.calls.at(-1)![0].map((value: { id: string }) => value.id)).toEqual(['shell-a:v2:top']);
+    expect(button(container, '다시 만들기')?.disabled).toBe(false);
+    await unmount();
+  });
+
   describe('옷 색 마스크', () => {
     it('입은 파츠마다 한 번 받아 색을 보이고, 벗으면 풀며, 다시 입으면 새로 받는다', async () => {
       const { container, unmount } = await open();

@@ -14,6 +14,8 @@ export type GameRoomValue = {
   client: GameClient;
   /** Whether the signed-in viewer is in the island's live room; the dock shows only then. */
   live: boolean;
+  /** Whether the island is the viewer's: its owner may close any game on it. */
+  owner?: boolean;
   /** The island as this page has it loaded, for the host's layout. */
   building: () => BuildingSerializedState;
   /** The viewer's character. */
@@ -35,7 +37,8 @@ export function GameRoom({ username, viewer, building, playerRef, children }: Ga
   const self = useLiveSelf();
   const live = !!viewer && self.connected && !!self.peer;
   const { client } = useGameSession({ username, viewerId: viewer?.id ?? null, peer: self.peer, enabled: live });
-  const value = useMemo(() => ({ client, live, building, playerRef }), [client, live, building, playerRef]);
+  const owner = !!viewer && viewer.username === username;
+  const value = useMemo(() => ({ client, live, owner, building, playerRef }), [client, live, owner, building, playerRef]);
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>;
 }
 

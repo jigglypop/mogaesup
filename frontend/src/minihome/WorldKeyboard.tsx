@@ -2,7 +2,8 @@ import { useEffect } from 'react';
 
 import { useWorldLoadProgress } from 'gaesup-world';
 
-const MOVE_KEYS = new Set(['w', 'a', 's', 'd', 'e', ' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
+/** By the key's place on the keyboard, as the world reads it, so a Korean input source (W gives ㅈ) or AZERTY still walks. */
+const MOVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyE', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
 const nothingFocused = () => !document.activeElement || document.activeElement === document.body;
 const worldCanvas = () => document.querySelector<HTMLCanvasElement>('.mg-world-canvas canvas');
 
@@ -17,7 +18,7 @@ export function WorldKeyboard({ enabled }: { enabled: boolean }) {
     if (!enabled || !ready) return undefined;
     if (nothingFocused()) worldCanvas()?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent) => {
-      if (event.ctrlKey || event.metaKey || event.altKey || !MOVE_KEYS.has(event.key.toLowerCase()) || !nothingFocused()) return;
+      if (event.ctrlKey || event.metaKey || event.altKey || !MOVE_KEYS.has(event.code) || !nothingFocused()) return;
       const canvas = worldCanvas();
       if (!canvas) return;
       canvas.focus({ preventScroll: true });

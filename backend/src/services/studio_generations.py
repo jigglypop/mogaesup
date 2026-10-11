@@ -154,7 +154,9 @@ class StudioGenerations:
         resumable, reason = image or self._image_reason(directory, record)
         if resumable and record['kind'] == 'prop':
             run = self._run(directory, record)
-            problem = model_problem(read_json(run/'character.json') if task is None else task, run)
+            task = read_json(run/'character.json') if task is None else task
+            # A submission whose saved 2xx answer names the accepted task is that task: the next run polls it.
+            problem = None if character_jobs.submitted_task_id(run, task) else model_problem(task, run)
             if problem:
                 return False, problem['message']
         return resumable, reason
@@ -416,7 +418,8 @@ class StudioGenerations:
     def _model(self, directory, record, image):
         provider = record.get('provider') or 'meshy'; run = self._run(directory, record)
         with provider_client(provider, record) as client:
-            task = read_json(run/'character.json')
+            # A task the provider accepted, named only by its saved answer, is polled and never sent again.
+            task = character_jobs.adopt_submitted_task(run, read_json(run/'character.json'))
             if not task:
                 # The receipt is written before the POST; an existing one is only refreshed, never sent again.
                 if provider == 'tripo':
@@ -428,6 +431,7 @@ class StudioGenerations:
                 else:
                     task = character_jobs.generate(run, image, 1.2, client, isolated_part=True)
             deadline = time.monotonic()+1200
+            refreshed = False
             while task.get('status') != 'SUCCEEDED':
                 problem = model_problem(task, run)
                 if problem:
@@ -435,11 +439,15 @@ class StudioGenerations:
                 if time.monotonic() >= deadline:
                     raise PipelineError('provider_wait', '3D 작업이 진행 중입니다. 저장된 작업에서 이어서 확인하세요.', 409)
                 task = character_jobs.refresh(run, client)
+                refreshed = True
                 if task['status'] != 'SUCCEEDED':
                     time.sleep(5)
-        saved = read_json(run/'generation-artifacts.json')
-        if not saved or not (run/'generated.glb').is_file() or digest(run/'generated.glb') != saved.get('generated', {}).get('sha256'):
-            character_jobs.download(run, 'generation')
+            saved = read_json(run/'generation-artifacts.json')
+            if not saved or not (run/'generated.glb').is_file() or digest(run/'generated.glb') != saved.get('generated', {}).get('sha256'):
+                if not refreshed:
+                    # Saved download links may have expired while the job waited; a status read renews them.
+                    task = character_jobs.refresh(run, client)
+                character_jobs.download(run, 'generation')
         copy_file(run/'generated.glb', directory/'source.glb')
         record['files']['source.glb'] = digest(directory/'source.glb')
         self._save(directory, record)

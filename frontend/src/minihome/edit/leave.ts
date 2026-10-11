@@ -16,8 +16,8 @@ function finished(state: SaverState): boolean {
 }
 
 /**
- * Islands that were left with edits that could not be saved yet (each under the key it was left with), and the question
- * closing the page asks for them.
+ * Islands that were left with edits not saved yet, from the save leaving sends until they are saved or nothing can save
+ * them (each under the key it was left with), and the question closing the page asks for them.
  */
 const holding = new Map<IslandSaver, string | undefined>();
 const closing = (event: BeforeUnloadEvent) => {
@@ -93,10 +93,12 @@ export function leaveIsland(saver: IslandSaver, release: () => void, discard = f
     letGo();
     return;
   }
+  // Held from the start: the save leaving sends may still be on its way when the same island opens again, and
+  // `heldSavesSettled` waits for that one too (closing the page meanwhile asks first).
+  holding.set(saver, key);
+  askBeforeClosing();
   void saver.flush().then(() => {
     if (saver.disposed || finished(saver.getState())) return letGo();
-    holding.set(saver, key);
-    askBeforeClosing();
     stopWatching = saver.subscribe(() => {
       if (saver.disposed || finished(saver.getState())) letGo();
     });
