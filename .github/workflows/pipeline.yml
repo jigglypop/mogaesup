@@ -278,7 +278,8 @@ jobs:
       - name: CloudFormation 템플릿
         run: |
           uv venv --python 3.12 "$RUNNER_TEMP/cfn-lint"
-          uv pip install --python "$RUNNER_TEMP/cfn-lint" --require-hashes -r .github/requirements/cfn-lint.txt
+          # --no-config: the root pyproject's constraint-dependencies (urllib3) would otherwise reach this hashed install.
+          uv --no-config pip install --python "$RUNNER_TEMP/cfn-lint" --require-hashes -r .github/requirements/cfn-lint.txt
           "$RUNNER_TEMP/cfn-lint/bin/cfn-lint" --ignore-checks W1030 -- \
             frontend/infra/aws-static.yaml server/infra/aws-server.yaml backend/infra/ec2.yaml .github/aws/deploy-role.yaml
       - name: 스크립트 문법
