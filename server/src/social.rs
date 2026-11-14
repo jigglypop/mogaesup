@@ -70,7 +70,7 @@ pub fn router() -> Router<AppState> {
 }
 
 /// A user as pages show them: name and their 미니미 emoji.
-fn card(row: &PgRow, prefix: &str) -> Value {
+pub(crate) fn card(row: &PgRow, prefix: &str) -> Value {
     json!({
         "id": row.get::<Uuid, _>(format!("{prefix}id").as_str()),
         "username": row.get::<String, _>(format!("{prefix}username").as_str()),

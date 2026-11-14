@@ -353,6 +353,143 @@ async fn 일촌을_맺으면_일촌_공개_홈을_볼_수_있다() {
     app.cleanup().await;
 }
 
+#[tokio::test]
+async fn 사주_집은_주인만_짓고_마을에는_이웃의_집과_공개된_집이_함께_선다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_s", "호스트").await;
+    let friend = app.register("friend_s", "친구").await;
+    let stranger = app.register("stranger_s", "낯선이").await;
+    let host_id = app.user_id("host_s").await;
+    let friend_id = app.user_id("friend_s").await;
+    let birth = json!({"calendar": "solar", "year": 1989, "month": 2, "day": 23, "leapMonth": false, "time": "22:10", "gender": "female"});
+    let save =
+        |owner: uuid::Uuid, name: &str, birth: Value| json!({"expectedOwnerId": owner, "name": name, "birth": birth});
+
+    let empty = app.call("GET", "/api/homes/host_s/saju", None, None).await;
+    assert_eq!(empty.status, StatusCode::OK);
+    assert_eq!(empty.body, json!({"saju": null, "village": []}));
+    let path = "/api/homes/me/saju";
+    assert_eq!(
+        app.call("PUT", path, Some(save(host_id, "솔", birth.clone())), None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    // A page loaded for another account, or one that does not say whose it is, saves nothing.
+    let other = app.call("PUT", path, Some(save(friend_id, "솔", birth.clone())), Some(&host)).await;
+    assert_eq!(other.body["code"], "owner_changed");
+    let unsigned = app.call("PUT", path, Some(json!({"name": "솔", "birth": birth})), Some(&host)).await;
+    assert_eq!(unsigned.body["code"], "owner_changed");
+    let mut wrong = birth.clone();
+    wrong["month"] = json!(13);
+    let refused = app.call("PUT", path, Some(save(host_id, "솔", wrong)), Some(&host)).await;
+    assert_eq!(refused.body["code"], "invalid_birth");
+    for name in ["  ", "열세글자가넘는아주긴이름이에요"] {
+        let refused = app.call("PUT", path, Some(save(host_id, name, birth.clone())), Some(&host)).await;
+        assert_eq!(refused.body["code"], "invalid_name", "{name}");
+    }
+    // The name a village shows may not read as the site's staff, as a display name may not.
+    for name in ["운영자", " 관 리 자 ", "ＡＤＭＩＮ"] {
+        let refused = app.call("PUT", path, Some(save(host_id, name, birth.clone())), Some(&host)).await;
+        assert_eq!(refused.body["code"], "reserved_name", "{name}");
+    }
+
+    let built = app.call("PUT", path, Some(save(host_id, "  솔  ", birth.clone())), Some(&host)).await;
+    assert_eq!(built.status, StatusCode::OK, "{:?}", built.body);
+    assert_eq!(built.body["saju"], json!({"name": "솔", "birth": birth}));
+    // Built again from a corrected birth: the hour is not known after all.
+    let mut corrected = birth.clone();
+    corrected["time"] = Value::Null;
+    let rebuilt = app.call("PUT", path, Some(save(host_id, "솔", corrected.clone())), Some(&host)).await;
+    assert_eq!(rebuilt.body["saju"]["birth"], corrected);
+    assert_eq!(app.call("GET", "/api/homes/host_s/saju", None, None).await.body["saju"]["birth"], corrected);
+
+    let lunar = json!({"calendar": "lunar", "year": 1988, "month": 8, "day": 21, "leapMonth": false, "time": null, "gender": "male"});
+    let friends = app.call("PUT", path, Some(save(friend_id, "보리", lunar.clone())), Some(&friend)).await;
+    assert_eq!(friends.status, StatusCode::OK);
+    // A public home stands in the village of someone who is no 이웃 of its owner, without a bridge.
+    let village = app.call("GET", "/api/homes/host_s/saju", None, None).await.body;
+    assert_eq!(village["village"].as_array().unwrap().len(), 1);
+    assert_eq!(village["village"][0]["user"]["username"], "friend_s");
+    assert_eq!(village["village"][0]["neighbour"], false);
+
+    let ask = json!({"name": "옆집", "theirName": "앞집"});
+    app.call("POST", "/api/ilchon/host_s/request", Some(ask), Some(&friend)).await;
+    let requests = app.call("GET", "/api/ilchon-requests", None, Some(&host)).await;
+    let id = requests.body["received"][0]["id"].as_str().unwrap().to_owned();
+    app.call("POST", &format!("/api/ilchon-requests/{id}/accept"), Some(json!({})), Some(&host)).await;
+    let village = app.call("GET", "/api/homes/host_s/saju", None, None).await.body;
+    assert_eq!(village["village"].as_array().unwrap().len(), 1);
+    assert_eq!(village["village"][0]["saju"], json!({"name": "보리", "birth": lunar}));
+    assert_eq!(village["village"][0]["neighbour"], true);
+    let back = app.call("GET", "/api/homes/friend_s/saju", None, None).await.body;
+    assert_eq!(back["village"][0]["user"]["username"], "host_s");
+    assert_eq!(back["village"][0]["neighbour"], true);
+
+    // A home kept to 이웃 stands in a village only for those who may see the home itself.
+    app.call("PATCH", "/api/homes/me", Some(json!({"visibility": "ilchon"})), Some(&friend)).await;
+    let seen = |cookie: Option<String>| {
+        let app = &app;
+        async move {
+            let village = app.call("GET", "/api/homes/host_s/saju", None, cookie.as_deref()).await.body;
+            village["village"].as_array().unwrap().len()
+        }
+    };
+    assert_eq!(seen(None).await, 0);
+    assert_eq!(seen(Some(stranger.clone())).await, 0);
+    assert_eq!(seen(Some(host.clone())).await, 1);
+    assert_eq!(seen(Some(friend.clone())).await, 1);
+    let closed = app.call("GET", "/api/homes/friend_s/saju", None, Some(&stranger)).await;
+    assert_eq!(closed.status, StatusCode::FORBIDDEN);
+
+    let removal = json!({"expectedOwnerId": host_id});
+    assert_eq!(app.call("DELETE", path, Some(json!({})), Some(&host)).await.body["code"], "owner_changed");
+    assert_eq!(app.call("DELETE", path, Some(removal), Some(&host)).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(app.call("GET", "/api/homes/host_s/saju", None, Some(&host)).await.body["saju"], Value::Null);
+    // The host's home is gone from the friend's village too; the two are 이웃 still.
+    assert_eq!(app.call("GET", "/api/homes/friend_s/saju", None, Some(&friend)).await.body["village"], json!([]));
+    assert_eq!(app.call("GET", "/api/ilchon/host_s", None, Some(&friend)).await.body["relation"], "ilchon");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 마을은_여덟_집까지_이웃을_앞세워_최근에_지은_공개된_집으로_채운다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_v", "호스트").await;
+    let birth = json!({"calendar": "solar", "year": 1990, "month": 5, "day": 5, "leapMonth": false, "time": null, "gender": "male"});
+    let mut cookies = Vec::new();
+    for index in 0..10 {
+        let name = format!("villager_{index}");
+        let cookie = app.register(&name, "주민").await;
+        let body = json!({"expectedOwnerId": app.user_id(&name).await, "name": format!("집{index}"), "birth": birth});
+        assert_eq!(app.call("PUT", "/api/homes/me/saju", Some(body), Some(&cookie)).await.status, StatusCode::OK);
+        cookies.push(cookie);
+    }
+    let names = |village: &Value| -> Vec<String> {
+        village["village"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|home| home["user"]["username"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Nobody's 이웃 yet: the eight built last, the newest first.
+    let village = app.call("GET", "/api/homes/host_v/saju", None, Some(&host)).await.body;
+    assert_eq!(names(&village), (2..10).rev().map(|index| format!("villager_{index}")).collect::<Vec<_>>());
+    // The first to build becomes an 이웃 and takes the first place; the village stays eight homes.
+    let ask = json!({"name": "옆집", "theirName": "앞집"});
+    app.call("POST", "/api/ilchon/host_v/request", Some(ask), Some(&cookies[0])).await;
+    let requests = app.call("GET", "/api/ilchon-requests", None, Some(&host)).await;
+    let id = requests.body["received"][0]["id"].as_str().unwrap().to_owned();
+    app.call("POST", &format!("/api/ilchon-requests/{id}/accept"), Some(json!({})), Some(&host)).await;
+    let village = app.call("GET", "/api/homes/host_v/saju", None, Some(&host)).await.body;
+    let listed = names(&village);
+    assert_eq!(listed.len(), 8);
+    assert_eq!(listed[0], "villager_0");
+    assert_eq!(village["village"][0]["neighbour"], true);
+    assert_eq!(village["village"][1]["neighbour"], false);
+    assert!(!listed.contains(&"host_v".to_owned()));
+    app.cleanup().await;
+}
+
 /// Rigged, with the clips the character server's Meshy delivery names; `name` makes each copy's bytes its own.
 fn character_glb(name: &str) -> Vec<u8> {
     let (mut json, bin) = test_glb::document(&["idle", "walk", "run", "sit"]);

@@ -86,7 +86,7 @@ const PASSWORD_CHANGED: ApiError = conflict("password_changed", "비밀번호가
 const RESERVED_NAMES: [&str; 9] =
     ["admin", "administrator", "mogaesup", "root", "system", "support", "staff", "운영자", "관리자"];
 const USERNAME_TAKEN: ApiError = conflict("username_taken", "이미 사용 중인 아이디입니다.");
-const STAFF_NAME: ApiError = bad("reserved_name", "운영진처럼 보이는 이름은 쓸 수 없어요.");
+pub(crate) const STAFF_NAME: ApiError = bad("reserved_name", "운영진처럼 보이는 이름은 쓸 수 없어요.");
 /// Sign-up made the account but could not sign it in.
 const SIGNED_UP: ApiError = ApiError::new(
     StatusCode::SERVICE_UNAVAILABLE,
@@ -231,7 +231,7 @@ pub(crate) fn username(raw: &str) -> ApiResult<String> {
 
 /// Whether a display name reads as one of [`RESERVED_NAMES`]: the same letters and digits once their width and form
 /// are made one (NFKC) and their case too, whatever spaces, marks, symbols or invisible joiners come between them.
-fn reads_as_staff(name: &str) -> bool {
+pub(crate) fn reads_as_staff(name: &str) -> bool {
     let letters: String = name.nfkc().flat_map(char::to_lowercase).filter(|c| c.is_alphanumeric()).collect();
     RESERVED_NAMES.contains(&letters.as_str())
 }

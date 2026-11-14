@@ -17,6 +17,7 @@ pub mod rebac;
 pub mod residents;
 pub mod rooms;
 pub mod runtime;
+pub mod saju;
 pub mod security;
 pub mod share;
 pub mod slim;
@@ -110,6 +111,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .merge(homes::router())
         .merge(social::router())
+        .merge(saju::router())
         .merge(catalog::router())
         .merge(factory::router())
         .merge(looks::router())
