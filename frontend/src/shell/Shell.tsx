@@ -94,7 +94,7 @@ export function Brand() {
 
 type RailItem = { label: string; icon: IconName; to: string; active: boolean; divided?: boolean };
 
-/** The app's five places. Signed-out visitors get the island list and the way in. */
+/** The app's places. Signed-out visitors get the island list, the 사주 village and the way in. */
 export function Rail() {
   const { user } = useAuth();
   const { pathname } = useLocation();
@@ -110,6 +110,7 @@ export function Rail() {
         ]
       : []),
     { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
+    { label: '사주', icon: 'home', to: '/saju', active: pathname === '/saju' || pathname.startsWith('/saju/') },
     ...(admin ? [{ label: '운영', icon: 'shield' as const, to: admin, active: pathname.startsWith('/admin'), divided: true }] : []),
   ];
   return (

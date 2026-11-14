@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "smoke": "node scripts/browser-smoke.mjs",
+    "smoke:saju": "node scripts/saju-smoke.mjs",
     "test:character": "node scripts/character-e2e.mjs",
     "perf": "node scripts/perf-probe.mjs",
     "deploy:aws": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-aws.ps1"
@@ -23,6 +24,7 @@
     "@react-three/postprocessing": "^3.1.1",
     "@react-three/rapier": "^2.2.0",
     "gaesup-world": "file:vendor/gaesup-world-1.7.0-mogaesup.2.tgz",
+    "jamiblossom": "file:vendor/jamiblossom-0.1.0.tgz",
     "postprocessing": "6.39.5",
     "react": "~19.2.8",
     "react-dom": "~19.2.8",

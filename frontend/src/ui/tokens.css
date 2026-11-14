@@ -127,6 +127,28 @@
   --mg-kart-flame: #ffb03a;
   --mg-kart-shout: #ffffff;
 
+  /* 사주 마을. The five elements (오방색, softened): a mark's fill (hex: three.js reads them for a bridge's light), its
+     wash, and text in that tone. Then the sky behind a home of each element, top and bottom (hex: the saved picture
+     paints them), and the hard edge under a retro control. */
+  --mg-wood: #4fb286;
+  --mg-wood-soft: rgba(79, 178, 134, 0.16);
+  --mg-wood-ink: #1d6a49;
+  --mg-fire: #f0705a;
+  --mg-fire-soft: rgba(240, 112, 90, 0.15);
+  --mg-fire-ink: #a8361f;
+  --mg-earth: #dba63c;
+  --mg-earth-soft: rgba(219, 166, 60, 0.18);
+  --mg-earth-ink: #7a5708;
+  --mg-metal: #9aa7bd;
+  --mg-metal-soft: rgba(154, 167, 189, 0.2);
+  --mg-metal-ink: #4b566b;
+  --mg-water: #4f93dc;
+  --mg-water-soft: rgba(79, 147, 220, 0.15);
+  --mg-water-ink: #1c4f93;
+  --mg-saju-lake-top: #d9b9c4;
+  --mg-saju-lake-bottom: #8f84bd;
+  --mg-saju-edge: rgba(29, 24, 48, 0.16);
+
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(200, 186, 255, 0.5), transparent 62%),
     radial-gradient(60vmax 40vmax at 100% 4%, rgba(190, 232, 196, 0.55), transparent 58%),
@@ -194,6 +216,25 @@
   --mg-ship-room: #8a91a6;
   --mg-ship-cafeteria: #9d9583;
   --mg-ship-wall: #3e4558;
+
+  --mg-wood: #63c79a;
+  --mg-wood-soft: rgba(99, 199, 154, 0.16);
+  --mg-wood-ink: #a5e6c7;
+  --mg-fire: #f58a76;
+  --mg-fire-soft: rgba(245, 138, 118, 0.16);
+  --mg-fire-ink: #ffc2b5;
+  --mg-earth: #e3b757;
+  --mg-earth-soft: rgba(227, 183, 87, 0.16);
+  --mg-earth-ink: #f3d896;
+  --mg-metal: #b3bfd4;
+  --mg-metal-soft: rgba(179, 191, 212, 0.16);
+  --mg-metal-ink: #d7deeb;
+  --mg-water: #6fa9ea;
+  --mg-water-soft: rgba(111, 169, 234, 0.16);
+  --mg-water-ink: #b6d4f7;
+  --mg-saju-lake-top: #34345f;
+  --mg-saju-lake-bottom: #131a36;
+  --mg-saju-edge: rgba(0, 0, 0, 0.42);
 
   --mg-page:
     radial-gradient(70vmax 45vmax at 6% -8%, rgba(110, 88, 190, 0.35), transparent 62%),

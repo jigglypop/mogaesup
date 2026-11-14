@@ -121,4 +121,21 @@ describe('레일', () => {
     expect(await admin('admin', 'paid_operator', 'operator', 'moderator', 'catalog_editor', 'studio_viewer')).toBe('/admin');
     expect(await admin('studio_viewer')).toBeUndefined();
   });
+
+  it('사주 마을은 로그인하지 않아도 갈 수 있고, 그 안에서는 켜져 있다', async () => {
+    const rail = async (path: string) => {
+      const { container, unmount } = await mount(
+        <MemoryRouter initialEntries={[path]}>
+          <Rail />
+        </MemoryRouter>,
+      );
+      const links = [...container.querySelectorAll('a')].map((anchor) => `${anchor.textContent}${anchor.getAttribute('aria-current') ? '*' : ''} ${anchor.getAttribute('href')}`);
+      await unmount();
+      return links;
+    };
+    expect(await rail('/explore')).toEqual(['섬 /', '둘러보기* /explore', '사주 /saju']);
+    expect(await rail('/saju/home/sol')).toEqual(['섬 /', '둘러보기 /explore', '사주* /saju']);
+    // 아이디가 saju로 시작하는 섬은 사주 마을이 아니다.
+    expect(await rail('/sajuland')).toEqual(['섬 /', '둘러보기 /explore', '사주 /saju']);
+  });
 });

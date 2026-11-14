@@ -1,0 +1,297 @@
+/* 사주 마을: one frame, a 미니홈피. The village's canvas on one side, the story of what it shows on the other, and the
+   retro pieces (a tab menu on the frame's edge, a BGM player, pixel marks) drawn with the app's glass tokens. */
+
+.mg-saju {
+  --el: var(--mg-primary);
+  --el-soft: var(--mg-primary-soft);
+  --el-ink: var(--mg-primary);
+  /* Room at the right for the tab menu hanging off the frame. */
+  margin-right: 74px;
+}
+.mg-saju [data-element='wood'] { --el: var(--mg-wood); --el-soft: var(--mg-wood-soft); --el-ink: var(--mg-wood-ink); }
+.mg-saju [data-element='fire'] { --el: var(--mg-fire); --el-soft: var(--mg-fire-soft); --el-ink: var(--mg-fire-ink); }
+.mg-saju [data-element='earth'] { --el: var(--mg-earth); --el-soft: var(--mg-earth-soft); --el-ink: var(--mg-earth-ink); }
+.mg-saju [data-element='metal'] { --el: var(--mg-metal); --el-soft: var(--mg-metal-soft); --el-ink: var(--mg-metal-ink); }
+.mg-saju [data-element='water'] { --el: var(--mg-water); --el-soft: var(--mg-water-soft); --el-ink: var(--mg-water-ink); }
+.mg-saju-pixel { display: block; flex: none; }
+
+.mg-saju-frame {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  /* The frame fills the window under the top bar, and its two sides scroll inside it. */
+  height: calc(100vh - var(--mg-edge) * 2 - 72px);
+  height: calc(100dvh - var(--mg-edge) * 2 - 72px);
+  min-height: 560px;
+  padding: 16px 18px 18px;
+}
+
+/* The title bar, ruled off with a dotted line as a 미니홈피's was. */
+.mg-saju-bar { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 2px dotted var(--mg-hair-strong); }
+.mg-saju-bar h1 { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 19px; font-weight: 850; letter-spacing: -0.03em; }
+.mg-saju-bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mg-saju-bar-mark { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 10px; background: var(--el-soft); color: var(--el-ink); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
+.mg-saju-bar-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* The tab menu: tabs hanging off the frame's right edge, the open one in the home's colour. */
+.mg-saju-menu { position: absolute; z-index: 2; left: 100%; top: 78px; display: grid; gap: 6px; }
+.mg-saju-menu a {
+  display: grid;
+  place-items: center;
+  width: 70px;
+  height: 44px;
+  border: 1px solid var(--mg-line);
+  border-left: 0;
+  border-radius: 0 12px 12px 0;
+  background: var(--mg-glass-strong);
+  box-shadow: 3px 3px 0 var(--mg-saju-edge);
+  color: var(--mg-muted);
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+  transition: width 0.15s, color 0.15s;
+}
+.mg-saju-menu a[aria-current='page'] { width: 78px; background: var(--el); border-color: transparent; color: var(--mg-accent-ink); }
+@media (hover: hover) {
+  .mg-saju-menu a:hover:not([aria-current='page']) { width: 76px; color: var(--mg-ink); }
+}
+
+.mg-saju-body { display: grid; grid-template-columns: minmax(0, 1fr) 392px; gap: 16px; min-height: 0; }
+
+/* The canvas: the lake's own colours until it has drawn, a dotted mat inside its edge. */
+.mg-saju-stage {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 18px;
+  background: linear-gradient(180deg, var(--mg-saju-lake-top), var(--mg-saju-lake-bottom));
+  box-shadow: inset 0 0 0 1px var(--mg-hair);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mg-saju-stage::after { content: ''; position: absolute; z-index: 1; inset: 8px; border: 2px dotted rgba(255, 255, 255, 0.5); border-radius: 12px; pointer-events: none; }
+:root[data-theme='dark'] .mg-saju-stage::after { border-color: rgba(255, 255, 255, 0.2); }
+.mg-saju-canvas { position: absolute; inset: 0; }
+.mg-saju-canvas-failed { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 24px; color: var(--mg-accent-ink); font-size: 14px; font-weight: 750; text-align: center; }
+/* A swipe up or down over the canvas still scrolls the page. */
+.mg-saju-canvas canvas { display: block; touch-action: pan-y; }
+/* The canvas comes up out of the lake's colours once its first frames are drawn; until then three pixels count the wait. */
+.mg-saju-canvas > div { opacity: 0; transition: opacity 0.6s ease; }
+.mg-saju-canvas[data-drawn] > div { opacity: 1; }
+.mg-saju-canvas::before { content: ''; position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; margin: -4px 0 0 -4px; background: rgba(255, 255, 255, 0.85); box-shadow: -16px 0 rgba(255, 255, 255, 0.85), 16px 0 rgba(255, 255, 255, 0.85); animation: mg-saju-wait 1s steps(4) infinite; }
+.mg-saju-canvas[data-drawn]::before { content: none; }
+@keyframes mg-saju-wait { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .mg-saju-canvas::before { animation: none; }
+}
+.mg-saju-pins { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.mg-saju-pin {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  justify-items: center;
+  padding: 5px 11px 6px;
+  border: 2px solid var(--mg-ink);
+  border-radius: 10px;
+  background: var(--mg-glass-strong);
+  box-shadow: 3px 3px 0 var(--mg-saju-edge);
+  color: var(--mg-ink);
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+  pointer-events: auto;
+  will-change: transform;
+  /* Out of sight until the canvas has put it over its island. */
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.mg-saju-pin[data-placed] { opacity: 1; }
+.mg-saju-pin small { font-size: 10px; font-weight: 750; color: var(--el-ink); }
+.mg-saju-pin::before { content: ''; position: absolute; left: 50%; bottom: -7px; width: 8px; height: 8px; margin-left: -4px; background: var(--el); border: 2px solid var(--mg-ink); border-radius: 2px; }
+@media (hover: hover) {
+  .mg-saju-pin:hover { background: var(--mg-card); }
+}
+
+/* What 궁합 found, said over the two homes. */
+.mg-saju-say {
+  position: absolute;
+  z-index: 2;
+  top: 20px;
+  left: 50%;
+  width: max-content;
+  max-width: calc(100% - 44px);
+  padding: 10px 16px;
+  transform: translateX(-50%);
+  border: 2px solid var(--mg-ink);
+  border-radius: 12px;
+  background: var(--mg-glass-strong);
+  box-shadow: 4px 4px 0 var(--mg-saju-edge);
+  font-size: 15px;
+  font-weight: 850;
+  letter-spacing: -0.02em;
+  text-align: center;
+  animation: mg-saju-pop 0.35s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+@keyframes mg-saju-pop { from { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(0.94); } }
+
+.mg-saju-stage-foot { position: absolute; z-index: 2; left: 16px; right: 16px; bottom: 16px; display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; pointer-events: none; }
+.mg-saju-stage-foot > * { pointer-events: auto; }
+.mg-saju-toast { position: absolute; z-index: 3; left: 50%; bottom: 68px; display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px 16px; transform: translateX(-50%); border-radius: 999px; font-size: 13px; font-weight: 750; white-space: nowrap; }
+.mg-saju-toast svg { width: 16px; height: 16px; color: var(--mg-good); }
+/* Where a picture is drawn: off the page, at the picture's own size. */
+.mg-saju-snapshot { position: fixed; top: 0; left: -99999px; pointer-events: none; }
+
+/* The BGM player. */
+.mg-saju-bgm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  min-width: 0;
+  max-width: 250px;
+  padding: 0 12px 0 5px;
+  border: 2px solid var(--mg-ink);
+  border-radius: 10px;
+  background: var(--mg-glass-strong);
+  box-shadow: 3px 3px 0 var(--mg-saju-edge);
+}
+.mg-saju-bgm button { display: grid; place-items: center; width: 28px; height: 28px; flex: none; padding: 0; border: 0; border-radius: 6px; background: var(--el); color: var(--mg-accent-ink); }
+.mg-saju-eq { display: flex; align-items: flex-end; gap: 2px; height: 14px; flex: none; }
+.mg-saju-eq i { width: 3px; height: 3px; background: var(--el-ink); }
+.mg-saju-bgm.is-playing .mg-saju-eq i { animation: mg-saju-eq 0.9s steps(5) infinite alternate; }
+.mg-saju-bgm.is-playing .mg-saju-eq i:nth-child(2) { animation-duration: 0.6s; animation-delay: -0.3s; }
+.mg-saju-bgm.is-playing .mg-saju-eq i:nth-child(3) { animation-duration: 0.75s; animation-delay: -0.5s; }
+.mg-saju-bgm.is-playing .mg-saju-eq i:nth-child(4) { animation-duration: 0.5s; animation-delay: -0.1s; }
+@keyframes mg-saju-eq { from { height: 3px; } to { height: 14px; } }
+.mg-saju-bgm-title { min-width: 0; overflow: hidden; font-family: var(--mg-mono); font-size: 11.5px; font-weight: 700; white-space: nowrap; }
+.mg-saju-bgm-title span { display: block; overflow: hidden; text-overflow: ellipsis; }
+/* Playing, the title runs across the display. */
+.mg-saju-bgm.is-playing .mg-saju-bgm-title span { display: inline-block; overflow: visible; padding-left: 100%; animation: mg-saju-marquee 11s linear infinite; }
+@keyframes mg-saju-marquee { to { transform: translateX(-100%); } }
+
+/* The story beside the canvas. */
+.mg-saju-side { display: flex; flex-direction: column; gap: 12px; min-height: 0; margin-right: -8px; padding-right: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.mg-saju-side > * { flex: none; }
+.mg-saju-side .mg-heading { display: flex; align-items: baseline; gap: 6px; }
+.mg-saju-side .mg-heading b { color: var(--el-ink); }
+.mg-saju-side .mg-heading small { font-size: 12px; font-weight: 650; color: var(--mg-muted); }
+.mg-saju-card { display: grid; gap: 10px; padding: 14px; background: var(--mg-card); border: 1px solid var(--mg-hair); border-radius: var(--mg-r-card); }
+
+.mg-saju-who { position: relative; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px; }
+.mg-saju-who-mark { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: var(--el-soft); color: var(--el-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
+.mg-saju-who-text { display: grid; gap: 8px; min-width: 0; }
+.mg-saju-who-edit { position: absolute; top: 8px; right: 8px; }
+.mg-saju-who:has(.mg-saju-who-edit) .mg-saju-badge { padding-right: 30px; }
+.mg-saju-badge { font-size: 16px; font-weight: 850; letter-spacing: -0.025em; line-height: 1.3; color: var(--el-ink); }
+.mg-saju-notes { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.mg-saju-notes .mg-chip { height: 26px; padding: 0 9px; }
+
+/* One block a character, lit in the element's colour. */
+.mg-saju-gauge { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.mg-saju-gauge li { display: grid; grid-template-columns: 58px minmax(0, 1fr) 38px; align-items: center; gap: 8px; }
+.mg-saju-gauge-name { display: flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 800; color: var(--el-ink); }
+.mg-saju-gauge-name small { font-size: 11px; font-weight: 650; opacity: 0.75; }
+.mg-saju-gauge-bar { display: flex; gap: 3px; }
+.mg-saju-gauge-bar i { flex: 1; height: 14px; border-radius: 3px; background: var(--mg-tint); }
+.mg-saju-gauge-bar i.is-lit { background: var(--el); box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.1); }
+.mg-saju-gauge b { font-family: var(--mg-mono); font-size: 12px; font-weight: 700; text-align: right; }
+
+.mg-saju-bridge-line { font-size: 15px; font-weight: 850; letter-spacing: -0.02em; line-height: 1.35; }
+.mg-saju-bridge.is-built { border-color: transparent; background: linear-gradient(135deg, var(--mg-primary-soft), var(--mg-accent-soft)); }
+.mg-saju-bridge.is-built .mg-btn { justify-self: start; }
+
+.mg-saju-guestbook { display: grid; gap: 10px; }
+.mg-saju-guestbook > .mg-btn { justify-self: start; }
+.mg-saju-write { display: flex; gap: 6px; }
+.mg-saju-write .mg-field { flex: 1; min-width: 0; height: 40px; }
+.mg-saju-entries { display: grid; margin: 0; padding: 0; list-style: none; }
+.mg-saju-entries li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 10px 2px; border-top: 2px dotted var(--mg-hair-strong); }
+.mg-saju-entries li:first-child { border-top: 0; }
+.mg-saju-entry-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--el-soft); color: var(--el-ink); }
+.mg-saju-entry-meta { display: flex; align-items: baseline; gap: 6px; }
+.mg-saju-entry-meta b { font-size: 13px; font-weight: 800; }
+.mg-saju-entry-meta time { font-family: var(--mg-mono); font-size: 11px; color: var(--mg-muted); }
+.mg-saju-entry-meta .mg-link { margin-left: auto; }
+.mg-saju-entry-body { font-size: 14px; overflow-wrap: anywhere; }
+
+/* The card a home is built from. */
+.mg-saju-form { gap: 14px; }
+.mg-saju-form .mg-tabs > button { height: 34px; font-size: 13px; }
+.mg-saju-date { display: grid; grid-template-columns: 1.5fr auto 1fr auto 1fr auto; align-items: center; gap: 6px; }
+.mg-saju-date span { font-size: 13px; font-weight: 700; color: var(--mg-muted); }
+.mg-saju-date .mg-field, .mg-saju-time .mg-field { padding: 0 10px; text-align: center; }
+.mg-saju-time { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 6px; }
+.mg-saju-time select.mg-field { text-align: left; }
+.mg-saju-form-foot { display: flex; justify-content: space-between; }
+
+/* 사주보기. */
+.mg-saju-chart { display: grid; gap: 12px; }
+.mg-saju-pillars, .mg-saju-twelve { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: center; font-size: 12.5px; }
+.mg-saju-pillars th, .mg-saju-twelve th { padding: 5px 2px; font-size: 11.5px; font-weight: 800; color: var(--mg-muted); }
+.mg-saju-pillars th[scope='row'], .mg-saju-twelve th[scope='row'], .mg-saju-twelve thead th:first-child { width: 58px; text-align: left; }
+.mg-saju-pillars td, .mg-saju-twelve td { padding: 5px 2px; border-top: 1px solid var(--mg-hair); font-weight: 650; }
+.mg-saju-pillars thead td { border-top: 0; }
+.mg-saju-glyph { display: grid; justify-items: center; gap: 1px; padding: 6px 0 5px; border-radius: 10px; background: var(--el-soft); color: var(--el-ink); }
+.mg-saju-glyph b { font-size: 23px; font-weight: 800; line-height: 1.1; }
+.mg-saju-glyph small { font-size: 11px; font-weight: 750; }
+.mg-saju-pillars td:has(.mg-saju-glyph) { padding: 3px; border-top: 0; }
+.mg-saju-sinsal { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.mg-saju-sinsal .mg-chip { height: 26px; padding: 0 9px; }
+.mg-saju-sinsal .mg-chip[data-kind='귀인'] { background: var(--mg-good-soft); color: var(--mg-good); }
+.mg-saju-sinsal .mg-chip small { font-size: 10.5px; font-weight: 700; opacity: 0.75; }
+.mg-saju-dayun { display: flex; gap: 6px; margin: 0 -14px -4px; padding: 2px 14px 8px; overflow-x: auto; list-style: none; scrollbar-width: thin; }
+.mg-saju-dayun li { display: grid; justify-items: center; gap: 1px; flex: none; min-width: 58px; padding: 8px 6px; border: 1px solid var(--mg-hair); border-radius: 12px; background: var(--mg-tint); }
+.mg-saju-dayun li b { font-size: 14px; font-weight: 850; }
+.mg-saju-dayun li span { font-size: 12px; color: var(--mg-muted); }
+.mg-saju-dayun li small { font-family: var(--mg-mono); font-size: 10.5px; color: var(--mg-muted); }
+.mg-saju-dayun li[aria-current='true'] { border: 2px solid var(--mg-ink); background: var(--el-soft); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
+
+/* 마을 주민. */
+.mg-saju-villagers { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.mg-saju-villager { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; padding: 12px; color: var(--mg-ink); text-decoration: none; transition: transform 0.15s, box-shadow 0.15s; }
+@media (hover: hover) {
+  .mg-saju-villager:hover { transform: translateY(-2px); box-shadow: var(--mg-shadow-soft); }
+}
+@media (hover: none) {
+  .mg-saju-villager:active { transform: scale(0.98); }
+}
+.mg-saju-villager.is-lot { border: 2px dotted var(--mg-hair-strong); background: transparent; }
+.mg-saju-villager-mark { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: var(--el-soft); color: var(--el-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
+.mg-saju-villager-text { display: grid; gap: 2px; min-width: 0; }
+.mg-saju-villager-text b { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 15px; font-weight: 850; }
+.mg-saju-villager-text small { overflow: hidden; font-size: 12px; color: var(--mg-muted); text-overflow: ellipsis; white-space: nowrap; }
+.mg-saju-mix { display: flex; gap: 2px; margin-top: 4px; }
+.mg-saju-mix i { flex: 1; max-width: 26px; height: 6px; border-radius: 2px; background: var(--el); }
+
+/* A narrower window, a tablet, a phone: the menu comes inside the frame and the story goes under the canvas. */
+@media (max-width: 1180px) {
+  .mg-saju { margin-right: 0; }
+  .mg-saju-frame { grid-template-rows: auto auto auto; height: auto; min-height: 0; }
+  .mg-saju-menu { position: static; display: flex; gap: 4px; padding: 4px; border-radius: 16px; background: var(--mg-tint); }
+  .mg-saju-menu a, .mg-saju-menu a[aria-current='page'] { flex: 1; width: auto; height: 38px; border: 0; border-radius: 12px; background: transparent; box-shadow: none; }
+  .mg-saju-menu a[aria-current='page'] { background: var(--el); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
+  .mg-saju-body { grid-template-columns: minmax(0, 1fr); }
+  /* As tall as three quarters of its width, short of filling the window. */
+  .mg-saju-stage { height: min(75vw, 68vh); height: min(75vw, 68dvh); min-height: 300px; }
+  .mg-saju-side { margin-right: 0; padding-right: 0; overflow: visible; }
+}
+@media (max-width: 720px) {
+  .mg-saju-frame { gap: 12px; padding: 14px; }
+  .mg-saju-bar h1 { font-size: 17px; }
+  .mg-saju-bar-mark { width: 32px; height: 32px; }
+  .mg-saju-stage { height: min(100vw - 52px, 66vh); height: min(100vw - 52px, 66dvh); }
+  .mg-saju-stage-foot { left: 12px; right: 12px; bottom: 12px; }
+  .mg-saju-save { padding: 0 12px; font-size: 13px; }
+  .mg-saju-bgm { max-width: 46%; }
+  .mg-saju-say { top: 16px; font-size: 14px; }
+  .mg-saju-pin { padding: 3px 8px 4px; font-size: 12px; }
+}
+@media (pointer: coarse) {
+  .mg-saju-form .mg-tabs > button { height: 40px; }
+  .mg-saju-bgm { height: 44px; }
+  .mg-saju-bgm button { width: 32px; height: 32px; }
+}

@@ -24,6 +24,8 @@ const CharacterPage = lazy(() => import('./studio/CharacterPage'));
 // Only catalog editors open the pipeline board and only admins the permissions, so members never download them.
 const AdminPage = lazy(() => import('./pages/AdminPage').then((module) => ({ default: module.AdminPage })));
 const PermissionsPage = lazy(() => import('./pages/permissions/PermissionsPage'));
+// The 사주 village brings its own 3D scene and the chart calculation; they load with its first page.
+const SajuPage = lazy(() => import('./saju/SajuPage'));
 
 /** Old studio addresses: the wardrobe is `/character` now, the factory screens live under `/admin/studio`. */
 function StudioRedirect() {
@@ -79,6 +81,14 @@ if (root) {
               element={
                 <Suspense fallback={<Loading />}>
                   <AdminPage />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/saju/*"
+              element={
+                <Suspense fallback={<Loading />}>
+                  <SajuPage />
                 </Suspense>
               }
             />
