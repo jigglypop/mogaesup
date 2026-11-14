@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import { profileOf } from '../profile';
-import { SAMPLE_RESIDENTS } from '../residents';
 import { PLOT_REACH, plotsOf } from '../village';
+import { PEOPLE } from './people';
 
 describe('마을 자리', () => {
   const R = PLOT_REACH;
 
   it('이웃은 제 오행의 방위에 자리를 잡고, 토는 남은 자리에 든다', () => {
-    const neighbours = SAMPLE_RESIDENTS.map((resident) => ({ id: resident.id, element: profileOf(resident.birth).balance.dominant }));
+    const neighbours = PEOPLE.map((resident) => ({ id: resident.id, element: profileOf(resident.birth).balance.dominant }));
     expect(plotsOf(neighbours)).toEqual([
       { id: 'sol', x: R, z: 0 },
       { id: 'noeul', x: 0, z: R },

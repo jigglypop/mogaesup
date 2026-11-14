@@ -473,16 +473,6 @@ export default function Wardrobe() {
     }
     finally { if (mine === lookGeneration.current) { lookPending.current = false; setLookBusy(false); } }
   }
-  async function wearLook() {
-    if (lookPending.current) return;
-    lookPending.current = true;
-    const mine = ++lookGeneration.current;
-    lookRead.current?.abort();
-    setLookBusy(true); setLookError('');
-    try { const value = await lookApi.wear(true); if (mine === lookGeneration.current) setLook(value.look); }
-    catch (reason) { if (mine === lookGeneration.current) setLookError(problemText(reason)); }
-    finally { if (mine === lookGeneration.current) { lookPending.current = false; setLookBusy(false); } }
-  }
   async function remove(id: string) {
     if (!outfits.value || busy) return;
     setBusy(true); setSaveError('');
@@ -583,9 +573,6 @@ export default function Wardrobe() {
         <div className="wardrobe-look"><h2>내 캐릭터</h2>
           <div className="wardrobe-look-row">
             <button type="button" className="is-primary" disabled={!lookReady || lookBusy || baking || !settled || !!wearError || !!editError} onClick={() => void saveLook()}>{baking ? '입히는 중' : '내 캐릭터로 입기'}</button>
-            {look?.status === 'ready' && (look.worn
-              ? <><span role="status">섬에서 입고 있어요</span>{user && <Link to={`/@${user.username}`}>내 섬으로</Link>}</>
-              : <button type="button" disabled={lookBusy} onClick={() => void wearLook()}>섬에서 입기</button>)}
             {baking && <span role="status">모델을 만드는 중…</span>}
           </div>
           {look?.status === 'failed' && look.error && <p role="alert">{look.error.message}</p>}

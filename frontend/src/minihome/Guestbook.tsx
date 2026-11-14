@@ -1,3 +1,5 @@
+import './social.css';
+
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { Link } from 'react-router-dom';
@@ -154,7 +156,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
       <ul className="mg-entries">
         {entries.map((entry) => (
           <li key={entry.id}>
-            <Link className="mg-avatar" data-tone={toneOf(entry.author.username)} to={`/@${entry.author.username}`} aria-label={`${entry.author.displayName}의 섬`}>
+            <Link className="mg-avatar" data-tone={toneOf(entry.author.username)} to={`/@${entry.author.username}`} aria-label={`${entry.author.displayName}의 미니홈피`}>
               {initialOf(entry.author.displayName)}
             </Link>
             <div>

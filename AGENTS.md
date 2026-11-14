@@ -2,10 +2,10 @@
 
 ## 목표와 경로
 
-gaesup-world 예제 섬 "모개숲"을 서비스로 만든다.
+"모개숲"을 서비스로 만든다. 메인은 사주 마을이다: 회원의 미니홈피 `/@아이디`가 사주로 지은 집이고, 화면은 `frontend/src/saju/`에 있다. gaesup-world로 그리던 걸어다니는 섬(`frontend/src/minihome/`)은 코드만 남기고 화면에서 뺐다(그 폴더의 방명록·이웃 부품은 사주 미니홈피가 쓴다).
 
 - `frontend/`: 앱 하나(React·Vite). 캐릭터 스튜디오 화면은 `frontend/src/character/`(지침은 그 폴더의 AGENTS.md).
-- `server/`: Rust 웹서버(회원·섬·카탈로그·실시간 방·스튜디오 게이트웨이).
+- `server/`: Rust 웹서버(회원·사주 집·방명록·이웃·섬·카탈로그·실시간 방·스튜디오 게이트웨이).
 - `backend/`: 캐릭터 서버. 3D SD 캐릭터의 몸·얼굴·헤어·의상·무기·장비를 생산하고 조립과 검수를 연결한다(지침은 `backend/AGENTS.md`).
 - 엔진 gaesup-world는 npm 패키지로 받는다. 엔진 수정은 gaesup-world 레포에서 한다.
 

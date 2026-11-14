@@ -1,7 +1,8 @@
-// What the fixed isometric camera frames: a point it looks at and how much of the world shows to either side of it and
-// above and below. The camera never turns; going from one home to another, or out to the whole village, moves the frame.
+// What the isometric camera frames: a point it looks at and how much of the world shows to either side of it and above
+// and below. Going from one home to another, or out to the whole village, moves the frame; a drag across the picture
+// turns the camera about that point, and the frame is then as much wider as the turned ground needs.
 
-/** The camera looks from the south-east, a little above: its turn about y and its height above the ground. */
+/** Where the camera looks from until it is turned: the south-east, a little above (its turn about y, its height above the ground). */
 export const AZIMUTH = Math.PI / 4;
 export const ELEVATION = (33 * Math.PI) / 180;
 
@@ -43,7 +44,31 @@ export function frameOf(homes: readonly Spot[]): Frame {
   };
 }
 
+/**
+ * Half the view's width and height for the ground `frame` holds once the camera has turned `turn` radians about the
+ * vertical from where the frame was measured: what lay across the picture now runs partly away from the camera, and
+ * the other way about.
+ */
+export function turnedExtent(frame: Frame, turn: number): Pick<Frame, 'halfWidth' | 'halfHeight'> {
+  const across = frame.halfWidth - HOME_HALF_WIDTH;
+  const away = (frame.halfHeight - HOME_HALF_HEIGHT) / Math.sin(ELEVATION);
+  const cos = Math.abs(Math.cos(turn));
+  const sin = Math.abs(Math.sin(turn));
+  return {
+    halfWidth: HOME_HALF_WIDTH + across * cos + away * sin,
+    halfHeight: HOME_HALF_HEIGHT + (across * sin + away * cos) * Math.sin(ELEVATION),
+  };
+}
+
+/** How much of the canvas lies under the page's own panels, in pixels from each edge: the picture is fitted to the rest. */
+export type Inset = { top: number; right: number; bottom: number; left: number };
+export const NO_INSET: Inset = { top: 0, right: 0, bottom: 0, left: 0 };
+
+/** How far in and out a viewer may zoom, as a multiple of the size at which the frame just fits. */
+export const ZOOM_RANGE = { min: 0.6, max: 3.2 } as const;
+export const clampZoom = (zoom: number) => Math.min(ZOOM_RANGE.max, Math.max(ZOOM_RANGE.min, zoom));
+
 /** How many pixels a metre takes for `frame` to fit a view `width` by `height` pixels. */
-export function zoomOf(frame: Frame, width: number, height: number): number {
+export function zoomOf(frame: Pick<Frame, 'halfWidth' | 'halfHeight'>, width: number, height: number): number {
   return Math.min(width / (2 * frame.halfWidth), height / (2 * frame.halfHeight));
 }

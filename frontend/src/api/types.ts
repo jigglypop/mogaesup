@@ -127,6 +127,32 @@ export type IlchonStatus = {
   request: IlchonRequest | null;
 };
 
+/** When a member was born, by Seoul's clock: what their 사주 home's chart is read from. */
+export type SajuBirth = {
+  calendar: 'solar' | 'lunar';
+  year: number;
+  month: number;
+  day: number;
+  /** A lunar date in that year's leap month. */
+  leapMonth: boolean;
+  /** `HH:MM`, or null when the hour is not known. */
+  time: string | null;
+  gender: 'female' | 'male';
+};
+
+/** A member's 사주 home as the server keeps it: the name on its gate and the birth. */
+export type SajuHome = { name: string; birth: SajuBirth };
+
+/**
+ * `GET /api/homes/{username}/saju`: the member's 사주 home (null until they build one) and the village around it, at
+ * most eight homes: their 이웃' that the viewer may see (`neighbour`, the viewer's own first), then the public homes
+ * built most recently.
+ */
+export type SajuVillage = {
+  saju: SajuHome | null;
+  village: { user: UserCard; saju: SajuHome; neighbour: boolean }[];
+};
+
 /** 미니미 are what people walk as, 주민 (`npc`) stand on islands, furniture is placed. */
 export type CatalogKind = 'minime' | 'furniture' | 'npc';
 export type CatalogStatus = 'draft' | 'published' | 'retired';

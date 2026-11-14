@@ -122,7 +122,7 @@ describe('레일', () => {
     expect(await admin('studio_viewer')).toBeUndefined();
   });
 
-  it('사주 마을은 로그인하지 않아도 갈 수 있고, 그 안에서는 켜져 있다', async () => {
+  it('사주 마을은 내 집으로 가고, 그 집의 어느 쪽에서든 켜져 있다', async () => {
     const rail = async (path: string) => {
       const { container, unmount } = await mount(
         <MemoryRouter initialEntries={[path]}>
@@ -133,9 +133,13 @@ describe('레일', () => {
       await unmount();
       return links;
     };
-    expect(await rail('/explore')).toEqual(['섬 /', '둘러보기* /explore', '사주 /saju']);
-    expect(await rail('/saju/home/sol')).toEqual(['섬 /', '둘러보기 /explore', '사주* /saju']);
-    // 아이디가 saju로 시작하는 섬은 사주 마을이 아니다.
-    expect(await rail('/sajuland')).toEqual(['섬 /', '둘러보기 /explore', '사주 /saju']);
+    // 로그인하지 않으면 들어가는 길로 간다.
+    expect(await rail('/explore')).toEqual(['사주 마을 /', '둘러보기* /explore']);
+    auth.user = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user' };
+    expect(await rail('/@mogae')).toEqual(['사주 마을* /@mogae', '캐릭터 /character', '둘러보기 /explore']);
+    expect(await rail('/@mogae/village')).toEqual(['사주 마을* /@mogae', '캐릭터 /character', '둘러보기 /explore']);
+    // 남의 집과, 아이디가 내 것으로 시작하는 집에서는 꺼져 있다.
+    expect(await rail('/@sol')).toEqual(['사주 마을 /@mogae', '캐릭터 /character', '둘러보기 /explore']);
+    expect(await rail('/@mogaeland')).toEqual(['사주 마을 /@mogae', '캐릭터 /character', '둘러보기 /explore']);
   });
 });

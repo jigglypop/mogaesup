@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import { pillarsOf } from '../engine';
 import { HOUSE_NAME, profileOf } from '../profile';
-import { ENTRY_MAX, SAMPLE_RESIDENTS, SEED_ENTRIES, sampleOf, WELCOME_NOTES } from '../residents';
+import { PEOPLE, personOf } from './people';
 
-const profile = (id: string) => profileOf(sampleOf(id)!.birth);
+const profile = (id: string) => profileOf(personOf(id).birth);
 const chart = (id: string) => pillarsOf(profile(id).reading).map(({ pillar }) => pillar.cn).join(' ');
 
-describe('샘플 주민의 사주', () => {
+describe('네 사람의 사주', () => {
   it('네 사람의 사주와 오행 분포', () => {
     expect(chart('sol')).toBe('己巳 丙寅 甲寅 乙亥');
     expect(profile('sol').balance.counts).toEqual({ wood: 4, fire: 2, earth: 1, metal: 0, water: 1 });
@@ -20,7 +20,7 @@ describe('샘플 주민의 사주', () => {
   });
 
   it('집은 가장 많은 오행을 따르고, 다음 오행과 일간이 마당에 더해진다', () => {
-    expect(SAMPLE_RESIDENTS.map((resident) => profileOf(resident.birth).house)).toEqual([
+    expect(PEOPLE.map((resident) => profileOf(resident.birth).house)).toEqual([
       { style: 'wood', accent: 'fire', symbol: 'tree' },
       { style: 'fire', accent: 'wood', symbol: 'candle' },
       { style: 'earth', accent: 'metal', symbol: 'field' },
@@ -56,8 +56,8 @@ describe('샘플 주민의 사주', () => {
   });
 
   it('시를 모르는 사주는 여섯 글자로 센다', () => {
-    const known = profileOf(sampleOf('sol')!.birth);
-    const unknown = profileOf({ ...sampleOf('sol')!.birth, time: null });
+    const known = profileOf(personOf('sol').birth);
+    const unknown = profileOf({ ...personOf('sol').birth, time: null });
     // 시주 乙亥(木水)가 빠진다.
     expect(known.balance.total).toBe(8);
     expect(unknown.balance.total).toBe(6);
@@ -67,21 +67,5 @@ describe('샘플 주민의 사주', () => {
     expect(unknown.guardian.name).toBe('푸른 호랑이');
     // 역마는 시지(亥)에 있었다.
     expect(unknown.guardian.charms.map((item) => item.charm)).not.toContain('bundle');
-  });
-});
-
-describe('샘플 방명록', () => {
-  it('샘플 주민끼리 서로의 집에 남긴 글이다', () => {
-    const ids = SAMPLE_RESIDENTS.map((resident) => resident.id);
-    for (const entry of SEED_ENTRIES) {
-      expect(ids).toContain(entry.home);
-      expect(ids).toContain(entry.author);
-      expect(entry.author).not.toBe(entry.home);
-      expect(entry.body.length).toBeLessThanOrEqual(ENTRY_MAX);
-      expect(Number.isNaN(Date.parse(entry.at))).toBe(false);
-    }
-    expect(new Set(SEED_ENTRIES.map((entry) => entry.id)).size).toBe(SEED_ENTRIES.length);
-    expect(ids.every((id) => SEED_ENTRIES.some((entry) => entry.home === id))).toBe(true);
-    expect(WELCOME_NOTES.every((note) => ids.includes(note.author) && note.body.length <= ENTRY_MAX)).toBe(true);
   });
 });

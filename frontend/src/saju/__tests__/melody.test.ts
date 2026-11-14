@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import { melodyOf } from '../melody';
 import { profileOf } from '../profile';
-import { sampleOf } from '../residents';
+import { personOf } from './people';
 
 describe('집의 가락', () => {
   it('기둥마다 한 마디, 천간과 지지의 오음으로 읽는다', () => {
-    const melody = melodyOf(profileOf(sampleOf('noeul')!.birth));
+    const melody = melodyOf(profileOf(personOf('noeul').birth));
     expect(melody.title).toBe('정유(丁酉)의 가락 · 치(徵)조');
     expect(melody.bpm).toBe(118);
     expect(melody.steps).toBe(16);
@@ -21,7 +21,7 @@ describe('집의 가락', () => {
   });
 
   it('시를 모르면 세 마디다', () => {
-    const melody = melodyOf(profileOf({ ...sampleOf('noeul')!.birth, time: null }));
+    const melody = melodyOf(profileOf({ ...personOf('noeul').birth, time: null }));
     expect(melody.steps).toBe(12);
     expect(melody.notes.filter((note) => note.voice === 'lead')).toHaveLength(12);
   });

@@ -6,7 +6,7 @@
 
 | 폴더 | 역할 |
 | --- | --- |
-| `frontend/` | 프론트엔드 하나. React 19 + Vite 8, 3D 섬은 npm의 `gaesup-world`로 그린다. 글래스 디자인(`--mg-*` 토큰)으로 로그인·가입, 섬(`/@아이디`)과 꾸미기(`/@아이디/edit`), 둘러보기, 사주 마을(`/saju`, 화면은 `src/saju/`), 운영(`/admin`), 내 캐릭터 옷장(`/character`), 캐릭터 공장(`/admin/studio`, 화면은 `src/character/`) |
+| `frontend/` | 프론트엔드 하나. React 19 + Vite 8. 글래스 디자인(`--mg-*` 토큰)으로 로그인·가입, 사주 마을(회원의 미니홈피 `/@아이디`, 화면은 `src/saju/`), 둘러보기, 운영(`/admin`), 내 캐릭터 옷장(`/character`), 캐릭터 공장(`/admin/studio`, 화면은 `src/character/`). 걸어다니는 3D 섬과 꾸미기(`src/minihome/`, `gaesup-world`로 그림)는 코드만 남아 있고 화면에서는 뺐다. 그 폴더에서 방명록(`Guestbook.tsx`)·이웃(`Ilchons.tsx`)·`social.css`·`stored.ts`는 사주 미니홈피가 그대로 쓴다 |
 | `server/` | 웹서버. Rust(axum + sqlx) + PostgreSQL. 회원과 세션 쿠키, 섬 프로필·섬 저장(리비전)·방문자, 방명록·이웃(API 이름은 ilchon), 미니미 카탈로그와 캐릭터 가져오기, 캐릭터 스튜디오 API 중계(권한·유료 한도·기록), 실시간 방(WebSocket, gaesup-world 멀티플레이 프로토콜) |
 | `backend/` | 캐릭터 서버. Python(FastAPI) + Blender. 캐릭터 몸·파츠·의상·기물의 이미지·3D 생성, 리깅, 조립, 검수. AWS 스튜디오 배포는 `backend/infra/`. 자세한 것은 [backend/README.md](backend/README.md) |
 | `scripts/` | 루트 기동(`dev.ps1`)과 섬 기물 생성(`props/`) |
@@ -18,7 +18,7 @@
 ## 로컬 실행
 
 1. 설치: 루트에서 `npm install`과 `uv sync`. 필요한 도구는 Node 22.12 이상(`.nvmrc`), Rust 1.95 이상(cargo), uv, Docker(compose)다.
-2. 기동: `npm run dev`(= `scripts/dev.ps1`). Docker PostgreSQL(127.0.0.1:55432)과 Rust 서버(`127.0.0.1:8080`), 웹(`http://127.0.0.1:5180`, `/api`와 WebSocket을 8080으로 넘긴다)을 숨은 프로세스로 띄우고 로그는 `.data/dev/`에 둔다. 이미 떠 있는 포트는 그대로 쓴다. `npm run dev:stop`이 이 스크립트가 띄운 것을 끈다(기록한 프로세스 이름과 시작 시각이 맞는 것만). `npm run dev`·`dev:character`·`dev:stop`은 Windows PowerShell 스크립트라 Windows에서만 돈다. 다른 OS에서는 `server/scripts/start-rust-server.ps1`이 하는 대로 PostgreSQL·환경 변수·`cargo build`를 맞추고 `npm run dev -w frontend`를 따로 띄운다.
+2. 기동: `npm run dev`(= `scripts/dev.ps1`). Docker PostgreSQL(127.0.0.1:55432)과 Rust 서버(`127.0.0.1:8080`), 웹(`http://127.0.0.1:5180`, `/api`와 WebSocket을 8080으로 넘긴다)을 숨은 프로세스로 띄우고 로그는 `.data/dev/`에 둔다. 이미 떠 있는 포트는 그대로 쓴다. `npm run dev:stop`이 이 스크립트가 띄운 것을 끈다(기록한 프로세스 이름과 시작 시각이 맞는 것만). `npm run dev`·`dev:character`·`dev:stop`은 Windows PowerShell 스크립트라 Windows에서만 돈다. macOS·Linux에서는 같은 일을 하는 `scripts/dev.sh`를 쓴다: `npm run dev:unix`(서버·웹), `npm run dev:unix:character`(캐릭터 서버까지, 유료 작업은 막힌 채), `npm run dev:unix:stop`. 55432를 다른 프로세스가 쓰고 있으면 `POSTGRES_PORT=55433`처럼 앞에 붙인다.
 3. 캐릭터 파이프라인까지: `npm run dev:character`. 캐릭터 서버를 루트 `.venv`로 `127.0.0.1:8016`에 띄우고(멈춘 유료 단계 자동 재개는 끈다), `backend/.env`(`backend/.env.example`에서 만든다)의 API 키와 JWT 설정을 Rust 서버의 스튜디오 게이트웨이에 넘겨 `/admin` 가져오기와 `/admin/studio`·`/character`가 끝까지 돈다. 관리자는 기록을 바꿀 수 있고(`FACTORY_ACCESS=write`), 비용이 드는 작업은 `scripts/dev.ps1 -Character -Paid`(월 `-PaidMonthly`건)일 때만 열린다. `.env`는 운영 키이니 필요할 때만 쓴다.
 4. 관리자: 서버를 `BOOTSTRAP_ADMIN_USERNAME`·`BOOTSTRAP_ADMIN_PASSWORD`와 함께 띄우면 그 계정을 만들거나(있으면 비밀번호는 그대로) 관리자 권한을 준다. 그 밖의 역할은 `/admin/permissions`에서 준다. 설정 목록은 `server/.env.example`에 있다.
 5. 섬 기물 만들기(유료): `scripts/props/manifest.json`에 기물(이름·`emoji`·`shelf`, 패키지 모델이 없으면 `fit`)을 더하고 `uv run python scripts/props/generate.py --only <id>`로 하나씩 확인한 뒤 `--all`. 그다음 `node frontend/scripts/props-normalize.mjs <id...>`가 크기·방향·무광 재질을 섬에 맞춘 모델과 서랍 그림을 `frontend/public/gltf/decor/`에 넣고, `node frontend/scripts/props-catalog.mjs server/migrations/<YYYYMMDDHHMMSS>_<이름>.sql`이 아직 어느 마이그레이션에도 없는 기물을 공개된 기본 가구(`prop-<id>`)로 넣는 마이그레이션을 쓴다. 배포되면 모든 섬 꾸미기의 `스튜디오에서 만든 것`에 나오고, 운영 카탈로그에서 이름·순서를 고치거나 내린다. 처음 69종은 `20261005090000_island_props.sql`이다. `--replace`는 패키지의 같은 경로 모델을 대신하는 옛 방식이다(되돌렸다).
@@ -68,14 +68,17 @@
 
 ## 사주 마을
 
-`/saju`는 로그인 없이 쓰는 사주 미니홈피다. 이름과 생년월일시(양력·음력, 윤달, 시간 모름), 성별을 넣으면 사주를 세우고 그에 맞는 집과 수호 캐릭터를 호수의 섬 위에 짓는다. 화면은 한 틀(미니홈피)에 3D 아이소메트릭 캔버스와 이야기 패널을 나란히 두고, 탭 메뉴로 홈·사주보기(`?view=chart`)·마을(`/saju/village`)을 오간다. 이웃의 집은 `/saju/home/<id>`이다.
+위의 `캐릭터 가져오기`·`주민과 내 캐릭터`·`실시간 방과 섬 저장`·`미니게임`과 `로컬 실행`의 섬 기물 만들기에서 섬·꾸미기·섬의 `소개` 탭·실시간 방을 말하는 부분은 화면에서 뺀 섬의 것이다. 서버 API와 코드는 그대로 있고, 섬 화면을 다시 열어야 쓸 수 있다.
+
+앱의 메인이다. 회원마다 `/@아이디`가 사주 미니홈피이고, 로그인하면 자기 집으로 간다. 이름과 생년월일시(양력·음력, 윤달, 시간 모름), 성별을 넣으면 사주를 세우고 그에 맞는 집과 수호 캐릭터를 호수의 섬 위에 짓는다. 화면은 3D 아이소메트릭 캔버스가 창 전체를 채우고, 그 위에 제목 줄·앱 레일·이야기 패널·BGM과 확대·축소 버튼이 글래스로 뜬다. 패널의 탭 메뉴로 홈·사주보기(`?view=chart`)·마을(`/@아이디/village`)을 오가고, 패널은 접어 둘 수 있다(접은 채로 기억한다). 그림은 패널들이 가리지 않는 자리에 맞춰 놓인다. 주인은 `사주 다시 입력`(`/@아이디/edit`)으로 이름과 생일을 다시 넣어 집을 다시 짓거나 허문다. 예전 주소 `/saju/*`는 자기 미니홈피의 같은 쪽으로 넘어간다.
 
 - 계산: 사주는 [jamiblossom](frontend/vendor/jamiblossom-0.1.0.md)이 세운다(`frontend/vendor/`의 묶음, 고치지 않음). 네 기둥과 십성·지장간·12운성·납음·대운·신살은 그 결과 그대로이고, 서울 법정시(역사 표준시·서머타임)로 시진을 정한다. 시간을 모르면 시주 없이 세 기둥으로 읽는다. 이 앱의 코드는 `src/saju/engine.ts`에서만 라이브러리를 부른다.
 - 집: 여덟 글자(시간 모름이면 여섯)의 오행을 세어 가장 많은 오행이 집이 된다(목 전나무 숲의 통나무 오두막, 화 붉은 벽돌집과 모닥불 정원, 토 황토 초가집과 장독대·텃밭, 금 기와집과 자갈 마당·소나무, 수 푸른 기와의 집과 연못·다리). 글자 수가 같으면 일간, 월지의 오행 순으로 앞세운다. 다음으로 많은 오행의 소품과 일간의 상징물(甲 큰 나무 … 癸 빗물사슬과 돌확)이 마당에 더해진다(`src/saju/scene/homes.ts`, `yard.ts`).
 - 수호 캐릭터: 일지의 동물(12지)을 일간 오행의 색(오방색)으로 그리고, 신살이 준 것을 셋까지 지닌다(천을귀인의 별, 괴강의 망토, 화개의 꽃양산, 도화의 꽃, 홍염의 리본, 역마의 봇짐, 장성의 깃발, 백호의 목도리, 문창의 책, 양인의 검, 건록의 엽전).
-- 궁합 다리: 이웃의 집에서 놓는다. 두 일주의 천간합·육합을 먼저 보고, 없으면 두 집 오행의 상생·비화·반합·상극 순으로 한 줄을 말하며, 찾은 관계를 모두 적는다(`src/saju/compat.ts`). 놓은 다리는 마을 지도와 두 집 사이에 남는다.
-- 저장: 내 집(이름·생일), 내가 쓰거나 받은 방명록, 놓은 다리는 이 브라우저의 `localStorage`(`saju:village`)에만 둔다. 서버로 보내지 않고, `집 허물기`가 모두 지운다. 마을에는 샘플 주민 네 명(`src/saju/residents.ts`)이 있고, 그 집도 같은 계산으로 짓는다.
-- 그림: 마을은 WebGL 캔버스 하나에 해 질 녘(어두운 테마에서는 어스름)의 호수와 섬으로 그린다. 모델·이미지 파일 없이 코드로 짓는다. 기와·벽돌·통나무·돌은 섬마다 재질별로 쌓아 몇 개의 메시로 그리고(`src/saju/scene/build.ts`), 잎·풀·꽃·돌은 인스턴스로 흩뿌리며(`sprigs.ts`, `plants.ts`), 벽돌·회벽·나뭇결·초가 같은 표면은 실행 중에 만든 타일 텍스처다(`surfaces.ts`). 빛은 낮은 해와 그 그림자, 하늘빛, 창과 등불이고, 호수는 장면을 한 번 더 그려 비춘다(`Lake.tsx`). 음영(AO)·피사계 심도·블룸·톤 매핑은 `look.tsx`에서 입힌다. 휴대폰에서는 AO와 심도를 끄고 정원을 성기게 심으며, 프레임이 느린 기기에서도 AO와 심도를 끄고 화소 비율을 낮춘다. `내 집 이미지 저장하기`는 화면 밖 정사각 캔버스에 그 집의 섬만 다시 그려 1080×1080 PNG로 내려받는다. BGM은 집의 사주를 오음(궁상각치우)으로 읽은 가락을 브라우저에서 합성한다(음원 파일 없음). 동작 줄이기를 켠 기기에서는 장면이 멈춰 있다.
+- 마을: 가운데가 주인의 집이고 둘레 여덟 자리에 주인의 이웃(서버의 일촌)의 집이 먼저, 남는 자리에 최근에 지은 공개 회원의 집이 선다(`server/src/saju.rs`). 닫아 둔 집은 볼 수 있는 사람에게만 선다. `파도타기`는 둘레의 집 하나로 간다.
+- 궁합 다리: 이웃 사이에 놓인다. 남의 집에서 `이웃 신청`을 보내고 상대가 수락하면, 두 일주의 천간합·육합을 먼저 보고 없으면 두 집 오행의 상생·비화·반합·상극 순으로 한 줄을 말하며 찾은 관계를 모두 적는다(`src/saju/compat.ts`). 다리는 마을 지도와 두 집 사이에 남고, `다리 보기`가 두 집을 함께 보여 준다.
+- 저장: 집(이름·생일)은 회원 계정에 묶어 서버에 둔다(`saju_homes`, `PUT`·`DELETE /api/homes/me/saju`, 읽기는 `GET /api/homes/{아이디}/saju`). 사주 계산은 브라우저가 하므로 서버는 넣은 값을 보관하고 그 홈을 볼 수 있는 사람에게 돌려준다. 방명록과 이웃은 서버의 방명록·일촌을 그대로 쓰며 `집 허물기` 뒤에도 남는다. 집을 누가 볼 수 있는지(모두·이웃만·나만)는 주인이 홈 패널에서 고르며, 홈의 공개 범위(`homes.visibility`)를 그대로 쓴다. 서버 저장 전에 이 브라우저의 `localStorage`(`saju:village`)에 지어 둔 집이 있으면 집 짓는 카드에 그 값이 채워지고, 서버에 지으면 지운다.
+- 그림: 마을은 WebGL 캔버스 하나에 해 질 녘(어두운 테마에서는 어스름)의 호수와 섬으로 그린다. 모델·이미지 파일 없이 코드로 짓는다. 기와·벽돌·통나무·돌은 섬마다 재질별로 쌓아 몇 개의 메시로 그리고(`src/saju/scene/build.ts`), 잎·풀·꽃·돌은 인스턴스로 흩뿌리며(`sprigs.ts`, `plants.ts`), 벽돌·회벽·나뭇결·초가 같은 표면은 실행 중에 만든 타일 텍스처다(`surfaces.ts`). 빛은 낮은 해와 그 그림자, 하늘빛, 창과 등불이고, 호수는 장면을 한 번 더 그려 비춘다(`Lake.tsx`). 음영(AO)·피사계 심도·블룸·톤 매핑은 `look.tsx`에서 입힌다. 캔버스를 좌우로 끌면 카메라가 보고 있는 곳을 중심으로 좌우 40도까지 돌고, 휠·트랙패드나 두 손가락 벌리기, 화면의 확대·축소 버튼으로 0.6배에서 3.2배까지 당기고 민다(`scene/frames.ts`의 `ZOOM_RANGE`). 집은 남동쪽에서 보이는 두 면만 지붕을 이고 창을 냈으므로(`scene/arch.ts`, `homes.ts`) 그 너머로는 돌리지 않는다(`scene/Stage.tsx`의 `MAX_TURN`). 휴대폰에서는 AO와 심도를 끄고 정원을 성기게 심으며, 프레임이 느린 기기에서도 AO와 심도를 끄고 화소 비율을 낮춘다. `내 집 이미지 저장하기`는 화면 밖 정사각 캔버스에 그 집의 섬만 다시 그려 1080×1080 PNG로 내려받는다. BGM은 집의 사주를 오음(궁상각치우)으로 읽은 가락을 브라우저에서 합성한다(음원 파일 없음). 동작 줄이기를 켠 기기에서는 장면이 멈춰 있다.
 
 ## 권한
 
@@ -98,8 +101,7 @@
 
 - 서버: `cd server && docker compose up -d --wait && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`. 테스트는 실제 PostgreSQL에 임시 DB를 만들어 돌고, 운영자 토큰이 캐릭터 서버의 `auth.py`(`backend/src`)를 통과하는지도 확인한다(`uv`가 있을 때).
 - 캐릭터 서버: `uv run python -m compileall -q backend/src`. 테스트(`uv run pytest`)는 외부 API·Blender·DB를 대체한 것만 돈다.
-- 웹: `npm run typecheck && npm test && npm run build`(루트). 서버와 `npm run dev`가 떠 있으면 `npm run smoke`가 Chrome(이 PC의 GPU, WebGPU)으로 가입부터 꾸미기 저장·방문·실시간 방·방명록·이웃까지 확인한다. 주소를 주면 그곳을 확인한다(빌드본은 `npm run preview -w frontend`의 `http://127.0.0.1:4173`).
-- 사주 마을: 웹만 떠 있으면(`npm run dev -w frontend`, 서버 없이도) `npm run smoke:saju -w frontend`가 Chrome(이 PC의 GPU)으로 음력 생일로 집 짓기부터 그림 저장·BGM·사주보기·마을·방명록·궁합 다리·파도타기·지도의 섬 누르기·고쳐 짓기·집 허물기까지 확인한다. 스크린샷과 저장한 그림은 인자로 준 폴더(기본 `.data/saju-smoke`)에 남긴다.
+- 웹: `npm run typecheck && npm test && npm run build`(루트). 서버와 웹이 떠 있으면 `npm run smoke`(`frontend/scripts/saju-smoke.mjs`)가 Chrome(이 PC의 GPU)으로 회원 둘을 가입시켜 음력 생일로 집 짓기부터 창을 채운 그림·끌어서 돌리기·확대와 축소·패널 접기·그림 저장·BGM·사주보기·마을·방명록·이웃 신청과 수락·궁합 다리·파도타기·지도의 섬 누르기·사주 다시 입력·집 허물기까지 확인한다. 주소를 주면 그곳을 확인한다(빌드본은 `npm run preview -w frontend`의 `http://127.0.0.1:4173`). 스크린샷과 저장한 그림은 인자로 준 폴더(기본 `.data/saju-smoke`)에 남긴다. 화면에서 뺀 섬을 걷는 점검(`frontend/scripts/browser-smoke.mjs`, `perf-probe.mjs`)은 섬 화면이 다시 열려야 돈다. 아래 캐릭터 점검(`npm run test:character`)도 관리자 쪽과 가입·옷장·모습 저장까지만 통과하고, 섬 단계(미니미 바꾸기·걷기, 주민 두기·인사말, 저장한 모습으로 섬 걷기·실시간 방)에서 실패해 0이 아닌 값으로 끝난다.
 - 캐릭터: `npm run test:character`(루트)가 `server/`를 빌드해 임시 DB와 가짜 캐릭터 서버(`frontend/scripts/e2e/`)로 띄우고 웹 개발 서버와 함께 빈 포트에서 Chrome(WebGPU)으로 확인한다: 관리자가 완성 캐릭터를 가져와 검사·공개하고 스튜디오 화면을 열며, 새 회원이 그 미니미로 섬을 걷고 옷장만 보고, 다시 가져오면 공개 그대로 새 버전이 되며, `walk`가 없는 캐릭터는 이유와 함께 실패한다. 그 캐릭터를 주민으로 가져와 회원이 인사말과 함께 섬에 두면 방문자가 상호작용 버튼으로 인사말을 읽고, 회원이 옷장에서 모자를 씌워 저장한 모습으로 섬을 걷고 실시간 방에 알리며, 없어진 figure를 고른 섬은 기본 미니미로 걷는다. 로컬 PostgreSQL(55432)과 cargo만 있으면 되고 비용이 들지 않으며, 끝나면 띄운 것과 DB를 지운다. 스크린샷은 인자로 준 폴더(기본 `.data/character-e2e`)에 남긴다.
 - 성능: 서버와 빌드본(`npm run build` 뒤 `npm run preview -w frontend`, `http://127.0.0.1:4173`, `/api`는 8080으로 넘긴다)이 떠 있으면 `npm run perf -w frontend -- http://127.0.0.1:4173`이 이 PC의 GPU(Chrome, WebGPU, vsync 끔)로 섬 로딩 시간·전송량·서 있을 때와 걸을 때의 프레임·메인 스레드 상위 함수를 잰다(주소를 빼면 개발 서버 5180을 잰다). 대상 서버에 측정용 계정을 하나 만들고, loopback이 아닌 주소는 `--allow-remote` 없이 거절한다.
 - 빌드는 패키지의 캐릭터 GLB(`gltf/*.glb`) 텍스처를 섬 카메라에 맞게 줄인다(색상 1024px, 그 밖 512px, WebP). 원본은 패키지에 그대로 있다.

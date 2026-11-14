@@ -8,6 +8,9 @@
   "scripts": {
     "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
     "dev:character": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1 -Character",
+    "dev:unix": "bash scripts/dev.sh",
+    "dev:unix:character": "bash scripts/dev.sh character",
+    "dev:unix:stop": "bash scripts/dev.sh stop",
     "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1 -Stop",
     "typecheck": "npm run typecheck --workspace frontend",
     "test": "npm test --workspace frontend",

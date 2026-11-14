@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, type RefObject } from 'react';
 
 import { useFrame, useThree } from '@react-three/fiber';
 import {
@@ -103,9 +103,9 @@ const FRAGMENT = /* glsl */ `
 /**
  * The lake, about the place the camera looks at. `sky` is the sky as one picture (see mood); `scale` is how large the
  * mirrored picture is drawn against the canvas (smaller is cheaper and softer), and it is drawn afresh `every` so
- * many frames.
+ * many frames, or every frame while the camera is `moving`.
  */
-export function Lake({ mood, sky, scale = 0.5, every = 2 }: { mood: Mood; sky: Texture; scale?: number; every?: number }) {
+export function Lake({ mood, sky, scale = 0.5, every = 2, moving }: { mood: Mood; sky: Texture; scale?: number; every?: number; moving?: RefObject<boolean> }) {
   const lake = useRef<Mesh>(null);
   const size = useThree((state) => state.size);
   const dpr = useThree((state) => state.viewport.dpr);
@@ -172,7 +172,7 @@ export function Lake({ mood, sky, scale = 0.5, every = 2 }: { mood: Mood; sky: T
 
     // What stands still is mirrored the same from one frame to the next: the mirror is drawn afresh only now and then.
     drawn.current += 1;
-    if (drawn.current > 2 && drawn.current % every !== 0) return;
+    if (drawn.current > 2 && drawn.current % every !== 0 && !moving?.current) return;
 
     // The camera as the water mirrors it: below the surface, looking up at the same things.
     mirror.position.set(eye.x, 2 * WATER_LEVEL - eye.y, eye.z);

@@ -30,11 +30,11 @@ export function usePolling<T>(read: (signal: AbortSignal) => Promise<T>, interva
       const current = intervalRef.current;
       return typeof current === 'function' ? current(latest.current) : current;
     };
-    const poll = async () => {
+    const poll = async (forced = false) => {
       // A refresh during a read runs once more after it, so a just-saved change is not missed.
       if (controller) { again = true; return; }
       // Populate a newly opened tab once; pause its repeated reads while hidden.
-      if (!active || (document.hidden && !firstRead)) return;
+      if (!active || (document.hidden && !firstRead && !forced)) return;
       firstRead = false;
       clearTimeout(timer);
       controller = new AbortController(); const started = revision.current;
@@ -61,7 +61,7 @@ export function usePolling<T>(read: (signal: AbortSignal) => Promise<T>, interva
       const base = delay();
       if (base !== null) timer = setTimeout(() => void poll(), base);
     };
-    refreshRef.current = poll; void poll();
+    refreshRef.current = () => poll(true); void poll();
     window.addEventListener('online', reconnect); document.addEventListener('visibilitychange', reconnect);
     return () => {
       active = false; clearTimeout(timer); controller?.abort(); scheduleRef.current = () => {};

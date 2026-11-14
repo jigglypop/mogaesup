@@ -2,32 +2,40 @@ import { Link } from 'react-router-dom';
 
 import { ELEMENTS } from '../elements';
 import { HOUSE_NAME, type Profile } from '../profile';
-import { MY_HOME, type Resident } from '../residents';
-import { homePath, SAJU } from '../routes';
+import type { Resident } from '../residents';
+import { homePath } from '../routes';
 import { PixelIcon } from './PixelIcon';
 
+/** A home in the village; `bridged` when its owner is an 이웃 of the village's. */
 export type Villager = { resident: Resident; profile: Profile; bridged: boolean };
 
 /**
- * 마을 갤러리: everyone with a home in the village, each a way into their 미니홈피. The viewer's own comes first; while
- * they have none, the empty plot does.
+ * 마을 갤러리: the homes of a village, each a way into its 미니홈피: the owner's first (an empty plot until they build
+ * it), then their 이웃' and the other homes around it.
  */
-export function VillagePanel({ villagers, hasHome }: { villagers: readonly Villager[]; hasHome: boolean }) {
+export function VillagePanel({ owner, villagers, viewer }: {
+  /** Whose village it is: their username and the name they go by. */
+  owner: { username: string; name: string };
+  villagers: readonly Villager[];
+  /** The signed-in viewer's username. */
+  viewer: string | null;
+}) {
+  const built = villagers.some(({ resident }) => resident.id === owner.username);
   return (
     <section aria-label="마을 주민">
       <h2 className="mg-heading">
         주민 <b>{villagers.length}</b>
       </h2>
       <ul className="mg-saju-villagers">
-        {!hasHome && (
+        {!built && (
           <li>
-            <Link className="mg-saju-villager mg-card is-lot" to={SAJU}>
+            <Link className="mg-saju-villager mg-card is-lot" to={homePath(owner.username)}>
               <span className="mg-saju-villager-mark">
                 <PixelIcon name="house" size={26} />
               </span>
               <span className="mg-saju-villager-text">
                 <b>빈 터</b>
-                <small>내 집 짓기</small>
+                <small>{owner.username === viewer ? '내 집 짓기' : owner.name}</small>
               </span>
             </Link>
           </li>
@@ -43,9 +51,8 @@ export function VillagePanel({ villagers, hasHome }: { villagers: readonly Villa
                 <span className="mg-saju-villager-text">
                   <b>
                     {resident.name}
-                    {resident.id === MY_HOME && <span className="mg-badge">내 집</span>}
-                    {resident.sample && <span className="mg-badge">샘플</span>}
-                    {bridged && <span className="mg-badge is-published">다리 놓음</span>}
+                    {resident.id === viewer && <span className="mg-badge">내 집</span>}
+                    {bridged && <span className="mg-badge is-published">이웃</span>}
                   </b>
                   <small>{profile.badge}</small>
                   <small>

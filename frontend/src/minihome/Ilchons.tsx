@@ -1,3 +1,5 @@
+import './social.css';
+
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 
 import { Link } from 'react-router-dom';
@@ -8,7 +10,7 @@ import type { HomeView, Ilchon, IlchonRequest, IlchonStatus, User } from '../api
 import { useSignInPath } from '../auth/signIn';
 import { initialOf, REQUESTS_CHANGED, toneOf } from '../shell/Shell';
 
-type Neighbors = {
+export type Neighbors = {
   list: Ilchon[];
   received: IlchonRequest[];
   status: IlchonStatus | null;
@@ -67,12 +69,15 @@ function Person({ username, name, detail }: { username: string; name: string; de
   );
 }
 
-export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; viewer: User | null; neighbors: Neighbors }) {
+/**
+ * What can be done about 이웃 here: the owner's waiting requests, and the visitor's own standing with the owner (asking,
+ * a request on its way from either side, or 이웃 already).
+ */
+export function NeighborActions({ view, viewer, neighbors }: { view: HomeView; viewer: User | null; neighbors: Neighbors }) {
   const { username, ownerName } = view.profile;
   const visitor = !!viewer && !view.isOwner;
-  const { list, received, status, error, act } = neighbors;
+  const { received, status, error, act } = neighbors;
   const [asking, setAsking] = useState(false);
-  const signIn = useSignInPath();
 
   const submitRequest = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -85,7 +90,7 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
   };
 
   return (
-    <div className="mg-neighbors">
+    <>
       {received.length > 0 && (
         <section>
           <p className="mg-list-count">
@@ -159,7 +164,22 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
           </button>
         </p>
       )}
+      {error && (
+        <p className="mg-error" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
 
+export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; viewer: User | null; neighbors: Neighbors }) {
+  const { ownerName } = view.profile;
+  const { list } = neighbors;
+  const signIn = useSignInPath();
+  return (
+    <div className="mg-neighbors">
+      <NeighborActions view={view} viewer={viewer} neighbors={neighbors} />
       <p className="mg-list-count">
         이웃 <b>{list.length}</b>
       </p>
@@ -182,11 +202,6 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
           <Link className="mg-btn is-small" to={signIn}>
             로그인
           </Link>
-        </p>
-      )}
-      {error && (
-        <p className="mg-error" role="alert">
-          {error}
         </p>
       )}
     </div>

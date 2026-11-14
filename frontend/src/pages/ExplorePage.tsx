@@ -37,8 +37,8 @@ function ExploreSearch({ query, onQuery }: { query: string; onQuery: (query: str
         type="search"
         value={text}
         maxLength={40}
-        placeholder="섬이나 사람 찾기"
-        aria-label="섬이나 사람 찾기"
+        placeholder="미니홈피나 사람 찾기"
+        aria-label="미니홈피나 사람 찾기"
         enterKeyHint="search"
         onChange={(event) => {
           setText(event.target.value);
@@ -61,7 +61,7 @@ function useRested<T>(value: T, ms: number): T {
   return rested;
 }
 
-/** `/explore`: public islands, most recently changed first, found by `?q` on the server and a page at a time. */
+/** `/explore`: public 미니홈피, most recently changed first, found by `?q` on the server and a page at a time. */
 export function ExplorePage() {
   const [params, setParams] = useSearchParams();
   const query = params.get('q') ?? '';
@@ -157,7 +157,7 @@ export function ExplorePage() {
           </div>
         )}
         {!homes && !error && <p className="mg-empty" role="status">불러오는 중…</p>}
-        {homes?.length === 0 && <p className="mg-empty">{search ? '찾는 섬이 없어요' : '아직 공개된 섬이 없어요'}</p>}
+        {homes?.length === 0 && <p className="mg-empty">{search ? '찾는 미니홈피가 없어요' : '아직 공개된 미니홈피가 없어요'}</p>}
         <ul className="mg-islands">
           {homes?.map((home) => (
             <li key={home.username}>
@@ -166,11 +166,8 @@ export function ExplorePage() {
                   <span>{home.emoji}</span>
                 </span>
                 <span className="mg-island-info">
-                  <b>{home.title}</b>
-                  <small>
-                    {home.ownerName} · @{home.username}
-                  </small>
-                  {home.statusMessage && <span className="mg-island-status">{home.statusMessage}</span>}
+                  <b>{home.ownerName}의 미니홈피</b>
+                  <small>@{home.username}</small>
                   <span className="mg-island-meta">
                     <span>{since(home.updatedAt)}</span>
                     <span>방문 {home.total.toLocaleString()}</span>

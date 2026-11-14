@@ -32,6 +32,9 @@ import type {
   ProfileChanges,
   RealtimeTicket,
   Registration,
+  SajuBirth,
+  SajuHome,
+  SajuVillage,
   SavedHomeWorld,
   SaveHomeWorld,
   StudioPower,
@@ -125,6 +128,15 @@ export const socialApi = {
   dismiss: (id: string) => changesRequests(api<void>(`/ilchon-requests/${segment(id)}`, { method: 'DELETE' })),
   /** Dismisses every 이웃 request the viewer received. */
   dismissAll: () => changesRequests(api<{ dismissed: number }>('/ilchon-requests', { method: 'DELETE' })),
+};
+
+export const sajuApi = {
+  /** A member's 사주 home and their village. */
+  village: (username: string) => api<SajuVillage>(`/homes/${segment(username)}/saju`),
+  /** Builds the caller's home, or builds it again from a corrected name or birth. */
+  save: (body: { expectedOwnerId: string; name: string; birth: SajuBirth }) => api<{ saju: SajuHome }>('/homes/me/saju', { method: 'PUT', body }),
+  /** Takes the caller's home down; their guestbook and 이웃 stay. */
+  remove: (body: { expectedOwnerId: string }) => api<void>('/homes/me/saju', { method: 'DELETE', body }),
 };
 
 /** The public lists change only when an admin publishes, so an island opened soon after another reuses them. */

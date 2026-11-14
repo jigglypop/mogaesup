@@ -94,7 +94,7 @@ const wood: Plan = {
         b.cyl(round * 0.9, 0.012, [2.455, y, 1.78], '#d2b58c', { sides: 10, surface: 'wood', vary: 0.08 }, [0, 0, QUARTER]);
         b.cyl(round * 0.9, 0.012, [2.18, y + round * 0.95, 2.055], '#d2b58c', { sides: 10, surface: 'wood', vary: 0.08 }, [QUARTER, 0, 0]);
       }
-      gableRoof(b, [0, 2.26, 0], { width: 4.4, depth: 3.7, rise: 1.75, over: 0.42, verge: 0.3, cover: shakes, wall: '#8a6444', wallFinish: WOOD, trim: dark });
+      gableRoof(b, [0, 2.26, 0], { width: 4.4, depth: 3.7, rise: 1.75, over: 0.42, verge: 0.3, both: true, cover: shakes, wall: '#8a6444', wallFinish: WOOD, trim: dark });
       windowAt(b, [2.205, 3.0, 0.1], { size: [0.5, 0.5], frame: cream, bars: [2, 2] }, QUARTER);
       chimney(b, [2.52, 0, -1.05], [0.6, 0.76], 4.3, { surface: 'masonry' });
       b.life({ kind: 'smoke', at: [2.52, 4.6, -1.05] });
@@ -174,7 +174,7 @@ const fire: Plan = {
         const long = block % 2 === 0;
         b.box([long ? 0.34 : 0.22, 0.22, long ? 0.22 : 0.34], [2.2 - (long ? 0.15 : 0.09), 0.36 + block * 0.3, 1.7 - (long ? 0.09 : 0.15)], cream, { ...STONE, vary: 0.06 });
       }
-      gableRoof(b, [0, 2.92, 0], { width: 4.4, depth: 3.4, rise: 1.3, over: 0.38, verge: 0.26, cover: tiles, wall: '#ffffff', wallFinish: brick, trim });
+      gableRoof(b, [0, 2.92, 0], { width: 4.4, depth: 3.4, rise: 1.3, over: 0.38, verge: 0.26, both: true, cover: tiles, wall: '#ffffff', wallFinish: brick, trim });
       b.cyl(0.2, 0.02, [2.21, 3.5, 0], cream, { sides: 20, surface: 'stone' }, [0, 0, QUARTER]);
       b.cyl(0.15, 0.03, [2.215, 3.5, 0], '#ffe2a6', { sides: 20, glow: '#ffcf85', power: 2.2 }, [0, 0, QUARTER]);
 
@@ -184,7 +184,7 @@ const fire: Plan = {
 
       // The entrance: a gabled porch, the door in it, a lamp to either side.
       b.box([1.7, 1.5, 0.95], [DOOR_X, 0.95, 2.17], '#ffffff', brick);
-      gableRoof(b, [DOOR_X, 1.7, 2.1], { width: 1.25, depth: 1.7, rise: 0.62, over: 0.2, verge: 0.2, cover: tiles, wall: cream, wallFinish: { surface: 'plaster' }, trim }, QUARTER);
+      gableRoof(b, [DOOR_X, 1.7, 2.1], { width: 1.25, depth: 1.7, rise: 0.62, over: 0.2, verge: 0.2, both: true, cover: tiles, wall: cream, wallFinish: { surface: 'plaster' }, trim }, QUARTER);
       b.box([1.5, 0.07, 0.05], [DOOR_X, 1.75, 2.68], trim, WOOD);
       b.box([0.06, 0.46, 0.05], [DOOR_X, 2, 2.68], trim, WOOD);
       doorAt(b, [DOOR_X, 0.2, 2.65], { size: [0.56, 1.08], color: '#8a2f24', frame: cream, transom: true, double: true });
@@ -403,7 +403,7 @@ const metal: Plan = {
       for (const x of [-1.9, -0.6, 0.7, 2.0]) b.box([0.1, 0.18, 0.1], [x, 0.41, 2.3], timber, WOOD);
 
       // 기와지붕: the eaves lifting to their corners, a white-pointed ridge, its ends turned up.
-      gableRoof(b, [0, 2.08, 0], { width: 4.5, depth: 3.5, rise: 1.45, over: 0.62, verge: 0.36, cover: giwa, wall: white, wallFinish: { surface: 'plaster' }, trim: timber, ridge: '#454b54' });
+      gableRoof(b, [0, 2.08, 0], { width: 4.5, depth: 3.5, rise: 1.45, over: 0.62, verge: 0.36, both: true, cover: giwa, wall: white, wallFinish: { surface: 'plaster' }, trim: timber, ridge: '#454b54' });
       b.box([5.3, 0.07, 0.24], [0, 3.56, 0], '#e9e5db', { surface: 'plaster' });
       b.box([5.3, 0.14, 0.2], [0, 3.66, 0], '#3d424a', { surface: 'clay', rough: 0.6 });
       for (const end of [-1, 1]) b.box([0.14, 0.34, 0.24], [end * 2.68, 3.72, 0], '#3d424a', { surface: 'clay', rough: 0.6 }, [0, 0, end * -0.3]);
@@ -480,14 +480,14 @@ const water: Plan = {
       b.box([4.5, 0.2, 3.6], [0, 0.1, 0], '#ffffff', MASONRY);
       b.box([4.3, 2.72, 3.4], [0, 1.56, 0], white, { surface: 'plaster', rough: 0.92 });
       b.box([4.36, 0.07, 3.46], [0, 1.62, 0], trim, STONE);
-      gableRoof(b, [0, 2.92, 0], { width: 4.3, depth: 3.4, rise: 1.25, over: 0.38, verge: 0.26, cover: blueTiles, wall: white, wallFinish: { surface: 'plaster' }, trim: '#3a4a5e' });
+      gableRoof(b, [0, 2.92, 0], { width: 4.3, depth: 3.4, rise: 1.25, over: 0.38, verge: 0.26, both: true, cover: blueTiles, wall: white, wallFinish: { surface: 'plaster' }, trim: '#3a4a5e' });
       windowAt(b, [2.151, 3.45, 0], { size: [0.4, 0.4], frame: trim, bars: [2, 2], arch: true }, QUARTER);
       chimney(b, [-1.4, 3.3, -0.7], [0.5, 0.5], 1.3, { surface: 'plaster', color: white, cap: '#3a7fc6' });
       b.life({ kind: 'smoke', at: [-1.4, 4.9, -0.7], scale: 0.9 });
 
       // The door under its own little roof, and the windows.
       doorAt(b, [DOOR_X, 0.2, 1.701], { size: [0.56, 1.08], color: '#2f5f96', frame: trim, transom: true });
-      gableRoof(b, [DOOR_X, 1.52, 2.0], { width: 0.6, depth: 1.2, rise: 0.36, over: 0.14, verge: 0.12, cover: blueTiles, wall: white, wallFinish: { surface: 'plaster' }, trim: '#3a4a5e' }, QUARTER);
+      gableRoof(b, [DOOR_X, 1.52, 2.0], { width: 0.6, depth: 1.2, rise: 0.36, over: 0.14, verge: 0.12, both: true, cover: blueTiles, wall: white, wallFinish: { surface: 'plaster' }, trim: '#3a4a5e' }, QUARTER);
       for (const x of [-0.5, 0.5]) b.box([0.05, 0.05, 0.62], [DOOR_X + x, 1.36, 2.0], '#3a4a5e', WOOD, [0.6, 0, 0]);
       lantern(b, [DOOR_X + 0.5, 1.0, 1.701], { kind: 'wall', light: '#ffd9a0' });
       steps(b, [DOOR_X, 0, 2.32], 1.2, 3, { rise: 0.066, tread: 0.2, color: '#d5d3cc' });

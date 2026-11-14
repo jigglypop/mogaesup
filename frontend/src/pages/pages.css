@@ -58,7 +58,6 @@
 .mg-island-info { display: grid; gap: 3px; padding: 14px 16px 16px; }
 .mg-island-info b { font-size: 15px; font-weight: 800; }
 .mg-island-info small { font-size: 12px; color: var(--mg-muted); }
-.mg-island-status { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mg-island-meta { display: flex; gap: 10px; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--mg-muted); }
 /* A list that did not load: why, and a way to ask again. */
 .mg-explore-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 16px; }

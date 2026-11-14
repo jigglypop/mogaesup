@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, type RefObject } from 'react';
 
 import { useFrame, useThree } from '@react-three/fiber';
 import { Bloom, DepthOfField, EffectComposer, HueSaturation, N8AO, ToneMapping, Vignette } from '@react-three/postprocessing';
@@ -7,23 +7,28 @@ import { Fog, HalfFloatType, Plane, PMREMGenerator, Vector3, type DirectionalLig
 
 import { setLampGain } from './build';
 import { GRASS_LAYER } from './Built';
-import { AZIMUTH, ELEVATION, zoomOf, type Frame } from './frames';
+import { AZIMUTH, ELEVATION, NO_INSET, turnedExtent, zoomOf, type Frame, type Inset } from './frames';
 import { Lake } from './Lake';
 import { skyTexture, type Mood } from './mood';
 
-// How the village is photographed: one fixed isometric camera that moves between frames, the low sun and its shadows,
-// the sky that lights what the sun does not, the lake, and the darkroom after (shade in the corners things meet in, a
-// lens that keeps one distance sharp, the glow of what is bright, film's roll-off).
+// How the village is photographed: one isometric camera that moves between frames and turns about what it looks at, the
+// low sun and its shadows, the sky that lights what the sun does not, the lake, and the darkroom after (shade in the
+// corners things meet in, a lens that keeps one distance sharp, the glow of what is bright, film's roll-off).
 
 /** `high` draws everything; `low` leaves out what a phone's graphics chip pays most for. */
 export type Quality = 'high' | 'low';
 
-/** From the middle of the view toward the camera. */
-const TO_CAMERA = new Vector3(Math.cos(ELEVATION) * Math.sin(AZIMUTH), Math.sin(ELEVATION), Math.cos(ELEVATION) * Math.cos(AZIMUTH));
 const CAMERA_DISTANCE = 120;
 const SUN_DISTANCE = 90;
 /** How quickly the view follows a new frame: about a second to settle. */
 const FOLLOW = 3.4;
+/** How quickly it follows the hand that turns it: a tenth of a second behind. */
+const TURN_FOLLOW = 18;
+/** A turn still to make, in radians, under which the camera has arrived. */
+const TURN_SETTLED = 0.0005;
+/** How quickly it follows the wheel, the fingers or the buttons that zoom it, and the zoom still to make that counts as none. */
+const ZOOM_FOLLOW = 12;
+const ZOOM_SETTLED = 0.001;
 /**
  * The lake's mirror is drawn with everything under the water cut away, which the graphics card needs its own version of
  * every material for. The picture itself is drawn with a cut that removes nothing, so both share one version.
@@ -42,12 +47,22 @@ type LookProps = {
   frame: Frame;
   /** Jump to the frame instead of easing there. */
   snap?: boolean;
+  /** How far the camera is to stand turned about the vertical from its own side, in radians; a drag changes it. */
+  turn?: RefObject<number>;
+  /** How large the picture is to be drawn against the size at which the frame just fits; the viewer changes it. */
+  zoom?: RefObject<number>;
+  /** The parts of the canvas the page's panels cover: the frame is fitted to, and centred in, what is left. */
+  inset?: RefObject<Inset>;
   mood: Mood;
   quality: Quality;
 };
 
+const UNTURNED: RefObject<number> = { current: 0 };
+const UNZOOMED: RefObject<number> = { current: 1 };
+const UNCOVERED: RefObject<Inset> = { current: NO_INSET };
+
 /** Everything about the picture that is not the village itself. Mounted once in a canvas, beside the homes. */
-export function Look({ frame, snap = false, mood, quality }: LookProps) {
+export function Look({ frame, snap = false, turn = UNTURNED, zoom = UNZOOMED, inset = UNCOVERED, mood, quality }: LookProps) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera) as OrthographicCamera;
@@ -55,6 +70,12 @@ export function Look({ frame, snap = false, mood, quality }: LookProps) {
   const sun = useRef<DirectionalLight>(null);
   const lens = useRef<DepthOfFieldEffect>(null);
   const shown = useRef<Frame | null>(null);
+  const turned = useRef(turn.current);
+  const zoomed = useRef(zoom.current);
+  /** Where the middle of the frame is drawn, in pixels right and down of the canvas's own middle; it eases like the frame. */
+  const shifted = useRef({ x: 0, y: 0, width: 0, height: 0 });
+  /** The camera is on its way round, in or out: the lake's mirror follows it frame by frame. */
+  const turning = useRef(false);
   const last = useRef(0);
   const frames = useRef(0);
   const focus = useMemo(() => new Vector3(), []);
@@ -95,16 +116,43 @@ export function Look({ frame, snap = false, mood, quality }: LookProps) {
     for (const axis of [0, 1, 2] as const) current.target[axis] += (frame.target[axis] - current.target[axis]) * step;
     current.halfWidth += (frame.halfWidth - current.halfWidth) * step;
     current.halfHeight += (frame.halfHeight - current.halfHeight) * step;
+    const left = turn.current - turned.current;
+    const closer = zoom.current - zoomed.current;
+    const moving = Math.abs(left) > TURN_SETTLED;
+    const zooming = Math.abs(closer) > ZOOM_SETTLED;
+    turned.current = moving && !snap ? turned.current + left * (1 - Math.exp(-elapsed * TURN_FOLLOW)) : turn.current;
+    zoomed.current = zooming && !snap ? zoomed.current + closer * (1 - Math.exp(-elapsed * ZOOM_FOLLOW)) : zoom.current;
+    const azimuth = AZIMUTH + turned.current;
+    const extent = turnedExtent(current, turned.current);
+    // The frame is fitted to the part of the canvas the page's panels leave open, and drawn in the middle of it.
+    const cover = inset.current;
+    const open = { width: Math.max(1, size.width - cover.left - cover.right), height: Math.max(1, size.height - cover.top - cover.bottom) };
+    const view = shifted.current;
+    const first = view.width === 0;
+    const ease = (from: number, to: number) => (first || snap ? to : from + (to - from) * step);
+    view.x = ease(view.x, (cover.left - cover.right) / 2);
+    view.y = ease(view.y, (cover.top - cover.bottom) / 2);
+    view.width = ease(view.width, open.width);
+    view.height = ease(view.height, open.height);
+    const settling = Math.abs(view.width - open.width) > 0.5 || Math.abs(view.height - open.height) > 0.5;
+    turning.current = moving || zooming || settling;
     const [x, y, z] = current.target;
-    camera.position.set(x + TO_CAMERA.x * CAMERA_DISTANCE, y + TO_CAMERA.y * CAMERA_DISTANCE, z + TO_CAMERA.z * CAMERA_DISTANCE);
+    camera.position.set(
+      x + Math.cos(ELEVATION) * Math.sin(azimuth) * CAMERA_DISTANCE,
+      y + Math.sin(ELEVATION) * CAMERA_DISTANCE,
+      z + Math.cos(ELEVATION) * Math.cos(azimuth) * CAMERA_DISTANCE,
+    );
     camera.lookAt(x, y, z);
-    camera.zoom = zoomOf(current, size.width, size.height);
+    camera.zoom = zoomOf(extent, view.width, view.height) * zoomed.current;
+    // The whole canvas is drawn; the view is only moved so that the frame's middle falls in the open part's.
+    if (Math.abs(view.x) > 0.5 || Math.abs(view.y) > 0.5) camera.setViewOffset(size.width, size.height, -view.x, -view.y, size.width, size.height);
+    else if (camera.view?.enabled) camera.clearViewOffset();
     camera.updateProjectionMatrix();
     focus.set(x, y, z);
     if (lens.current) {
       lens.current.target?.copy(focus);
       // What is in view is in focus to about its edges, which go soft: softer in a close view than in a wide one.
-      lens.current.cocMaterial.focusRange = Math.max(10, current.halfHeight * 2);
+      lens.current.cocMaterial.focusRange = Math.max(10, (extent.halfHeight * 2) / Math.max(1, zoomed.current));
       lens.current.bokehScale = Math.min(3, Math.max(0.5, camera.zoom / 26));
     }
     const light = sun.current;
@@ -113,7 +161,7 @@ export function Look({ frame, snap = false, mood, quality }: LookProps) {
     light.target.position.set(x, y, z);
     light.target.updateMatrixWorld();
     // A low sun throws long shadows: what stands outside the view still shades what is in it.
-    const reach = Math.max(current.halfWidth, current.halfHeight) + 9;
+    const reach = Math.max(extent.halfWidth, extent.halfHeight) + 9;
     const shadow = light.shadow.camera;
     if (Math.abs(shadow.right - reach) > 0.01) {
       shadow.left = shadow.bottom = -reach;
@@ -129,7 +177,7 @@ export function Look({ frame, snap = false, mood, quality }: LookProps) {
       <directionalLight ref={sun} castShadow intensity={mood.sunPower} color={mood.sun} shadow-mapSize={[map, map]} shadow-bias={-0.0004} shadow-normalBias={0.05} shadow-radius={2.2}>
         <orthographicCamera attach="shadow-camera" args={[-12, 12, 12, -12, 1, 220]} />
       </directionalLight>
-      <Lake mood={mood} sky={sky} scale={fine ? 0.5 : 0.35} every={fine ? 2 : 3} />
+      <Lake mood={mood} sky={sky} scale={fine ? 0.5 : 0.35} every={fine ? 2 : 3} moving={turning} />
       <EffectComposer multisampling={0} frameBufferType={HalfFloatType} enableNormalPass={false}>
         {fine ? <N8AO halfRes aoRadius={1.3} distanceFalloff={1} intensity={2.4} quality="medium" color="#241538" /> : <></>}
         {fine ? <DepthOfField ref={lens} target={[0, 0, 0]} worldFocusRange={9} bokehScale={2} resolutionScale={0.5} /> : <></>}

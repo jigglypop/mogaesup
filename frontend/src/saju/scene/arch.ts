@@ -84,7 +84,7 @@ export type RoofLook = {
   trim: string;
   /** The ridge's own cap, when it differs from the tiles. */
   ridge?: string;
-  /** Cover the slope facing away as well (nobody sees it; it only costs). */
+  /** Cover the slope facing away as well: a camera turned to the side sees it; one that never turns does not, and it costs. */
   both?: boolean;
 };
 

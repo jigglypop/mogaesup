@@ -1,81 +1,48 @@
-/* 사주 마을: one frame, a 미니홈피. The village's canvas on one side, the story of what it shows on the other, and the
-   retro pieces (a tab menu on the frame's edge, a BGM player, pixel marks) drawn with the app's glass tokens. */
+/* 사주 마을: a member's 미니홈피. The village's canvas fills the window, and the page's own pieces float over it in the
+   app's glass: the title, the rail, the story panel with its tab menu, the BGM player and the zoom buttons. */
 
 .mg-saju {
   --el: var(--mg-primary);
   --el-soft: var(--mg-primary-soft);
   --el-ink: var(--mg-primary);
-  /* Room at the right for the tab menu hanging off the frame. */
-  margin-right: 74px;
 }
-.mg-saju [data-element='wood'] { --el: var(--mg-wood); --el-soft: var(--mg-wood-soft); --el-ink: var(--mg-wood-ink); }
-.mg-saju [data-element='fire'] { --el: var(--mg-fire); --el-soft: var(--mg-fire-soft); --el-ink: var(--mg-fire-ink); }
-.mg-saju [data-element='earth'] { --el: var(--mg-earth); --el-soft: var(--mg-earth-soft); --el-ink: var(--mg-earth-ink); }
-.mg-saju [data-element='metal'] { --el: var(--mg-metal); --el-soft: var(--mg-metal-soft); --el-ink: var(--mg-metal-ink); }
-.mg-saju [data-element='water'] { --el: var(--mg-water); --el-soft: var(--mg-water-soft); --el-ink: var(--mg-water-ink); }
+.mg-saju[data-element='wood'], .mg-saju [data-element='wood'] { --el: var(--mg-wood); --el-soft: var(--mg-wood-soft); --el-ink: var(--mg-wood-ink); }
+.mg-saju[data-element='fire'], .mg-saju [data-element='fire'] { --el: var(--mg-fire); --el-soft: var(--mg-fire-soft); --el-ink: var(--mg-fire-ink); }
+.mg-saju[data-element='earth'], .mg-saju [data-element='earth'] { --el: var(--mg-earth); --el-soft: var(--mg-earth-soft); --el-ink: var(--mg-earth-ink); }
+.mg-saju[data-element='metal'], .mg-saju [data-element='metal'] { --el: var(--mg-metal); --el-soft: var(--mg-metal-soft); --el-ink: var(--mg-metal-ink); }
+.mg-saju[data-element='water'], .mg-saju [data-element='water'] { --el: var(--mg-water); --el-soft: var(--mg-water-soft); --el-ink: var(--mg-water-ink); }
 .mg-saju-pixel { display: block; flex: none; }
 
-.mg-saju-frame {
-  position: relative;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 14px;
-  /* The frame fills the window under the top bar, and its two sides scroll inside it. */
-  height: calc(100vh - var(--mg-edge) * 2 - 72px);
-  height: calc(100dvh - var(--mg-edge) * 2 - 72px);
-  min-height: 560px;
-  padding: 16px 18px 18px;
-}
-
-/* The title bar, ruled off with a dotted line as a 미니홈피's was. */
-.mg-saju-bar { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 2px dotted var(--mg-hair-strong); }
-.mg-saju-bar h1 { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 19px; font-weight: 850; letter-spacing: -0.03em; }
-.mg-saju-bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mg-saju-bar-mark { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 10px; background: var(--el-soft); color: var(--el-ink); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
-.mg-saju-bar-actions { display: flex; gap: 6px; margin-left: auto; }
-
-/* The tab menu: tabs hanging off the frame's right edge, the open one in the home's colour. */
-.mg-saju-menu { position: absolute; z-index: 2; left: 100%; top: 78px; display: grid; gap: 6px; }
-.mg-saju-menu a {
-  display: grid;
-  place-items: center;
-  width: 70px;
-  height: 44px;
-  border: 1px solid var(--mg-line);
-  border-left: 0;
-  border-radius: 0 12px 12px 0;
-  background: var(--mg-glass-strong);
-  box-shadow: 3px 3px 0 var(--mg-saju-edge);
-  color: var(--mg-muted);
-  font-size: 13px;
-  font-weight: 800;
-  text-decoration: none;
-  transition: width 0.15s, color 0.15s;
-}
-.mg-saju-menu a[aria-current='page'] { width: 78px; background: var(--el); border-color: transparent; color: var(--mg-accent-ink); }
-@media (hover: hover) {
-  .mg-saju-menu a:hover:not([aria-current='page']) { width: 76px; color: var(--mg-ink); }
-}
-
-.mg-saju-body { display: grid; grid-template-columns: minmax(0, 1fr) 392px; gap: 16px; min-height: 0; }
-
-/* The canvas: the lake's own colours until it has drawn, a dotted mat inside its edge. */
-.mg-saju-stage {
-  position: relative;
-  min-height: 0;
+/* The window: the lake's own colours until the canvas has drawn. */
+.mg-saju-world {
+  --mg-side: 392px;
+  position: fixed;
+  inset: 0;
   overflow: hidden;
-  border-radius: 18px;
   background: linear-gradient(180deg, var(--mg-saju-lake-top), var(--mg-saju-lake-bottom));
-  box-shadow: inset 0 0 0 1px var(--mg-hair);
-  user-select: none;
-  -webkit-user-select: none;
 }
-.mg-saju-stage::after { content: ''; position: absolute; z-index: 1; inset: 8px; border: 2px dotted rgba(255, 255, 255, 0.5); border-radius: 12px; pointer-events: none; }
-:root[data-theme='dark'] .mg-saju-stage::after { border-color: rgba(255, 255, 255, 0.2); }
+/* Nothing here scrolls the page, so a drag past a panel's end must not pull-to-refresh or bounce it. */
+html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: none; }
+
+/* The title in the top bar: the home's mark, whose 미니홈피 it is, and TODAY and TOTAL as one counts its visitors. */
+.mg-saju-bar { gap: 10px; min-width: 0; padding: 0 16px 0 7px; }
+.mg-saju-bar-mark { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 12px; background: var(--el-soft); color: var(--el-ink); }
+.mg-saju-bar-title { min-width: 0; overflow: hidden; font-size: 15px; font-weight: 850; letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
+.mg-saju-visits { margin: 0; font-family: var(--mg-mono); font-size: 11px; color: var(--mg-muted); white-space: nowrap; }
+.mg-saju-visits b { color: var(--mg-ink); }
+.mg-saju-world .mg-topbar-left { flex: 1 1 auto; }
+.mg-saju-world .mg-topbar-right { flex: none; }
+
+/* The canvas, edge to edge. */
+.mg-saju-stage { position: absolute; inset: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .mg-saju-canvas { position: absolute; inset: 0; }
+/* The picture turns with a drag to either side, and zooms with the wheel or two fingers. */
+.mg-saju-canvas { cursor: grab; user-select: none; -webkit-user-select: none; }
+.mg-saju-canvas[data-turning], .mg-saju-canvas[data-turning] canvas { cursor: grabbing !important; }
+/* Every gesture on the picture is the picture's: nothing under it scrolls. */
+.mg-saju-canvas canvas { display: block; touch-action: none; }
+.mg-saju-pin { touch-action: none; }
 .mg-saju-canvas-failed { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 24px; color: var(--mg-accent-ink); font-size: 14px; font-weight: 750; text-align: center; }
-/* A swipe up or down over the canvas still scrolls the page. */
-.mg-saju-canvas canvas { display: block; touch-action: pan-y; }
 /* The canvas comes up out of the lake's colours once its first frames are drawn; until then three pixels count the wait. */
 .mg-saju-canvas > div { opacity: 0; transition: opacity 0.6s ease; }
 .mg-saju-canvas[data-drawn] > div { opacity: 1; }
@@ -119,11 +86,11 @@
 /* What 궁합 found, said over the two homes. */
 .mg-saju-say {
   position: absolute;
-  z-index: 2;
-  top: 20px;
-  left: 50%;
+  z-index: 16;
+  top: calc(var(--mg-edge) + 72px);
+  left: calc(50% + (var(--mg-rail) + var(--mg-edge)) / 2);
   width: max-content;
-  max-width: calc(100% - 44px);
+  max-width: calc(100% - var(--mg-rail) - var(--mg-edge) * 4);
   padding: 10px 16px;
   transform: translateX(-50%);
   border: 2px solid var(--mg-ink);
@@ -138,8 +105,12 @@
 }
 @keyframes mg-saju-pop { from { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(0.94); } }
 
-.mg-saju-stage-foot { position: absolute; z-index: 2; left: 16px; right: 16px; bottom: 16px; display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; pointer-events: none; }
-.mg-saju-stage-foot > * { pointer-events: auto; }
+/* Along the bottom of the open water: the BGM player, the picture to save, and the zoom. */
+.mg-saju-dock { position: absolute; z-index: 17; left: calc(var(--mg-edge) * 2 + var(--mg-rail)); bottom: var(--mg-edge); display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; max-width: calc(100% - var(--mg-rail) - var(--mg-edge) * 3); }
+.mg-saju-world.has-panel .mg-saju-dock { max-width: calc(100% - var(--mg-rail) - var(--mg-side) - var(--mg-edge) * 4); }
+.mg-saju-world.has-panel .mg-saju-say { left: calc(50% + (var(--mg-rail) - var(--mg-side)) / 2); max-width: calc(100% - var(--mg-rail) - var(--mg-side) - var(--mg-edge) * 5); }
+.mg-saju-zoom { display: flex; align-items: center; gap: 2px; height: 48px; padding: 0 4px; border-radius: 999px; }
+.mg-saju-zoom .mg-icon-btn { width: 40px; height: 40px; }
 .mg-saju-toast { position: absolute; z-index: 3; left: 50%; bottom: 68px; display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px 16px; transform: translateX(-50%); border-radius: 999px; font-size: 13px; font-weight: 750; white-space: nowrap; }
 .mg-saju-toast svg { width: 16px; height: 16px; color: var(--mg-good); }
 /* Where a picture is drawn: off the page, at the picture's own size. */
@@ -173,8 +144,32 @@
 .mg-saju-bgm.is-playing .mg-saju-bgm-title span { display: inline-block; overflow: visible; padding-left: 100%; animation: mg-saju-marquee 11s linear infinite; }
 @keyframes mg-saju-marquee { to { transform: translateX(-100%); } }
 
-/* The story beside the canvas. */
-.mg-saju-side { display: flex; flex-direction: column; gap: 12px; min-height: 0; margin-right: -8px; padding-right: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* The story panel: glass over the right of the picture, with the tab menu at its head. It folds away. */
+.mg-saju-panel {
+  position: absolute;
+  z-index: 18;
+  top: calc(var(--mg-edge) + 72px);
+  right: var(--mg-edge);
+  bottom: var(--mg-edge);
+  width: var(--mg-side);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+/* Folded it stays in the page (keeping what was typed in it), out of sight. */
+.mg-saju-panel[hidden] { display: none; }
+.mg-saju-panel-close { position: absolute; top: 14px; right: 12px; }
+.mg-saju-panel-open { position: absolute; z-index: 18; top: calc(var(--mg-edge) + 72px); right: var(--mg-edge); max-width: var(--mg-side); height: 48px; }
+.mg-saju-panel-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The tab menu, the open tab in the home's colour. */
+.mg-saju-menu { display: flex; gap: 4px; margin-right: 44px; padding: 4px; border-radius: 16px; background: var(--mg-tint); }
+.mg-saju-menu a { flex: 1; display: grid; place-items: center; height: 38px; border-radius: 12px; color: var(--mg-muted); font-size: 13px; font-weight: 800; text-decoration: none; transition: color 0.15s, background 0.15s; }
+.mg-saju-menu a[aria-current='page'] { background: var(--el); color: var(--mg-accent-ink); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
+@media (hover: hover) {
+  .mg-saju-menu a:hover:not([aria-current='page']) { color: var(--mg-ink); }
+}
+.mg-saju-side { flex: 1; display: flex; flex-direction: column; gap: 12px; min-height: 0; margin: 0 -16px -16px; padding: 2px 16px 16px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .mg-saju-side > * { flex: none; }
 .mg-saju-side .mg-heading { display: flex; align-items: baseline; gap: 6px; }
 .mg-saju-side .mg-heading b { color: var(--el-ink); }
@@ -184,8 +179,7 @@
 .mg-saju-who { position: relative; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px; }
 .mg-saju-who-mark { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: var(--el-soft); color: var(--el-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
 .mg-saju-who-text { display: grid; gap: 8px; min-width: 0; }
-.mg-saju-who-edit { position: absolute; top: 8px; right: 8px; }
-.mg-saju-who:has(.mg-saju-who-edit) .mg-saju-badge { padding-right: 30px; }
+.mg-saju-who-edit { justify-self: start; }
 .mg-saju-badge { font-size: 16px; font-weight: 850; letter-spacing: -0.025em; line-height: 1.3; color: var(--el-ink); }
 .mg-saju-notes { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
 .mg-saju-notes .mg-chip { height: 26px; padding: 0 9px; }
@@ -205,18 +199,6 @@
 .mg-saju-bridge.is-built .mg-btn { justify-self: start; }
 
 .mg-saju-guestbook { display: grid; gap: 10px; }
-.mg-saju-guestbook > .mg-btn { justify-self: start; }
-.mg-saju-write { display: flex; gap: 6px; }
-.mg-saju-write .mg-field { flex: 1; min-width: 0; height: 40px; }
-.mg-saju-entries { display: grid; margin: 0; padding: 0; list-style: none; }
-.mg-saju-entries li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 10px 2px; border-top: 2px dotted var(--mg-hair-strong); }
-.mg-saju-entries li:first-child { border-top: 0; }
-.mg-saju-entry-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--el-soft); color: var(--el-ink); }
-.mg-saju-entry-meta { display: flex; align-items: baseline; gap: 6px; }
-.mg-saju-entry-meta b { font-size: 13px; font-weight: 800; }
-.mg-saju-entry-meta time { font-family: var(--mg-mono); font-size: 11px; color: var(--mg-muted); }
-.mg-saju-entry-meta .mg-link { margin-left: auto; }
-.mg-saju-entry-body { font-size: 14px; overflow-wrap: anywhere; }
 
 /* The card a home is built from. */
 .mg-saju-form { gap: 14px; }
@@ -267,28 +249,35 @@
 .mg-saju-mix { display: flex; gap: 2px; margin-top: 4px; }
 .mg-saju-mix i { flex: 1; max-width: 26px; height: 6px; border-radius: 2px; background: var(--el); }
 
-/* A narrower window, a tablet, a phone: the menu comes inside the frame and the story goes under the canvas. */
-@media (max-width: 1180px) {
-  .mg-saju { margin-right: 0; }
-  .mg-saju-frame { grid-template-rows: auto auto auto; height: auto; min-height: 0; }
-  .mg-saju-menu { position: static; display: flex; gap: 4px; padding: 4px; border-radius: 16px; background: var(--mg-tint); }
-  .mg-saju-menu a, .mg-saju-menu a[aria-current='page'] { flex: 1; width: auto; height: 38px; border: 0; border-radius: 12px; background: transparent; box-shadow: none; }
-  .mg-saju-menu a[aria-current='page'] { background: var(--el); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
-  .mg-saju-body { grid-template-columns: minmax(0, 1fr); }
-  /* As tall as three quarters of its width, short of filling the window. */
-  .mg-saju-stage { height: min(75vw, 68vh); height: min(75vw, 68dvh); min-height: 300px; }
-  .mg-saju-side { margin-right: 0; padding-right: 0; overflow: visible; }
-}
+/* A phone: the rail lies along the bottom (see the shell), the panel is a sheet over it, and the dock sits on the sheet. */
 @media (max-width: 720px) {
-  .mg-saju-frame { gap: 12px; padding: 14px; }
-  .mg-saju-bar h1 { font-size: 17px; }
+  .mg-saju-bar { gap: 8px; padding: 0 12px 0 6px; }
   .mg-saju-bar-mark { width: 32px; height: 32px; }
-  .mg-saju-stage { height: min(100vw - 52px, 66vh); height: min(100vw - 52px, 66dvh); }
-  .mg-saju-stage-foot { left: 12px; right: 12px; bottom: 12px; }
-  .mg-saju-save { padding: 0 12px; font-size: 13px; }
-  .mg-saju-bgm { max-width: 46%; }
-  .mg-saju-say { top: 16px; font-size: 14px; }
+  .mg-saju-visits { display: none; }
+  .mg-saju-world .mg-topbar-right { gap: 6px; }
+  .mg-saju-world .mg-topbar-right > .mg-btn { padding: 0 10px; font-size: 12px; }
+  .mg-saju-panel { top: auto; left: var(--mg-edge); right: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); width: auto; height: 46dvh; padding: 14px; }
+  .mg-saju-side { margin: 0 -14px -14px; padding: 2px 14px 14px; }
+  /* The sheet folds down, not to the side. */
+  .mg-saju-panel-close svg { transform: rotate(90deg); }
+  .mg-saju-panel-open { top: auto; right: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px); }
+  .mg-saju-dock { left: var(--mg-edge); bottom: calc(var(--mg-edge) + 76px + 56px); max-width: calc(100% - var(--mg-edge) * 2); }
+  .mg-saju-world.has-panel .mg-saju-dock { bottom: calc(var(--mg-edge) + 76px + 46dvh + 8px); max-width: calc(100% - var(--mg-edge) * 2); }
+  .mg-saju-say, .mg-saju-world.has-panel .mg-saju-say { top: calc(var(--mg-edge) + 60px); left: 50%; max-width: calc(100% - var(--mg-edge) * 2); font-size: 14px; }
+  /* One row: the player takes what the two round controls leave. The save button keeps its name for a screen reader. */
+  .mg-saju-dock { flex-wrap: nowrap; align-items: center; }
+  .mg-saju-save { flex: none; width: 48px; padding: 0; justify-content: center; }
+  .mg-saju-save span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .mg-saju-bgm { flex: 1 1 auto; max-width: none; }
+  .mg-saju-zoom { flex: none; }
   .mg-saju-pin { padding: 3px 8px 4px; font-size: 12px; }
+}
+/* A phone on its side: slim bars (see the shell) and a narrower panel. */
+@media (max-height: 500px) and (min-width: 721px) {
+  .mg-saju-world { --mg-side: 340px; }
+  .mg-saju-panel, .mg-saju-panel-open, .mg-saju-say { top: calc(var(--mg-edge) + 58px); }
+  .mg-saju-panel { gap: 10px; padding: 12px; }
+  .mg-saju-side { margin: 0 -12px -12px; padding: 2px 12px 12px; }
 }
 @media (pointer: coarse) {
   .mg-saju-form .mg-tabs > button { height: 40px; }

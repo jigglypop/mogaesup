@@ -469,16 +469,15 @@ if (browser) {
     ['studio'],
   );
 
-  await step('member', 'a new member signs up and reaches their island', async () => {
+  await step('member', 'a new member signs up', async () => {
     ({ page: member, sent: memberSent } = await person('member'));
     await member.goto(WEB);
     await member.getByRole('tab', { name: '가입하기' }).click();
     await member.locator('input[name=username]').fill(MEMBER.username);
     await member.locator('input[name=displayName]').fill(MEMBER.displayName);
     await member.locator('input[name=password]').fill(MEMBER.password);
-    await member.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
+    await member.locator('form button[type=submit]').click();
     await member.waitForURL(`**/@${MEMBER.username}`);
-    await worldReady(member);
   });
 
   await step(
@@ -645,7 +644,7 @@ if (browser) {
     await page.locator('input[name=username]').fill(who.username);
     await page.locator('input[name=displayName]').fill(who.displayName);
     await page.locator('input[name=password]').fill(who.password);
-    await page.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
+    await page.locator('form button[type=submit]').click();
     await page.waitForURL(`**/@${who.username}`);
     await worldReady(page);
   };

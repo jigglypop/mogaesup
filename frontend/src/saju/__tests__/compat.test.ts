@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { compatOf } from '../compat';
 import type { Birth } from '../engine';
 import { profileOf } from '../profile';
-import { sampleOf } from '../residents';
+import { personOf } from './people';
 
-const sample = (id: string) => profileOf(sampleOf(id)!.birth);
+const sample = (id: string) => profileOf(personOf(id).birth);
 const born = (year: number, month: number, day: number, time: string): Birth => ({ calendar: 'solar', year, month, day, leapMonth: false, time, gender: 'female' });
 
 describe('궁합', () => {

@@ -1,12 +1,12 @@
 import { act } from 'react';
 
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { ApiRequestError } from '../../api/client';
 import { mount, type } from '../../__tests__/mount';
-import { MY_HOME } from '../residents';
-import { resetSajuStore, sajuStore } from '../store';
-import { birthOfDraft, Onboarding, type Draft } from '../ui/Onboarding';
+import type { Birth } from '../engine';
+import { birthOfDraft, Onboarding, type Draft, type Known } from '../ui/Onboarding';
 
 const draft = (changes: Partial<Draft> = {}): Draft => ({
   name: '가온',
@@ -41,43 +41,39 @@ describe('집 짓는 카드의 검사', () => {
 });
 
 describe('집 짓는 카드', () => {
-  beforeEach(() => {
-    localStorage.clear();
-    resetSajuStore();
-  });
   afterEach(() => {
-    localStorage.clear();
-    resetSajuStore();
     vi.restoreAllMocks();
   });
 
-  const open = (resident = sajuStore.getState().me, suggestedName = '') =>
-    mount(
-      <MemoryRouter initialEntries={['/saju/edit']}>
-        <Routes>
-          <Route path="/saju/edit" element={<Onboarding resident={resident} suggestedName={suggestedName} />} />
-          <Route path="/saju" element={<p>집</p>} />
-        </Routes>
+  const open = async (known: Known | null = null, suggestedName = '', built = !!known) => {
+    const onBuild = vi.fn(async (_name: string, _birth: Birth) => undefined);
+    const onDemolish = vi.fn(async () => undefined);
+    const mounted = await mount(
+      <MemoryRouter>
+        <Onboarding built={built} known={known} suggestedName={suggestedName} cancelTo="/@gaon" onBuild={onBuild} onDemolish={onDemolish} />
       </MemoryRouter>,
     );
+    return { ...mounted, onBuild, onDemolish };
+  };
   const field = (container: HTMLElement, name: string) => container.querySelector<HTMLInputElement>(`input[name=${name}]`)!;
   const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button')].find((item) => item.textContent?.trim() === label)!;
   const click = (element: Element) => act(async () => (element as HTMLElement).click());
   const submit = (container: HTMLElement) => act(async () => container.querySelector('form')!.requestSubmit());
 
   it('빈 카드를 내면 까닭을 말하고 집은 짓지 않는다', async () => {
-    const { container, unmount } = await open();
+    const { container, unmount, onBuild } = await open();
     await submit(container);
     expect(container.querySelector('[role=alert]')?.textContent).toBe('이름을 적어 주세요.');
-    expect(sajuStore.getState().me).toBeNull();
+    expect(onBuild).not.toHaveBeenCalled();
     // 고치면 말이 지워진다.
     await type(field(container, 'name'), '가온');
     expect(container.querySelector('[role=alert]')).toBeNull();
     await unmount();
   });
 
-  it('채워서 내면 집을 짓고 내 집으로 간다', async () => {
-    const { container, unmount } = await open(null, '로그인한 이름이 아주 길 때');
+  it('채워서 내면 그 이름과 생일로 집을 짓는다', async () => {
+    const { container, unmount, onBuild } = await open(null, '로그인한 이름이 아주 길 때');
+    expect(container.querySelector('h2')?.textContent).toBe('내 집 짓기');
     // 로그인한 이름을 열두 자까지 미리 적어 둔다.
     expect(field(container, 'name').value).toBe('로그인한 이름이 아주 ');
     await type(field(container, 'name'), '가온');
@@ -88,13 +84,13 @@ describe('집 짓는 카드', () => {
     await type(field(container, 'time'), '12:00');
     await click(button(container, '남성'));
     await submit(container);
-    expect(sajuStore.getState().me).toEqual({
-      id: MY_HOME,
-      name: '가온',
-      sample: false,
-      birth: { calendar: 'solar', year: 1990, month: 1, day: 1, leapMonth: false, time: '12:00', gender: 'male' },
-    });
-    expect(container.textContent).toBe('집');
+    expect(onBuild).toHaveBeenCalledExactlyOnceWith('가온', { calendar: 'solar', year: 1990, month: 1, day: 1, leapMonth: false, time: '12:00', gender: 'male' });
+    await unmount();
+  });
+
+  it('미리 적는 이름은 글자 단위로 열두 자에서 자른다', async () => {
+    const { container, unmount } = await open(null, '열한글자이름을가진사람😀😀');
+    expect(field(container, 'name').value).toBe('열한글자이름을가진사람😀');
     await unmount();
   });
 
@@ -132,7 +128,7 @@ describe('집 짓는 카드', () => {
   });
 
   it('시간을 모르면 시각 없이 짓는다', async () => {
-    const { container, unmount } = await open();
+    const { container, unmount, onBuild } = await open();
     await type(field(container, 'name'), '가온');
     await type(field(container, 'year'), '1990');
     await type(field(container, 'month'), '1');
@@ -141,12 +137,12 @@ describe('집 짓는 카드', () => {
     await click(field(container, 'noTime'));
     expect(field(container, 'time').disabled).toBe(true);
     await submit(container);
-    expect(sajuStore.getState().me?.birth.time).toBeNull();
+    expect(onBuild.mock.calls[0]?.[1].time).toBeNull();
     await unmount();
   });
 
   it('엔진이 계산하지 못하는 시각은 그 까닭을 보여 준다', async () => {
-    const { container, unmount } = await open();
+    const { container, unmount, onBuild } = await open();
     await type(field(container, 'name'), '가온');
     // 1988년 5월 8일 02:00에 시계를 03:00으로 돌렸다.
     await type(field(container, 'year'), '1988');
@@ -156,31 +152,64 @@ describe('집 짓는 카드', () => {
     await click(button(container, '여성'));
     await submit(container);
     expect(container.querySelector('[role=alert]')?.textContent).toContain('서머타임');
-    expect(sajuStore.getState().me).toBeNull();
+    expect(onBuild).not.toHaveBeenCalled();
     await unmount();
   });
 
-  it('내 정보를 고쳐 짓거나, 물어본 뒤 집을 허문다', async () => {
-    sajuStore.moveIn('가온', { calendar: 'lunar', year: 2020, month: 4, day: 10, leapMonth: true, time: null, gender: 'female' });
-    const { container, unmount } = await open();
+  const known: Known = { name: '가온', birth: { calendar: 'lunar', year: 2020, month: 4, day: 10, leapMonth: true, time: null, gender: 'female' } };
+
+  it('지은 집은 적어 둔 사주로 열리고, 다시 입력해 다시 짓는다', async () => {
+    const { container, unmount, onBuild } = await open(known);
+    expect(container.querySelector('h2')?.textContent).toBe('사주 다시 입력');
     expect(field(container, 'name').value).toBe('가온');
     expect(field(container, 'year').value).toBe('2020');
     expect(field(container, 'leapMonth').checked).toBe(true);
     expect(field(container, 'noTime').checked).toBe(true);
     expect(button(container, '여성').getAttribute('aria-checked')).toBe('true');
-    await type(field(container, 'name'), '가온이');
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('/@gaon');
+    await click(field(container, 'noTime'));
+    await type(field(container, 'time'), '09:10');
+    await click(button(container, '남성'));
     await submit(container);
-    expect(sajuStore.getState().me?.name).toBe('가온이');
+    expect(onBuild).toHaveBeenCalledExactlyOnceWith('가온', { ...known.birth, time: '09:10', gender: 'male' });
     await unmount();
+  });
 
-    const again = await open();
+  it('이 브라우저에 남아 있던 사주로 처음 짓는 카드를 채운다', async () => {
+    const { container, unmount } = await open(known, '로그인한 이름', false);
+    expect(container.querySelector('h2')?.textContent).toBe('내 집 짓기');
+    expect(field(container, 'name').value).toBe('가온');
+    expect(field(container, 'year').value).toBe('2020');
+    // 아직 지은 집이 없으니 허물 것도 없다.
+    expect(button(container, '집 허물기')).toBeUndefined();
+    await unmount();
+  });
+
+  it('물어본 뒤에 집을 허문다', async () => {
+    const { container, unmount, onDemolish } = await open(known);
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    await click(button(again.container, '집 허물기'));
-    expect(sajuStore.getState().me).not.toBeNull();
+    await click(button(container, '집 허물기'));
+    expect(onDemolish).not.toHaveBeenCalled();
     confirm.mockReturnValue(true);
-    await click(button(again.container, '집 허물기'));
-    expect(sajuStore.getState().me).toBeNull();
-    expect(again.container.textContent).toBe('집');
-    await again.unmount();
+    await click(button(container, '집 허물기'));
+    expect(onDemolish).toHaveBeenCalledOnce();
+    await unmount();
+  });
+
+  it('보내는 동안은 다시 보내지 않고, 서버가 거절하면 까닭을 보여 준 뒤 다시 받는다', async () => {
+    const { container, unmount, onBuild } = await open(known);
+    let refuse: (error: unknown) => void = () => {};
+    onBuild.mockImplementationOnce(() => new Promise<undefined>((_, reject) => (refuse = reject)));
+    await submit(container);
+    expect(button(container, '다시 짓기').disabled).toBe(true);
+    expect(button(container, '집 허물기').disabled).toBe(true);
+    await submit(container);
+    expect(onBuild).toHaveBeenCalledOnce();
+    await act(async () => refuse(new ApiRequestError(422, 'invalid_birth', '생년월일과 태어난 시간을 확인해 주세요.')));
+    expect(container.querySelector('[role=alert]')?.textContent).toBe('생년월일과 태어난 시간을 확인해 주세요.');
+    expect(button(container, '다시 짓기').disabled).toBe(false);
+    await submit(container);
+    expect(onBuild).toHaveBeenCalledTimes(2);
+    await unmount();
   });
 });

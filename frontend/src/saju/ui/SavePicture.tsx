@@ -56,7 +56,7 @@ export function SavePicture({ name, profile }: { name: string; profile: Profile 
   return (
     <>
       <button className="mg-btn mg-saju-save" disabled={state === 'drawing'} onClick={start}>
-        <Icon name="download" /> {state === 'drawing' ? '그리는 중…' : '내 집 이미지 저장하기'}
+        <Icon name="download" /> <span>{state === 'drawing' ? '그리는 중…' : '내 집 이미지 저장하기'}</span>
       </button>
       {state === 'saved' && (
         <p className="mg-saju-toast mg-glass" role="status">

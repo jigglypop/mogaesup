@@ -1,12 +1,11 @@
 import { useId, useState, type FormEvent } from 'react';
 
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 
+import { problemText } from '../../api/client';
 import { BirthError, hasLeapMonth, isValidBirthDate, solarDateOf, timeBranchOf, timeBranches, type Birth, type Calendar, type Gender } from '../engine';
 import { profileOf } from '../profile';
-import { NAME_MAX, type Resident } from '../residents';
-import { SAJU } from '../routes';
-import { sajuStore } from '../store';
+import { NAME_MAX } from '../residents';
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const CALENDARS: { value: Calendar; label: string }[] = [
@@ -32,18 +31,21 @@ export type Draft = {
   gender: Gender | null;
 };
 
-const draftOf = (resident: Resident | null, name: string): Draft =>
-  resident
+/** A name and birth already known: the home's own to correct, or what this browser kept from the village's first days. */
+export type Known = { name: string; birth: Birth };
+
+const draftOf = (known: Known | null, name: string): Draft =>
+  known
     ? {
-        name: resident.name,
-        calendar: resident.birth.calendar,
-        year: String(resident.birth.year),
-        month: String(resident.birth.month),
-        day: String(resident.birth.day),
-        leapMonth: resident.birth.leapMonth,
-        time: resident.birth.time ?? '',
-        noTime: resident.birth.time === null,
-        gender: resident.birth.gender,
+        name: known.name,
+        calendar: known.birth.calendar,
+        year: String(known.birth.year),
+        month: String(known.birth.month),
+        day: String(known.birth.day),
+        leapMonth: known.birth.leapMonth,
+        time: known.birth.time ?? '',
+        noTime: known.birth.time === null,
+        gender: known.birth.gender,
       }
     : { name, calendar: 'solar', year: '', month: '', day: '', leapMonth: false, time: '', noTime: false, gender: null };
 
@@ -74,12 +76,23 @@ export function birthOfDraft(draft: Draft): { birth: Birth } | { problem: string
 
 /**
  * The card a home is built from: a name, a birth date in either calendar, the hour (or that it is not known) and
- * gender. With `resident` it corrects the viewer's own; the home is then rebuilt, or taken down.
+ * gender. For a home already built (`built`) it enters them again: the home is then built again from them, or taken
+ * down. `onBuild` and `onDemolish` keep the home on the server and take the page on from there.
  */
-export function Onboarding({ resident, suggestedName = '' }: { resident: Resident | null; suggestedName?: string }) {
-  const navigate = useNavigate();
-  const [draft, setDraft] = useState(() => draftOf(resident, suggestedName.slice(0, NAME_MAX)));
+export function Onboarding({ built, known, suggestedName = '', cancelTo, onBuild, onDemolish }: {
+  built: boolean;
+  /** What the fields start with. */
+  known: Known | null;
+  suggestedName?: string;
+  /** Where giving up on entering them again leads. */
+  cancelTo: string;
+  onBuild: (name: string, birth: Birth) => Promise<void>;
+  onDemolish: () => Promise<void>;
+}) {
+  // Cut by character, as the server counts a name: a cut by code unit could leave half an emoji.
+  const [draft, setDraft] = useState(() => draftOf(known, [...suggestedName].slice(0, NAME_MAX).join('')));
   const [problem, setProblem] = useState('');
+  const [busy, setBusy] = useState(false);
   const ids = useId();
   const change = (changes: Partial<Draft>) => {
     setDraft((current) => ({ ...current, ...changes }));
@@ -104,18 +117,26 @@ export function Onboarding({ resident, suggestedName = '' }: { resident: Residen
     } catch (error) {
       return setProblem(error instanceof BirthError ? error.message : '계산하지 못했어요.');
     }
-    sajuStore.moveIn(draft.name, result.birth);
-    navigate(SAJU);
+    send(() => onBuild(draft.name, result.birth));
   };
-  const moveOut = () => {
-    if (!window.confirm('집과 방명록, 놓은 다리가 이 브라우저에서 지워져요. 허물까요?')) return;
-    sajuStore.moveOut();
-    navigate(SAJU);
+  const demolish = () => {
+    if (!window.confirm('집을 허물어요. 방명록과 이웃은 그대로 남아요. 허물까요?')) return;
+    send(onDemolish);
+  };
+  /** One request at a time; what the server refused is said under the form. */
+  const send = (request: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
+    setProblem('');
+    request().catch((error: unknown) => {
+      setProblem(problemText(error));
+      setBusy(false);
+    });
   };
 
   return (
     <form className="mg-saju-card mg-saju-form" onSubmit={submit} noValidate>
-      <h2 className="mg-heading">{resident ? '내 정보 고치기' : '내 집 짓기'}</h2>
+      <h2 className="mg-heading">{built ? '사주 다시 입력' : '내 집 짓기'}</h2>
       <label className="mg-label">
         이름
         <input className="mg-field" name="name" value={draft.name} maxLength={NAME_MAX} autoComplete="nickname" onChange={(event) => change({ name: event.target.value })} />
@@ -202,15 +223,15 @@ export function Onboarding({ resident, suggestedName = '' }: { resident: Residen
           {problem}
         </p>
       )}
-      <button className="mg-btn is-primary is-wide" type="submit">
-        {resident ? '고쳐 짓기' : '내 집 짓기'}
+      <button className="mg-btn is-primary is-wide" type="submit" disabled={busy}>
+        {built ? '다시 짓기' : '내 집 짓기'}
       </button>
-      {resident && (
+      {built && (
         <div className="mg-saju-form-foot">
-          <Link className="mg-btn is-quiet is-small" to={SAJU}>
+          <Link className="mg-btn is-quiet is-small" to={cancelTo}>
             취소
           </Link>
-          <button className="mg-btn is-danger is-small" type="button" onClick={moveOut}>
+          <button className="mg-btn is-danger is-small" type="button" disabled={busy} onClick={demolish}>
             집 허물기
           </button>
         </div>

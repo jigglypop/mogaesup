@@ -94,7 +94,7 @@ export function Brand() {
 
 type RailItem = { label: string; icon: IconName; to: string; active: boolean; divided?: boolean };
 
-/** The app's places. Signed-out visitors get the island list, the 사주 village and the way in. */
+/** The app's places. Signed-out visitors get the list of members' homes and the way in. */
 export function Rail() {
   const { user } = useAuth();
   const { pathname } = useLocation();
@@ -102,15 +102,9 @@ export function Rail() {
   // 운영 opens on the import board; an operator who does not edit the catalog has only the character factory there.
   const admin = can(user, 'catalog_editor') ? '/admin' : can(user, 'operator') ? '/admin/studio' : null;
   const items: RailItem[] = [
-    { label: '섬', icon: 'island', to: home, active: !!user && pathname === home },
-    ...(user
-      ? [
-          { label: '꾸미기', icon: 'brush' as const, to: `${home}/edit`, active: pathname === `${home}/edit` },
-          { label: '캐릭터', icon: 'person' as const, to: '/character', active: pathname.startsWith('/character') },
-        ]
-      : []),
+    { label: '사주 마을', icon: 'home', to: home, active: !!user && (pathname === home || pathname.startsWith(`${home}/`)) },
+    ...(user ? [{ label: '캐릭터', icon: 'person' as const, to: '/character', active: pathname.startsWith('/character') }] : []),
     { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
-    { label: '사주', icon: 'home', to: '/saju', active: pathname === '/saju' || pathname.startsWith('/saju/') },
     ...(admin ? [{ label: '운영', icon: 'shield' as const, to: admin, active: pathname.startsWith('/admin'), divided: true }] : []),
   ];
   return (
@@ -144,8 +138,8 @@ function SearchBox() {
       <input
         value={text}
         maxLength={40}
-        placeholder="섬이나 사람 찾기"
-        aria-label="섬이나 사람 찾기"
+        placeholder="미니홈피나 사람 찾기"
+        aria-label="미니홈피나 사람 찾기"
         enterKeyHint="search"
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => event.stopPropagation()}
@@ -339,10 +333,7 @@ function UserMenu() {
           </div>
           <div className="mg-menu-items" role="menu" aria-label="내 메뉴">
             <Link role="menuitem" to={home} onClick={() => setOpen(false)}>
-              <Icon name="island" /> 내 섬
-            </Link>
-            <Link role="menuitem" to={`${home}/edit`} onClick={() => setOpen(false)}>
-              <Icon name="brush" /> 섬 꾸미기
+              <Icon name="home" /> 내 집
             </Link>
             <Link role="menuitem" to="/character" onClick={() => setOpen(false)}>
               <Icon name="person" /> 내 캐릭터

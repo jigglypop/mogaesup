@@ -1,4 +1,4 @@
-import { Component, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Component, createContext, memo, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type PointerEvent, type ReactNode, type Ref, type RefObject } from 'react';
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { AdditiveBlending, HalfFloatType, MeshBasicMaterial, RingGeometry, Vector3, WebGLRenderTarget } from 'three';
@@ -8,7 +8,7 @@ import type { Profile } from '../profile';
 import { Bridge } from './Bridge';
 import type { Build } from './build';
 import { Built, LampPool, Wind } from './Built';
-import type { Frame } from './frames';
+import { clampZoom, NO_INSET, type Frame, type Inset } from './frames';
 import { Guardian } from './Guardian';
 import { buildHome, buildLot, GUARDIAN_AT } from './homes';
 import { BOX } from './kit';
@@ -16,8 +16,8 @@ import { initialQuality, Look, type Quality } from './look';
 import { DUSK, GOLDEN, WATER_LEVEL, type Mood } from './mood';
 import { Stillness } from './parts';
 
-// The village: every home on its own island in one lake at the day's last light, seen by one fixed isometric camera
-// that moves between a single home, two homes with their bridge, and the whole village.
+// The village: every home on its own island in one lake at the day's last light, seen by one isometric camera that
+// moves between a single home, two homes with their bridge, and the whole village, and that a drag turns about them.
 
 /** A home on the stage: where its island lies, and whose it is (nobody's yet when `profile` is null). */
 export type StageHome = { id: string; x: number; z: number; profile: Profile | null };
@@ -28,6 +28,19 @@ export type StageBridge = { from: StageHome; to: StageHome; compat: Compat; colo
 const GUARDIAN_SCALE = 0.8;
 /** Milliseconds between one island's building and the next. */
 const BUILD_EVERY_MS = 60;
+/** Radians the camera turns for each pixel a drag crosses: its whole swing to one side across some 270 pixels. */
+const TURN_PER_PIXEL = 0.0026;
+/** A press that has moved this far is a drag, as the islands count one: it turns the camera and visits nothing. */
+const DRAG_PIXELS = 6;
+/**
+ * How far the camera turns to either side of where it stands, in radians. The homes are built and lit for the
+ * south-east: their roofs are tiled, their walls dressed and their windows cut on the two sides that face it. Forty
+ * degrees either way keeps the camera in that quarter, where every side it sees is a finished one.
+ */
+const MAX_TURN = (40 * Math.PI) / 180;
+/** How much a wheel's step zooms, per pixel it would have scrolled; a trackpad's pinch sends finer steps and counts for more. */
+const WHEEL_ZOOM = 0.0016;
+const WHEEL_PINCH = 0.012;
 
 /** The hour the village is seen at: sunset under the light theme, dusk under the dark one. */
 export function useMood(): Mood {
@@ -105,17 +118,19 @@ const HALO = new RingGeometry(6.3, 8.2, 72);
  */
 const Plot = memo(function Plot({ home, turn, focused, lush, onVisit }: { home: StageHome; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined }) {
   const [hovered, setHovered] = useState(false);
+  const canvas = useThree((state) => state.gl.domElement);
   const glow = useMemo(() => new MeshBasicMaterial({ color: '#ffe2b0', transparent: true, opacity: 0, depthWrite: false, blending: AdditiveBlending }), []);
   const origin = useMemo(() => [home.x, 0, home.z] as const, [home.x, home.z]);
   const visitable = !!onVisit && !focused;
   useEffect(() => () => glow.dispose(), [glow]);
+  // Over an island that can be visited the canvas shows the hand that visits, in place of the one that turns it.
   useEffect(() => {
     if (!hovered) return undefined;
-    document.body.style.cursor = 'pointer';
+    canvas.style.cursor = 'pointer';
     return () => {
-      document.body.style.cursor = '';
+      canvas.style.cursor = '';
     };
-  }, [hovered]);
+  }, [hovered, canvas]);
   useEffect(() => {
     if (!visitable) setHovered(false);
   }, [visitable]);
@@ -214,6 +229,12 @@ function Warm({ onWarm }: { onWarm: () => void }) {
 type SceneProps = {
   frame: Frame;
   snap: boolean;
+  /** How far a drag has turned the camera, in radians. */
+  turn?: RefObject<number>;
+  /** How far the viewer has zoomed in or out; 1 fits the frame. */
+  zoom?: RefObject<number>;
+  /** The parts of the canvas under the page's panels. */
+  inset?: RefObject<Inset>;
   mood: Mood;
   quality: Quality;
   still: boolean;
@@ -223,12 +244,12 @@ type SceneProps = {
 };
 
 /** Everything the village's canvas and a saved picture's share: the hour, the camera's look, the lights, the wind. */
-export function Scene({ frame, snap, mood, quality, still, onWarm, children }: SceneProps) {
+export function Scene({ frame, snap, turn, zoom, inset, mood, quality, still, onWarm, children }: SceneProps) {
   const works = useMemo<Works>(() => ({ pending: 0 }), []);
   return (
     <WorksContext.Provider value={works}>
       <Stillness value={still}>
-        <Look frame={frame} snap={snap} mood={mood} quality={quality} />
+        <Look frame={frame} snap={snap} {...(turn ? { turn } : {})} {...(zoom ? { zoom } : {})} {...(inset ? { inset } : {})} mood={mood} quality={quality} />
         <Wind />
         <LampPool count={quality === 'high' ? 8 : 4} gain={mood.lamps}>
           <group dispose={null}>{children}</group>
@@ -289,10 +310,19 @@ class Failsafe extends Component<{ fallback: ReactNode; children: ReactNode }, {
 
 const calm = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+/** What the page around the canvas can ask of it. */
+export type StageHandle = {
+  /** Zooms in (a factor above 1) or out (below 1), within what the canvas allows. */
+  zoomBy: (factor: number) => void;
+};
+
 type StageProps = {
+  ref?: Ref<StageHandle>;
   homes: readonly StageHome[];
   bridges: readonly StageBridge[];
   frame: Frame;
+  /** The parts of the canvas the page's panels cover; the picture is fitted to the rest. */
+  inset?: Inset;
   /** The home in view, whose guardian plays; the others can be visited. */
   focus: string | null;
   onVisit?: (id: string) => void;
@@ -300,10 +330,91 @@ type StageProps = {
   pins?: ReactNode;
 };
 
-/** The village's canvas. It draws while it is on screen, and holds still for a viewer who asked for less motion. */
-export function Stage({ homes, bridges, frame, focus, onVisit, pins }: StageProps) {
+/**
+ * The village's canvas. It draws while it is on screen, and holds still for a viewer who asked for less motion. A drag
+ * to either side turns the camera about what it shows, as far as the homes' finished sides go ({@link MAX_TURN}). The
+ * wheel, two fingers pinching, or the page's own buttons (through `ref`) zoom it in and out.
+ */
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, focus, onVisit, pins }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
+  const turn = useRef(0);
+  const zoom = useRef(1);
+  const cover = useRef(inset);
+  cover.current = inset;
+  useImperativeHandle(ref, () => ({ zoomBy: (factor) => void (zoom.current = clampZoom(zoom.current * factor)) }), []);
+  const drag = useRef<{ pointer: number; x: number; from: number; kept: boolean } | null>(null);
+  /** Fingers on the picture, by pointer; two of them pinch, and how far apart they were is what the next move compares with. */
+  const touches = useRef(new Map<number, { x: number; y: number }>());
+  const spread = useRef(0);
+  const apart = () => {
+    const [a, b] = [...touches.current.values()];
+    return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+  };
+  // The wheel zooms. Heard as the page's own listener, not React's passive one: a pinch on a trackpad arrives as a
+  // wheel with ctrl held, which the browser would otherwise take to zoom the whole page.
+  useEffect(() => {
+    const element = box.current;
+    if (!element) return undefined;
+    const wheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+      zoom.current = clampZoom(zoom.current * Math.exp(-event.deltaY * lines * (event.ctrlKey ? WHEEL_PINCH : WHEEL_ZOOM)));
+    };
+    element.addEventListener('wheel', wheel, { passive: false });
+    return () => element.removeEventListener('wheel', wheel);
+  }, []);
+  const press = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'touch') {
+      touches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      spread.current = apart();
+      // A second finger makes it a pinch: the first one's drag ends.
+      if (touches.current.size > 1) {
+        drag.current = null;
+        return;
+      }
+    }
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    drag.current = { pointer: event.pointerId, x: event.clientX, from: event.clientX, kept: false };
+  };
+  const release = (event: PointerEvent<HTMLDivElement>) => {
+    touches.current.delete(event.pointerId);
+    spread.current = apart();
+    if (drag.current?.pointer !== event.pointerId) return;
+    drag.current = null;
+    delete event.currentTarget.dataset['turning'];
+  };
+  // The box's own capture ending ends the drag. One that bubbles up from the canvas or a label only says the pointer
+  // has come over to the box.
+  const lost = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget) release(event);
+  };
+  const pull = (event: PointerEvent<HTMLDivElement>) => {
+    const finger = touches.current.get(event.pointerId);
+    if (finger) {
+      finger.x = event.clientX;
+      finger.y = event.clientY;
+      if (touches.current.size > 1) {
+        const now = apart();
+        if (spread.current > 0 && now > 0) zoom.current = clampZoom((zoom.current * now) / spread.current);
+        spread.current = now;
+        return;
+      }
+    }
+    const held = drag.current;
+    if (!held || held.pointer !== event.pointerId) return;
+    // The button came up where this box did not hear it (outside the picture, before the pointer was kept).
+    if (event.pointerType === 'mouse' && event.buttons === 0) return release(event);
+    turn.current = Math.min(MAX_TURN, Math.max(-MAX_TURN, turn.current - (event.clientX - held.x) * TURN_PER_PIXEL));
+    held.x = event.clientX;
+    // Past a drag's length the picture keeps the pointer: it goes on turning outside the canvas, and letting go is no
+    // click on an island or a label.
+    if (!held.kept && Math.abs(event.clientX - held.from) > DRAG_PIXELS) {
+      held.kept = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.currentTarget.dataset['turning'] = '';
+    }
+  };
   const [inView, setInView] = useState(true);
   /** A lost WebGL context comes back with a fresh canvas. */
   const [generation, setGeneration] = useState(0);
@@ -327,7 +438,7 @@ export function Stage({ homes, bridges, frame, focus, onVisit, pins }: StageProp
     return () => observer.disconnect();
   }, []);
   return (
-    <div className="mg-saju-canvas" ref={box} data-drawn={drawn || undefined}>
+    <div className="mg-saju-canvas" ref={box} data-drawn={drawn || undefined} onPointerDown={press} onPointerMove={pull} onPointerUp={release} onPointerCancel={release} onLostPointerCapture={lost}>
       {/* What the canvas shows is said in words beside it; the labels over it are the page's own links. */}
       <Failsafe fallback={<p className="mg-saju-canvas-failed">이 브라우저에서는 마을을 그릴 수 없어요</p>}>
         <Canvas
@@ -349,7 +460,7 @@ export function Stage({ homes, bridges, frame, focus, onVisit, pins }: StageProp
             });
           }}
         >
-          <Scene frame={frame} snap={still} mood={mood} quality={quality} still={still} onWarm={warmed}>
+          <Scene frame={frame} snap={still} turn={turn} zoom={zoom} inset={cover} mood={mood} quality={quality} still={still} onWarm={warmed}>
             {homes.map((home, index) => (
               <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} />
             ))}
