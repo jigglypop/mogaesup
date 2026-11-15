@@ -8,7 +8,7 @@ import type { Profile } from '../profile';
 import { Bridge } from './Bridge';
 import { Built, LampPool, Wind } from './Built';
 import { FlagIsland, type StageFlag } from './Flag';
-import { clampZoom, NO_INSET, type Frame, type Inset } from './frames';
+import { clampZoom, NO_INSET, wheelZoom, type Frame, type Inset } from './frames';
 import { loadDogModel, type DogModel } from './dogModel';
 import { Guardian } from './Guardian';
 import { buildHome, buildLot, GUARDIAN_AT } from './homes';
@@ -38,9 +38,6 @@ const DRAG_PIXELS = 6;
  * degrees either way keeps the camera in that quarter, where every side it sees is a finished one.
  */
 const MAX_TURN = (40 * Math.PI) / 180;
-/** How much a wheel's step zooms, per pixel it would have scrolled; a trackpad's pinch sends finer steps and counts for more. */
-const WHEEL_ZOOM = 0.0016;
-const WHEEL_PINCH = 0.012;
 
 /**
  * A dog's model once it has arrived. The canvas waits for it as it does for an island still to be built, until the dog
@@ -167,6 +164,8 @@ function Pins({ homes, layer }: { homes: readonly StageHome[]; layer: RefObject<
   useFrame(() => {
     const host = layer.current;
     if (!host) return;
+    // A browser without `overflow: clip` lets a focused label scroll the layer; the labels are placed for it unscrolled.
+    if (host.scrollLeft || host.scrollTop) host.scrollLeft = host.scrollTop = 0;
     for (const element of host.querySelectorAll<HTMLElement>('[data-pin]')) {
       const home = homes.find((item) => item.id === element.dataset['pin']);
       if (!home) continue;
@@ -174,6 +173,9 @@ function Pins({ homes, layer }: { homes: readonly StageHome[]; layer: RefObject<
       const x = (point.current.x * 0.5 + 0.5) * size.width;
       const y = (-point.current.y * 0.5 + 0.5) * size.height;
       element.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
+      // A label whose island lies outside the picture is out of sight and out of the keyboard's way.
+      const outside = x < 0 || x > size.width || y < 0 || y > size.height;
+      if ((element.style.visibility === 'hidden') !== outside) element.style.visibility = outside ? 'hidden' : '';
       // A label stays out of sight until it has been put over its island.
       element.dataset['placed'] = '';
     }
@@ -207,7 +209,9 @@ function Warm({ onWarm }: { onWarm: () => void }) {
       gl.setRenderTarget(before);
       void ready.then(() => {
         target.dispose();
-        if (live) onWarm();
+        if (!live) return;
+        if (works) works.warm = true;
+        onWarm();
       });
     };
     // A frame on, when every island has said it is still to be built.
@@ -239,7 +243,7 @@ type SceneProps = {
 
 /** Everything the village's canvas and a saved picture's share: the hour, the camera's look, the lights, the wind. */
 export function Scene({ frame, snap, turn, zoom, inset, mood, quality, still, onWarm, children }: SceneProps) {
-  const works = useMemo<Works>(() => ({ pending: 0 }), []);
+  const works = useMemo<Works>(() => ({ pending: 0, warm: false }), []);
   return (
     <WorksContext.Provider value={works}>
       <Stillness value={still}>
@@ -355,18 +359,35 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
       const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
-      zoom.current = clampZoom(zoom.current * Math.exp(-event.deltaY * lines * (event.ctrlKey ? WHEEL_PINCH : WHEEL_ZOOM)));
+      zoom.current = clampZoom(zoom.current * wheelZoom(event.deltaY * lines, event.ctrlKey));
+    };
+    // Safari says a trackpad's pinch in events of its own, each with how far apart the fingers are against where they
+    // began, and magnifies the whole page unless they are taken. Fingers on a touch screen are heard as pointers.
+    let last = 1;
+    const pinch = (event: Event) => {
+      event.preventDefault();
+      const scale = (event as Event & { scale?: unknown }).scale;
+      if (typeof scale !== 'number' || !(scale > 0)) return;
+      if (event.type === 'gesturechange' && touches.current.size === 0) zoom.current = clampZoom((zoom.current * scale) / last);
+      last = scale;
     };
     element.addEventListener('wheel', wheel, { passive: false });
-    return () => element.removeEventListener('wheel', wheel);
+    element.addEventListener('gesturestart', pinch);
+    element.addEventListener('gesturechange', pinch);
+    return () => {
+      element.removeEventListener('wheel', wheel);
+      element.removeEventListener('gesturestart', pinch);
+      element.removeEventListener('gesturechange', pinch);
+    };
   }, []);
   const press = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'touch') {
       touches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
       spread.current = apart();
-      // A second finger makes it a pinch: the first one's drag ends.
+      // A second finger makes it a pinch: the first one's drag ends, as letting go ends it.
       if (touches.current.size > 1) {
         drag.current = null;
+        delete event.currentTarget.dataset['turning'];
         return;
       }
     }
@@ -399,8 +420,9 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     }
     const held = drag.current;
     if (!held || held.pointer !== event.pointerId) return;
-    // The button came up where this box did not hear it (outside the picture, before the pointer was kept).
-    if (event.pointerType === 'mouse' && event.buttons === 0) return release(event);
+    // The press ended where this box did not hear it (outside the picture, before the pointer was kept): a mouse or a
+    // pen moving over the picture with nothing held down. A finger moves only while it touches.
+    if (event.pointerType !== 'touch' && event.buttons === 0) return release(event);
     turn.current = Math.min(MAX_TURN, Math.max(-MAX_TURN, turn.current - (event.clientX - held.x) * TURN_PER_PIXEL));
     held.x = event.clientX;
     // Past a drag's length the picture keeps the pointer: it goes on turning outside the canvas, and letting go is no

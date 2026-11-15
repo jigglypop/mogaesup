@@ -328,16 +328,17 @@ export const flagToken = (element: Element | null) => (element ? `--mg-${element
  */
 type Stroke = readonly ['h' | 'v' | 'l' | 'r' | 'd', ...number[]];
 
+/** The five characters, each brushed as heavily as its strokes leave room for, and all of it inside the seal's ring. */
 const GLYPHS: Record<Element, { weight: number; strokes: readonly Stroke[] }> = {
   /** 木 */
-  wood: { weight: 0.08, strokes: [['h', -0.6, 0.2, 0.6, 0.24], ['v', 0, 0.68, 0, -0.68], ['l', -0.04, 0.18, -0.2, -0.2, -0.62, -0.5], ['r', 0.04, 0.18, 0.22, -0.18, 0.64, -0.5]] },
+  wood: { weight: 0.112, strokes: [['h', -0.6, 0.2, 0.6, 0.24], ['v', 0, 0.68, 0, -0.68], ['l', -0.04, 0.18, -0.2, -0.2, -0.62, -0.5], ['r', 0.04, 0.18, 0.22, -0.18, 0.64, -0.5]] },
   /** 火 */
-  fire: { weight: 0.08, strokes: [['d', -0.52, 0.36, -0.36, 0.08], ['l', 0.52, 0.4, 0.3, 0.1], ['l', 0.02, 0.68, 0.02, -0.06, -0.62, -0.6], ['r', 0.03, 0.14, 0.16, -0.28, 0.64, -0.58]] },
+  fire: { weight: 0.112, strokes: [['d', -0.52, 0.36, -0.36, 0.08], ['l', 0.52, 0.4, 0.3, 0.1], ['l', 0.02, 0.68, 0.02, -0.06, -0.62, -0.6], ['r', 0.03, 0.14, 0.16, -0.28, 0.64, -0.58]] },
   /** 土 */
-  earth: { weight: 0.085, strokes: [['h', -0.38, 0.12, 0.38, 0.15], ['v', 0, 0.64, 0, -0.5], ['h', -0.66, -0.5, 0.66, -0.48]] },
+  earth: { weight: 0.118, strokes: [['h', -0.38, 0.12, 0.38, 0.15], ['v', 0, 0.64, 0, -0.5], ['h', -0.6, -0.5, 0.6, -0.48]] },
   /** 金 */
   metal: {
-    weight: 0.066,
+    weight: 0.086,
     strokes: [
       ['l', 0, 0.72, -0.2, 0.44, -0.68, 0.18],
       ['r', 0, 0.72, 0.2, 0.44, 0.7, 0.16],
@@ -346,12 +347,12 @@ const GLYPHS: Record<Element, { weight: number; strokes: readonly Stroke[] }> = 
       ['v', 0, 0.2, 0, -0.58],
       ['d', -0.4, -0.2, -0.27, -0.42],
       ['l', 0.4, -0.18, 0.25, -0.43],
-      ['h', -0.64, -0.6, 0.64, -0.58],
+      ['h', -0.58, -0.6, 0.58, -0.58],
     ],
   },
   /** 水 */
   water: {
-    weight: 0.078,
+    weight: 0.108,
     strokes: [['v', 0, 0.7, 0, -0.6], ['l', 0, -0.6, -0.17, -0.42], ['h', -0.62, 0.22, -0.16, 0.24], ['l', -0.16, 0.24, -0.24, -0.1, -0.62, -0.42], ['l', 0.54, 0.44, 0.08, 0.08], ['r', 0.08, 0.08, 0.24, -0.2, 0.66, -0.5]],
   },
 };
@@ -400,9 +401,13 @@ function inkAt(marks: readonly Mark[], x: number, y: number): number {
 
 /** The cloth's picture is this many texels along the fly and up the hoist. */
 export const CLOTH_TEXELS = { width: 512, height: 256 } as const;
-/** The bands' height and how far in from the head and the foot they run; the disc's middle along the fly and its radius; all in metres. */
-const BAND = { from: 0.16, height: 0.17 } as const;
-const DISC = { x: 1.42, radius: 0.56 } as const;
+/**
+ * The bands' height and how far in from the head and the foot they run; the disc's middle along the fly and its radius;
+ * all in metres. The disc takes what the bands leave of the cloth's height and its character is brushed heavily: from
+ * across the village a metre of cloth is some sixteen pixels, and a finer mark is lost on the way.
+ */
+const BAND = { from: 0.07, height: 0.15 } as const;
+const DISC = { x: 1.42, radius: 0.72 } as const;
 /** The strip of canvas the cloth is sewn to at the hoist. */
 const HEADING = 0.075;
 
@@ -442,7 +447,7 @@ export function paintCloth(colors: ClothColors, element: Element | null): Uint8A
         const gy = (y - middle) / DISC.radius;
         const soft = texel / DISC.radius;
         // A fine ring inside the disc's rim, as a seal has, and the character.
-        mix(color, colors.ink, cover(0.012, Math.abs(away / DISC.radius - 0.9), soft) * 0.85);
+        mix(color, colors.ink, cover(0.012, Math.abs(away / DISC.radius - 0.93), soft) * 0.85);
         mix(color, colors.ink, cover(0, inkAt(marks, gx, gy), soft));
       }
       mix(color, colors.disc, cover(HEADING, x, texel));
@@ -464,7 +469,7 @@ export function paintCloth(colors: ClothColors, element: Element | null): Uint8A
 /** How far a line sags below its own straight run at its middle, and a pennant's width along its line and its fall from it, in metres. */
 const SAG = 0.24;
 const PENNANT = { width: 0.25, fall: 0.34, every: 0.36 } as const;
-/** Pennants begin far enough down the line to hang clear of the mast, and stop short of the post. */
+/** Pennants begin far enough down the line to hang clear of the mast (lower on three of the lines: see LINES), and stop short of the post. */
 const DRESSED = { from: 0.18, to: 0.95 } as const;
 const ROPE = { radius: 0.011, rings: 13, sides: 3 } as const;
 /** How far round its line the full wind swings a pennant, in radians. */
@@ -478,6 +483,8 @@ type Line = {
   across: V3;
   /** How squarely the wind takes the line's pennants: 1 full on from one side, -1 from the other, 0 along the line. */
   lee: number;
+  /** How far down the line its first pennant's place begins (0 the mast's head, 1 the post). */
+  from: number;
   pennants: number;
 };
 
@@ -489,7 +496,14 @@ const LINES: readonly Line[] = POSTS.map((post) => {
   const fall = Math.hypot(along[1] * along[0], along[1] * along[1] - 1, along[1] * along[2]);
   const down: V3 = [(along[1] * along[0]) / fall, (along[1] * along[1] - 1) / fall, (along[1] * along[2]) / fall];
   const across: V3 = [along[1] * down[2] - along[2] * down[1], along[2] * down[0] - along[0] * down[2], along[0] * down[1] - along[1] * down[0]];
-  return { post, along, down, across, lee: WIND[0] * across[0] + WIND[1] * across[2], pennants: Math.floor((length * (DRESSED.to - DRESSED.from)) / PENNANT.every) };
+  // How nearly the line runs out the way the wind blows: 1 straight down the wind, -1 straight up it.
+  const downwind = (run[0] * WIND[0] + run[2] * WIND[1]) / Math.hypot(run[0], run[2]);
+  // The cloth flies between the two lines that run out down the wind, and the wind swings their pennants in toward it:
+  // those lines are dressed only from where they have come down past the cloth's foot. On the line that runs straight
+  // up the wind nothing swings the pennants aside and the wind leans the line itself on the mast: there they begin a
+  // place lower than on the rest.
+  const from = downwind > 0 ? (HEAD[1] - (HOIST_TOP - CLOTH.height)) / -run[1] : downwind < -0.9 ? DRESSED.from + PENNANT.every / length : DRESSED.from;
+  return { post, along, down, across, lee: WIND[0] * across[0] + WIND[1] * across[2], from, pennants: Math.floor((length * (DRESSED.to - from)) / PENNANT.every) };
 });
 
 /** How many pennants fly in all. */
@@ -530,10 +544,10 @@ export function flutter(time: number, positions: Float32Array, normals: Float32A
   for (let index = 0; index < LINES.length; index++) {
     const line = LINES[index]!;
     const { down, across } = line;
-    const each = (DRESSED.to - DRESSED.from) / line.pennants;
+    const each = (DRESSED.to - line.from) / line.pennants;
     const half = (each * PENNANT.width) / PENNANT.every / 2;
     for (let pennant = 0; pennant < line.pennants; pennant++) {
-      const t = DRESSED.from + (pennant + 0.5) * each;
+      const t = line.from + (pennant + 0.5) * each;
       const phase = index * 2.3 + pennant * 1.9;
       lineAt(line, index, t - half, time);
       const ax = spot[0];
@@ -573,12 +587,16 @@ export function flutter(time: number, positions: Float32Array, normals: Float32A
   }
 }
 
-/** The lines and their pennants as one mesh, hung as at the first moment. */
-export function buntingShape(): Shape {
+/**
+ * The lines and their pennants as one mesh, hung as at the first moment. `threads` joins the same corners in pairs down
+ * each line: the rope as a bare line, for where it is too far off to be drawn as thick as it is.
+ */
+export function buntingShape(): Shape & { threads: Uint16Array } {
   const corners = ROPE_CORNERS + PENNANTS * 3;
   const positions = new Float32Array(corners * 3);
   const normals = new Float32Array(corners * 3);
   const indices: number[] = [];
+  const threads: number[] = [];
   let at = 0;
   for (const [index, line] of LINES.entries()) {
     for (let ring = 0; ring < ROPE.rings; ring++) {
@@ -591,13 +609,15 @@ export function buntingShape(): Shape {
         if (ring === ROPE.rings - 1) continue;
         const a = (index * ROPE.rings + ring) * ROPE.sides + side;
         const b = (index * ROPE.rings + ring) * ROPE.sides + ((side + 1) % ROPE.sides);
-        indices.push(a, a + ROPE.sides, b, b, a + ROPE.sides, b + ROPE.sides);
+        // Wound so that each face looks out of the rope, the way its corners do.
+        indices.push(a, b, a + ROPE.sides, b, b + ROPE.sides, a + ROPE.sides);
+        if (side === 0) threads.push(a, a + ROPE.sides);
       }
     }
   }
   for (let corner = ROPE_CORNERS; corner < corners; corner++) indices.push(corner);
   flutter(0, positions, normals);
-  return { positions, normals, indices: new Uint16Array(indices) };
+  return { positions, normals, indices: new Uint16Array(indices), threads: new Uint16Array(threads) };
 }
 
 /** The colour of every corner of {@link buntingShape}, as light: the lines in `rope`, the pennants in `colors` by turns. */
@@ -613,4 +633,35 @@ export function buntingColors(colors: readonly string[], rope = '#3a3331'): Floa
     }
   }
   return tints;
+}
+
+// The island as one thing: what the pointer meets of it, and how it comes to a village that is already on screen.
+
+/**
+ * What the pointer meets of the island, in place of the thousands of shapes on it: a cone from the water up past the
+ * finial, which holds the ground, the mast and the lines of pennants, and a box about the cloth, which flies out of the
+ * cone. Whatever of the island the camera can draw before a home stands inside the two (see Flag).
+ */
+export const HULL = {
+  /** The cone: the heights of its foot and its tip, its radius at the foot, and how many flat sides it is drawn with. */
+  cone: { foot: WATER_LEVEL, tip: 7.6, radius: 3.6, sides: 16 },
+  /**
+   * The box: how far it runs from the mast down the wind, the heights of its foot (the fly end sinks well below the
+   * hoist's) and its head, how far it reaches to either side of the wind's line, and the turn about the mast that
+   * lays it along the wind.
+   */
+  cloth: { length: CLOTH.length, foot: HOIST_TOP - CLOTH.height - 0.85, head: HOIST_TOP + 0.04, half: 0.75, turn: Math.atan2(-WIND[1], WIND[0]) },
+} as const;
+
+/** How long an island raised in a village already on screen takes to come up out of the lake, in seconds. */
+export const RISE_SECONDS = 1.8;
+
+/**
+ * How far below its place such an island stands `seconds` after it began to come up: under the lake by the whole
+ * height of its hull at first (its finial just covered), slow to leave and slow to arrive, and in its place from
+ * {@link RISE_SECONDS} on.
+ */
+export function sunk(seconds: number): number {
+  const t = Math.min(1, Math.max(0, seconds / RISE_SECONDS));
+  return (1 - t * t * (3 - 2 * t)) * (HULL.cone.tip - HULL.cone.foot);
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const KEY = (name: string) => `minihome:${name}`;
 
@@ -37,10 +37,19 @@ function writeStored(name: string, value: unknown): void {
   }
 }
 
-/** `useState` that survives reloads in this browser, for this viewer's own settings. */
+/**
+ * `useState` that survives reloads in this browser, for this viewer's own settings. Only a change is kept: a value
+ * nobody has touched is not written back, so it goes on following its fallback (which may differ from one window or
+ * version to the next).
+ */
 export function useStored<T>(name: string, fallback: T) {
   const [value, setValue] = useState(() => readStored(name, fallback));
-  useEffect(() => writeStored(name, value), [name, value]);
+  const kept = useRef(value);
+  useEffect(() => {
+    if (Object.is(kept.current, value)) return;
+    kept.current = value;
+    writeStored(name, value);
+  }, [name, value]);
   return [value, setValue] as const;
 }
 

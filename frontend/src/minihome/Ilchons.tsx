@@ -12,6 +12,8 @@ import { initialOf, REQUESTS_CHANGED, toneOf } from '../shell/Shell';
 
 export type Neighbors = {
   list: Ilchon[];
+  /** Whether `list` is what the server answered: not until it has been read, and not when it could not be. */
+  loaded: boolean;
   received: IlchonRequest[];
   status: IlchonStatus | null;
   error: string;
@@ -23,6 +25,7 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
   const { username } = view.profile;
   const visitor = !!viewer && !view.isOwner;
   const [list, setList] = useState<Ilchon[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [received, setReceived] = useState<IlchonRequest[]>([]);
   const [status, setStatus] = useState<IlchonStatus | null>(null);
   const [error, setError] = useState('');
@@ -34,6 +37,7 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
       visitor ? socialApi.status(username) : null,
     ]);
     setList(ilchons.ilchons);
+    setLoaded(true);
     setReceived(requests?.received ?? []);
     setStatus(standing);
   }, [username, view.isOwner, visitor]);
@@ -52,7 +56,7 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
       .then(() => window.dispatchEvent(new Event(REQUESTS_CHANGED)))
       .catch((problem: unknown) => setError(problemText(problem)));
   }, []);
-  return { list, received, status, error, act };
+  return { list, loaded, received, status, error, act };
 }
 
 function Person({ username, name, detail }: { username: string; name: string; detail: string }) {

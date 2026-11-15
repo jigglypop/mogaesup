@@ -5,14 +5,18 @@
 .mg-ziwei { container: mg-ziwei / inline-size; display: grid; gap: 12px; }
 
 /* A star: its name, how bright it stands (a small syllable after it) and its 사화 (a filled square). The kinds other
-   than 주성 have a colour each, the same in a cell and in the picked palace's card. */
+   than 주성 have a colour each, the same in a cell and in the picked palace's card. A star that stands bare is written
+   in its colour; one that sits on a fill has the colour as the fill and the page's ink as its name, since a colour on
+   its own wash is too faint to read. The syllable and the square never get smaller than a narrow cell's smallest
+   text. */
 .mg-ziwei-star { --star: var(--mg-ink); --star-soft: var(--mg-tint); display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
 .mg-ziwei-star[data-kind='lucky'] { --star: var(--mg-good); --star-soft: var(--mg-good-soft); }
 .mg-ziwei-star[data-kind='tough'] { --star: var(--mg-bad); --star-soft: var(--mg-bad-soft); }
 .mg-ziwei-star[data-kind='special'] { --star: var(--mg-warn); --star-soft: var(--mg-warn-soft); }
 .mg-ziwei-star[data-kind='misc'] { --star: var(--mg-muted); }
-.mg-ziwei-star small { font-size: 0.8em; font-weight: 700; color: var(--mg-muted); }
-.mg-ziwei-star [lang] { font-size: 0.86em; font-weight: 600; opacity: 0.72; }
+.mg-ziwei-star small { font-size: max(0.8em, 9.5px); font-weight: 700; color: var(--mg-muted); }
+/* The hanja beside a name is quieter than it by size and weight alone. */
+.mg-ziwei-star [lang] { font-size: 0.86em; font-weight: 600; }
 .mg-ziwei-sahwa {
   display: inline-grid;
   place-items: center;
@@ -22,7 +26,7 @@
   border-radius: 0.36em;
   background: var(--mg-tint);
   color: var(--mg-accent-ink);
-  font-size: 0.8em;
+  font-size: max(0.8em, 9.5px);
   font-style: normal;
   font-weight: 850;
   line-height: 1;
@@ -65,11 +69,12 @@
 /* The outline of a focused cell lies over its neighbours and the lines. */
 .mg-ziwei-palace:focus-visible { z-index: 2; outline-offset: 1px; }
 /* 삼방사정: the picked palace in the ink of a pressed control, its trines edged like the triangle that joins them,
-   the palace across like the broken line to it. */
+   the palace across like the broken line to it. The picked one's edge is three times theirs: where the home's colour
+   is as pale as the ink (metal, in the dark), the width alone tells it from its trines. */
 .mg-ziwei-palace[data-relation] { background: var(--el-soft); }
 .mg-ziwei-palace[data-relation='trine'] { border-color: var(--el-ink); }
 .mg-ziwei-palace[data-relation='opposite'] { border-color: var(--el-ink); border-style: dashed; }
-.mg-ziwei-palace[aria-pressed='true'] { border-color: var(--mg-ink); box-shadow: inset 0 0 0 1px var(--mg-ink), 2px 2px 0 var(--mg-saju-edge); }
+.mg-ziwei-palace[aria-pressed='true'] { border-color: var(--mg-ink); box-shadow: inset 0 0 0 1px var(--mg-ink), 0 0 0 1px var(--mg-ink), 3px 3px 0 var(--mg-saju-edge); }
 
 /* The head's pieces are the cell's own until the cell is wide enough to set them in one line. */
 .mg-ziwei-head { display: contents; }
@@ -83,7 +88,8 @@
 .mg-ziwei-minor { grid-area: minor; display: flex; flex-wrap: wrap; align-content: flex-start; align-items: center; gap: 1px 4px; font-size: var(--minor); font-weight: 750; }
 .mg-ziwei-minor .mg-ziwei-star { color: var(--star); }
 .mg-ziwei-minor .mg-ziwei-star small { display: none; }
-.mg-ziwei-more { font-family: var(--mg-mono); font-size: var(--fine); font-weight: 600; color: var(--mg-muted); }
+/* The count of the stars a narrow cell does not name stands at the end of its line, apart from the star before it. */
+.mg-ziwei-more { margin-left: auto; font-family: var(--mg-mono); font-size: var(--fine); font-weight: 600; color: var(--mg-muted); }
 .mg-ziwei-misc, .mg-ziwei-cycles { display: none; }
 /* The foot: the 대한, and beside it what else the palace is; above it, in a cell too narrow for both in a line (the
    lines of the foot are stacked upwards, so their start is the bottom). */
@@ -93,12 +99,13 @@
 .mg-ziwei-decade[data-current], .mg-badge.mg-ziwei-now { background: var(--mg-ink); color: var(--mg-surface); }
 .mg-ziwei-decade[data-current] { margin: 0 0 -1px -2px; padding: 1px 4px; border-radius: 5px; }
 .mg-ziwei-flags { display: flex; gap: 2px; margin-left: auto; }
-.mg-ziwei-flags i { display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 14px; padding: 0 2px; border: 1px solid currentColor; border-radius: 5px; color: var(--el-ink); font-size: 9px; font-style: normal; font-weight: 800; line-height: 1; white-space: nowrap; }
+.mg-ziwei-flags i { display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 14px; padding: 0 2px; border: 1px solid currentColor; border-radius: 5px; color: var(--el-ink); font-size: 9.5px; font-style: normal; font-weight: 800; line-height: 1; white-space: nowrap; }
 .mg-ziwei-flags i span { display: none; }
 
 /* The middle of the ring: the chart's summary over the lines of the picked palace's 삼방사정. The lines are drawn in a
-   square that reaches the cells around the middle, stretched to its shape with strokes that keep their width, and
-   they thin out under the summary so that it stays easy to read. */
+   square that reaches the cells around the middle, stretched to its shape with strokes that keep their width. They
+   thin out towards the middle, and the summary stands on a ground of its own: in a narrow ring it fills most of the
+   middle, out to where the lines are still strong. */
 .mg-ziwei-centre { position: relative; z-index: 1; grid-area: 2 / 2 / 4 / 4; display: grid; place-items: center; min-width: 0; }
 .mg-ziwei-lines { position: absolute; inset: calc(-1 * var(--gap)); pointer-events: none; }
 .mg-ziwei-lines svg {
@@ -114,7 +121,7 @@
 .mg-ziwei-lines polygon { fill: var(--el-soft); }
 .mg-ziwei-lines line { stroke-dasharray: 3 5; }
 .mg-ziwei-lines i { position: absolute; width: 7px; height: 7px; margin: -3.5px; border-radius: 50%; background: var(--el-ink); }
-.mg-ziwei-summary { position: relative; display: grid; justify-items: center; gap: 7px; min-width: 0; padding: 4px; }
+.mg-ziwei-summary { position: relative; display: grid; justify-items: center; gap: 7px; min-width: 0; padding: 4px; border-radius: 10px; background: var(--mg-card); }
 .mg-ziwei-bureau { font-size: clamp(15px, 5cqi, 18px); font-weight: 850; letter-spacing: -0.03em; color: var(--el-ink); }
 .mg-ziwei-summary dl { display: grid; grid-template-columns: auto auto; justify-content: center; gap: 3px 10px; margin: 0; }
 .mg-ziwei-summary dl > div { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
@@ -125,17 +132,22 @@
 .mg-ziwei-summary dd { margin: 0; font-size: var(--major); font-weight: 800; }
 .mg-ziwei-summary dd small { font-size: var(--fine); font-weight: 650; color: var(--mg-muted); }
 
-/* The picked palace. */
-.mg-ziwei .mg-ziwei-detail .mg-heading { flex-wrap: wrap; align-items: center; }
-.mg-ziwei .mg-ziwei-detail .mg-heading small { align-self: baseline; }
+/* The picked palace. Its card lies in a place as tall as the fullest of the twelve, whichever is picked: every
+   palace's card lies there unseen, and over them the picked one's, as tall as it is itself. */
+.mg-ziwei-fit { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.mg-ziwei-fit > * { grid-area: 1 / 1; }
+.mg-ziwei-fit > [aria-hidden] { visibility: hidden; }
+.mg-ziwei .mg-ziwei-fit .mg-heading { flex-wrap: wrap; align-items: center; }
+.mg-ziwei .mg-ziwei-fit .mg-heading small { align-self: baseline; }
 .mg-ziwei-halves { display: grid; gap: 9px; }
 .mg-ziwei-rows { display: grid; align-content: start; gap: 9px; margin: 0; }
 .mg-ziwei-rows > div { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: baseline; gap: 8px; }
 .mg-ziwei-rows dt { font-size: 11.5px; font-weight: 800; color: var(--mg-muted); }
 .mg-ziwei-rows dd { margin: 0; font-size: 13px; font-weight: 700; }
 .mg-ziwei-stars { display: flex; flex-wrap: wrap; gap: 5px; }
-.mg-ziwei-stars .mg-ziwei-star { gap: 4px; height: 26px; padding: 0 8px; border-radius: 9px; background: var(--star-soft); color: var(--star); font-size: 12.5px; font-weight: 750; }
+.mg-ziwei-stars .mg-ziwei-star { gap: 4px; height: 26px; padding: 0 8px; border-radius: 9px; background: var(--star-soft); color: var(--mg-ink); font-size: 12.5px; font-weight: 750; }
 .mg-ziwei-stars .mg-ziwei-star[data-kind='major'] { font-weight: 850; }
+.mg-ziwei-stars .mg-ziwei-star[data-kind='misc'] { color: var(--mg-muted); }
 .mg-ziwei-pairs { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .mg-ziwei-pairs > span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .mg-ziwei-pairs small { font-size: 11px; font-weight: 700; color: var(--mg-muted); }
@@ -163,13 +175,12 @@
   .mg-ziwei-flags i { height: 16px; padding: 0 4px; font-size: 10px; }
   .mg-ziwei-flags i span { display: inline; }
   .mg-ziwei-bureau { font-size: 20px; }
-  .mg-ziwei-summary { gap: 9px; }
+  .mg-ziwei-summary { gap: 9px; padding: 6px 8px; }
   .mg-ziwei-summary dl { gap: 5px 14px; }
 }
 
 @container mg-ziwei (min-width: 640px) {
   .mg-ziwei .mg-ziwei-board { --gap: 6px; --pad: 9px; --name: 14.5px; --major: 15px; --minor: 12px; --fine: 11px; padding: 14px; }
-  .mg-ziwei-grid { grid-template-rows: repeat(4, minmax(150px, 1fr)); }
   /* A cell this wide names its 잡성 and its cycles too, and the stars between sit on their colours. What else the
      palace is goes beside its name; a head too long for one line sets the 간지 on the next. */
   .mg-ziwei-palace { grid-template: 'head head' auto 'major major' auto 'minor minor' auto 'misc misc' 1fr 'foot cycles' auto / auto minmax(0, 1fr); gap: 5px 6px; }
@@ -180,18 +191,21 @@
   .mg-ziwei-ganji [lang] { display: inline; }
   .mg-ziwei-major { flex-flow: row wrap; gap: 2px 9px; }
   .mg-ziwei-minor { gap: 3px; }
-  .mg-ziwei-minor .mg-ziwei-star { height: 21px; padding: 0 6px; border-radius: 7px; background: var(--star-soft); }
+  .mg-ziwei-minor .mg-ziwei-star { height: 21px; padding: 0 6px; border-radius: 7px; background: var(--star-soft); color: var(--mg-ink); }
   .mg-ziwei-more { display: none; }
   .mg-ziwei-misc { grid-area: misc; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 2px 6px; font-size: 11.5px; font-weight: 650; }
   .mg-ziwei-misc .mg-ziwei-star { color: var(--star); }
   .mg-ziwei-cycles { grid-area: cycles; display: flex; flex-wrap: wrap; align-self: end; justify-content: flex-end; gap: 1px 5px; font-size: 10.5px; font-weight: 650; color: var(--mg-muted); word-spacing: 2px; }
   .mg-ziwei-cycles > span { white-space: nowrap; }
   .mg-ziwei-bureau { font-size: 26px; }
-  .mg-ziwei-summary { gap: 14px; }
+  .mg-ziwei-summary { gap: 14px; padding: 10px 14px; border-radius: 12px; }
   .mg-ziwei-summary dl { gap: 8px 22px; }
   .mg-ziwei-summary dl > div { gap: 8px; }
   .mg-ziwei-summary dt { font-size: 12.5px; }
   .mg-ziwei-summary dd { font-size: 16px; }
   .mg-ziwei-summary dd small { font-size: 12.5px; }
-  .mg-ziwei-halves { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 24px; }
+  /* Two columns: the stars on the left, and on the right the palaces it is read with over the rest. */
+  .mg-ziwei-halves { grid-template: auto 1fr / repeat(2, minmax(0, 1fr)); gap: 9px 24px; }
+  .mg-ziwei-halves > .mg-ziwei-rows { grid-column: 2; }
+  .mg-ziwei-halves > .mg-ziwei-kinds { grid-area: 1 / 1 / span 2; }
 }

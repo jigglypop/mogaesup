@@ -106,9 +106,21 @@ export function timeBranches(solarDate: string): TimeBranchOption[] {
 /** Stands in for an unknown hour pillar: no table of jamiblossom's 신살 holds this character. */
 const UNKNOWN = '？';
 
-const keyOf = (birth: Birth) => JSON.stringify([birth.calendar, birth.year, birth.month, birth.day, birth.leapMonth, birth.time, birth.gender]);
+/** What tells one birth from another: the same for two that read alike. */
+export const keyOf = (birth: Birth) => JSON.stringify([birth.calendar, birth.year, birth.month, birth.day, birth.leapMonth, birth.time, birth.gender]);
 const charts = new Map<string, Chart>();
 const readings = new Map<string, Reading>();
+/** The Seoul day the charts kept here were drawn on. A chart also says what is running that day (the 대운, the 명반's 대한). */
+let drawnOn = '';
+
+/** Lets go of the charts of an earlier day: a page left open draws them again, with what is running today. */
+function forgetOlder(): void {
+  const today = seoulNowParts().date;
+  if (today === drawnOn) return;
+  drawnOn = today;
+  charts.clear();
+  readings.clear();
+}
 
 /**
  * All jamiblossom calculates of a birth in one go: its 사주, and the 자미두수 명반 it draws on the way. Without a birth
@@ -116,6 +128,7 @@ const readings = new Map<string, Reading>();
  * @throws {BirthError} for a date or time that does not exist (the message is for the person who typed it).
  */
 export function chartOf(birth: Birth): Chart {
+  forgetOlder();
   const key = keyOf(birth);
   const known = charts.get(key);
   if (known) return known;
@@ -145,6 +158,7 @@ export function chartOf(birth: Birth): Chart {
  * @throws {BirthError} for a date or time that does not exist (the message is for the person who typed it).
  */
 export function readingOf(birth: Birth): Reading {
+  forgetOlder();
   const key = keyOf(birth);
   const known = readings.get(key);
   if (known) return known;

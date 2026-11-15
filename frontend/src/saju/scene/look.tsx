@@ -7,9 +7,9 @@ import { Fog, HalfFloatType, Plane, PMREMGenerator, Vector3, type DirectionalLig
 
 import { setLampGain } from './build';
 import { GRASS_LAYER } from './Built';
-import { AZIMUTH, ELEVATION, NO_INSET, turnedExtent, zoomOf, type Frame, type Inset } from './frames';
+import { AZIMUTH, cameraRange, NO_INSET, openArea, stand, turnedExtent, zoomOf, type Frame, type Inset } from './frames';
 import { Lake } from './Lake';
-import { skyTexture, type Mood } from './mood';
+import { skyTexture, WATER_LEVEL, type Mood } from './mood';
 
 // How the village is photographed: one isometric camera that moves between frames and turns about what it looks at, the
 // low sun and its shadows, the sky that lights what the sun does not, the lake, and the darkroom after (shade in the
@@ -18,7 +18,6 @@ import { skyTexture, type Mood } from './mood';
 /** `high` draws everything; `low` leaves out what a phone's graphics chip pays most for. */
 export type Quality = 'high' | 'low';
 
-const CAMERA_DISTANCE = 120;
 const SUN_DISTANCE = 90;
 /** How quickly the view follows a new frame: about a second to settle. */
 const FOLLOW = 3.4;
@@ -34,9 +33,9 @@ const ZOOM_SETTLED = 0.001;
  * every material for. The picture itself is drawn with a cut that removes nothing, so both share one version.
  */
 const CUT_NOTHING = [new Plane(new Vector3(0, 1, 0), 1e5)];
-/** The haze begins past the middle of the view and thickens toward the far water. */
-const HAZE_NEAR = CAMERA_DISTANCE + 4;
-const HAZE_FAR = CAMERA_DISTANCE + 95;
+/** The haze begins past the middle of the view and thickens toward the far water: metres beyond the point the camera looks at. */
+const HAZE_NEAR = 4;
+const HAZE_FAR = 95;
 
 export function initialQuality(): Quality {
   if (typeof matchMedia !== 'function') return 'high';
@@ -81,6 +80,8 @@ export function Look({ frame, snap = false, turn = UNTURNED, zoom = UNZOOMED, in
   const focus = useMemo(() => new Vector3(), []);
   const sky = useMemo(() => skyTexture(mood), [mood]);
   useEffect(() => () => sky.dispose(), [sky]);
+  /** The air's haze; where it begins and ends follows the camera each frame. */
+  const haze = useMemo(() => new Fog(mood.haze), [mood]);
 
   // The sky lights the scene, the air hazes its distance, and where nothing is drawn is deep water.
   useLayoutEffect(() => {
@@ -89,7 +90,7 @@ export function Look({ frame, snap = false, turn = UNTURNED, zoom = UNZOOMED, in
     pmrem.dispose();
     scene.environment = lit.texture;
     scene.environmentIntensity = mood.skyPower;
-    scene.fog = new Fog(mood.haze, HAZE_NEAR, HAZE_FAR);
+    scene.fog = haze;
     gl.setClearColor(mood.deep, 1);
     gl.toneMappingExposure = mood.exposure;
     gl.clippingPlanes = CUT_NOTHING;
@@ -101,7 +102,7 @@ export function Look({ frame, snap = false, turn = UNTURNED, zoom = UNZOOMED, in
       gl.clippingPlanes = [];
       lit.dispose();
     };
-  }, [gl, scene, camera, sky, mood]);
+  }, [gl, scene, camera, sky, haze, mood]);
 
   useFrame(() => {
     // Shadows are cast afresh every other frame, the frames the lake's mirror is not drawn: almost nothing moves.
@@ -125,25 +126,24 @@ export function Look({ frame, snap = false, turn = UNTURNED, zoom = UNZOOMED, in
     const azimuth = AZIMUTH + turned.current;
     const extent = turnedExtent(current, turned.current);
     // The frame is fitted to the part of the canvas the page's panels leave open, and drawn in the middle of it.
-    const cover = inset.current;
-    const open = { width: Math.max(1, size.width - cover.left - cover.right), height: Math.max(1, size.height - cover.top - cover.bottom) };
+    const open = openArea(size.width, size.height, inset.current);
     const view = shifted.current;
     const first = view.width === 0;
     const ease = (from: number, to: number) => (first || snap ? to : from + (to - from) * step);
-    view.x = ease(view.x, (cover.left - cover.right) / 2);
-    view.y = ease(view.y, (cover.top - cover.bottom) / 2);
+    view.x = ease(view.x, open.x);
+    view.y = ease(view.y, open.y);
     view.width = ease(view.width, open.width);
     view.height = ease(view.height, open.height);
     const settling = Math.abs(view.width - open.width) > 0.5 || Math.abs(view.height - open.height) > 0.5;
     turning.current = moving || zooming || settling;
     const [x, y, z] = current.target;
-    camera.position.set(
-      x + Math.cos(ELEVATION) * Math.sin(azimuth) * CAMERA_DISTANCE,
-      y + Math.sin(ELEVATION) * CAMERA_DISTANCE,
-      z + Math.cos(ELEVATION) * Math.cos(azimuth) * CAMERA_DISTANCE,
-    );
-    camera.lookAt(x, y, z);
     camera.zoom = zoomOf(extent, view.width, view.height) * zoomed.current;
+    // The camera stands as far back, and draws as far, as the lake runs in the canvas; the haze keeps its place over it.
+    const { distance, far } = cameraRange(size.height, view.y, camera.zoom, y - WATER_LEVEL, camera.near);
+    camera.far = far;
+    stand(camera, current.target, azimuth, distance);
+    haze.near = distance + HAZE_NEAR;
+    haze.far = distance + HAZE_FAR;
     // The whole canvas is drawn; the view is only moved so that the frame's middle falls in the open part's.
     if (Math.abs(view.x) > 0.5 || Math.abs(view.y) > 0.5) camera.setViewOffset(size.width, size.height, -view.x, -view.y, size.width, size.height);
     else if (camera.view?.enabled) camera.clearViewOffset();
@@ -160,8 +160,9 @@ export function Look({ frame, snap = false, turn = UNTURNED, zoom = UNZOOMED, in
     light.position.set(x + mood.toSun.x * SUN_DISTANCE, y + mood.toSun.y * SUN_DISTANCE, z + mood.toSun.z * SUN_DISTANCE);
     light.target.position.set(x, y, z);
     light.target.updateMatrixWorld();
-    // A low sun throws long shadows: what stands outside the view still shades what is in it.
-    const reach = Math.max(extent.halfWidth, extent.halfHeight) + 9;
+    // A low sun throws long shadows: what stands outside the view still shades what is in it. Zoomed out, the view
+    // holds that much more ground (a home's neighbours come into it), and the shadows are cast over all of it.
+    const reach = (Math.max(extent.halfWidth, extent.halfHeight) + 9) / Math.min(1, zoomed.current);
     const shadow = light.shadow.camera;
     if (Math.abs(shadow.right - reach) > 0.01) {
       shadow.left = shadow.bottom = -reach;

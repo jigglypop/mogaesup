@@ -21,13 +21,17 @@ export function useMood(): Mood {
   return mood;
 }
 
-/** How many islands are still to be built: the canvas waits for them before it draws its first frame. */
-export type Works = { pending: number };
+/**
+ * How many islands are still to be built: the canvas waits for them before it draws its first frame. `warm` says it
+ * has stopped waiting and is drawing.
+ */
+export type Works = { pending: number; warm: boolean };
 export const WorksContext = createContext<Works | null>(null);
 
 /**
  * What `make` builds, a little after mounting and `turn` builds after the first: a village is built an island at a
- * time, between which the page can answer, instead of all at once.
+ * time, between which the page can answer, instead of all at once. An island that joins a canvas already drawing (the
+ * flag's, raised once the 이웃 are counted) has no turn to wait for: the others were built long before.
  */
 export function useBuild(make: () => Build, turn: number): Build | null {
   const works = useContext(WorksContext);
@@ -39,10 +43,13 @@ export function useBuild(make: () => Build, turn: number): Build | null {
       if (counted && works) works.pending -= 1;
       counted = false;
     };
-    const timer = setTimeout(() => {
-      setBuild(make());
-      settle();
-    }, turn * BUILD_EVERY_MS);
+    const timer = setTimeout(
+      () => {
+        setBuild(make());
+        settle();
+      },
+      works?.warm ? 0 : turn * BUILD_EVERY_MS,
+    );
     return () => {
       clearTimeout(timer);
       settle();

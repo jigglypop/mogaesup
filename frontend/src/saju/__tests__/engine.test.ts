@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { branchElement, elementOfHanja, stemElement } from '../elements';
-import { BirthError, hasLeapMonth, isValidBirthDate, pillarsOf, readingOf, solarDateOf, timeBranchOf, timeBranches, type Birth } from '../engine';
+import { BirthError, hasLeapMonth, isValidBirthDate, pillarsOf, readingOf, solarDateOf, timeBranchOf, timeBranches, type Birth, type Reading } from '../engine';
 
 const birth = (changes: Partial<Birth> = {}): Birth => ({
   calendar: 'solar',
@@ -64,6 +64,32 @@ describe('사주 계산 (jamiblossom)', () => {
   it('같은 생일은 한 번만 계산한다', () => {
     expect(readingOf(birth())).toBe(readingOf(birth()));
     expect(readingOf(birth({ gender: 'female' }))).not.toBe(readingOf(birth()));
+  });
+
+  describe('지금의 대운', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    const on = (day: string) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(`${day}T12:00:00+09:00`));
+    };
+
+    it('하루 동안은 한 번 계산한 사주 그대로이고, 날이 바뀌면 그날의 대운으로 다시 읽는다', () => {
+      // 1992년 11월 12일 04:20생 남자의 대운은 2031년 3월 12일에 갑인에서 을묘로 넘어간다.
+      const garam = birth({ year: 1992, month: 11, day: 12, time: '04:20' });
+      const running = (reading: Reading) => reading.daYun[reading.currentDaYun ?? -1]?.ganZhiKo;
+      on('2031-03-11');
+      const before = readingOf(garam);
+      expect(readingOf(garam)).toBe(before);
+      expect(running(before)).toBe('갑인');
+      // 열어 둔 페이지에서도 다음 날에는 다시 계산한다.
+      on('2031-03-13');
+      const after = readingOf(garam);
+      expect(after).not.toBe(before);
+      expect(running(after)).toBe('을묘');
+      expect(after.day).toEqual(before.day);
+    });
   });
 
   it('기둥의 오행은 천간·지지의 오행과 같다', () => {

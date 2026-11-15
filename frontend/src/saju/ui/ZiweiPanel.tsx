@@ -1,11 +1,11 @@
 import './ziwei.css';
 
-import { useState } from 'react';
+import { memo, useState } from 'react';
 
 import { Link } from 'react-router-dom';
 
 import { Icon } from '../../ui/icons';
-import type { Birth } from '../engine';
+import { keyOf, type Birth } from '../engine';
 import { STAR_KINDS, ziweiOf, type Ziwei, type ZiweiPalace, type ZiweiStar } from '../ziwei';
 
 /** How a palace stands to the one that is picked: 삼방사정 is the picked palace, its two trines and the one across. */
@@ -143,21 +143,26 @@ function Lines({ ziwei, picked }: { ziwei: Ziwei; picked: ZiweiPalace }) {
 }
 
 /**
- * The picked palace in full: every star by kind, the palaces it is read with, its cycles and years, and its 비성사화.
- * `onPick` goes on to one of the palaces it is read with.
+ * A palace in full: the palaces it is read with, every star by kind, its cycles and years, and its 비성사화. `onPick`
+ * goes on to one of the palaces it is read with; without it the card is a copy that only takes up room, with no name
+ * of its own and nothing in it that can be pressed.
  */
-function Detail({ ziwei, palace, onPick }: { ziwei: Ziwei; palace: ZiweiPalace; onPick: (index: number) => void }) {
+function Detail({ ziwei, palace, onPick }: { ziwei: Ziwei; palace: ZiweiPalace; onPick?: (index: number) => void }) {
   // The palaces it is read with wear the edge their cells wear on the ring, and pick as those cells do. Each keeps its
   // place whichever palace it names, so the focus stays on the button that was pressed.
   const related = (relation: Relation, indexes: readonly number[]) =>
     indexes.map((index, place) => (
-      <button key={place} type="button" data-relation={relation} onClick={() => onPick(index)}>
+      <button key={place} type="button" data-relation={relation} disabled={!onPick} onClick={() => onPick?.(index)}>
         {ziwei.palaces[index]?.name}
       </button>
     ));
   const kinds = STAR_KINDS.filter(({ kind }) => palace.stars[kind].length > 0);
   return (
-    <section className="mg-saju-card mg-ziwei-detail" aria-label={`${palace.name} ${palace.ganji.ko}`}>
+    <section
+      className={onPick ? 'mg-saju-card mg-ziwei-detail' : 'mg-saju-card'}
+      aria-label={onPick ? `${palace.name} ${palace.ganji.ko}` : undefined}
+      aria-hidden={onPick ? undefined : true}
+    >
       <h2 className="mg-heading">
         {palace.name}
         <small>
@@ -168,8 +173,22 @@ function Detail({ ziwei, palace, onPick }: { ziwei: Ziwei; palace: ZiweiPalace; 
         {palace.isCurrent && <span className="mg-badge mg-ziwei-now">현재 대한</span>}
       </h2>
       <div className="mg-ziwei-halves">
-        {kinds.length > 0 && (
+        {/* These come first: under the stars, whose rows differ from palace to palace, a button that was pressed would
+            be drawn somewhere else, away from the pointer that goes on round the 삼합. */}
+        {palace.surround && (
           <dl className="mg-ziwei-rows">
+            <div>
+              <dt>삼합</dt>
+              <dd className="mg-ziwei-related">{related('trine', palace.surround.trines)}</dd>
+            </div>
+            <div>
+              <dt>대궁</dt>
+              <dd className="mg-ziwei-related">{related('opposite', [palace.surround.opposite])}</dd>
+            </div>
+          </dl>
+        )}
+        {kinds.length > 0 && (
+          <dl className="mg-ziwei-rows mg-ziwei-kinds">
             {kinds.map(({ kind, label }) => (
               <div key={kind}>
                 <dt>{label}</dt>
@@ -183,18 +202,6 @@ function Detail({ ziwei, palace, onPick }: { ziwei: Ziwei; palace: ZiweiPalace; 
           </dl>
         )}
         <dl className="mg-ziwei-rows">
-          {palace.surround && (
-            <>
-              <div>
-                <dt>삼합</dt>
-                <dd className="mg-ziwei-related">{related('trine', palace.surround.trines)}</dd>
-              </div>
-              <div>
-                <dt>대궁</dt>
-                <dd className="mg-ziwei-related">{related('opposite', [palace.surround.opposite])}</dd>
-              </div>
-            </>
-          )}
           {palace.cycles.length > 0 && (
             <div>
               <dt>12신</dt>
@@ -251,6 +258,11 @@ function Detail({ ziwei, palace, onPick }: { ziwei: Ziwei; palace: ZiweiPalace; 
   );
 }
 
+/** Every palace's card, to lie unseen where the picked one's is. A chart's twelve do not change with the pick. */
+const Unseen = memo(function Unseen({ ziwei }: { ziwei: Ziwei }) {
+  return ziwei.palaces.map((palace) => <Detail key={palace.index} ziwei={ziwei} palace={palace} />);
+});
+
 /**
  * 자미두수: the 명반 of a home's birth, as jamiblossom draws it. The twelve palaces stand round a ring by earthly branch
  * with the chart's summary in the middle; picking one marks its 삼방사정 and shows it in full below. `editTo` is where
@@ -258,8 +270,10 @@ function Detail({ ziwei, palace, onPick }: { ziwei: Ziwei; palace: ZiweiPalace; 
  */
 export function ZiweiPanel({ birth, editTo }: { birth: Birth; editTo: string | null }) {
   const ziwei = ziweiOf(birth);
-  // The palace picked on this chart: another birth's chart starts again from its own 명궁.
-  const [pick, setPick] = useState<{ on: Ziwei; index: number } | null>(null);
+  // The palace picked on this birth's chart: another birth's starts again from its own 명궁. It is held against the
+  // birth and not the chart, which is drawn again each day.
+  const of = keyOf(birth);
+  const [pick, setPick] = useState<{ of: string; index: number } | null>(null);
   if (!ziwei) {
     return (
       <section className="mg-saju-card mg-ziwei-none" aria-label="자미두수 명반">
@@ -272,9 +286,9 @@ export function ZiweiPanel({ birth, editTo }: { birth: Birth; editTo: string | n
       </section>
     );
   }
-  const picked = ziwei.palaces[pick?.on === ziwei ? pick.index : ziwei.soul];
+  const picked = ziwei.palaces[pick?.of === of ? pick.index : ziwei.soul];
   if (!picked) return null;
-  const pickAt = (index: number) => setPick({ on: ziwei, index });
+  const pickAt = (index: number) => setPick({ of, index });
   const relationOf = (index: number): Relation | null => {
     if (index === picked.index) return 'self';
     if (picked.surround?.trines.includes(index)) return 'trine';
@@ -334,7 +348,13 @@ export function ZiweiPanel({ birth, editTo }: { birth: Birth; editTo: string | n
           ))}
         </div>
       </section>
-      <Detail ziwei={ziwei} palace={picked} onPick={pickAt} />
+      {/* The place of the picked palace's card is as tall as the fullest of the twelve, whichever is picked: under a
+          card that got shorter, a column scrolled to its end would slide, and the ring and the card's buttons with
+          it, from under the pointer. */}
+      <div className="mg-ziwei-fit">
+        <Detail ziwei={ziwei} palace={picked} onPick={pickAt} />
+        <Unseen ziwei={ziwei} />
+      </div>
     </div>
   );
 }

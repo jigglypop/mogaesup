@@ -57,7 +57,7 @@ describe('집 이야기', () => {
     visits: { today: 0, total: 0 },
     profile: { ownerId: 'u2', username: 'noeul', ownerName: '노을이', title: '', statusMessage: '', mood: 0, minime: 'man', emoji: '😊', visibility: 'public', updatedAt: '2026-11-01T00:00:00Z' },
   });
-  const neighbors = (changes: Partial<Neighbors> = {}): Neighbors => ({ list: [], received: [], status: null, error: '', act: (action) => void action(), ...changes });
+  const neighbors = (changes: Partial<Neighbors> = {}): Neighbors => ({ list: [], loaded: true, received: [], status: null, error: '', act: (action) => void action(), ...changes });
   const standing = (relation: IlchonStatus['relation']): IlchonStatus => ({
     relation,
     ilchon: relation === 'ilchon' ? { user: { id: 'u2', username: 'noeul', displayName: '노을이', emoji: '😊' }, name: '옆집', theirName: '앞집', since: '2026-11-01T00:00:00Z' } : null,

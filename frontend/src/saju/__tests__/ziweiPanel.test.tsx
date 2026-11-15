@@ -1,7 +1,7 @@
 import { act } from 'react';
 
 import { MemoryRouter } from 'react-router-dom';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { mount } from '../../__tests__/mount';
 import type { Birth } from '../engine';
@@ -25,15 +25,18 @@ const cell = (container: Element, name: string) => {
 const pressed = (container: Element) => cells(container).filter((button) => button.getAttribute('aria-pressed') === 'true');
 /** Each marked palace with how it stands to the picked one. */
 const marked = (container: Element) => cells(container).flatMap((button) => (button.dataset['relation'] ? [`${named(button)} ${button.dataset['relation']}`] : []));
-const rows = (container: Element) => [...container.querySelectorAll('.mg-ziwei-detail .mg-ziwei-rows > div')].map((row) => [row.querySelector('dt')?.textContent, texts(row, 'dd > *').join(' | ')]);
+/** The picked palace's card: every palace's lies unseen in the same place. */
+const shown = (container: Element) => container.querySelector('.mg-ziwei-fit > :not([aria-hidden])')!;
+const rows = (container: Element) => [...shown(container).querySelectorAll('.mg-ziwei-rows > div')].map((row) => [row.querySelector('dt')?.textContent, texts(row, 'dd > *').join(' | ')]);
+const related = (container: Element) => [...shown(container).querySelectorAll<HTMLButtonElement>('.mg-ziwei-related button')];
 
 describe('자미두수 명반 패널', () => {
-  // 지금의 대한은 차트를 처음 계산한 날로 정해진다: 그날을 정해 두고 본다. 2026년 11월의 가람은 서른다섯이다.
-  beforeAll(() => {
+  // 지금의 대한은 오늘 날짜로 정해진다: 그날을 정해 두고 본다. 2026년 11월의 가람은 서른다섯이다.
+  beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-11-14T12:00:00+09:00'));
   });
-  afterAll(() => {
+  afterEach(() => {
     vi.useRealTimers();
   });
 
@@ -136,59 +139,102 @@ describe('자미두수 명반 패널', () => {
     expect(detail().getAttribute('aria-label')).toBe('명궁 기유');
     expect(texts(detail(), 'h2')).toEqual(['명궁기유 己酉']);
     expect(rows(container)).toEqual([
+      ['삼합', '관록 | 재백'],
+      ['대궁', '천이'],
       ['주성', '천부天府왕'],
       ['살성', '지공地空'],
       ['잡성', '함지咸池 | 천수天壽 | 천주天廚 | 천공天空 | 파쇄破碎'],
-      ['삼합', '관록 | 재백'],
-      ['대궁', '천이'],
       ['12신', '장생 목욕 | 박사 복병 | 장전 함지 | 태세 회기'],
       ['대한', '5–14세'],
       ['소한', '12 | 24 | 36 | 48 | 60 | 72 | 84 | 96 | 108 | 120세'],
       ['비성사화', '록 천이 | 권 복덕 | 과 노복 | 기 자녀'],
     ]);
-    expect([...detail().querySelectorAll<HTMLElement>('.mg-ziwei-related button')].map((item) => item.dataset['relation'])).toEqual(['trine', 'trine', 'opposite']);
+    expect(related(container).map((item) => item.dataset['relation'])).toEqual(['trine', 'trine', 'opposite']);
 
     await act(async () => cell(container, '관록').click());
     expect(detail().getAttribute('aria-label')).toBe('관록 계축');
     expect(texts(detail(), 'h2')).toEqual(['관록계축 癸丑신궁']);
-    expect(rows(container).slice(0, 4)).toEqual([
+    expect(rows(container).slice(0, 6)).toEqual([
+      ['삼합', '재백 | 명궁'],
+      ['대궁', '부처'],
       ['주성', '천상天相묘'],
       ['보좌·길성', '좌보左輔과 | 우필右弼'],
       ['살성', '지겁地劫'],
       ['잡성', '천희天喜 | 월덕月德'],
     ]);
-    expect([...detail().querySelectorAll<HTMLElement>('.mg-ziwei-stars .mg-ziwei-star')].map((star) => star.dataset['kind'])).toEqual(['major', 'lucky', 'lucky', 'tough', 'misc', 'misc']);
+    expect([...shown(container).querySelectorAll<HTMLElement>('.mg-ziwei-stars .mg-ziwei-star')].map((star) => star.dataset['kind'])).toEqual(['major', 'lucky', 'lucky', 'tough', 'misc', 'misc']);
 
     // 지금의 대한인 궁은 그렇다고 적는다.
     await act(async () => cell(container, '전택').click());
     expect(texts(detail(), 'h2 .mg-badge')).toEqual(['현재 대한']);
     // 주성이 없는 궁에는 그 줄이 없다.
     await act(async () => cell(container, '재백').click());
-    expect(rows(container).map(([label]) => label)).toEqual(['보좌·길성', '잡성', '삼합', '대궁', '12신', '대한', '소한', '비성사화']);
+    expect(rows(container).map(([label]) => label)).toEqual(['삼합', '대궁', '보좌·길성', '잡성', '12신', '대한', '소한', '비성사화']);
     await unmount();
   });
 
-  it('삼합과 대궁은 그 궁으로 가는 버튼이고, 누른 버튼은 제자리에 남는다', async () => {
+  it('삼합과 대궁은 그 궁으로 가는 버튼이고, 누른 버튼이 초점을 지닌 채 다음 궁을 적는다', async () => {
     const { container, unmount } = await mount(panel(garam));
-    const related = () => [...container.querySelectorAll<HTMLButtonElement>('.mg-ziwei-related button')];
-    expect(related().map((button) => button.textContent)).toEqual(['관록', '재백', '천이']);
-    const across = related()[2]!;
+    expect(related(container).map((button) => button.textContent)).toEqual(['관록', '재백', '천이']);
+    const across = related(container)[2]!;
     across.focus();
     await act(async () => across.click());
     expect(container.querySelector('.mg-ziwei-detail')?.getAttribute('aria-label')).toBe('천이 계묘');
     expect(pressed(container)).toEqual([cell(container, '천이')]);
     expect(marked(container)).toEqual(['명궁 opposite', '복덕 trine', '천이 self', '부처 trine']);
     // 대궁의 대궁은 떠나온 궁이다: 같은 버튼이 초점을 지닌 채 그 이름을 적는다.
-    expect(related().map((button) => button.textContent)).toEqual(['부처', '복덕', '명궁']);
-    expect(related()[2]).toBe(across);
+    expect(related(container).map((button) => button.textContent)).toEqual(['부처', '복덕', '명궁']);
+    expect(related(container)[2]).toBe(across);
     expect(document.activeElement).toBe(across);
     await act(async () => across.click());
     expect(container.querySelector('.mg-ziwei-detail')?.getAttribute('aria-label')).toBe('명궁 기유');
     // 삼합을 따라가면 세 궁을 돈다.
     for (const name of ['관록 계축', '재백 을사', '명궁 기유']) {
-      await act(async () => related()[0]!.click());
+      await act(async () => related(container)[0]!.click());
       expect(container.querySelector('.mg-ziwei-detail')?.getAttribute('aria-label')).toBe(name);
     }
+    await unmount();
+  });
+
+  it('삼합과 대궁은 어느 궁을 골라도 카드의 첫 두 줄이다', async () => {
+    // 별의 줄 수는 궁마다 달라서, 그 아래에 있으면 누른 버튼이 손끝에서 달아난다.
+    const { container, unmount } = await mount(panel(garam));
+    const counts = new Set<number>();
+    for (const button of cells(container)) {
+      await act(async () => button.click());
+      const all = rows(container).map(([label]) => label);
+      expect(all.slice(0, 2)).toEqual(['삼합', '대궁']);
+      counts.add(all.length);
+      // 제목 바로 아래, 별의 줄들보다 앞이다.
+      expect([...shown(container).children].map((child) => child.tagName)).toEqual(['H2', 'DIV']);
+      expect(shown(container).querySelector('.mg-ziwei-halves')?.firstElementChild?.querySelectorAll('.mg-ziwei-related button')).toHaveLength(3);
+    }
+    // 가람의 열두 궁은 별의 줄이 둘에서 넷까지다.
+    expect([...counts].sort((a, b) => a - b)).toEqual([8, 9, 10]);
+    await unmount();
+  });
+
+  it('고른 궁의 카드 밑에 열두 궁의 카드가 누를 수 없게 깔려 있고, 다른 궁을 골라도 그대로다', async () => {
+    // 카드가 놓이는 자리의 키를 열두 궁 가운데 가장 긴 카드에 맞춘다: 보이는 카드가 먼저이고, 그 뒤로 차트의 순서대로 열두 궁이다.
+    const { container, unmount } = await mount(panel(garam));
+    const fit = container.querySelector('.mg-ziwei-fit')!;
+    const unseen = () => [...fit.children].filter((child) => child.getAttribute('aria-hidden') === 'true');
+    expect([...fit.children].map((child) => child.getAttribute('aria-hidden'))).toEqual([null, ...Array<string>(12).fill('true')]);
+    // 이름과 고른 궁의 카드라는 표시는 보이는 카드에만 있다.
+    expect([...container.querySelectorAll('.mg-ziwei-detail')]).toEqual([shown(container)]);
+    expect(unseen().map((copy) => copy.getAttribute('aria-label'))).toEqual(Array<null>(12).fill(null));
+    expect(unseen().map((copy) => texts(copy, 'h2')[0])).toEqual([
+      '노복임인 壬寅래인궁', '천이계묘 癸卯', '질액갑진 甲辰', '재백을사 乙巳', '자녀병오 丙午', '부처정미 丁未',
+      '형제무신 戊申', '명궁기유 己酉', '부모경술 庚戌', '복덕신해 辛亥', '전택임자 壬子현재 대한', '관록계축 癸丑신궁',
+    ]);
+    const buttons = () => unseen().flatMap((copy) => [...copy.querySelectorAll('button')]);
+    expect(buttons()).toHaveLength(36);
+    expect(buttons().every((button) => button.disabled)).toBe(true);
+    expect(related(container).every((button) => !button.disabled)).toBe(true);
+    const before = unseen();
+    await act(async () => cell(container, '재백').click());
+    expect(unseen().map((copy, index) => copy === before[index])).toEqual(Array<boolean>(12).fill(true));
+    expect(buttons().every((button) => button.disabled)).toBe(true);
     await unmount();
   });
 
@@ -199,6 +245,26 @@ describe('자미두수 명반 패널', () => {
     expect(pressed(container).map((button) => button.getAttribute('aria-label'))).toEqual(['명궁 임인, 탐랑']);
     expect(container.querySelector('.mg-ziwei-detail')?.getAttribute('aria-label')).toBe('명궁 임인');
     expect(container.querySelector('.mg-ziwei-bureau')?.textContent).toBe('금사국');
+    await unmount();
+  });
+
+  it('날이 바뀌어 명반을 다시 지어도 고른 궁은 그대로이고, 지금의 대한은 그날의 궁으로 옮긴다', async () => {
+    const current = (container: Element) => [...container.querySelectorAll('.mg-ziwei-decade[data-current]')].map((decade) => `${named(decade.closest('button')!)} ${decade.textContent}`);
+    // 2036년의 설은 1월 28일이다: 그 전날 열어 둔 패널이다.
+    vi.setSystemTime(new Date('2036-01-27T22:00:00+09:00'));
+    const { container, rerender, unmount } = await mount(panel(garam));
+    await act(async () => cell(container, '재백').click());
+    expect(current(container)).toEqual(['전택 35–44']);
+    vi.setSystemTime(new Date('2036-01-28T10:00:00+09:00'));
+    // 페이지가 다시 그려도(패널을 넓힌다든지) 고른 궁은 명궁으로 돌아가지 않는다.
+    await rerender(panel({ ...garam }));
+    expect(pressed(container)).toEqual([cell(container, '재백')]);
+    expect(current(container)).toEqual(['관록 45–54']);
+    // 날이 바뀌고 처음 누른 것도 그 궁을 고른다.
+    vi.setSystemTime(new Date('2036-01-29T00:10:00+09:00'));
+    await act(async () => cell(container, '자녀').click());
+    expect(pressed(container)).toEqual([cell(container, '자녀')]);
+    expect(container.querySelector('.mg-ziwei-detail')?.getAttribute('aria-label')).toBe('자녀 병오');
     await unmount();
   });
 

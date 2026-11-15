@@ -318,7 +318,9 @@ function Ripples({ life }: { life: Extract<Life, { kind: 'ripples' }> }) {
   useAnimation((time) => {
     rings.current.forEach((ring, index) => {
       if (!ring) return;
-      const age = (time * 0.3 + index / 2 + life.at[0]) % 1;
+      // A place west of its island's middle has a negative x, and a remainder keeps its sign: left as it was, the
+      // ring's scale went negative, it turned face down and only the lake's mirror drew it.
+      const age = (((time * 0.3 + index / 2 + life.at[0]) % 1) + 1) % 1;
       ring.scale.setScalar(0.1 + age * life.reach);
       materials[index]!.opacity = 0.5 * (1 - age);
     });

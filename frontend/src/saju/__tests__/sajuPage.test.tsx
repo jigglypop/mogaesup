@@ -4,14 +4,15 @@ import { MemoryRouter, Route, Routes, useLocation, useParams } from 'react-route
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError } from '../../api/client';
-import type { HomeView, IlchonStatus, SajuVillage, User } from '../../api/types';
+import type { HomeView, Ilchon, IlchonStatus, SajuVillage, User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
-import type { Frame } from '../scene/frames';
+import type { StageFlag } from '../scene/Flag';
+import { frameOf, type Frame, type Inset } from '../scene/frames';
 import type { StageBridge, StageHandle, StageHome } from '../scene/Stage';
-import { PLOT_REACH } from '../village';
+import { FLAG_SPOT, PLOT_REACH } from '../village';
 import { personOf } from './people';
 
-type StageProps = { ref?: Ref<StageHandle>; homes: StageHome[]; bridges: StageBridge[]; frame: Frame; focus: string | null; onVisit: (id: string) => void; pins?: ReactNode };
+type StageProps = { ref?: Ref<StageHandle>; homes: StageHome[]; bridges: StageBridge[]; frame: Frame; inset?: Inset; flag?: StageFlag | null; focus: string | null; onVisit: (id: string) => void; pins?: ReactNode };
 const { stage, api } = vi.hoisted(() => ({
   stage: { props: null as StageProps | null, zooms: [] as number[] },
   api: { mine: vi.fn(), get: vi.fn(), visit: vi.fn(), village: vi.fn(), save: vi.fn(), remove: vi.fn(), ilchons: vi.fn(), requests: vi.fn(), status: vi.fn() },
@@ -60,6 +61,8 @@ const standing = (relation: IlchonStatus['relation']): IlchonStatus => ({
   ilchon: relation === 'ilchon' ? { user: { id: 'u-sol', username: 'sol', displayName: '모개', emoji: '😊' }, name: '옆집', theirName: '앞집', since: '2026-11-01T00:00:00Z' } : null,
   request: null,
 });
+const ilchons = (count: number): Ilchon[] =>
+  Array.from({ length: count }, (_, index) => ({ user: { id: `u-n${index}`, username: `n${index}`, displayName: `이웃${index}`, emoji: '😊' }, name: '이웃', theirName: '이웃', since: '2026-11-01T00:00:00Z' }));
 
 function Page() {
   const { slug = '', '*': rest = '' } = useParams();
@@ -92,6 +95,7 @@ describe('미니홈피 화면', () => {
   });
   afterEach(() => {
     localStorage.clear();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.resetAllMocks();
   });
@@ -306,11 +310,18 @@ describe('미니홈피 화면', () => {
     expect(panel().hidden).toBe(false);
     expect(container.querySelector('.mg-saju-world')?.classList.contains('has-panel')).toBe(true);
     await type(field(container, 'year'), '1989');
-    await act(async () => container.querySelector<HTMLButtonElement>('.mg-saju-panel-close')!.click());
+    const close = () => container.querySelector<HTMLButtonElement>('.mg-saju-panel-close')!;
+    const opener = () => container.querySelector<HTMLButtonElement>('.mg-saju-panel-open')!;
+    expect([close().getAttribute('aria-expanded'), close().getAttribute('aria-controls')]).toEqual(['true', panel().id]);
+    await act(async () => close().click());
     expect(panel().hidden).toBe(true);
     expect(container.querySelector('.mg-saju-world')?.classList.contains('has-panel')).toBe(false);
-    await act(async () => container.querySelector<HTMLButtonElement>('.mg-saju-panel-open')!.click());
+    // 누른 단추는 사라지고, 초점은 되돌리는 단추로 간다.
+    expect(document.activeElement).toBe(opener());
+    expect([opener().getAttribute('aria-expanded'), opener().getAttribute('aria-controls')]).toEqual(['false', panel().id]);
+    await act(async () => opener().click());
     expect(panel().hidden).toBe(false);
+    expect(document.activeElement).toBe(close());
     expect(field(container, 'year').value).toBe('1989');
     await act(async () => container.querySelector<HTMLButtonElement>('.mg-saju-panel-close')!.click());
     await unmount();
@@ -344,6 +355,193 @@ describe('미니홈피 화면', () => {
     expect(where(container)).toBe('/@sol');
     expect(container.querySelector('.mg-saju-form')).toBeNull();
     await unmount();
+  });
+
+  it('머리띠와 패널, 독이 가린 만큼을 캔버스에 알리고, 다른 주소에서 돌아온 화면도 그렇게 한다', async () => {
+    const boxes: Record<string, [number, number, number, number]> = {
+      'mg-saju-world': [0, 0, 1000, 800],
+      'mg-topbar': [20, 20, 980, 74],
+      'mg-saju-dock': [118, 732, 568, 780],
+      'mg-saju-panel': [588, 92, 980, 780],
+    };
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const [left, top, right, bottom] = Object.entries(boxes).find(([name]) => this.classList.contains(name))?.[1] ?? [0, 0, 0, 0];
+      return { left, top, right, bottom, x: left, y: top, width: right - left, height: bottom - top, toJSON: () => ({}) };
+    });
+    const covered = { top: 74, right: 412, bottom: 68, left: 0 };
+    auth = { status: 'signedIn', user: noeul };
+    const direct = await open('/@sol');
+    expect(stage.props?.inset).toEqual(covered);
+    // 가린 만큼은 캔버스의 기다림 표시가 설 자리에도 쓰인다.
+    expect(direct.container.querySelector<HTMLElement>('.mg-saju-stage')?.style.getPropertyValue('--mg-cover-right')).toBe('412px');
+    await direct.unmount();
+    const redirected = await open('/@sol/edit');
+    expect(where(redirected.container)).toBe('/@sol');
+    expect(stage.props?.inset).toEqual(covered);
+    // 접으면 패널이 가리던 쪽이 열린다.
+    await act(async () => redirected.container.querySelector<HTMLButtonElement>('.mg-saju-panel-close')!.click());
+    expect(stage.props?.inset).toEqual({ ...covered, right: 0 });
+    await redirected.unmount();
+  });
+
+  it('탭을 바꾸면 패널은 처음부터 보여 준다', async () => {
+    const { container, unmount } = await open('/@sol');
+    const side = container.querySelector<HTMLElement>('.mg-saju-side')!;
+    for (const tab of ['사주보기', '자미두수', '홈', '마을']) {
+      side.scrollTop = 120;
+      await act(async () => link(container, tab)!.click());
+      await settle();
+      expect([tab, side.scrollTop]).toEqual([tab, 0]);
+    }
+    expect(where(container)).toBe('/@sol/village');
+    // 글자판 없이도 읽어 내려갈 수 있게 초점을 받는다.
+    expect(side.tabIndex).toBe(0);
+    await unmount();
+  });
+
+  it('자미두수는 같은 틀 안에서 명반을 열고, 그 탭에서만 패널을 넓힌다', async () => {
+    const { container, unmount } = await open('/@sol?view=ziwei');
+    expect(menu(container)).toEqual(['홈 /@sol', '사주보기 /@sol?view=chart', '자미두수* /@sol?view=ziwei', '마을 /@sol/village']);
+    expect(container.querySelector('.mg-saju-side [aria-label="자미두수 명반"]')).not.toBeNull();
+    const world = container.querySelector('.mg-saju-world')!;
+    const widen = () => container.querySelector<HTMLButtonElement>('.mg-saju-panel-roomy');
+    expect([widen()?.getAttribute('aria-label'), widen()?.getAttribute('aria-pressed'), world.classList.contains('is-roomy')]).toEqual(['패널 넓히기', 'false', false]);
+    await act(async () => widen()!.click());
+    // 이름은 그대로이고 눌린 상태가 넓다는 것을 말한다.
+    expect([widen()?.getAttribute('aria-label'), widen()?.getAttribute('aria-pressed'), world.classList.contains('is-roomy')]).toEqual(['패널 넓히기', 'true', true]);
+    // 다른 탭에는 넓히는 단추가 없고, 넓혀 둔 패널도 그 탭에서만 넓다.
+    await act(async () => link(container, '사주보기')!.click());
+    await settle();
+    expect(widen()).toBeNull();
+    expect(world.classList.contains('is-roomy')).toBe(false);
+    await unmount();
+    const again = await open('/@sol?view=ziwei');
+    expect(again.container.querySelector('.mg-saju-world')?.classList.contains('is-roomy')).toBe(true);
+    await again.unmount();
+  });
+
+  it('시를 모르는 집에는 명반이 없어 패널을 넓히지 않고, 주인에게만 다시 입력하는 길이 있다', async () => {
+    localStorage.setItem('minihome:saju:ziwei-wide', 'true');
+    villages['sol'] = { saju: { name: '솔', birth: { ...personOf('sol').birth, time: null } }, village: [] };
+    const own = await open('/@sol?view=ziwei');
+    expect(own.container.querySelector('.mg-saju-side [aria-label="자미두수 명반"]')).not.toBeNull();
+    expect(own.container.querySelector('.mg-saju-panel-roomy')).toBeNull();
+    expect(own.container.querySelector('.mg-saju-world')?.classList.contains('is-roomy')).toBe(false);
+    expect(link(own.container, '사주 다시 입력')?.getAttribute('href')).toBe('/@sol/edit');
+    // 넓혀 둔 것은 명반이 있는 집을 위해 그대로 남는다.
+    expect(localStorage.getItem('minihome:saju:ziwei-wide')).toBe('true');
+    await own.unmount();
+    auth = { status: 'signedIn', user: noeul };
+    const visit = await open('/@sol?view=ziwei');
+    expect(link(visit.container, '사주 다시 입력')).toBeUndefined();
+    await visit.unmount();
+  });
+
+  it('이웃이 열 명이면 깃발 섬이 집의 오행으로 서고, 마을 틀만 그 섬을 담는다', async () => {
+    api.ilchons.mockResolvedValue({ ilchons: ilchons(10) });
+    const village = await open('/@sol/village');
+    expect(stage.props?.flag).toEqual({ ...FLAG_SPOT, element: 'wood' });
+    expect(stage.props?.frame).toEqual(frameOf([...stage.props!.homes, FLAG_SPOT]));
+    expect(village.container.querySelector('.mg-saju-flag h2')?.textContent).toBe('깃발 섬 이웃 10명');
+    await village.unmount();
+    const own = await open('/@sol');
+    expect(stage.props?.flag).toEqual({ ...FLAG_SPOT, element: 'wood' });
+    expect(stage.props?.frame).toMatchObject({ target: [0, 1.5, 0], halfWidth: 8 });
+    await own.unmount();
+    // 다리 보기는 두 집만 담는다.
+    auth = { status: 'signedIn', user: noeul };
+    api.status.mockResolvedValue(standing('ilchon'));
+    const visit = await open('/@sol');
+    await act(async () => button(visit.container, '다리 보기')!.click());
+    const homes = stage.props!.homes;
+    expect(stage.props?.frame).toEqual(frameOf([homes.find((item) => item.id === 'noeul')!, homes[0]!]));
+    await visit.unmount();
+  });
+
+  it('이웃이 아홉 명이면 깃발은 없고, 카드가 몇 명인지 말한다', async () => {
+    api.ilchons.mockResolvedValue({ ilchons: ilchons(9) });
+    const { container, unmount } = await open('/@sol/village');
+    expect(stage.props?.flag).toBeNull();
+    expect(stage.props?.frame).toEqual(frameOf(stage.props!.homes));
+    expect(container.querySelector('.mg-saju-flag h2')?.textContent).toBe('깃발 섬 이웃 9/10');
+    expect(container.querySelector('.mg-neighbors .mg-list-count')?.textContent).toBe('이웃 9');
+    await unmount();
+  });
+
+  it('이웃 목록을 아직 읽지 못했으면 몇 명인지 말하지 않고, 읽으면 깃발을 올린다', async () => {
+    let answer: (value: { ilchons: Ilchon[] }) => void = () => undefined;
+    api.ilchons.mockReturnValue(new Promise((done) => { answer = done; }));
+    const { container, unmount } = await open('/@sol/village');
+    expect(stage.props?.flag).toBeNull();
+    expect(container.querySelector('.mg-saju-flag')).toBeNull();
+    expect(container.querySelector('.mg-neighbors')?.textContent).toBe('');
+    await act(async () => answer({ ilchons: ilchons(11) }));
+    await settle();
+    expect(stage.props?.flag).toEqual({ ...FLAG_SPOT, element: 'wood' });
+    expect(container.querySelector('.mg-saju-flag h2')?.textContent).toBe('깃발 섬 이웃 11명');
+    expect(container.querySelector('.mg-neighbors .mg-list-count')?.textContent).toBe('이웃 11');
+    await unmount();
+  });
+
+  it('이웃을 읽다 실패하면 없다고 하지 않고 실패했다고만 한다', async () => {
+    api.ilchons.mockResolvedValue({ ilchons: ilchons(11) });
+    // 함께 읽는 받은 신청이 실패하면 목록도 읽지 못한 것으로 남는다.
+    api.requests.mockRejectedValue(new Error('unavailable'));
+    const { container, unmount } = await open('/@sol/village');
+    expect(stage.props?.flag).toBeNull();
+    expect(container.querySelector('.mg-saju-flag')).toBeNull();
+    expect(container.querySelector('.mg-neighbors .mg-list-count')).toBeNull();
+    expect(container.querySelector('.mg-neighbors .mg-empty')).toBeNull();
+    expect(container.querySelector('.mg-neighbors [role=alert]')?.textContent).toBe('잠시 후 다시 시도해 주세요');
+    await unmount();
+  });
+
+  it('건드리지 않은 패널은 창을 따르고, 휴대폰에서 접은 것이 넓은 창의 패널을 접지 않는다', async () => {
+    const phone = { matches: true };
+    vi.stubGlobal('matchMedia', () => phone);
+    const hidden = (container: HTMLElement) => container.querySelector<HTMLElement>('.mg-saju-panel')!.hidden;
+    // 휴대폰에서는 접힌 채로 열리고, 그 기본값은 남기지 않는다.
+    const first = await open('/@sol');
+    expect(hidden(first.container)).toBe(true);
+    expect(Object.keys(localStorage).filter((key) => key.startsWith('minihome:saju:'))).toEqual([]);
+    await act(async () => first.container.querySelector<HTMLButtonElement>('.mg-saju-panel-open')!.click());
+    await act(async () => first.container.querySelector<HTMLButtonElement>('.mg-saju-panel-close')!.click());
+    expect(hidden(first.container)).toBe(true);
+    await first.unmount();
+    phone.matches = false;
+    const wide = await open('/@sol');
+    expect(hidden(wide.container)).toBe(false);
+    await wide.unmount();
+    // 휴대폰에서 펴 둔 것은 휴대폰에서 남는다.
+    phone.matches = true;
+    const opened = await open('/@sol');
+    await act(async () => opened.container.querySelector<HTMLButtonElement>('.mg-saju-panel-open')!.click());
+    await opened.unmount();
+    const again = await open('/@sol');
+    expect(hidden(again.container)).toBe(false);
+    await again.unmount();
+  });
+
+  it('창의 제목이 누구의 미니홈피인지 말하고, 이야기 패널이 화면의 본문이다', async () => {
+    document.title = '모개숲';
+    const { container, unmount } = await open('/@sol');
+    expect(document.title).toBe('솔의 미니홈피 · 모개숲');
+    expect(container.querySelector('main.mg-saju-panel')?.getAttribute('aria-label')).toBe('솔의 미니홈피');
+    await unmount();
+    expect(document.title).toBe('모개숲');
+  });
+
+  it('답이 오지 않으면 까닭을 제목이 한 번만 말한다', async () => {
+    api.mine.mockRejectedValue(new TypeError('Failed to fetch'));
+    const silent = await open('/@sol');
+    expect(silent.container.querySelector('h1')?.textContent).toBe('미니홈피를 불러오지 못했어요');
+    expect(silent.container.querySelector('.mg-muted')).toBeNull();
+    await silent.unmount();
+    // 서버가 까닭을 말하면 그 말을 덧붙인다.
+    api.mine.mockRejectedValue(new ApiRequestError(500, 'internal', '요청이 실패했어요 (500)'));
+    const failed = await open('/@sol');
+    expect(failed.container.querySelector('.mg-muted')?.textContent).toBe('요청이 실패했어요 (500)');
+    await failed.unmount();
   });
 
   it('없는 집과 닫힌 집은 까닭을 말하고 둘러보기로 보낸다', async () => {

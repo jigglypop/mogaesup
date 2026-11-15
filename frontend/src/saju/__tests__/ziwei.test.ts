@@ -246,30 +246,42 @@ describe('자미두수 명반', () => {
     afterEach(() => {
       vi.useRealTimers();
     });
-    const on = (day: string) => {
+    const on = (day: string, time = '12:00') => {
       vi.useFakeTimers({ toFake: ['Date'] });
-      vi.setSystemTime(new Date(`${day}T12:00:00+09:00`));
+      vi.setSystemTime(new Date(`${day}T${time}:00+09:00`));
     };
     const current = (ziwei: Ziwei) => ziwei.palaces.filter((item) => item.isCurrent).map((item) => `${item.name} ${item.decade?.from}–${item.decade?.to}`);
 
-    // 차트는 처음 계산한 날의 대한을 담으므로, 날마다 아직 계산하지 않은 시각(같은 인시)으로 읽는다.
     it('그 나이가 든 대한의 궁 하나를 표시한다', () => {
       // 1992년생은 2026년에 서른다섯이다.
       on('2026-11-14');
-      expect(current(drawn(birth({ time: '04:21' })))).toEqual(['전택 35–44']);
+      expect(current(drawn(birth()))).toEqual(['전택 35–44']);
       // 나이는 음력 설에 한 살을 더한다: 2036년의 설(1월 28일) 전날까지 마흔넷이다.
       on('2036-01-27');
-      expect(current(drawn(birth({ time: '04:22' })))).toEqual(['전택 35–44']);
+      expect(current(drawn(birth()))).toEqual(['전택 35–44']);
       on('2036-01-28');
-      expect(current(drawn(birth({ time: '04:23' })))).toEqual(['관록 45–54']);
+      expect(current(drawn(birth()))).toEqual(['관록 45–54']);
     });
 
     it('첫 대한이 시작되기 전에는 어느 궁도 아니다', () => {
       // 토오국은 다섯 살에 첫 대한이 든다.
       on('1995-06-01');
-      expect(current(drawn(birth({ time: '04:24' })))).toEqual([]);
+      expect(current(drawn(birth()))).toEqual([]);
       on('1996-06-01');
-      expect(current(drawn(birth({ time: '04:25' })))).toEqual(['명궁 5–14']);
+      expect(current(drawn(birth()))).toEqual(['명궁 5–14']);
+    });
+
+    it('명반은 하루 동안 한 번 짓고, 날이 바뀌면 그날의 대한으로 다시 짓는다', () => {
+      // 설 전날 열어 둔 페이지도 설날에는 새 대한을 표시한다.
+      on('2036-01-27', '09:00');
+      const eve = drawn(birth());
+      on('2036-01-27', '22:00');
+      expect(drawn(birth())).toBe(eve);
+      on('2036-01-28', '09:00');
+      const newYear = drawn(birth());
+      expect(newYear).not.toBe(eve);
+      expect(drawn(birth())).toBe(newYear);
+      expect([current(eve), current(newYear)]).toEqual([['전택 35–44'], ['관록 45–54']]);
     });
   });
 

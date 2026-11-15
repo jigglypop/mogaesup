@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
 import { ELEMENTS, type Element } from '../elements';
-import { buildFlagIsland, buntingColors, buntingShape, CLOTH, CLOTH_TEXELS, clothColors, clothShape, flagToken, flutter, fly, paintCloth, PENNANTS, POSTS } from '../scene/flagIsland';
-import { ELEVATION, frameOf, onScreen } from '../scene/frames';
+import { buildFlagIsland, buntingColors, buntingShape, CLOTH, CLOTH_TEXELS, clothColors, clothShape, flagToken, flutter, fly, HULL, paintCloth, PENNANTS, POSTS, RISE_SECONDS, sunk, type Shape } from '../scene/flagIsland';
+import { AZIMUTH, ELEVATION, frameOf, onScreen } from '../scene/frames';
+import { WATER_LEVEL } from '../scene/mood';
 import { FLAG_SPOT, ISLAND, PLOT_REACH } from '../village';
 
 /** A home's island is drawn this far out from its middle, its bed under the water included (the ground's own reach). */
 const HOME_REACH = 7.4;
+/** A home is visited through a box about its island: half this wide, high and deep, its middle this far up (the stage's own). */
+const HOME_BOX = { half: [5.3, 2.7, 5.3], up: 1.8 } as const;
+/** How far a drag turns the camera to either side of where it stands (the stage's own). */
+const MAX_TURN = (40 * Math.PI) / 180;
 /** The moments the moving parts are looked at: the first, the one a still scene shows, and some later ones. */
 const MOMENTS = [0, 0.4, 1.7, 3.3, 9.1, 47.5];
 
@@ -27,6 +32,38 @@ function pointsOf(build: ReturnType<typeof buildFlagIsland>): { corners: Point[]
 }
 
 const pointsIn = (positions: Float32Array): Point[] => Array.from({ length: positions.length / 3 }, (_, index): Point => [positions[index * 3]!, positions[index * 3 + 1]!, positions[index * 3 + 2]!]);
+
+/** Of a shape's faces, those its indices from `from` up to `to` make: how many are wound to look the way their corners face, and how many the other way. */
+function facing({ positions, normals, indices }: Shape, from = 0, to = indices.length): { out: number; in: number } {
+  const [corners, ways] = [pointsIn(positions), pointsIn(normals)];
+  const count = { out: 0, in: 0 };
+  for (let index = from; index < to; index += 3) {
+    const [a, b, c] = [corners[indices[index]!]!, corners[indices[index + 1]!]!, corners[indices[index + 2]!]!];
+    const [ab, ac] = [[b[0] - a[0], b[1] - a[1], b[2] - a[2]] as const, [c[0] - a[0], c[1] - a[1], c[2] - a[2]] as const];
+    const wound = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]] as const;
+    const faced = [0, 1, 2].map((axis) => ways[indices[index]!]![axis]! + ways[indices[index + 1]!]![axis]! + ways[indices[index + 2]!]![axis]!);
+    count[wound[0] * faced[0]! + wound[1] * faced[1]! + wound[2] * faced[2]! > 0 ? 'out' : 'in'] += 1;
+  }
+  return count;
+}
+
+/** Whether the stretch from `p` to `q` passes through the face `a`, `b`, `c`. */
+function crosses(p: Point, q: Point, a: Point, b: Point, c: Point): boolean {
+  const [dx, dy, dz] = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+  const [abx, aby, abz] = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const [acx, acy, acz] = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  const [hx, hy, hz] = [dy * acz - dz * acy, dz * acx - dx * acz, dx * acy - dy * acx];
+  const det = abx * hx + aby * hy + abz * hz;
+  if (Math.abs(det) < 1e-12) return false;
+  const [sx, sy, sz] = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+  const u = (sx * hx + sy * hy + sz * hz) / det;
+  if (u < 0 || u > 1) return false;
+  const [qx, qy, qz] = [sy * abz - sz * aby, sz * abx - sx * abz, sx * aby - sy * abx];
+  const v = (dx * qx + dy * qy + dz * qz) / det;
+  if (v < 0 || u + v > 1) return false;
+  const t = (acx * qx + acy * qy + acz * qz) / det;
+  return t >= 0 && t <= 1;
+}
 
 /** The cloth and the lines of pennants at each of {@link MOMENTS}, every corner of them. */
 function movingPoints(): Point[] {
@@ -85,6 +122,15 @@ describe('깃발 섬', () => {
     expect(top).toBeLessThanOrEqual(7.5);
     // 깃발과 줄은 깃대 끝보다 높이 오르지 않는다.
     expect(Math.max(...moving.map(([, y]) => y))).toBeLessThan(top);
+  });
+
+  it('깃대 끝은 북동쪽 집의 기슭에 닿아 보이지 않는다', () => {
+    // 돌리지 않은 그림에서 깃대는 북동쪽 집의 섬 바로 아래에 선다. 그 섬의 땅이 화면에서 가장 낮게 내려오는 모서리와
+    // 깃대 끝 사이로 물이 보여야 한다: 기슭의 돌이 그 틈을 한 뼘쯤 더 메운다.
+    const top = Math.max(...corners.map(([, y]) => y));
+    const tip = onScreen(FLAG_SPOT).up + top * Math.cos(ELEVATION);
+    const shore = onScreen({ x: PLOT_REACH + ISLAND / 2, z: -PLOT_REACH + ISLAND / 2 }).up;
+    expect(shore - tip).toBeGreaterThan(0.5);
   });
 
   it('등불이 섬 위에 켜져 있다', () => {
@@ -202,6 +248,8 @@ describe('깃발의 천', () => {
   it('면마다 향하는 쪽이 있고, 그림은 깃대에서 끝자락까지 한 번 펼쳐진다', () => {
     const { normals, uvs, indices, positions } = flown(1.7);
     for (let index = 0; index < normals.length; index += 3) expect(Math.hypot(normals[index]!, normals[index + 1]!, normals[index + 2]!)).toBeCloseTo(1, 5);
+    // 면이 감긴 쪽과 모서리가 향하는 쪽이 같다: 어긋나면 양면 재질이 빛을 뒤집어 받는다.
+    for (const time of MOMENTS) expect(facing(flown(time))).toEqual({ out: CLOTH.columns * CLOTH.rows * 2, in: 0 });
     expect(indices.length).toBe(CLOTH.columns * CLOTH.rows * 6);
     expect(Math.max(...indices)).toBe(positions.length / 3 - 1);
     expect([uvs[0], uvs[1]]).toEqual([0, 0]);
@@ -250,22 +298,44 @@ describe('깃발의 빛깔과 글자', () => {
     // 바탕은 제 빛깔이고(물들인 천이라 조금씩 다르다), 띠는 그보다 옅다.
     const field = texel(data, 2.6, 1);
     for (const axis of [0, 1, 2] as const) expect(Math.abs(field[axis] - colors.field[axis])).toBeLessThan(0.05);
-    for (const y of [0.245, CLOTH.height - 0.245]) {
+    for (const y of [0.145, CLOTH.height - 0.145]) {
       const band = texel(data, 2.6, y);
       expect(bright(band)).toBeGreaterThan(bright(field) + 0.2);
       for (const axis of [0, 1, 2] as const) expect(Math.abs(band[axis] - colors.band[axis])).toBeLessThan(0.05);
     }
     // 원은 가장 옅고, 깃대 쪽 가장자리의 천도 그렇다.
-    expect(bright(texel(data, 1.42 + 0.56 * 0.78, 1.01))).toBeGreaterThan(bright(colors.band));
+    expect(bright(texel(data, 1.42 + 0.72 * 0.78, 1.01))).toBeGreaterThan(bright(colors.band));
     expect(bright(texel(data, 0.03, 1))).toBeGreaterThan(bright(colors.band));
     for (let index = 3; index < data.length; index += 4) expect(data[index]).toBe(255);
     // 글자는 오행이 있을 때만 쓴다. 없으면 원은 비어 있고, 먹은 테두리의 가는 줄뿐이다.
     if (element) {
       expect(inked(data, colors.field)).toBeGreaterThan(2500);
     } else {
-      expect(inked(data, colors.field)).toBeLessThan(800);
+      expect(inked(data, colors.field)).toBeLessThan(1500);
       const heart = texel(data, 1.42, 1);
       for (const axis of [0, 1, 2] as const) expect(Math.abs(heart[axis] - colors.disc[axis])).toBeLessThan(0.05);
+    }
+  });
+
+  it('마을만큼 멀리서 보아도 글자의 획이 남는다', () => {
+    // 꽉 찬 마을을 창에 맞추면 천 1미터가 열여섯 픽셀쯤이다. 그만큼 줄인 그림에서 획은 픽셀을 온전히 덮을 만큼 굵어야
+    // 한다: 픽셀 하나를 다 채우지 못하는 획은 원의 빛깔에 섞여 얼룩으로 남는다.
+    const scale = 16;
+    const [wide, tall] = [CLOTH.length * scale, CLOTH.height * scale];
+    for (const element of ELEMENTS) {
+      const colors = clothColors(FIELDS[element]);
+      const data = paintCloth(colors, element);
+      const sums = new Float64Array(wide * tall);
+      for (let row = 0; row < height; row++) {
+        for (let column = 0; column < width; column++) {
+          const pixel = Math.floor((row * tall) / height) * wide + Math.floor((column * wide) / width);
+          sums[pixel]! += data[(row * width + column) * 4]! + data[(row * width + column) * 4 + 1]! + data[(row * width + column) * 4 + 2]!;
+        }
+      }
+      const texels = (width / wide) * (height / tall) * 255;
+      // 먹이 아홉 푼 넘게 덮은 픽셀.
+      const solid = Array.from(sums).filter((sum) => sum / texels < bright(colors.ink) + (bright(colors.disc) - bright(colors.ink)) * 0.1).length;
+      expect(solid).toBeGreaterThan(40);
     }
   });
 
@@ -342,9 +412,86 @@ describe('오색 깃발 줄', () => {
   });
 
   it('작은 깃발은 깃대에 닿지 않게 걸린다', () => {
+    // 한참을 촘촘히 본다: 바람을 마주한 줄은 줄째 깃대 쪽으로 밀리고, 그 줄의 깃발은 옆으로 비키지 않는다.
+    const bunting = buntingShape();
+    const first = bunting.positions.length / 3 - PENNANTS * 3;
+    let nearest = Infinity;
+    for (let time = 0; time < 60; time += 0.05) {
+      flutter(time, bunting.positions, bunting.normals);
+      const flags = corners(bunting.positions).slice(first);
+      for (const [index, [px, , pz]] of flags.entries()) {
+        // 세모의 변이 깃대의 한가운데에서 떨어진 만큼, 땅에서 본 대로.
+        const [qx, , qz] = flags[index - (index % 3) + ((index + 1) % 3)]!;
+        const [dx, dz] = [qx - px, qz - pz];
+        const along = Math.min(1, Math.max(0, -(px * dx + pz * dz) / (dx * dx + dz * dz)));
+        nearest = Math.min(nearest, Math.hypot(px + dx * along, pz + dz * along));
+      }
+    }
+    // 깃발이 걸리는 높이에서 대나무의 굵기는 반지름 6센티미터쯤이다.
+    expect(nearest).toBeGreaterThan(0.09);
+  });
+
+  it('작은 깃발은 큰 깃발의 천을 뚫지 않는다', () => {
+    const cloth = clothShape();
+    const bunting = buntingShape();
+    const first = bunting.positions.length / 3 - PENNANTS * 3;
+    const pierced = new Set<number>();
+    for (let time = 0; time < 60; time += 0.05) {
+      fly(time, cloth.positions, cloth.normals);
+      flutter(time, bunting.positions, bunting.normals);
+      const sheet = corners(cloth.positions);
+      const flags = corners(bunting.positions).slice(first);
+      const low = Math.min(...sheet.map(([, y]) => y));
+      for (let pennant = 0; pennant < PENNANTS; pennant++) {
+        const [a, b, c] = [flags[pennant * 3]!, flags[pennant * 3 + 1]!, flags[pennant * 3 + 2]!];
+        // 천보다 아래에 걸린 깃발은 천에 닿을 수 없다.
+        if (Math.max(a[1], b[1], c[1]) < low) continue;
+        for (let face = 0; face < cloth.indices.length; face += 3) {
+          const [s, t, u] = [sheet[cloth.indices[face]!]!, sheet[cloth.indices[face + 1]!]!, sheet[cloth.indices[face + 2]!]!];
+          // 높이나 동서로 떨어져 있는 면은 볼 것도 없다.
+          if ([0, 1].some((axis) => Math.min(s[axis]!, t[axis]!, u[axis]!) > Math.max(a[axis]!, b[axis]!, c[axis]!) || Math.max(s[axis]!, t[axis]!, u[axis]!) < Math.min(a[axis]!, b[axis]!, c[axis]!))) continue;
+          // 세모의 변이 천의 면을 지나거나, 천의 변이 세모를 지난다.
+          if (crosses(a, b, s, t, u) || crosses(b, c, s, t, u) || crosses(c, a, s, t, u) || crosses(s, t, a, b, c) || crosses(t, u, a, b, c) || crosses(u, s, a, b, c)) pierced.add(pennant);
+        }
+      }
+    }
+    expect([...pierced]).toEqual([]);
+  });
+
+  it('줄마다 깃대 끝에서 말뚝까지 한 가닥 실이 따라간다', () => {
+    // 멀리서는 줄이 픽셀 하나보다 가늘어 점으로 흩어진다. 같은 모서리를 이은 실은 얼마나 멀든 이어져 그려진다.
+    const { positions, threads } = hung(3.3);
+    const all = corners(positions);
+    expect(Math.max(...threads)).toBeLessThan(all.length - PENNANTS * 3);
+    /** Each piece of thread, by the corner it starts from. */
+    const next = new Map(Array.from({ length: threads.length / 2 }, (_, piece) => [threads[piece * 2]!, threads[piece * 2 + 1]!]));
+    const head: Point = [0, Math.max(...all.map(([, y]) => y)), 0];
+    const starts = [...next.keys()].filter((corner) => far(all[corner]!, head) < 0.05);
+    expect(starts).toHaveLength(POSTS.length);
+    const ends = starts.map((start) => {
+      let [at, pieces] = [start, 0];
+      for (let to = next.get(at); to !== undefined; to = next.get(at)) {
+        // 토막마다 짧고, 아래로 내려간다.
+        expect(far(all[at]!, all[to]!)).toBeLessThan(0.8);
+        expect(all[to]![1]).toBeLessThan(all[at]![1]);
+        at = to;
+        pieces += 1;
+      }
+      expect(pieces).toBeGreaterThan(8);
+      return all[at]!;
+    });
+    // 가닥마다 제 말뚝에서 끝난다.
+    for (const post of POSTS) expect(ends.some((end) => far(end, post as Point) < 0.05)).toBe(true);
+  });
+
+  it('줄과 깃발의 면은 감긴 쪽으로 향한다', () => {
     for (const time of MOMENTS) {
-      const all = corners(hung(time).positions);
-      for (const [x, , z] of all.slice(all.length - PENNANTS * 3)) expect(Math.hypot(x, z)).toBeGreaterThan(0.07);
+      const bunting = hung(time);
+      const rope = bunting.indices.length - PENNANTS * 3;
+      const lines = facing(bunting, 0, rope);
+      expect(lines.out).toBeGreaterThan(100);
+      expect(lines.in).toBe(0);
+      expect(facing(bunting, rope)).toEqual({ out: PENNANTS, in: 0 });
     }
   });
 
@@ -392,5 +539,99 @@ describe('오색 깃발 줄', () => {
   it('같은 순간에는 같은 자리다', () => {
     expect(Array.from(hung(1.7).positions)).toEqual(Array.from(hung(1.7).positions));
     expect(Array.from(hung(1.7).normals)).toEqual(Array.from(hung(1.7).normals));
+  });
+});
+
+describe('포인터가 닿는 겉틀', () => {
+  const { cone, cloth } = HULL;
+  /** Whether a point of the island, about its middle, is inside the hull: in the cone as its flat sides bound it, or in the cloth's box. */
+  const inside = ([x, y, z]: Point) => {
+    const inCone = y >= cone.foot && y <= cone.tip && Math.hypot(x, z) <= ((cone.radius * (cone.tip - y)) / (cone.tip - cone.foot)) * Math.cos(Math.PI / cone.sides);
+    // The box lies down the wind: turned back, how far along it and across it the point is.
+    const along = x * Math.cos(cloth.turn) - z * Math.sin(cloth.turn);
+    const across = x * Math.sin(cloth.turn) + z * Math.cos(cloth.turn);
+    return inCone || (along >= 0 && along <= cloth.length && Math.abs(across) <= cloth.half && y >= cloth.foot && y <= cloth.head);
+  };
+  /** The nine plots of a village, and the ways the camera looks across it as a drag turns it from one side to the other. */
+  const plots = [-PLOT_REACH, 0, PLOT_REACH].flatMap((x) => [-PLOT_REACH, 0, PLOT_REACH].map((z) => ({ x, z })));
+  const views = Array.from({ length: 33 }, (_, index) => {
+    const azimuth = AZIMUTH - MAX_TURN + (index / 32) * 2 * MAX_TURN;
+    return [-Math.cos(ELEVATION) * Math.sin(azimuth), -Math.sin(ELEVATION), -Math.cos(ELEVATION) * Math.cos(azimuth)] as const;
+  });
+  /** Whether the camera, at some turn, sees the island's point `local` with a home's box behind it. */
+  const beforeHome = (local: Point) => {
+    const from = [local[0] + FLAG_SPOT.x, local[1], local[2] + FLAG_SPOT.z] as const;
+    return views.some((view) =>
+      plots.some(({ x, z }) => {
+        const middle = [x, HOME_BOX.up, z] as const;
+        let [enters, leaves] = [0, Infinity];
+        for (const axis of [0, 1, 2] as const) {
+          const [one, other] = [(middle[axis] - HOME_BOX.half[axis] - from[axis]) / view[axis], (middle[axis] + HOME_BOX.half[axis] - from[axis]) / view[axis]];
+          enters = Math.max(enters, Math.min(one, other));
+          leaves = Math.min(leaves, Math.max(one, other));
+        }
+        return enters <= leaves;
+      }),
+    );
+  };
+
+  it('천과 깃발 줄은 나부껴도 겉틀을 벗어나지 않는다', () => {
+    const sheet = clothShape();
+    const bunting = buntingShape();
+    const strays: Point[] = [];
+    for (let time = 0; time < 120; time += 0.25) {
+      fly(time, sheet.positions, sheet.normals);
+      flutter(time, bunting.positions, bunting.normals);
+      for (const point of [...pointsIn(sheet.positions), ...pointsIn(bunting.positions)]) if (!inside(point)) strays.push(point);
+    }
+    expect(strays).toEqual([]);
+  });
+
+  it('집 앞에 그려질 수 있는 것은 모두 겉틀 안에 있다', () => {
+    // 카메라를 동쪽으로 돌리면 깃발 섬이 동쪽 집 앞에 선다. 그때 집의 상자를 가리는 것이 겉틀 밖에 있으면 그것을 누른
+    // 포인터가 뒤의 집으로 간다.
+    const { corners } = pointsOf(buildFlagIsland());
+    const standing = corners.filter(beforeHome);
+    // 깃대의 윗부분이 그렇다. 땅과 마당, 솔과 선착장은 어느 쪽에서 보아도 집을 가리지 않는다.
+    expect(standing.length).toBeGreaterThan(100);
+    expect(Math.min(...standing.map(([, y]) => y))).toBeGreaterThan(3);
+    expect(standing.filter((point) => !inside(point))).toEqual([]);
+    // 천은 거의 다 가린다.
+    const sheet = clothShape();
+    fly(1.7, sheet.positions, sheet.normals);
+    expect(pointsIn(sheet.positions).filter(beforeHome).length).toBeGreaterThan(CLOTH.columns * CLOTH.rows * 0.5);
+  });
+
+  it('겉틀은 섬과 깃발보다 크지 않다', () => {
+    // 겉틀이 가리는 것은 깃발 섬뿐이어야 한다: 물 위로 드러난 섬보다 넓지 않고, 깃대 끝 위로 한 뼘을 넘지 않는다.
+    const { corners } = pointsOf(buildFlagIsland());
+    expect(cone.radius).toBeLessThan(Math.max(...corners.filter(([, y]) => y > cone.foot).map(([x, , z]) => Math.hypot(x, z))));
+    expect(cone.tip - Math.max(...corners.map(([, y]) => y))).toBeLessThan(0.2);
+    expect(cloth.length).toBeLessThanOrEqual(CLOTH.length);
+    expect(cloth.head - cloth.foot).toBeLessThan(CLOTH.height * 1.5);
+    expect(cloth.half).toBeLessThan(CLOTH.height / 2);
+  });
+});
+
+describe('뒤늦게 서는 섬', () => {
+  it('호수 밑에서 나와 제자리까지 천천히 올라온다', () => {
+    const { corners } = pointsOf(buildFlagIsland());
+    const top = Math.max(...corners.map(([, y]) => y));
+    // 처음에는 깃대 끝까지 물 밑에 있다.
+    expect(top - sunk(0)).toBeLessThan(WATER_LEVEL);
+    expect(top - sunk(0)).toBeGreaterThan(WATER_LEVEL - 0.5);
+    // 다 올라오면 제자리이고, 그 뒤로도 그대로다.
+    expect(sunk(RISE_SECONDS)).toBe(0);
+    expect(sunk(RISE_SECONDS + 30)).toBe(0);
+    // 한 프레임에 서지 않는다: 일 초 넘게 걸려 오르기만 하고, 한 프레임에 한 뼘을 넘지 않으며, 떠날 때와 닿을 때는 거의 서 있다.
+    expect(RISE_SECONDS).toBeGreaterThan(1);
+    const frames = Math.round(RISE_SECONDS * 60);
+    const steps = Array.from({ length: frames }, (_, frame) => sunk((frame * RISE_SECONDS) / frames) - sunk(((frame + 1) * RISE_SECONDS) / frames));
+    for (const step of steps) {
+      expect(step).toBeGreaterThan(0);
+      expect(step).toBeLessThan(0.2);
+    }
+    expect(steps[0]).toBeLessThan(0.01);
+    expect(steps[frames - 1]).toBeLessThan(0.01);
   });
 });

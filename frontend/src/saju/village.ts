@@ -10,9 +10,11 @@ export const FLAG_NEIGHBOURS = 10;
 export const flagRaised = (neighbours: number) => neighbours >= FLAG_NEIGHBOURS;
 /**
  * Where the flag's island lies: out past the east plot. Seen from the south-east the nine plots make a diamond, and
- * this is the corner of the picture the diamond leaves open, so a full village is framed no wider for it.
+ * this is the corner of the picture the diamond leaves open, so a full village is framed no wider for it. It lies as
+ * far toward the viewer as that corner goes, because in the picture its mast stands right under the north-east home's
+ * island: any farther back and the finial ends against that island's shore.
  */
-export const FLAG_SPOT = { x: 27, z: 0 } as const;
+export const FLAG_SPOT = { x: 27.4, z: 0.4 } as const;
 
 /** A place for a home on the village map. */
 export type Plot = {

@@ -26,7 +26,9 @@ import { useStill } from './parts';
 // from below, into a picture of its own), smeared and broken by ripples, over the sky's own colour where nothing
 // stands, and a little see-through so a shore shows going under.
 
-const SURFACE = new PlaneGeometry(1200, 1200);
+/** The water's sheet reaches this far to every side of where the camera looks, and further when the canvas shows more. */
+const SURFACE_REACH = 600;
+const SURFACE = new PlaneGeometry(SURFACE_REACH * 2, SURFACE_REACH * 2);
 /** Only what stands above the water is mirrored in it. */
 const ABOVE_WATER = [new Plane(new Vector3(0, 1, 0), -WATER_LEVEL)];
 /** Drawn before the frame itself (the composer draws at 1) and after everything has moved. */
@@ -159,11 +161,13 @@ export function Lake({ mood, sky, scale = 0.5, every = 2, moving }: { mood: Mood
     const view = camera as OrthographicCamera;
     const { mirror, eye, ahead, material, target, clear } = made;
     const uniforms = material.uniforms;
-    // The lake lies wherever the camera looks.
+    // The lake lies wherever the camera looks, as far as the canvas shows it: no corner of the canvas is further from
+    // that place than the canvas is wide and, on the water's slant, tall.
     view.getWorldDirection(ahead);
     view.getWorldPosition(eye);
     const reach = (eye.y - WATER_LEVEL) / -ahead.y;
     mesh.position.set(eye.x + ahead.x * reach, WATER_LEVEL, eye.z + ahead.z * reach);
+    mesh.scale.setScalar(Math.max(1, Math.hypot(size.width, size.height / -ahead.y) / view.zoom / SURFACE_REACH));
     (uniforms['uToCamera']!.value as Vector3).copy(ahead).negate();
     uniforms['uTime']!.value = still ? 0 : clock.elapsedTime;
     // A ripple bends what it mirrors by the same stretch of water whatever the zoom.
@@ -182,8 +186,11 @@ export function Lake({ mood, sky, scale = 0.5, every = 2, moving }: { mood: Mood
     mirror.near = view.near;
     mirror.far = view.far;
     mirror.updateMatrixWorld();
+    // Its right is the view's left: a picture drawn off the canvas's middle (the page's panels) lies off it the other
+    // way in the mirror.
     mirror.projectionMatrix.copy(view.projectionMatrix);
-    mirror.projectionMatrixInverse.copy(view.projectionMatrixInverse);
+    mirror.projectionMatrix.elements[12] *= -1;
+    mirror.projectionMatrixInverse.copy(mirror.projectionMatrix).invert();
     (uniforms['uMirror']!.value as Matrix4).set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1).multiply(mirror.projectionMatrix).multiply(mirror.matrixWorldInverse);
 
     const before = { target: gl.getRenderTarget(), shadows: gl.shadowMap.autoUpdate, planes: gl.clippingPlanes, alpha: gl.getClearAlpha() };
