@@ -38,6 +38,8 @@ const PATHS = {
   chevronDown: 'M6 9.5l6 6 6-6',
   plus: 'M12 5v14M5 12h14',
   minus: 'M5 12h14',
+  widen: 'M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4',
+  narrow: 'M3 12h7M14 12h7M7 9l3 3-3 3M17 9l-3 3 3 3',
   trash: 'M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13',
   music: 'M9 18V6l10-2v12M9 18a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0zM19 16a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0z',
   gauge: 'M4 16a8 8 0 1 1 16 0M12 16l3.5-5M4 16h2M18 16h2',

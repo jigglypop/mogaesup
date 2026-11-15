@@ -7,6 +7,7 @@ import {
   seoulNowParts,
   timeBranchOptionsAtSeoulDate,
   timeToIndexAtSeoulDate,
+  type Chart,
   type ChartRequest,
   type DaYunItem,
   type SajuPillar,
@@ -16,7 +17,8 @@ import {
 
 // 사주 comes from jamiblossom (vendor/jamiblossom-*.tgz), unchanged: the pillars, 십성, 지장간, 12운성, 대운 and 신살 are
 // its results, read by Seoul's civil clock (historic offsets and summer time included). This file only shapes a birth
-// into its request and leaves out what a birth without an hour cannot know.
+// into its request and leaves out what a birth without an hour cannot know. The 자미두수 명반 the same calculation draws
+// goes out whole (`chartOf`); `ziwei.ts` shapes it.
 
 export type Calendar = 'solar' | 'lunar';
 export type Gender = 'female' | 'male';
@@ -104,16 +106,18 @@ export function timeBranches(solarDate: string): TimeBranchOption[] {
 /** Stands in for an unknown hour pillar: no table of jamiblossom's 신살 holds this character. */
 const UNKNOWN = '？';
 
+const keyOf = (birth: Birth) => JSON.stringify([birth.calendar, birth.year, birth.month, birth.day, birth.leapMonth, birth.time, birth.gender]);
+const charts = new Map<string, Chart>();
 const readings = new Map<string, Reading>();
 
 /**
- * The 사주 of a birth. Without a birth hour jamiblossom reads the day at noon; the hour pillar is then left out, and the
- * 신살 are judged again from the three pillars alone.
+ * All jamiblossom calculates of a birth in one go: its 사주, and the 자미두수 명반 it draws on the way. Without a birth
+ * hour it reads the day at noon, so the hour pillar and the whole 명반 (午時's) of that chart are not the person's.
  * @throws {BirthError} for a date or time that does not exist (the message is for the person who typed it).
  */
-export function readingOf(birth: Birth): Reading {
-  const key = JSON.stringify([birth.calendar, birth.year, birth.month, birth.day, birth.leapMonth, birth.time, birth.gender]);
-  const known = readings.get(key);
+export function chartOf(birth: Birth): Chart {
+  const key = keyOf(birth);
+  const known = charts.get(key);
   if (known) return known;
   const request: ChartRequest = {
     calendar: birth.calendar,
@@ -131,6 +135,20 @@ export function readingOf(birth: Birth): Reading {
     // jamiblossom explains a skipped or repeated summer-time hour in Korean; its other refusals are a date out of range.
     throw new BirthError(/[가-힣]/.test(message) ? message : '계산할 수 없는 날짜예요.');
   }
+  charts.set(key, chart);
+  return chart;
+}
+
+/**
+ * The 사주 of a birth. Without a birth hour jamiblossom reads the day at noon; the hour pillar is then left out, and the
+ * 신살 are judged again from the three pillars alone.
+ * @throws {BirthError} for a date or time that does not exist (the message is for the person who typed it).
+ */
+export function readingOf(birth: Birth): Reading {
+  const key = keyOf(birth);
+  const known = readings.get(key);
+  if (known) return known;
+  const chart = chartOf(birth);
   const { saju } = chart;
   const reading: Reading = {
     year: saju.year,

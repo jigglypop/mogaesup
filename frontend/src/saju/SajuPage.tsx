@@ -18,7 +18,8 @@ import { melodyOf } from './melody';
 import { forgetLegacyHome, readLegacyHome, useMinihome, type Minihome } from './minihome';
 import { profileOf, type Profile } from './profile';
 import type { Resident } from './residents';
-import { chartPath, homePath, routeOf, villagePath, waveOf } from './routes';
+import { chartPath, editPath, homePath, routeOf, villagePath, waveOf, ziweiPath } from './routes';
+import type { StageFlag } from './scene/Flag';
 import { frameOf, NO_INSET, type Inset } from './scene/frames';
 import { Stage, type StageBridge, type StageHandle, type StageHome } from './scene/Stage';
 import { Bgm } from './ui/Bgm';
@@ -27,8 +28,9 @@ import { HomePanel, type Bridge } from './ui/HomePanel';
 import { Onboarding } from './ui/Onboarding';
 import { PixelIcon } from './ui/PixelIcon';
 import { SavePicture } from './ui/SavePicture';
-import { VillagePanel } from './ui/VillagePanel';
-import { plotsOf } from './village';
+import { FlagCard, VillagePanel } from './ui/VillagePanel';
+import { ZiweiPanel } from './ui/ZiweiPanel';
+import { FLAG_SPOT, flagRaised, plotsOf } from './village';
 
 const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 /** How much one press of a zoom button brings the picture closer. */
@@ -138,6 +140,8 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
   const world = useRef<HTMLDivElement>(null);
   const stage = useRef<StageHandle>(null);
   const [panelOpen, setPanelOpen] = useStored<boolean>('saju:panel', panelFits());
+  // The 명반 is twelve palaces of stars: its panel can be widened for them, and stays as it was left.
+  const [roomy, setRoomy] = useStored<boolean>('saju:ziwei-wide', false);
   const cover = useCover(world, panelOpen);
 
   // Everyone with a home here and what their chart gives. An answer to an 이웃 request or a line in the guestbook
@@ -191,11 +195,15 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
   const village = route.kind === 'village';
   const wide = village || !host;
   const together = bridgeShown && !wide && !!visitorHome;
+  // A village whose owner has ten 이웃 has raised its flag: the island with it stands past the homes.
+  const raised = flagRaised(neighbors.list.length);
+  const flagElement = host?.profile.balance.dominant ?? null;
+  const flag = useMemo<StageFlag | null>(() => (raised ? { ...FLAG_SPOT, element: flagElement } : null), [raised, flagElement]);
   const frame = useMemo(() => {
     const here = homes[0];
-    if (wide || !here) return frameOf(homes);
+    if (wide || !here) return frameOf(flag ? [...homes, flag] : homes);
     return together && visitorHome ? frameOf([visitorHome, here]) : frameOf([here]);
-  }, [homes, wide, together, visitorHome]);
+  }, [homes, wide, together, visitorHome, flag]);
 
   const visit = useCallback((id: string) => navigate(homePath(id)), [navigate]);
   // What this browser kept from the village's first days, for a member who has not built their home here yet.
@@ -220,12 +228,13 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
   const name = host?.resident.name ?? ownerName;
   const title = `${name}의 미니홈피`;
   const element = host?.profile.balance.dominant ?? null;
-  const chart = route.kind === 'home' && route.chart && !!host;
+  const tab = route.kind === 'home' && host ? route.tab : 'home';
+  const widened = tab === 'ziwei' && roomy;
   const compat = !view.isOwner && myProfile && host ? compatOf(myProfile, host.profile) : null;
   const villagers = host ? [{ ...host, bridged: false }, ...around] : around;
 
   return (
-    <div className={`mg-saju mg-saju-world${panelOpen ? ' has-panel' : ''}`} ref={world} data-element={element ?? undefined}>
+    <div className={`mg-saju mg-saju-world${panelOpen ? ' has-panel' : ''}${widened ? ' is-roomy' : ''}`} ref={world} data-element={element ?? undefined}>
       <div className="mg-saju-stage" data-view={wide ? 'village' : together ? 'bridge' : 'home'}>
         <Stage
           ref={stage}
@@ -233,6 +242,7 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
           bridges={bridges}
           frame={frame}
           inset={cover}
+          flag={flag}
           focus={wide ? null : username}
           onVisit={visit}
           pins={
@@ -301,13 +311,23 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
         <button className="mg-icon-btn is-quiet mg-saju-panel-close" aria-label="패널 접기" onClick={() => setPanelOpen(false)}>
           <Icon name="chevronRight" />
         </button>
+        {tab === 'ziwei' && (
+          <button className="mg-icon-btn is-quiet mg-saju-panel-roomy" aria-label={roomy ? '패널 좁히기' : '패널 넓히기'} aria-pressed={roomy} onClick={() => setRoomy(!roomy)}>
+            <Icon name={roomy ? 'narrow' : 'widen'} />
+          </button>
+        )}
         <nav className="mg-saju-menu" aria-label="미니홈피 메뉴">
-          <Link to={homePath(username)} aria-current={route.kind !== 'village' && !chart ? 'page' : undefined}>
+          <Link to={homePath(username)} aria-current={route.kind !== 'village' && tab === 'home' ? 'page' : undefined}>
             홈
           </Link>
           {host && (
-            <Link to={chartPath(username)} aria-current={chart ? 'page' : undefined}>
+            <Link to={chartPath(username)} aria-current={tab === 'chart' ? 'page' : undefined}>
               사주보기
+            </Link>
+          )}
+          {host && (
+            <Link to={ziweiPath(username)} aria-current={tab === 'ziwei' ? 'page' : undefined}>
+              자미두수
             </Link>
           )}
           <Link to={villagePath(username)} aria-current={village ? 'page' : undefined}>
@@ -332,12 +352,15 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
           ) : village ? (
             <>
               <VillagePanel owner={{ username, name }} villagers={villagers} viewer={viewer?.username ?? null} />
+              <FlagCard neighbours={neighbors.list.length} />
               <section aria-label="이웃">
                 <NeighborsTab view={view} viewer={viewer} neighbors={neighbors} />
               </section>
             </>
-          ) : chart && host ? (
+          ) : tab === 'chart' && host ? (
             <ChartPanel profile={host.profile} />
+          ) : tab === 'ziwei' && host ? (
+            <ZiweiPanel birth={host.resident.birth} editTo={view.isOwner ? editPath(username) : null} />
           ) : (
             <HomePanel
               view={view}

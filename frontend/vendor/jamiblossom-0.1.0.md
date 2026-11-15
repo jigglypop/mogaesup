@@ -1,4 +1,4 @@
-# jamiblossom (사주 계산)
+# jamiblossom (사주·자미두수 계산)
 
 `jamiblossom-0.1.0.tgz` is the [`jamiblossom`](https://github.com/jigglypop/jamiblossum) package as `npm pack --ignore-scripts` writes it. Nothing in it was changed here, and no npm publication is involved.
 
@@ -8,9 +8,11 @@ Artifact: **248,625 bytes**. SHA256: `a54e027d19e6ba68aa1c6b03899356aa79873a30fd
 
 ## Use
 
-The 사주 village (`frontend/src/saju/`) reads 사주 through `frontend/src/saju/engine.ts` only:
+The 사주 village (`frontend/src/saju/`) reads 사주 and the 자미두수 명반 through `frontend/src/saju/engine.ts` only:
 
-- `calculateZiweiChart(request).saju` gives the four pillars with their 십성, 지장간, 12운성 and 납음, the 대운 and the 신살. The 자미두수 chart it calculates on the way is not shown.
+- `calculateZiweiChart(request)` is one calculation for both (`chartOf`). Its `saju` gives the four pillars with their 십성, 지장간, 12운성 and 납음, the 대운 and the 신살.
+- The rest of that chart is the 자미두수 명반 of the 자미두수 tab, which `frontend/src/saju/ziwei.ts` lays out: the twelve `palaces` with their stars (brightness and 생년사화), 12신, 대한 and 소한, the 명궁 and 신궁, 오행국, 명주 and 신주, `surrounded` (삼방사정), `flies` (비성사화) and the 대한 running today (`horoscope.decadal`). A birth without an hour has no 명반 there: the library would read the day at noon.
+- `ziwei.ts` reads two things of the chart by tables of its own, which `frontend/src/saju/__tests__/ziwei.test.ts` holds to the library's charts: the brightness codes of the Korean chart (`[+3]` … `[-3]`, the library's `fmtBright`) and the place of each earthly branch on the ring (its `PALACE_GRID_AREAS`).
 - `calculateSinsal` judges the 신살 again from three pillars for a birth without an hour.
 - `isValidKoreanDate`, `koreanLunarToSolar`, `koreanLunarMonthDays`, `timeBranchOptionsAtSeoulDate` and `timeToIndexAtSeoulDate` check a birth date and name the 시진 of its day.
 

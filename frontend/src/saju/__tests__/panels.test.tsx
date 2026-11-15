@@ -11,7 +11,7 @@ import { profileOf } from '../profile';
 import { ChartPanel } from '../ui/ChartPanel';
 import { Gauge } from '../ui/Gauge';
 import { HomePanel, type Bridge } from '../ui/HomePanel';
-import { VillagePanel } from '../ui/VillagePanel';
+import { FlagCard, VillagePanel } from '../ui/VillagePanel';
 import { personOf } from './people';
 
 const { accept, dismiss, unlink } = vi.hoisted(() => ({ accept: vi.fn(), dismiss: vi.fn(), unlink: vi.fn() }));
@@ -80,7 +80,7 @@ describe('집 이야기', () => {
   it('일간 한 줄, 집과 수호 캐릭터, 신살이 준 것을 보여 주고 그 집의 방명록을 연다', async () => {
     const { container, unmount } = await inRouter(panel());
     expect(container.querySelector('.mg-saju-badge')?.textContent).toBe('따뜻한 촛불 같은 정화(丁火) 일간');
-    expect(texts(container, '.mg-saju-who .mg-chip')).toEqual(['붉은 벽돌집', '붉은 닭 · 정유(丁酉)', '천을귀인의 별', '도화의 꽃', '백호의 목도리']);
+    expect(texts(container, '.mg-saju-who .mg-chip')).toEqual(['붉은 벽돌집', '왕관 강아지 · 정유(丁酉)', '천을귀인의 별', '도화의 꽃', '백호의 목도리']);
     expect(container.querySelector('.guestbook')?.textContent).toBe('noeul:-');
     // 남의 집은 다시 입력할 수 없고, 로그인하지 않으면 다리 칸에는 로그인이 있다.
     expect(container.querySelector('.mg-saju-who-edit')).toBeNull();
@@ -237,7 +237,7 @@ describe('마을 주민', () => {
     expect(cards.map((card) => card.getAttribute('href'))).toEqual(['/@sol', '/@noeul', '/@bori']);
     expect(cards.map((card) => card.dataset['element'])).toEqual(['wood', 'fire', 'earth']);
     expect(texts(container, 'a.mg-saju-villager b')).toEqual(['솔', '노을이웃', '보리내 집']);
-    expect(texts(cards[1]!, 'small')).toEqual(['따뜻한 촛불 같은 정화(丁火) 일간', '붉은 벽돌집 · 붉은 닭']);
+    expect(texts(cards[1]!, 'small')).toEqual(['따뜻한 촛불 같은 정화(丁火) 일간', '붉은 벽돌집 · 왕관 강아지']);
     // 여덟 글자를 오행 순으로 늘어놓는다.
     expect([...cards[1]!.querySelectorAll<HTMLElement>('.mg-saju-mix i')].map((item) => item.dataset['element'])).toEqual(['wood', 'wood', 'fire', 'fire', 'fire', 'fire', 'earth', 'metal']);
     await unmount();
@@ -257,3 +257,25 @@ describe('마을 주민', () => {
     await theirs.unmount();
   });
 });
+
+describe('깃발 섬 카드', () => {
+  const lit = (container: HTMLElement) => container.querySelectorAll('.mg-saju-gauge-bar i.is-lit').length;
+
+  it('이웃이 열 명이 되기 전에는 몇 명인지를 열 칸에 채운다', async () => {
+    const { container, unmount } = await inRouter(<FlagCard neighbours={3} />);
+    expect(texts(container, 'h2')).toEqual(['깃발 섬 이웃 3/10']);
+    expect(container.querySelectorAll('.mg-saju-gauge-bar i')).toHaveLength(10);
+    expect(lit(container)).toBe(3);
+    expect(container.querySelector<HTMLElement>('.mg-saju-flag')!.dataset['raised']).toBeUndefined();
+    await unmount();
+  });
+
+  it('열 명이 넘으면 깃발이 올랐다고 표시하고 이웃 수를 적는다', async () => {
+    const { container, unmount } = await inRouter(<FlagCard neighbours={12} />);
+    expect(texts(container, 'h2')).toEqual(['깃발 섬 이웃 12명']);
+    expect(lit(container)).toBe(10);
+    expect(container.querySelector<HTMLElement>('.mg-saju-flag')!.dataset['raised']).toBe('true');
+    await unmount();
+  });
+});
+

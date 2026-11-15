@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { chartPath, editPath, homePath, isMinihomePage, movedPath, routeOf, villagePath, waveOf } from '../routes';
+import { chartPath, editPath, homePath, isMinihomePage, movedPath, routeOf, villagePath, waveOf, ziweiPath } from '../routes';
 
 describe('미니홈피 주소', () => {
   const owner = { owner: true, built: true };
   const visitor = { owner: false, built: true };
 
   it('뿌리는 집이고, 사주보기는 지은 집에서만 연다', () => {
-    expect(routeOf('sol', '', '', visitor)).toEqual({ kind: 'home', chart: false });
-    expect(routeOf('sol', '', '?view=chart', visitor)).toEqual({ kind: 'home', chart: true });
+    expect(routeOf('sol', '', '', visitor)).toEqual({ kind: 'home', tab: 'home' });
+    expect(routeOf('sol', '', '?view=chart', visitor)).toEqual({ kind: 'home', tab: 'chart' });
+    expect(routeOf('sol', '', '?view=ziwei', visitor)).toEqual({ kind: 'home', tab: 'ziwei' });
+    expect(routeOf('sol', '', '?view=stars', visitor)).toEqual({ kind: 'home', tab: 'home' });
     // 아직 짓지 않은 집에는 읽을 사주가 없다.
-    expect(routeOf('sol', '', '?view=chart', { owner: true, built: false })).toEqual({ kind: 'home', chart: false });
+    expect(routeOf('sol', '', '?view=chart', { owner: true, built: false })).toEqual({ kind: 'home', tab: 'home' });
+    expect(routeOf('sol', '', '?view=ziwei', { owner: true, built: false })).toEqual({ kind: 'home', tab: 'home' });
   });
 
   it('마을은 누구에게나 열린다', () => {
@@ -37,6 +40,7 @@ describe('미니홈피 주소', () => {
   it('집, 사주보기, 마을, 다시 입력의 주소', () => {
     expect(homePath('sol')).toBe('/@sol');
     expect(chartPath('sol')).toBe('/@sol?view=chart');
+    expect(ziweiPath('sol')).toBe('/@sol?view=ziwei');
     expect(villagePath('sol')).toBe('/@sol/village');
     expect(editPath('sol')).toBe('/@sol/edit');
   });

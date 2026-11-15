@@ -29,18 +29,29 @@ export function onScreen({ x, z }: Spot): { right: number; up: number } {
   return { right: across, up: -away * Math.sin(ELEVATION) };
 }
 
-/** A frame holding every one of `homes`, centred on the middle of the ground they cover. */
+/** The spot on the ground that falls at `right` and `up` on screen: {@link onScreen} the other way. */
+function onGround({ right, up }: { right: number; up: number }): Spot {
+  const away = -up / Math.sin(ELEVATION);
+  // A whole number of metres comes back as one, not a hair off it (and nothing as 0, not -0).
+  const whole = (value: number) => Math.round(value * 1e9) / 1e9 + 0;
+  return { x: whole(right * Math.cos(AZIMUTH) + away * Math.sin(AZIMUTH)), z: whole(away * Math.cos(AZIMUTH) - right * Math.sin(AZIMUTH)) };
+}
+
+/**
+ * A frame holding every one of `homes`, centred on the middle of the picture they make: of where they fall on screen,
+ * not of the ground they cover, so a spot in a corner the others leave open on screen costs the frame nothing.
+ */
 export function frameOf(homes: readonly Spot[]): Frame {
   if (homes.length === 0) return { target: [0, EYE_HEIGHT, 0], halfWidth: HOME_HALF_WIDTH, halfHeight: HOME_HALF_HEIGHT };
-  const xs = homes.map((home) => home.x);
-  const zs = homes.map((home) => home.z);
-  const middle = { x: (Math.min(...xs) + Math.max(...xs)) / 2, z: (Math.min(...zs) + Math.max(...zs)) / 2 };
-  const centre = onScreen(middle);
   const spots = homes.map(onScreen);
+  const rights = spots.map((spot) => spot.right);
+  const ups = spots.map((spot) => spot.up);
+  const centre = { right: (Math.min(...rights) + Math.max(...rights)) / 2, up: (Math.min(...ups) + Math.max(...ups)) / 2 };
+  const middle = homes.length === 1 ? homes[0]! : onGround(centre);
   return {
     target: [middle.x, EYE_HEIGHT, middle.z],
-    halfWidth: Math.max(...spots.map((spot) => Math.abs(spot.right - centre.right))) + HOME_HALF_WIDTH,
-    halfHeight: Math.max(...spots.map((spot) => Math.abs(spot.up - centre.up))) + HOME_HALF_HEIGHT,
+    halfWidth: (Math.max(...rights) - Math.min(...rights)) / 2 + HOME_HALF_WIDTH,
+    halfHeight: (Math.max(...ups) - Math.min(...ups)) / 2 + HOME_HALF_HEIGHT,
   };
 }
 

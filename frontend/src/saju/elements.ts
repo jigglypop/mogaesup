@@ -30,7 +30,7 @@ export function relationOf(from: Element, to: Element): Relation {
   return controls(from) === to ? 'controls' : 'controlled';
 }
 
-const STEMS = [...'甲乙丙丁戊己庚辛壬癸'];
+export const STEMS = [...'甲乙丙丁戊己庚辛壬癸'];
 const STEMS_KO = [...'갑을병정무기경신임계'];
 export const BRANCHES = [...'子丑寅卯辰巳午未申酉戌亥'];
 const BRANCHES_KO = [...'자축인묘진사오미신유술해'];

@@ -4,6 +4,7 @@ import { ELEMENTS } from '../elements';
 import { HOUSE_NAME, type Profile } from '../profile';
 import type { Resident } from '../residents';
 import { homePath } from '../routes';
+import { FLAG_NEIGHBOURS, flagRaised } from '../village';
 import { PixelIcon } from './PixelIcon';
 
 /** A home in the village; `bridged` when its owner is an 이웃 of the village's. */
@@ -67,6 +68,23 @@ export function VillagePanel({ owner, villagers, viewer }: {
           );
         })}
       </ul>
+    </section>
+  );
+}
+
+/** 깃발 섬: how many of the ten 이웃 that raise a village's flag its owner has, and whether it is raised. */
+export function FlagCard({ neighbours }: { neighbours: number }) {
+  const raised = flagRaised(neighbours);
+  return (
+    <section className="mg-saju-card mg-saju-flag" aria-label="깃발 섬" data-raised={raised || undefined}>
+      <h2 className="mg-heading">
+        깃발 섬 <small>{raised ? `이웃 ${neighbours}명` : `이웃 ${neighbours}/${FLAG_NEIGHBOURS}`}</small>
+      </h2>
+      <div className="mg-saju-gauge-bar" aria-hidden="true">
+        {Array.from({ length: FLAG_NEIGHBOURS }, (_, index) => (
+          <i key={index} className={index < neighbours ? 'is-lit' : undefined} />
+        ))}
+      </div>
     </section>
   );
 }

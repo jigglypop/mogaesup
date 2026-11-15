@@ -2,14 +2,19 @@
 export const homePath = (username: string) => `/@${username}`;
 /** The same home's 사주보기. */
 export const chartPath = (username: string) => `${homePath(username)}?view=chart`;
+/** The same home's 자미두수 명반. */
+export const ziweiPath = (username: string) => `${homePath(username)}?view=ziwei`;
 /** The member's village: their home among their 이웃'. */
 export const villagePath = (username: string) => `${homePath(username)}/village`;
 /** Where its owner corrects the name and birth a home is built from. */
 export const editPath = (username: string) => `${homePath(username)}/edit`;
 
+/** What a home's own address shows: the home, its 사주 chart, or its 자미두수 명반. */
+export type HomeTab = 'home' | 'chart' | 'ziwei';
+
 export type MinihomeRoute =
   /** The home; the way to build it for an owner who has none. */
-  | { kind: 'home'; chart: boolean }
+  | { kind: 'home'; tab: HomeTab }
   /** The owner's name and birth, to correct. */
   | { kind: 'edit' }
   | { kind: 'village' }
@@ -18,12 +23,12 @@ export type MinihomeRoute =
 
 /**
  * The page an address under `/@username` shows: `rest` is the path after it (as the router's `*` gives it) and `search`
- * its query. Only the owner corrects a home, and only a built one has a chart to read.
+ * its query. Only the owner corrects a home, and only a built one has charts to read.
  */
 export function routeOf(username: string, rest: string, search: string, home: { owner: boolean; built: boolean }): MinihomeRoute {
   const parts = rest.split('/').filter(Boolean);
-  const chart = new URLSearchParams(search).get('view') === 'chart';
-  if (parts.length === 0) return { kind: 'home', chart: chart && home.built };
+  const view = new URLSearchParams(search).get('view');
+  if (parts.length === 0) return { kind: 'home', tab: home.built && (view === 'chart' || view === 'ziwei') ? view : 'home' };
   if (parts.length === 1 && parts[0] === 'village') return { kind: 'village' };
   if (parts.length === 1 && parts[0] === 'edit' && home.owner && home.built) return { kind: 'edit' };
   return { kind: 'redirect', to: homePath(username) };

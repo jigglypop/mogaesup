@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { profileOf } from '../profile';
-import { PLOT_REACH, plotsOf } from '../village';
+import { FLAG_NEIGHBOURS, flagRaised, PLOT_REACH, plotsOf } from '../village';
 import { PEOPLE } from './people';
 
 describe('마을 자리', () => {
@@ -37,5 +37,10 @@ describe('마을 자리', () => {
     expect(plots).toHaveLength(8);
     expect(new Set(plots.map((plot) => `${plot.x},${plot.z}`)).size).toBe(8);
     expect(plots.every((plot) => plot.x !== 0 || plot.z !== 0)).toBe(true);
+  });
+
+  it('이웃이 열 명이 되면 깃발이 오른다', () => {
+    expect(FLAG_NEIGHBOURS).toBe(10);
+    expect([0, 9, 10, 11].map(flagRaised)).toEqual([false, false, true, true]);
   });
 });

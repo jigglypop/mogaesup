@@ -1,9 +1,11 @@
 // Walks the 사주 village in Chrome against the running server, as two new members: the card that builds a home (a lunar
-// birth), the home filling the window, a drag that turns the picture, the buttons and the wheel that zoom it, the story
-// panel folding away, its saved picture, BGM, 사주보기, the village, a visit, the guestbook, 이웃 and the bridge between
-// them, 파도타기, a click on the map, entering the 사주 again and taking the home down. Both accounts are made with a
-// password generated for this run.
-// Usage: node scripts/saju-smoke.mjs [webUrl] [screenshotDir] [--allow-remote]   (a local server; it creates accounts)
+// birth) and its guardian dog, the home filling the window, a drag that turns the picture, the buttons and the wheel
+// that zoom it, the story panel folding away, its saved picture, BGM, 사주보기, the village, a visit, the guestbook,
+// 이웃 and the bridge between them, 파도타기, a click on the map, entering the 사주 again and taking the home down.
+// Both accounts are made with a password generated for this run.
+// Usage: node scripts/saju-smoke.mjs [webUrl] [screenshotDir] [--allow-remote] [--flag]   (a local server; it creates accounts)
+// --flag also raises the village's flag: nine more members are signed up over the API and become the first member's
+// 이웃. The server takes twenty sign-ups from one address in ten minutes, so this walk runs once in that time.
 import { randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,7 +15,8 @@ import sharp from 'sharp';
 
 const args = process.argv.slice(2);
 const allowRemote = args.includes('--allow-remote');
-const [WEB = 'http://127.0.0.1:5180', SHOTS = '.data/saju-smoke'] = args.filter((arg) => arg !== '--allow-remote');
+const raiseFlag = args.includes('--flag');
+const [WEB = 'http://127.0.0.1:5180', SHOTS = '.data/saju-smoke'] = args.filter((arg) => !arg.startsWith('--'));
 const { hostname } = new URL(WEB);
 if (!allowRemote && !/^(localhost|127(\.\d{1,3}){3}|\[::1\])$/.test(hostname)) {
   console.error(`${WEB} is not a loopback address, and this script signs up accounts there. Pass --allow-remote to run it anyway.`);
@@ -29,10 +32,16 @@ const browser = await chromium.launch({
   args: ['--enable-gpu', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : [])],
 });
 const problems = [];
+/** The guardian dogs' models each page has fetched, and whether each arrived: a dog is fetched once and then shared. */
+const dogs = new Map();
 
 async function member(username, name) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
   const page = await context.newPage();
+  dogs.set(page, []);
+  page.on('response', (response) => {
+    if (/\/gltf\/guardians\/\d{2}\.glb$/.test(new URL(response.url()).pathname)) dogs.get(page).push(response.ok());
+  });
   page.on('pageerror', (error) => problems.push(`${username} pageerror: ${error.message}`));
   page.on('console', (message) => {
     if (message.type() === 'error') problems.push(`${username} console: ${message.text().slice(0, 300)}`);
@@ -107,7 +116,12 @@ await step('a lunar birth builds the home on the server', async () => {
   await gaon.getByRole('button', { name: '내 집 짓기' }).click();
   if (!(await saved).ok()) throw new Error('the server refused the home');
   await heading(gaon, '가온의 미니홈피');
+  // The home's guardian is one of the twenty dogs. The picture waits for its model, which this page fetched now or,
+  // when a home of the village around the empty plot had the same dog, before the home was built.
+  await gaon.locator('.mg-saju-notes', { hasText: '강아지' }).waitFor();
   await settled(gaon);
+  const fetched = dogs.get(gaon);
+  if (!fetched.length || fetched.includes(false)) throw new Error(`the guardian dogs' models did not all arrive (${fetched.filter(Boolean).length} of ${fetched.length})`);
   await shot(gaon, '2-home');
   // It is the server's: a reload finds it.
   await gaon.reload();
@@ -253,6 +267,33 @@ await step('the visitor sees what 궁합 found and the two homes with the bridge
   await noeul.getByRole('button', { name: '집 보기' }).click();
   await noeul.locator('.mg-saju-say').waitFor({ state: 'detached' });
 });
+if (raiseFlag) {
+  await step('ten 이웃 raise the village\'s flag', async () => {
+    const headers = { origin: new URL(WEB).origin };
+    // The second member is one already; nine more ask, each from a session of their own, and the first accepts them all.
+    for (let index = 0; index < 9; index++) {
+      const session = await browser.newContext();
+      try {
+        const username = `nb${index}_${suffix}`;
+        const signUp = await session.request.post(`${WEB}/api/auth/register`, { headers, data: { username, displayName: `이웃${index + 1}`, password: PASSWORD } });
+        if (!signUp.ok()) throw new Error(`sign-up ${signUp.status()} (twenty an address in ten minutes)`);
+        const asked = await session.request.post(`${WEB}/api/ilchon/${gaonName}/request`, { headers, data: { name: '이웃', theirName: '이웃', message: '' } });
+        if (!asked.ok()) throw new Error(`request ${asked.status()}`);
+      } finally {
+        await session.close();
+      }
+    }
+    const { received } = await (await gaon.request.get(`${WEB}/api/ilchon-requests`)).json();
+    for (const request of received) {
+      const accepted = await gaon.request.post(`${WEB}/api/ilchon-requests/${request.id}/accept`, { headers, data: {} });
+      if (!accepted.ok()) throw new Error(`accept ${accepted.status()}`);
+    }
+    await gaon.goto(`${WEB}/@${gaonName}/village`);
+    await gaon.locator('.mg-saju-flag[data-raised]', { hasText: '이웃 10명' }).waitFor();
+    await settled(gaon);
+    await shot(gaon, '8-flag');
+  });
+}
 await step('파도타기 goes on to a home of the village', async () => {
   await gaon.getByRole('link', { name: '파도타기' }).click();
   await gaon.waitForURL((url) => url.pathname.startsWith('/@') && url.pathname !== `/@${gaonName}/village`);

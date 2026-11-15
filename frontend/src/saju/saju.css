@@ -160,6 +160,20 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 /* Folded it stays in the page (keeping what was typed in it), out of sight. */
 .mg-saju-panel[hidden] { display: none; }
 .mg-saju-panel-close { position: absolute; top: 14px; right: 12px; }
+/* The 명반's panel widens over the picture; a window too narrow for that keeps the one width. */
+.mg-saju-panel-roomy { position: absolute; top: 14px; right: 54px; }
+.mg-saju-panel:has(.mg-saju-panel-roomy) .mg-saju-menu { margin-right: 86px; }
+.mg-saju-panel { transition: width 0.25s ease; }
+@media (min-width: 1101px) and (min-height: 501px) {
+  .mg-saju-world.is-roomy { --mg-side: min(760px, calc(100vw - var(--mg-rail) - var(--mg-edge) * 4 - 260px)); }
+}
+@media (max-width: 1100px), (max-height: 500px) {
+  .mg-saju-panel-roomy { display: none; }
+  .mg-saju-panel:has(.mg-saju-panel-roomy) .mg-saju-menu { margin-right: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mg-saju-panel { transition: none; }
+}
 .mg-saju-panel-open { position: absolute; z-index: 18; top: calc(var(--mg-edge) + 72px); right: var(--mg-edge); max-width: var(--mg-side); height: 48px; }
 .mg-saju-panel-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The tab menu, the open tab in the home's colour. */
@@ -231,6 +245,9 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 .mg-saju-dayun li span { font-size: 12px; color: var(--mg-muted); }
 .mg-saju-dayun li small { font-family: var(--mg-mono); font-size: 10.5px; color: var(--mg-muted); }
 .mg-saju-dayun li[aria-current='true'] { border: 2px solid var(--mg-ink); background: var(--el-soft); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
+
+/* 깃발 섬: ten blocks, one an 이웃, lit in the home's colour. */
+.mg-saju-flag .mg-saju-gauge-bar i { height: 12px; }
 
 /* 마을 주민. */
 .mg-saju-villagers { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }

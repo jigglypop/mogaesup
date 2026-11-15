@@ -1,4 +1,4 @@
-import { Component, createContext, memo, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type PointerEvent, type ReactNode, type Ref, type RefObject } from 'react';
+import { Component, memo, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type PointerEvent, type ReactNode, type Ref, type RefObject } from 'react';
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { AdditiveBlending, HalfFloatType, MeshBasicMaterial, RingGeometry, Vector3, WebGLRenderTarget } from 'three';
@@ -6,15 +6,17 @@ import { AdditiveBlending, HalfFloatType, MeshBasicMaterial, RingGeometry, Vecto
 import type { Compat } from '../compat';
 import type { Profile } from '../profile';
 import { Bridge } from './Bridge';
-import type { Build } from './build';
 import { Built, LampPool, Wind } from './Built';
+import { FlagIsland, type StageFlag } from './Flag';
 import { clampZoom, NO_INSET, type Frame, type Inset } from './frames';
+import { loadDogModel, type DogModel } from './dogModel';
 import { Guardian } from './Guardian';
 import { buildHome, buildLot, GUARDIAN_AT } from './homes';
 import { BOX } from './kit';
 import { initialQuality, Look, type Quality } from './look';
-import { DUSK, GOLDEN, WATER_LEVEL, type Mood } from './mood';
+import { WATER_LEVEL, type Mood } from './mood';
 import { Stillness } from './parts';
+import { useBuild, useMood, WorksContext, type Works } from './works';
 
 // The village: every home on its own island in one lake at the day's last light, seen by one isometric camera that
 // moves between a single home, two homes with their bridge, and the whole village, and that a drag turns about them.
@@ -26,8 +28,6 @@ export type StageBridge = { from: StageHome; to: StageHome; compat: Compat; colo
 
 /** The guardian stands a little smaller than it was drawn, beside a house whose door is a metre high. */
 const GUARDIAN_SCALE = 0.8;
-/** Milliseconds between one island's building and the next. */
-const BUILD_EVERY_MS = 60;
 /** Radians the camera turns for each pixel a drag crosses: its whole swing to one side across some 270 pixels. */
 const TURN_PER_PIXEL = 0.0026;
 /** A press that has moved this far is a drag, as the islands count one: it turns the camera and visits nothing. */
@@ -42,46 +42,37 @@ const MAX_TURN = (40 * Math.PI) / 180;
 const WHEEL_ZOOM = 0.0016;
 const WHEEL_PINCH = 0.012;
 
-/** The hour the village is seen at: sunset under the light theme, dusk under the dark one. */
-export function useMood(): Mood {
-  const read = () => (typeof document !== 'undefined' && document.documentElement.dataset['theme'] === 'dark' ? DUSK : GOLDEN);
-  const [mood, setMood] = useState(read);
-  useEffect(() => {
-    const observer = new MutationObserver(() => setMood(read()));
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    return () => observer.disconnect();
-  }, []);
-  return mood;
-}
-
-/** How many islands are still to be built: the canvas waits for them before it draws its first frame. */
-type Works = { pending: number };
-const WorksContext = createContext<Works | null>(null);
-
 /**
- * What `make` builds, a little after mounting and `turn` builds after the first: a village is built an island at a
- * time, between which the page can answer, instead of all at once.
+ * A dog's model once it has arrived. The canvas waits for it as it does for an island still to be built, until the dog
+ * stands in the scene; a dog that cannot be fetched leaves its home without one.
  */
-function useBuild(make: () => Build, turn: number): Build | null {
+function useDog(id: string): DogModel | null {
   const works = useContext(WorksContext);
-  const [build, setBuild] = useState<Build | null>(null);
+  const [loaded, setLoaded] = useState<{ id: string; model: DogModel } | null>(null);
+  /** Gives back this dog's place among the works still to be done; only its first call counts. */
+  const settle = useRef<() => void>(() => undefined);
   useEffect(() => {
+    let live = true;
     let counted = true;
     if (works) works.pending += 1;
-    const settle = () => {
+    const done = () => {
       if (counted && works) works.pending -= 1;
       counted = false;
     };
-    const timer = setTimeout(() => {
-      setBuild(make());
-      settle();
-    }, turn * BUILD_EVERY_MS);
+    settle.current = done;
+    loadDogModel(id).then((model) => {
+      if (live) setLoaded({ id, model });
+    }, done);
     return () => {
-      clearTimeout(timer);
-      settle();
+      live = false;
+      done();
     };
-  }, [make, turn, works]);
-  return build;
+  }, [id, works]);
+  const model = loaded?.id === id ? loaded.model : null;
+  useEffect(() => {
+    if (model) settle.current();
+  }, [model]);
+  return model;
 }
 
 /**
@@ -92,14 +83,17 @@ export function Diorama({ profile, origin, playful = false, lush = true, turn = 
   const { house, guardian } = profile;
   const make = useCallback(() => buildHome({ style: house.style, accent: house.accent, symbol: house.symbol }, lush), [house.style, house.accent, house.symbol, lush]);
   const build = useBuild(make, turn);
+  const dog = useDog(guardian.dog);
   const charms = guardian.charms.map((item) => item.charm).join('+');
   if (!build) return null;
   return (
     <>
       <Built build={build} origin={origin} />
-      <group key={`${guardian.animal}:${guardian.color}:${charms}`} position={GUARDIAN_AT} scale={GUARDIAN_SCALE}>
-        <Guardian guardian={guardian} position={[0, 0, 0]} playful={playful} />
-      </group>
+      {dog && (
+        <group key={`${guardian.dog}:${charms}`} position={GUARDIAN_AT} scale={GUARDIAN_SCALE}>
+          <Guardian guardian={guardian} model={dog} position={[0, 0, 0]} playful={playful} />
+        </group>
+      )}
     </>
   );
 }
@@ -323,6 +317,8 @@ type StageProps = {
   frame: Frame;
   /** The parts of the canvas the page's panels cover; the picture is fitted to the rest. */
   inset?: Inset;
+  /** The island with the flag, for a village that has raised it. */
+  flag?: StageFlag | null;
   /** The home in view, whose guardian plays; the others can be visited. */
   focus: string | null;
   onVisit?: (id: string) => void;
@@ -335,7 +331,7 @@ type StageProps = {
  * to either side turns the camera about what it shows, as far as the homes' finished sides go ({@link MAX_TURN}). The
  * wheel, two fingers pinching, or the page's own buttons (through `ref`) zoom it in and out.
  */
-export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, focus, onVisit, pins }: StageProps) {
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const turn = useRef(0);
@@ -467,6 +463,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, focus, onV
             {bridges.map((bridge) => (
               <Bridge key={`${bridge.to.id}:${bridge.colors.join()}`} from={[bridge.from.x, bridge.from.z]} to={[bridge.to.x, bridge.to.z]} colors={bridge.colors} tone={bridge.compat.tone} />
             ))}
+            {flag && <FlagIsland flag={flag} lush={lush} turn={homes.length} />}
           </Scene>
           <Pins homes={homes} layer={layer} />
           {!slow && <Pace onSlow={() => setSlow(true)} />}

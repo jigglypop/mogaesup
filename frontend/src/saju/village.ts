@@ -5,6 +5,15 @@ export const ISLAND = 10;
 /** How far a neighbour's island stands from the middle one, centre to centre: a bridge's length of water between them. */
 export const PLOT_REACH = 14;
 
+/** How many 이웃 a member has when their village raises its flag: from then on the island with the flag stands in it. */
+export const FLAG_NEIGHBOURS = 10;
+export const flagRaised = (neighbours: number) => neighbours >= FLAG_NEIGHBOURS;
+/**
+ * Where the flag's island lies: out past the east plot. Seen from the south-east the nine plots make a diamond, and
+ * this is the corner of the picture the diamond leaves open, so a full village is framed no wider for it.
+ */
+export const FLAG_SPOT = { x: 27, z: 0 } as const;
+
 /** A place for a home on the village map. */
 export type Plot = {
   /** The resident living there. */

@@ -5,7 +5,8 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import type { Profile } from '../profile';
 import { PICTURE_SIZE } from '../snapshot';
 import { frameOf } from './frames';
-import { Diorama, Scene, useMood } from './Stage';
+import { Diorama, Scene } from './Stage';
+import { useMood } from './works';
 
 /** Frames drawn before the picture is taken: the first have the shadows cast and the lake's mirror drawn. */
 const SETTLE_FRAMES = 8;

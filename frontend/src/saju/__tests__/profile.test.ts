@@ -36,22 +36,21 @@ describe('네 사람의 사주', () => {
     expect(profile('garam').badge).toBe('깊고 넓은 바다 같은 임수(壬水) 일간');
   });
 
-  it('수호 캐릭터는 일주의 동물과 색, 신살이 준 것을 지닌다', () => {
+  it('수호 강아지는 일주가 정하고, 신살이 준 것을 지닌다', () => {
     expect(profile('sol').guardian).toEqual({
-      animal: 'tiger',
-      color: 'wood',
-      name: '푸른 호랑이',
+      dog: '09',
+      name: '메달 강아지',
       pillar: '갑인(甲寅)',
       charms: [
         { charm: 'bundle', label: '역마의 봇짐' },
         { charm: 'books', label: '문창의 책' },
       ],
     });
-    expect(profile('noeul').guardian.name).toBe('붉은 닭');
+    expect(profile('noeul').guardian.name).toBe('왕관 강아지');
     expect(profile('noeul').guardian.charms.map((item) => item.charm)).toEqual(['star', 'blossom', 'scarf']);
-    expect(profile('bori').guardian.name).toBe('노란 소');
+    expect(profile('bori').guardian.name).toBe('곰인형 강아지');
     expect(profile('bori').guardian.charms.map((item) => item.charm)).toEqual(['blossom', 'ribbon', 'bundle']);
-    expect(profile('garam').guardian.name).toBe('검은 용');
+    expect(profile('garam').guardian.name).toBe('목도리 강아지');
     expect(profile('garam').guardian.charms.map((item) => item.charm)).toEqual(['cape', 'canopy', 'bundle']);
   });
 
@@ -64,7 +63,7 @@ describe('네 사람의 사주', () => {
     expect(unknown.balance.counts).toEqual({ wood: 3, fire: 2, earth: 1, metal: 0, water: 0 });
     expect(unknown.balance.lacking).toEqual(['metal', 'water']);
     expect(unknown.house.style).toBe('wood');
-    expect(unknown.guardian.name).toBe('푸른 호랑이');
+    expect(unknown.guardian.name).toBe('메달 강아지');
     // 역마는 시지(亥)에 있었다.
     expect(unknown.guardian.charms.map((item) => item.charm)).not.toContain('bundle');
   });

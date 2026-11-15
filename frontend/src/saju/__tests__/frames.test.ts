@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ELEVATION, frameOf, onScreen, turnedExtent, zoomOf } from '../scene/frames';
 import { pictureFileName } from '../snapshot';
-import { PLOT_REACH } from '../village';
+import { FLAG_SPOT, PLOT_REACH } from '../village';
 
 describe('카메라의 틀', () => {
   it('한 집은 그 섬을 가운데에 둔다', () => {
@@ -30,6 +30,29 @@ describe('카메라의 틀', () => {
     expect(onScreen({ x: R, z: 0 }).up).toBeLessThan(0);
     expect(onScreen({ x: 0, z: -R }).right).toBeGreaterThan(0);
     expect(onScreen({ x: 0, z: -R }).up).toBeGreaterThan(0);
+  });
+
+  it('화면에 놓이는 자리의 가운데를 본다: 한쪽으로 치우친 마을도 꼭 맞게 담는다', () => {
+    const R = PLOT_REACH;
+    // 동쪽과 남쪽 집은 화면 아래 양옆이다. 틀은 그 셋이 화면에서 차지하는 만큼만 높다.
+    const three = frameOf([{ x: 0, z: 0 }, { x: R, z: 0 }, { x: 0, z: R }]);
+    expect(three.halfWidth).toBeCloseTo(8 + R * Math.SQRT1_2, 5);
+    expect(three.halfHeight).toBeCloseTo(7 + (R * Math.SQRT1_2 * Math.sin(ELEVATION)) / 2, 5);
+    // 가운데는 셋의 화면 한가운데에 놓이는 땅이다.
+    const centre = onScreen({ x: three.target[0], z: three.target[2] });
+    expect(centre.right).toBeCloseTo(0, 5);
+    expect(centre.up).toBeCloseTo(-(R * Math.SQRT1_2 * Math.sin(ELEVATION)) / 2, 5);
+  });
+
+  it('깃발 섬은 꽉 찬 마을이 화면에 비워 두는 귀퉁이에 있어 틀을 넓히지 않는다', () => {
+    const R = PLOT_REACH;
+    const full = [-R, 0, R].flatMap((x) => [-R, 0, R].map((z) => ({ x, z })));
+    const village = frameOf(full);
+    expect(frameOf([...full, FLAG_SPOT])).toEqual(village);
+    // 그 섬은 동쪽 집의 기슭 너머에 있다.
+    expect(FLAG_SPOT.x - R).toBeGreaterThan(11);
+    // 마을이 비어 있으면 깃발 섬까지 담도록 틀이 넓어진다.
+    expect(frameOf([{ x: 0, z: 0 }, FLAG_SPOT]).halfWidth).toBeGreaterThan(frameOf([{ x: 0, z: 0 }]).halfWidth);
   });
 
   it('집이 없어도 틀은 있다', () => {

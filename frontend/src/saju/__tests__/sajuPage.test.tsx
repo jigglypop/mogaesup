@@ -162,7 +162,7 @@ describe('미니홈피 화면', () => {
     expect(container.querySelector('.mg-saju-form')).toBeNull();
     expect(container.querySelector('.mg-saju-badge')?.textContent).toBe('곧게 뻗는 큰 나무 같은 갑목(甲木) 일간');
     expect(stage.props?.focus).toBe('sol');
-    expect(menu(container)).toEqual(['홈* /@sol', '사주보기 /@sol?view=chart', '마을 /@sol/village']);
+    expect(menu(container)).toEqual(['홈* /@sol', '사주보기 /@sol?view=chart', '자미두수 /@sol?view=ziwei', '마을 /@sol/village']);
     await unmount();
   });
 
@@ -199,13 +199,13 @@ describe('미니홈피 화면', () => {
 
   it('사주보기와 마을은 같은 틀 안에서 열린다', async () => {
     const chart = await open('/@sol?view=chart');
-    expect(menu(chart.container)).toEqual(['홈 /@sol', '사주보기* /@sol?view=chart', '마을 /@sol/village']);
+    expect(menu(chart.container)).toEqual(['홈 /@sol', '사주보기* /@sol?view=chart', '자미두수 /@sol?view=ziwei', '마을 /@sol/village']);
     expect(chart.container.querySelector('.mg-saju-pillars')).not.toBeNull();
     expect(chart.container.querySelector('.guestbook')).toBeNull();
     await chart.unmount();
 
     const village = await open('/@sol/village');
-    expect(menu(village.container)).toEqual(['홈 /@sol', '사주보기 /@sol?view=chart', '마을* /@sol/village']);
+    expect(menu(village.container)).toEqual(['홈 /@sol', '사주보기 /@sol?view=chart', '자미두수 /@sol?view=ziwei', '마을* /@sol/village']);
     expect(stage.props?.focus).toBeNull();
     expect(stage.props!.frame.halfWidth).toBeGreaterThan(8);
     expect(pins(village.container)).toEqual(['sol /@sol 솔내 집', 'bori /@bori 보리', 'noeul /@noeul 노을']);

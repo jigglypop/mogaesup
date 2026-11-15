@@ -1,4 +1,5 @@
-import { balanceOf, BRANCHES, branchElement, ELEMENT_NAME, stemElement, type Balance, type Element } from './elements';
+import { dogOf } from './dogs';
+import { balanceOf, branchElement, ELEMENT_NAME, stemElement, type Balance, type Element } from './elements';
 import { pillarsOf, readingOf, type Birth, type Reading } from './engine';
 
 /** What stands in the yard for the day master: 甲 a great tree … 癸 a rain cloud. */
@@ -25,16 +26,7 @@ export type DayMaster = {
   element: Element;
 };
 
-export const ANIMALS = ['rat', 'ox', 'tiger', 'rabbit', 'dragon', 'snake', 'horse', 'sheep', 'monkey', 'rooster', 'dog', 'pig'] as const;
-export type Animal = (typeof ANIMALS)[number];
-const ANIMAL_KO: Record<Animal, string> = {
-  rat: '쥐', ox: '소', tiger: '호랑이', rabbit: '토끼', dragon: '용', snake: '뱀',
-  horse: '말', sheep: '양', monkey: '원숭이', rooster: '닭', dog: '개', pig: '돼지',
-};
-/** 오방색: the colour a day stem's element gives its animal. */
-const COLOR_KO: Record<Element, string> = { wood: '푸른', fire: '붉은', earth: '노란', metal: '하얀', water: '검은' };
-
-/** What a 신살 of the chart gives the guardian to wear or keep. */
+/** What a 신살 of the chart gives the guardian to keep. */
 export type Charm = 'star' | 'cape' | 'canopy' | 'blossom' | 'ribbon' | 'bundle' | 'flag' | 'scarf' | 'books' | 'sword' | 'coins';
 /** Where a charm goes; the guardian has one of each at most. */
 type Slot = 'above' | 'ear' | 'neck' | 'back' | 'side';
@@ -56,11 +48,11 @@ const CHARM_RULES: readonly CharmRule[] = [
 ];
 const MAX_CHARMS = 3;
 
-/** 수호 캐릭터: the day pillar's animal in its stem's colour, with what the chart's 신살 gave it. */
+/** 수호 강아지: the dog that keeps the home's day pillar (see dogs), with what the chart's 신살 gave it. */
 export type Guardian = {
-  animal: Animal;
-  color: Element;
-  /** `붉은 닭`. */
+  /** Which of the twenty dogs: the name its model is kept under. */
+  dog: string;
+  /** `왕관 강아지`. */
   name: string;
   /** `정유(丁酉)`. */
   pillar: string;
@@ -126,7 +118,7 @@ export function profileOfReading(reading: Reading): Profile {
   const balance = balanceOf(pillarsOf(reading).flatMap(({ pillar }) => [...pillar.wuxing]), [element, monthElement]);
   const master = DAY_MASTERS[day.stem] ?? DAY_MASTERS['戊']!;
   const label = `${day.stemKo}${ELEMENT_NAME[element].ko}(${day.stem}${ELEMENT_NAME[element].hanja})`;
-  const animal = ANIMALS[BRANCHES.indexOf(day.branch)] ?? 'rat';
+  const dog = dogOf(day.stem, day.branch);
   const profile: Profile = {
     reading,
     balance,
@@ -134,9 +126,8 @@ export function profileOfReading(reading: Reading): Profile {
     badge: `${master.phrase} ${label} 일간`,
     house: { style: balance.dominant, accent: balance.secondary, symbol: master.symbol },
     guardian: {
-      animal,
-      color: element,
-      name: `${COLOR_KO[element]} ${ANIMAL_KO[animal]}`,
+      dog: dog.id,
+      name: dog.name,
       pillar: `${day.ko}(${day.cn})`,
       charms: charmsOf(reading),
     },
