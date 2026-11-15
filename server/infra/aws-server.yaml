@@ -313,6 +313,9 @@ Resources:
         - DeviceIndex: '0'
           AssociatePublicIpAddress: true
           SubnetId: !Ref SubnetA
+          # Pinned: CloudFront reaches the server by this address's private DNS name (the web stack's ApiPrivateDns), so
+          # an instance that has to be made again answers where the one before it did.
+          PrivateIpAddress: 172.31.7.208
           GroupSet: [!GetAtt ApiSecurityGroup.GroupId]
       UserData:
         Fn::Base64: |
@@ -380,7 +383,10 @@ Resources:
     Properties:
       VpcOriginEndpointConfig:
         Name: mogaesup-server
-        Arn: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ApiInstance}'
+        # The instance this origin was made for (terminated 2026-10-26). CloudFront refuses to change a VPC origin
+        # that a distribution uses, so it keeps that name; the path it opened into the subnet serves whichever
+        # instance holds the pinned address.
+        Arn: arn:aws:ec2:ap-northeast-2:960243570517:instance/i-0bc178f1e70898d6f
         HTTPPort: 8080
         HTTPSPort: 443
         OriginProtocolPolicy: http-only
