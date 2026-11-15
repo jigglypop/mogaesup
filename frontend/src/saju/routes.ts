@@ -1,4 +1,4 @@
-/** A member's 미니홈피 and its pages. */
+/** A member's 섬 and its pages. */
 export const homePath = (username: string) => `/@${username}`;
 /** The same home's 사주보기. */
 export const chartPath = (username: string) => `${homePath(username)}?view=chart`;
@@ -39,7 +39,7 @@ export const isMinihomePage = (rest: string) => rest === '' || rest === 'village
 
 /**
  * Where an address of the 사주 village's first days (`/saju`, `/saju/village`, `/saju/edit`, `/saju/home/…`) leads
- * now that every member's home is their 미니홈피: the same page of the viewer's own.
+ * now that every member's home is their 섬: the same page of the viewer's own.
  */
 export function movedPath(username: string, rest: string, search: string): string {
   const page = rest.split('/').filter(Boolean)[0];

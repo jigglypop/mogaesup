@@ -101,6 +101,18 @@ Resources:
       Description: Sent to the character studio as x-gateway-key; its CloudFront lets this server through with it
       GenerateSecretString: {ExcludePunctuation: true, PasswordLength: 48}
       Tags: [{Key: application, Value: mogaesup}]
+  # The OpenAI API key that writes 사주 readings and draws 미연시 pictures (OPENAI_API_KEY). It is created holding a
+  # placeholder, so neither this template nor the stack's parameters ever carry the key: it is set once by hand with
+  # `aws secretsmanager put-secret-value` (README "배포"), and the bootstrap writes it into server.env only once the
+  # secret holds a real key. A stack update leaves the value alone, since SecretString here never changes.
+  OpenAiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: OpenAI API key for saju readings and pictures; set by hand, created as a placeholder
+      SecretString: placeholder
+      Tags: [{Key: application, Value: mogaesup}]
   RuntimeBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -267,6 +279,7 @@ Resources:
                 Resource:
                   - !Ref RealtimeTicketSecret
                   - !Ref FactoryGatewaySecret
+                  - !Ref OpenAiKeySecret
               # The database master secrets and the character records secret only while DatabaseAdminAccess is true:
               # creating the app role, moving the database, making the records database. An ordinary install logs in as
               # the app role and reads none of them.
@@ -401,6 +414,7 @@ Outputs:
     Condition: StudioReadsCharacterDatabase
     Value: !Ref CharacterDatabaseSecret
   FactoryGatewaySecretArn: {Value: !Ref FactoryGatewaySecret}
+  OpenAiKeySecretArn: {Value: !Ref OpenAiKeySecret}
   VpcOriginId: {Value: !GetAtt VpcOrigin.Id}
   ApiPrivateDns: {Value: !GetAtt ApiInstance.PrivateDnsName}
   ApiSecurityGroupId: {Value: !GetAtt ApiSecurityGroup.GroupId}

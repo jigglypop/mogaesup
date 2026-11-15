@@ -35,7 +35,7 @@ UNAPPLIED = 'Infrastructure changes are listed above and not applied; run again 
 DATABASE = 'mogaesup-postgres'
 # Resources whose replacement --yes never applies.
 KEEP = ('ApiInstance', 'Database', 'RuntimeBucket', 'VpcOrigin', 'RealtimeTicketSecret', 'FactoryGatewaySecret',
-        'CharacterDatabaseSecret', 'ApiSecurityGroup')
+        'CharacterDatabaseSecret', 'ApiSecurityGroup', 'OpenAiKeySecret')
 WEB_STACK = 'mogaesup-web'
 # The release paths the server deploy ships (.github/scripts/release_parts.sh); a manual deploy refuses changes there.
 RELEASE_PATHS = ('server',)
@@ -209,7 +209,8 @@ def provision(studio_instance=None, yes=False):
 
 def bootstrap_command(args, outputs, studio_instance):
     """The bootstrap.py command line. A studio gateway flag the operator did not give is left out, so the instance keeps the
-    value it has; the studio instance is always the stack's (empty when it names none), since its role may start only that."""
+    value it has; the studio instance is always the stack's (empty when it names none), since its role may start only that.
+    The stack's OpenAI key secret goes along when the stack has one, and the bootstrap writes the key only once it is set."""
     command = ['python3', 'bootstrap.py', '--secret', outputs['DatabaseSecretArn'],
                '--ticket-secret', outputs['RealtimeTicketSecretArn'], '--endpoint', outputs['DatabaseEndpoint'],
                '--origin', args.origin, '--model-store', args.model_store]
@@ -219,6 +220,9 @@ def bootstrap_command(args, outputs, studio_instance):
             command += [flag, str(value)]
     if outputs.get('FactoryGatewaySecretArn'):
         command += ['--factory-gateway-secret', outputs['FactoryGatewaySecretArn']]
+    # A stack from before the OpenAI key's secret has no such output; the instance then keeps the key it has.
+    if outputs.get('OpenAiKeySecretArn'):
+        command += ['--openai-secret', outputs['OpenAiKeySecretArn']]
     return [*command, '--studio-instance-id', studio_instance]
 
 
@@ -461,7 +465,7 @@ def main():
         raise RuntimeError(f"SSM {result['Status']}; inspect {receipt_dir / 'ssm-result.json'} (once the script has stopped "
                            'the service, a release that does not come up is replaced by the previous binary)')
     for line in result.get('StandardOutputContent', '').splitlines():
-        if line.startswith('Studio gateway:'):
+        if line.startswith(('Studio gateway:', 'OpenAI:')):
             print(line, flush=True)
     receipt['status'] = 'server-deployed'
     receipt['git_commit'] = commit

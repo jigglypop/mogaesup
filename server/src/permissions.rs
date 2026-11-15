@@ -31,7 +31,7 @@ use crate::{
 };
 
 const USER_NOT_FOUND: ApiError = not_found("user_not_found", "없는 사용자입니다.");
-const HOME_NOT_FOUND: ApiError = not_found("home_not_found", "없는 미니홈피입니다.");
+const HOME_NOT_FOUND: ApiError = not_found("home_not_found", "없는 섬입니다.");
 const INVALID_OBJECT: ApiError = bad("invalid_object", "권한 대상을 확인해 주세요.");
 const INVALID_SUBJECT: ApiError = bad("invalid_subject", "권한을 받을 사람이나 그룹을 확인해 주세요.");
 const INVALID_RELATION: ApiError = bad("invalid_relation", "그 대상에 없는 관계입니다.");

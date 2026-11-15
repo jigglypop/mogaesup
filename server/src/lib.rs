@@ -12,12 +12,15 @@ pub mod imports;
 pub mod look_bake;
 pub mod looks;
 pub mod models;
+mod openai;
 pub mod permissions;
 pub mod rebac;
 pub mod residents;
 pub mod rooms;
 pub mod runtime;
 pub mod saju;
+pub mod saju_made;
+mod saju_reading;
 pub mod security;
 pub mod share;
 pub mod slim;
@@ -67,6 +70,8 @@ pub struct AppState {
     pub power: studio_power::StudioPower,
     /// Island saves under way and island loads kept compressed.
     pub homes: homes::Homes,
+    /// Readings and pictures of 사주 homes being made with a paid model.
+    pub made: saju_made::Slots,
 }
 
 impl AppState {
@@ -85,6 +90,7 @@ impl AppState {
             looks: Arc::new(Semaphore::new(looks::MAX_BAKING)),
             power,
             homes: homes::Homes::default(),
+            made: saju_made::Slots::default(),
         }
     }
 }
@@ -112,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .merge(homes::router())
         .merge(social::router())
         .merge(saju::router())
+        .merge(saju_made::router())
         .merge(catalog::router())
         .merge(factory::router())
         .merge(looks::router())

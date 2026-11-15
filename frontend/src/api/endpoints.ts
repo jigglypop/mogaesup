@@ -32,8 +32,11 @@ import type {
   ProfileChanges,
   RealtimeTicket,
   Registration,
+  ReadingChart,
   SajuBirth,
   SajuHome,
+  SajuPictureState,
+  SajuReadingState,
   SajuVillage,
   SavedHomeWorld,
   SaveHomeWorld,
@@ -137,6 +140,22 @@ export const sajuApi = {
   save: (body: { expectedOwnerId: string; name: string; birth: SajuBirth }) => api<{ saju: SajuHome }>('/homes/me/saju', { method: 'PUT', body }),
   /** Takes the caller's home down; their guestbook and 이웃 stay. */
   remove: (body: { expectedOwnerId: string }) => api<void>('/homes/me/saju', { method: 'DELETE', body }),
+  /** A home's reading, as far as it has been written. */
+  reading: (username: string) => api<SajuReadingState>(`/homes/${segment(username)}/saju/reading`),
+  /**
+   * Asks for the caller's reading to be written from `chart` (202 pending; 200 with the one already written for this
+   * birth unless `again`). Refused 409 `stale_birth` when the chart's birth is not the stored one.
+   */
+  read: (body: { expectedOwnerId: string; chart: ReadingChart; again?: boolean }) =>
+    api<SajuReadingState>('/homes/me/saju/reading', { method: 'POST', body }),
+  /** A home's 미연시 picture, as far as it has been drawn. */
+  picture: (username: string) => api<SajuPictureState>(`/homes/${segment(username)}/saju/picture`),
+  /**
+   * Asks for the caller's island to be drawn again from `image`: a `data:image/webp;base64,…` (or png/jpeg) of the island
+   * alone, 1024×1024 (202 pending; 200 with the one already drawn for this birth unless `again`).
+   */
+  draw: (body: { expectedOwnerId: string; image: string; again?: boolean }) =>
+    api<SajuPictureState>('/homes/me/saju/picture', { method: 'POST', body, timeoutMs: 60_000 }),
 };
 
 /** The public lists change only when an admin publishes, so an island opened soon after another reuses them. */

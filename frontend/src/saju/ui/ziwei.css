@@ -159,7 +159,7 @@
   .mg-ziwei-related button:hover { background: var(--mg-card); }
 }
 @media (pointer: coarse) {
-  .mg-ziwei-related button { height: 34px; padding: 0 12px; }
+  .mg-ziwei-related button { height: 44px; min-width: 44px; padding: 0 12px; }
 }
 .mg-ziwei-years { display: flex; flex-wrap: wrap; gap: 2px 9px; font-family: var(--mg-mono); font-size: 12px; font-weight: 600; }
 

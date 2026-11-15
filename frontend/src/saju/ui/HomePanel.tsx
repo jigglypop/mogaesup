@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { Link } from 'react-router-dom';
 
@@ -25,7 +25,7 @@ export type Bridge = {
 };
 
 /**
- * 궁합 다리, on someone else's 미니홈피: the way to become 이웃, and between 이웃 what the two charts found in each
+ * 궁합 다리, on someone else's 섬: the way to become 이웃, and between 이웃 what the two charts found in each
  * other. On one's own it holds the requests waiting for an answer.
  */
 function BridgeCard({ view, viewer, neighbors, bridge }: { view: HomeView; viewer: User | null; neighbors: Neighbors; bridge: Bridge }) {
@@ -108,15 +108,17 @@ function Doors({ visibility, onChange }: { visibility: HomeVisibility; onChange:
 }
 
 /**
- * A 미니홈피's story beside its canvas: the day master in a line, the house and guardian the chart gave, the balance of
- * elements, the bridge to it and its guestbook. A home not built yet has its bridge and guestbook all the same: a
- * visitor finds them under the empty plot, the owner under the card that builds the home.
+ * A 섬's story beside its canvas: the day master in a line, the house and guardian the chart gave, the picture
+ * of its island, the balance of elements, the bridge to it and its guestbook. A home not built yet has its bridge and
+ * guestbook all the same: a visitor finds them under the empty plot, the owner under the card that builds the home.
  */
-export function HomePanel({ view, viewer, profile, neighbors, bridge, onVisibility }: {
+export function HomePanel({ view, viewer, profile, picture, neighbors, bridge, onVisibility }: {
   view: HomeView;
   viewer: User | null;
   /** The home's chart, once its owner has built it. */
   profile: Profile | null;
+  /** The card with the picture of the built home's island. */
+  picture?: ReactNode;
   neighbors: Neighbors;
   bridge: Bridge;
   /** Changes who may see the home: its owner's. */
@@ -151,6 +153,7 @@ export function HomePanel({ view, viewer, profile, neighbors, bridge, onVisibili
               )}
             </div>
           </section>
+          {picture}
           <section className="mg-saju-card" aria-label="오행 밸런스">
             <h2 className="mg-heading">오행 밸런스</h2>
             <Gauge balance={profile.balance} />

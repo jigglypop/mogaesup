@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { AdditiveBlending, CanvasTexture, Color, MeshStandardMaterial, SpriteMaterial, type Group, type Mesh, type Sprite } from 'three';
 
 import type { CompatTone } from '../compat';
-import { ISLAND } from '../village';
+import { bridgeSpan } from '../village';
 import type { Lamp } from './build';
 import { useLamps } from './Built';
 import { BOX, Box, seeded } from './kit';
@@ -58,7 +58,11 @@ const settle = (t: number) => (t <= 0 ? 0 : t >= 1 ? 1 : 1 + 2.4 * (t - 1) ** 3 
 export function Bridge({ from, to, colors, tone }: { from: [number, number]; to: [number, number]; colors: [string, string]; tone: CompatTone }) {
   const dx = to[0] - from[0];
   const dz = to[1] - from[1];
-  const length = Math.hypot(dx, dz) - ISLAND + 0.5;
+  // From a foot on the viewer's bank to one on the neighbour's, over the middle of the water between them.
+  const [fromX, fromZ] = from;
+  const [toX, toZ] = to;
+  const span = useMemo(() => bridgeSpan({ x: fromX, z: fromZ }, { x: toX, z: toZ }), [fromX, fromZ, toX, toZ]);
+  const length = span.length;
   const planks = useRef<(Mesh | null)[]>([]);
   const rails = useRef<Group>(null);
   const orbs = useRef<(Sprite | null)[]>([]);
@@ -87,7 +91,7 @@ export function Bridge({ from, to, colors, tone }: { from: [number, number]; to:
   );
   const at = (t: number): [number, number, number] => [(t - 0.5) * length, ARCH * Math.sin(Math.PI * t) + 0.07, 0];
   const pitch = (t: number) => Math.atan((ARCH * Math.PI * Math.cos(Math.PI * t)) / length);
-  const middle = useMemo(() => [(from[0] + to[0]) / 2, 0, (from[1] + to[1]) / 2] as const, [from, to]);
+  const middle = useMemo(() => [span.middle[0], 0, span.middle[1]] as const, [span]);
   const turn = Math.atan2(-dz, dx);
   // The bridge's own light on the banks it lands on, one lamp of each home's colour.
   const lamps = useMemo<Lamp[]>(() => {

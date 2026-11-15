@@ -24,7 +24,7 @@ const CharacterPage = lazy(() => import('./studio/CharacterPage'));
 // Only catalog editors open the pipeline board and only admins the permissions, so members never download them.
 const AdminPage = lazy(() => import('./pages/AdminPage').then((module) => ({ default: module.AdminPage })));
 const PermissionsPage = lazy(() => import('./pages/permissions/PermissionsPage'));
-// A 미니홈피 brings its own 3D scene and the chart calculation; they load with the first one opened.
+// A 섬 brings its own 3D scene and the chart calculation; they load with the first one opened.
 const SajuPage = lazy(() => import('./saju/SajuPage'));
 
 /** Old studio addresses: the wardrobe is `/character` now, the factory screens live under `/admin/studio`. */
@@ -35,7 +35,7 @@ function StudioRedirect() {
   return <Navigate to={`${target}${hash}`} replace />;
 }
 
-/** `/@username` is a member's 미니홈피, with its village and (for its owner) the form its home is built from. */
+/** `/@username` is a member's 섬, with its village and (for its owner) the form its home is built from. */
 function UsernameRoute() {
   const { slug = '', '*': rest = '' } = useParams();
   const page = rest.replace(/\/+$/, '');
@@ -48,7 +48,7 @@ function UsernameRoute() {
   );
 }
 
-/** `/saju/*`, where the 사주 village first stood: on to the same page of the viewer's own 미니홈피. */
+/** `/saju/*`, where the 사주 village first stood: on to the same page of the viewer's own 섬. */
 function SajuRedirect() {
   const { '*': rest = '' } = useParams();
   const { search } = useLocation();

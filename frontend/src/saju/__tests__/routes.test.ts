@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { chartPath, editPath, homePath, isMinihomePage, movedPath, routeOf, villagePath, waveOf, ziweiPath } from '../routes';
 
-describe('미니홈피 주소', () => {
+describe('섬 주소', () => {
   const owner = { owner: true, built: true };
   const visitor = { owner: false, built: true };
 
@@ -45,7 +45,7 @@ describe('미니홈피 주소', () => {
     expect(editPath('sol')).toBe('/@sol/edit');
   });
 
-  it('사주 마을의 옛 주소는 내 미니홈피의 같은 쪽으로 간다', () => {
+  it('사주 마을의 옛 주소는 내 섬의 같은 쪽으로 간다', () => {
     expect(movedPath('sol', '', '')).toBe('/@sol');
     expect(movedPath('sol', '', '?view=chart')).toBe('/@sol?view=chart');
     expect(movedPath('sol', 'village', '')).toBe('/@sol/village');

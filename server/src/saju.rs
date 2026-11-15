@@ -122,16 +122,39 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Birth {
-    calendar: String,
-    year: i16,
-    month: i16,
-    day: i16,
+pub(crate) struct Birth {
+    pub(crate) calendar: String,
+    pub(crate) year: i16,
+    pub(crate) month: i16,
+    pub(crate) day: i16,
     #[serde(default)]
-    leap_month: bool,
+    pub(crate) leap_month: bool,
     /// `HH:MM`, or nothing when the hour is not known.
-    time: Option<String>,
-    gender: String,
+    pub(crate) time: Option<String>,
+    pub(crate) gender: String,
+}
+
+impl Birth {
+    /// The birth a stored home was built from.
+    pub(crate) fn of(row: &PgRow) -> Self {
+        Self {
+            calendar: row.get("calendar"),
+            year: row.get("birth_year"),
+            month: row.get("birth_month"),
+            day: row.get("birth_day"),
+            leap_month: row.get("leap_month"),
+            time: row.get("birth_time"),
+            gender: row.get("gender"),
+        }
+    }
+
+    /// What tells one birth from another: what the server makes for a home from its chart is kept under it, and a home
+    /// built again from another birth has none of it.
+    pub(crate) fn key(&self) -> String {
+        let leap = if self.leap_month { "leap" } else { "plain" };
+        let time = self.time.as_deref().unwrap_or("-");
+        format!("{}:{:04}-{:02}-{:02}:{leap}:{time}:{}", self.calendar, self.year, self.month, self.day, self.gender)
+    }
 }
 
 #[derive(Deserialize)]
@@ -219,7 +242,9 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
     .bind(&birth.gender)
     .execute(&mut *tx)
     .await?;
-    // A home built or built again is a change to the member's 미니홈피: the listing shows it among the newest.
+    // A reading or picture made from another birth is not this home's any more.
+    crate::saju_made::forget_other_births(&mut tx, user.id, &birth.key()).await?;
+    // A home built or built again is a change to the member's 섬: the listing shows it among the newest.
     sqlx::query("UPDATE homes SET updated_at = now() WHERE owner_id = $1").bind(user.id).execute(&mut *tx).await?;
     let row = sqlx::query(&format!("SELECT {COLUMNS} FROM saju_homes s WHERE s.owner_id = $1"))
         .bind(user.id)
@@ -236,7 +261,8 @@ struct Removal {
     expected_owner_id: Option<Uuid>,
 }
 
-/// `DELETE /api/homes/me/saju`: takes the caller's 사주 home down. Their guestbook and 이웃 stay.
+/// `DELETE /api/homes/me/saju`: takes the caller's 사주 home down, and its reading and picture with it (the database
+/// cascades). Their guestbook and 이웃 stay.
 async fn remove(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<Removal>) -> ApiResult<StatusCode> {
     let user = current_user(&state, &headers).await?;
     same_owner(body.expected_owner_id, user.id)?;

@@ -1,5 +1,7 @@
 use anyhow::Context;
-use mogaesup_server::{AppState, auth, config::Config, imports, looks, models, router, runtime::ProcessLock};
+use mogaesup_server::{
+    AppState, auth, config::Config, imports, looks, models, router, runtime::ProcessLock, saju_made,
+};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 
@@ -44,6 +46,10 @@ async fn run(db: PgPool, config: Config) -> anyhow::Result<()> {
     let interrupted = looks::interrupt_unfinished(&db).await.context("interrupted looks")?;
     if interrupted > 0 {
         tracing::warn!(interrupted, "Looks cut short by the last shutdown were marked failed");
+    }
+    let interrupted = saju_made::interrupt_unfinished(&db).await.context("interrupted saju readings and pictures")?;
+    if interrupted > 0 {
+        tracing::warn!(interrupted, "Saju readings and pictures cut short by the last shutdown were marked failed");
     }
     let state = AppState::new(db.clone(), config);
     if let Some((username, password)) = bootstrap {

@@ -17,12 +17,13 @@ import {
   PlaneGeometry,
   RGBAFormat,
   RingGeometry,
-  ShaderMaterial,
   SphereGeometry,
   Vector3,
   type Group,
   type PointLight,
 } from 'three';
+import { abs, attribute, cameraProjectionMatrix, cos, dot, exp, float, Fn, fract, max, mix, modelViewMatrix, positionGeometry, sin, smoothstep, step, vec2, vec3, vec4 } from 'three/tsl';
+import { MeshBasicNodeMaterial, type Node } from 'three/webgpu';
 
 import type { Build, Lamp, Life } from './build';
 import { WATER_LEVEL } from './mood';
@@ -50,90 +51,76 @@ type Motes = { at: number[]; look: number[]; way: number[] };
 const MOTE = { halo: 0, firefly: 1, ember: 2, smoke: 3, petal: 4, mist: 5, flame: 6 } as const;
 const QUAD = new PlaneGeometry(1, 1);
 
-const MOTE_VERTEX = /* glsl */ `
-  attribute vec3 aAt;
-  attribute vec4 aLook;
-  attribute vec4 aWay;
-  uniform float uWind;
-  varying vec2 vUv;
-  varying vec4 vColor;
-  varying float vMode;
-  void main() {
-    float mode = aWay.x;
-    float seed = aWay.y;
-    float reach = aWay.z;
-    vec3 at = aAt;
-    float size = aLook.w;
-    float alpha = 1.0;
-    float t = uWind;
-    vec2 stretch = vec2(1.0);
-    if (mode < 0.5) {
-      alpha = 0.86 + 0.14 * sin(t * 2.3 + seed * 40.0);
-    } else if (mode < 1.5) {
-      at += vec3(sin(t * 0.37 + seed * 31.0), sin(t * 0.53 + seed * 17.0) * 0.45, cos(t * 0.29 + seed * 23.0)) * reach;
-      alpha = smoothstep(0.25, 0.9, sin(t * 1.3 + seed * 50.0) * 0.5 + 0.5);
-    } else if (mode < 2.5) {
-      float life = fract(t * 0.35 + seed);
-      at += vec3(sin(life * 7.0 + seed * 20.0) * 0.22, life * reach, cos(life * 5.0 + seed * 9.0) * 0.22);
-      alpha = 1.0 - life;
-      size *= 1.0 - life * 0.6;
-    } else if (mode < 3.5) {
-      float life = fract(t * 0.1 + seed);
-      at += vec3(sin(life * 3.0 + seed * 12.0) * 0.14 + life * life * 0.85, life * reach, -life * life * 0.5);
-      size *= 0.4 + life * 1.7;
-      alpha = smoothstep(0.0, 0.12, life) * (1.0 - life) * (1.0 - life) * 0.62;
-    } else if (mode < 4.5) {
-      float life = fract(t * 0.06 + seed);
-      vec3 from = vec3(sin(seed * 91.0), 0.0, cos(seed * 57.0)) * reach * (0.25 + fract(seed * 7.0) * 0.75);
-      at += from + vec3(life * 1.5 + sin(life * 9.0 + seed * 30.0) * 0.25, -life * aWay.w, sin(life * 7.0 + seed * 11.0) * 0.25);
-      alpha = smoothstep(0.0, 0.08, life) * smoothstep(1.0, 0.9, life);
-      stretch = vec2(1.0, 0.55 + 0.45 * sin(t * 3.0 + seed * 70.0));
-    } else if (mode < 5.5) {
-      at += vec3(sin(t * 0.1 + seed * 20.0), 0.0, cos(t * 0.13 + seed * 31.0)) * reach;
-      alpha = 0.35 + 0.2 * sin(t * 0.3 + seed * 9.0);
-      stretch = vec2(1.9, 0.6);
-    } else {
-      float flicker = 0.84 + 0.14 * sin(t * 13.0 + seed * 40.0) + 0.09 * sin(t * 23.0 + seed * 11.0);
-      size *= flicker;
-      stretch = vec2(0.6, 1.3);
-      at.y += size * 0.5;
-      at.x += sin(t * 9.0 + seed * 5.0) * size * 0.04;
-    }
-    vec4 seen = modelViewMatrix * vec4(at, 1.0);
-    seen.xy += position.xy * size * stretch;
-    gl_Position = projectionMatrix * seen;
-    vUv = position.xy * 2.0;
-    vColor = vec4(aLook.rgb, alpha);
-    vMode = mode;
-  }
-`;
+/**
+ * The material of the motes: each copy of the quad is stood facing the camera at its own place and size, moves as its
+ * kind does (a halo glows, a firefly wanders, an ember rises, smoke swells, a petal falls turning, mist drifts, a
+ * flame flickers) and is cut to its shape. `glow` adds its light to what is behind it.
+ */
+function moteMaterial(glow: boolean): MeshBasicNodeMaterial {
+  const at = attribute('aAt', 'vec3');
+  const look = attribute('aLook', 'vec4');
+  const way = attribute('aWay', 'vec4');
+  const [mode, seed, reach, fall] = [way.x, way.y, way.z, way.w];
+  // The wind's clock: the same seconds the leaves sway by.
+  const t = wind;
+  const wave = (speed: number, offset: number, of: Node<'float'> = t) => sin(of.mul(speed).add(seed.mul(offset)));
+  const ember = fract(t.mul(0.35).add(seed));
+  const smoke = fract(t.mul(0.1).add(seed));
+  const petal = fract(t.mul(0.06).add(seed));
+  /** One of seven values by the mote's kind: halo, firefly, ember, smoke, petal, mist, flame. */
+  const byKind = <T extends 'float' | 'vec2' | 'vec3'>(values: readonly Node<T>[]): Node<T> =>
+    values.slice(0, -1).reduceRight<Node<T>>((rest, value, index) => mode.lessThan(index + 0.5).select(value, rest), values[values.length - 1]!);
+  const flicker = wave(13, 40).mul(0.14).add(0.84).add(wave(23, 11).mul(0.09));
+  const size = look.w.mul(byKind<'float'>([float(1), float(1), float(1).sub(ember.mul(0.6)), smoke.mul(1.7).add(0.4), float(1), float(1), flicker]));
+  const drift = byKind<'vec3'>([
+    vec3(0),
+    vec3(wave(0.37, 31), wave(0.53, 17).mul(0.45), cos(t.mul(0.29).add(seed.mul(23)))).mul(reach),
+    vec3(wave(7, 20, ember).mul(0.22), ember.mul(reach), cos(ember.mul(5).add(seed.mul(9))).mul(0.22)),
+    vec3(wave(3, 12, smoke).mul(0.14).add(smoke.mul(smoke).mul(0.85)), smoke.mul(reach), smoke.mul(smoke).mul(-0.5)),
+    vec3(sin(seed.mul(91)), 0, cos(seed.mul(57)))
+      .mul(reach)
+      .mul(fract(seed.mul(7)).mul(0.75).add(0.25))
+      .add(vec3(petal.mul(1.5).add(wave(9, 30, petal).mul(0.25)), petal.mul(fall).negate(), wave(7, 11, petal).mul(0.25))),
+    vec3(wave(0.1, 20), 0, cos(t.mul(0.13).add(seed.mul(31)))).mul(reach),
+    vec3(wave(9, 5).mul(size).mul(0.04), size.mul(0.5), 0),
+  ]);
+  const stretch = byKind<'vec2'>([vec2(1), vec2(1), vec2(1), vec2(1), vec2(1, wave(3, 70).mul(0.45).add(0.55)), vec2(1.9, 0.6), vec2(0.6, 1.3)]);
+  const alpha = byKind<'float'>([
+    wave(2.3, 40).mul(0.14).add(0.86),
+    smoothstep(0.25, 0.9, wave(1.3, 50).mul(0.5).add(0.5)),
+    float(1).sub(ember),
+    smoothstep(0, 0.12, smoke).mul(float(1).sub(smoke).pow(2)).mul(0.62),
+    smoothstep(0, 0.08, petal).mul(float(1).sub(smoothstep(0.9, 1, petal))),
+    wave(0.3, 9).mul(0.2).add(0.35),
+    float(1),
+  ]);
+  const seen = modelViewMatrix.mul(vec4(at.add(drift), 1)).add(vec4(positionGeometry.xy.mul(size).mul(stretch), 0, 0));
+  const material = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, ...(glow ? { blending: AdditiveBlending } : {}) });
+  material.vertexNode = cameraProjectionMatrix.mul(seen);
+  // Cut to its shape: a flame's tongue, a petal's diamond, else a soft round glow.
+  const spot = positionGeometry.xy.mul(2);
+  const kind = mode.toVarying();
+  const tongue = mix(float(0.8), float(0.04), smoothstep(-0.5, 1, spot.y));
+  const flame = float(1)
+    .sub(smoothstep(tongue.mul(0.25), tongue, abs(spot.x)))
+    .mul(smoothstep(-1, -0.55, spot.y))
+    .mul(float(1).sub(smoothstep(0.4, 1, spot.y)));
+  const diamond = step(abs(spot.x).mul(1.3).add(abs(spot.y)), 0.9);
+  const round = max(exp(dot(spot, spot).mul(-3.4)).sub(0.035), 0);
+  const cover = kind.greaterThan(5.5).select(flame, kind.greaterThan(3.5).and(kind.lessThan(4.5)).select(diamond, round)).mul(alpha.toVarying());
+  material.fragmentNode = Fn(() => {
+    cover.lessThan(0.004).discard();
+    return vec4(look.rgb.toVarying(), cover);
+  })();
+  return material;
+}
 
-const MOTE_FRAGMENT = /* glsl */ `
-  varying vec2 vUv;
-  varying vec4 vColor;
-  varying float vMode;
-  void main() {
-    float cover;
-    if (vMode > 5.5) {
-      float wide = mix(0.8, 0.04, smoothstep(-0.5, 1.0, vUv.y));
-      cover = smoothstep(wide, wide * 0.25, abs(vUv.x)) * smoothstep(-1.0, -0.55, vUv.y) * smoothstep(1.0, 0.4, vUv.y);
-    } else if (vMode > 3.5 && vMode < 4.5) {
-      cover = step(abs(vUv.x) * 1.3 + abs(vUv.y), 0.9);
-    } else {
-      cover = max(0.0, exp(-dot(vUv, vUv) * 3.4) - 0.035);
-    }
-    cover *= vColor.a;
-    if (cover < 0.004) discard;
-    gl_FragColor = vec4(vColor.rgb, cover);
-  }
-`;
-
-let glowMaterial: ShaderMaterial | null = null;
-let softMaterial: ShaderMaterial | null = null;
-const moteMaterial = (glow: boolean): ShaderMaterial => {
+let glowMaterial: MeshBasicNodeMaterial | null = null;
+let softMaterial: MeshBasicNodeMaterial | null = null;
+const moteMaterialOf = (glow: boolean): MeshBasicNodeMaterial => {
   const known = glow ? glowMaterial : softMaterial;
   if (known) return known;
-  const material = new ShaderMaterial({ vertexShader: MOTE_VERTEX, fragmentShader: MOTE_FRAGMENT, uniforms: { uWind: wind }, transparent: true, depthWrite: false, ...(glow ? { blending: AdditiveBlending } : {}) });
+  const material = moteMaterial(glow);
   if (glow) glowMaterial = material;
   else softMaterial = material;
   return material;
@@ -185,7 +172,7 @@ function moteMesh(motes: Motes, glow: boolean): Mesh | null {
   geometry.setAttribute('aLook', new InstancedBufferAttribute(new Float32Array(motes.look), 4));
   geometry.setAttribute('aWay', new InstancedBufferAttribute(new Float32Array(motes.way), 4));
   geometry.instanceCount = count;
-  const mesh = new Mesh(geometry, moteMaterial(glow));
+  const mesh = new Mesh(geometry, moteMaterialOf(glow));
   mesh.frustumCulled = false;
   mesh.renderOrder = 2;
   return mesh;

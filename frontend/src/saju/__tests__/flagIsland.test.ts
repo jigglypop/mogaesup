@@ -4,10 +4,11 @@ import { ELEMENTS, type Element } from '../elements';
 import { buildFlagIsland, buntingColors, buntingShape, CLOTH, CLOTH_TEXELS, clothColors, clothShape, flagToken, flutter, fly, HULL, paintCloth, PENNANTS, POSTS, RISE_SECONDS, sunk, type Shape } from '../scene/flagIsland';
 import { AZIMUTH, ELEVATION, frameOf, onScreen } from '../scene/frames';
 import { WATER_LEVEL } from '../scene/mood';
+import { ISLANDS } from '../scene/terrain';
 import { FLAG_SPOT, ISLAND, PLOT_REACH } from '../village';
 
-/** A home's island is drawn this far out from its middle, its bed under the water included (the ground's own reach). */
-const HOME_REACH = 7.4;
+/** A neighbour's island (the east one is) is drawn this far out from its middle, its bed under the water included. */
+const HOME_REACH = ISLANDS.neighbour.reach;
 /** A home is visited through a box about its island: half this wide, high and deep, its middle this far up (the stage's own). */
 const HOME_BOX = { half: [5.3, 2.7, 5.3], up: 1.8 } as const;
 /** How far a drag turns the camera to either side of where it stands (the stage's own). */

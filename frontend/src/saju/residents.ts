@@ -3,7 +3,7 @@ import type { Birth } from './engine';
 
 /** A member with a 사주 home. */
 export type Resident = {
-  /** Their username: `/@id` is their 미니홈피. */
+  /** Their username: `/@id` is their 섬. */
   id: string;
   /** The name on the home's gate. */
   name: string;

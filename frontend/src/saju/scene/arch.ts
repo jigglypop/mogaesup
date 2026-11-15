@@ -117,10 +117,14 @@ export function gableRoof(b: Builder, at: V3, look: RoofLook, turn = 0): void {
           b.box([0.05, 0.15, length + 0.04], [end * (width / 2 + verge - 0.02), rise / 2 - drop / 2 - 0.08, (side * run) / 2], trim, { surface: 'wood', rough: 0.8 }, [side * pitch, 0, 0]);
         }
       }
-      b.box([width + verge * 2, 0.1, 0.04], [0, -drop - 0.03, run + 0.01], trim, { surface: 'wood', rough: 0.8 });
+      // The fascia along each eave and the rafters' ends under it: on the back as well when the back is covered as the
+      // front is, since a camera that goes round sees it.
       const tails = Math.max(2, Math.round(width / 0.5));
-      for (let tail = 0; tail <= tails; tail++) {
-        b.box([0.06, 0.09, over + 0.1], [-width / 2 + (width * tail) / tails, -drop * 0.5 - 0.06, depth / 2 + over / 2], trim, { surface: 'wood', rough: 0.8 }, [pitch, 0, 0]);
+      for (const side of look.both ? [1, -1] : [1]) {
+        b.box([width + verge * 2, 0.1, 0.04], [0, -drop - 0.03, side * (run + 0.01)], trim, { surface: 'wood', rough: 0.8 });
+        for (let tail = 0; tail <= tails; tail++) {
+          b.box([0.06, 0.09, over + 0.1], [-width / 2 + (width * tail) / tails, -drop * 0.5 - 0.06, side * (depth / 2 + over / 2)], trim, { surface: 'wood', rough: 0.8 }, [side * pitch, 0, 0]);
+        }
       }
     },
     turn,
@@ -503,6 +507,163 @@ export function jetty(b: Builder, at: V3, length: number, width: number, look: {
         for (let post = 0; post < 3; post++) b.cyl(0.04, 0.9, [side * (width / 2 - 0.02), -0.3, 0.15 + (post / 2) * (length - 0.3)], toned(wood, 0.65), { sides: 8, surface: 'bark' });
       }
       if (lamp) lantern(b, [width / 2 - 0.02, 0.16, length - 0.15], { kind: 'path', height: 0.3 });
+    },
+    turn,
+  );
+}
+
+/** Firewood stacked dry, its sawn ends out at either face: a cord `width` long and `height` high along x on `at`. */
+export function stack(b: Builder, at: V3, width: number, height: number, turn = 0, depth = 0.42): void {
+  const bark: Palette = ['#8b6444', '#9a7350', '#7a5639', '#6f4f36'];
+  b.group(
+    at,
+    () => {
+      const across = Math.max(2, Math.round(width / 0.13));
+      const each = width / across;
+      const rows = Math.max(1, Math.round(height / 0.115));
+      for (let row = 0; row < rows; row++) {
+        // Each course sits in the hollows of the one under it.
+        for (let index = 0; index < across - (row % 2); index++) {
+          const x = -width / 2 + each * (index + 0.5 + (row % 2) * 0.5) + b.between(-0.012, 0.012);
+          const y = 0.058 + row * 0.108;
+          const radius = b.between(0.05, 0.064);
+          b.cyl(radius, depth, [x, y, b.between(-0.02, 0.02)], b.pick(bark), { sides: 7, surface: 'bark', rough: 0.95 }, [QUARTER, 0, 0]);
+          for (const end of [-1, 1]) b.cyl(radius * 0.86, 0.006, [x, y, end * (depth / 2 + 0.02)], '#d9bd92', { sides: 7, surface: 'wood', rough: 0.9, vary: 0.12 }, [QUARTER, 0, 0]);
+        }
+      }
+    },
+    turn,
+  );
+}
+
+/** A barrel of staves in iron hoops catching the rain, full to its brim, standing on `at`. */
+export function barrel(b: Builder, at: V3, scale = 1, wood = '#8a6444'): void {
+  const iron: Finish = { metal: 0.6, rough: 0.5 };
+  b.group(
+    at,
+    () => {
+      b.cyl(0.22, 0.31, [0, 0.155, 0], wood, { top: 0.25, sides: 16, surface: 'wood', rough: 0.85 });
+      b.cyl(0.25, 0.31, [0, 0.465, 0], wood, { top: 0.22, sides: 16, surface: 'wood', rough: 0.85 });
+      for (const [y, radius] of [[0.08, 0.228], [0.31, 0.252], [0.54, 0.228]] as const) b.ring(radius, 0.012, [0, y, 0], '#3a3532', iron, [QUARTER, 0, 0]);
+      b.cyl(0.205, 0.01, [0, 0.6, 0], '#2a4563', { rough: 0.05, metal: 0.85, sides: 16 });
+    },
+    0,
+    scale,
+  );
+}
+
+/** A bench of boards for two, its seat along x and its back to -z, standing on `at`. */
+export function bench(b: Builder, at: V3, turn = 0, color = '#8a6648', length = 1.1): void {
+  const wood: Finish = { surface: 'wood', rough: 0.75 };
+  const frame = toned(color, 0.72);
+  b.group(
+    at,
+    () => {
+      for (const z of [-0.07, 0.07]) b.box([length, 0.035, 0.12], [0, 0.42, z], color, wood);
+      for (const y of [0.6, 0.73]) b.box([length, 0.09, 0.025], [0, y, -0.18], color, wood, [-0.14, 0, 0]);
+      for (const side of [-1, 1]) {
+        const x = side * (length / 2 - 0.08);
+        b.box([0.05, 0.42, 0.05], [x, 0.21, 0.1], frame, wood);
+        b.box([0.05, 0.8, 0.05], [x, 0.4, -0.16], frame, wood, [-0.14, 0, 0]);
+        b.box([0.05, 0.04, 0.34], [x, 0.4, -0.03], frame, wood);
+      }
+    },
+    turn,
+  );
+}
+
+/** A line strung between two posts on the ground, `cloths` pegged out on it to dry. */
+export function clothesline(b: Builder, from: [number, number], to: [number, number], cloths: Palette, post = '#7a5a42'): void {
+  const wood: Finish = { surface: 'wood', rough: 0.8 };
+  const height = 1.55;
+  const turn = Math.atan2(-(to[1] - from[1]), to[0] - from[0]);
+  for (const [x, z] of [from, to]) {
+    b.box([0.05, height + 0.08, 0.05], [x, (height + 0.08) / 2, z], post, wood);
+    b.box([0.04, 0.04, 0.4], [x, height - 0.02, z], post, wood, turn);
+  }
+  const sag = (t: number): V3 => [from[0] + (to[0] - from[0]) * t, height - 0.03 - Math.sin(t * Math.PI) * 0.12, from[1] + (to[1] - from[1]) * t];
+  b.limb(Array.from({ length: 9 }, (_, index) => sag(index / 8)), [0.006], '#e9e2d4', { sides: 4, shadowless: true });
+  cloths.forEach((color, index) => {
+    const t = (index + 0.7) / (cloths.length + 0.4);
+    const [x, y, z] = sag(t);
+    const wide = 0.3 + (index % 3) * 0.09;
+    const tall = 0.36 + ((index + 1) % 2) * 0.18;
+    b.box([wide, tall, 0.014], [x, y - tall / 2 - 0.01, z], color, { rough: 0.95, vary: 0.05 }, turn);
+    for (const side of [-1, 1]) b.box([0.016, 0.06, 0.03], [x + Math.cos(turn) * side * wide * 0.4, y - 0.01, z - Math.sin(turn) * side * wide * 0.4], '#c9a66b', wood, turn);
+  });
+}
+
+/** 우물: a round well of dressed stone, a roof of `cover` on two posts over it, its bucket let down on the rope. */
+export function well(b: Builder, at: V3, look: { cover: Cover; wood?: string; stone?: string }, turn = 0): void {
+  const { cover, wood = '#6b4a35', stone = '#c9c2b4' } = look;
+  const timber: Finish = { surface: 'wood', rough: 0.8 };
+  b.group(
+    at,
+    () => {
+      b.cyl(0.52, 0.56, [0, 0.28, 0], stone, { top: 0.5, sides: 22, surface: 'stone', rough: 0.9 });
+      b.ring(0.47, 0.05, [0, 0.57, 0], toned(stone, 1.06), { surface: 'stone', rough: 0.9 }, [QUARTER, 0, 0]);
+      // Looking in: the dark of the shaft, and the water far down it.
+      b.cyl(0.43, 0.02, [0, 0.555, 0], '#1b232b', { rough: 0.3, metal: 0.4, sides: 20 });
+      for (const side of [-1, 1]) b.box([0.08, 1.96, 0.08], [side * 0.6, 0.98, 0], wood, timber);
+      b.cyl(0.045, 1.16, [0, 1.22, 0], toned(wood, 1.15), { ...timber, sides: 10 }, [0, 0, QUARTER]);
+      b.limb([[0, 1.2, 0], [0, 0.98, 0]], [0.008], '#c9b28a', { sides: 4, shadowless: true });
+      b.cyl(0.085, 0.14, [0, 0.9, 0], wood, { top: 0.1, sides: 12, surface: 'wood', rough: 0.8 });
+      b.ring(0.1, 0.008, [0, 0.99, 0], '#3a3532', { metal: 0.6, rough: 0.5 }, [0, 0, 0]);
+      // Two slopes meeting over the posts, open at their ends.
+      for (const face of [0, Math.PI]) b.group([0, 1.62, 0], () => slope(b, 1.5, 0.62, 0.34, cover), face);
+      b.cyl(0.05, 1.56, [0, 1.98, 0], toned(wood, 0.8), { ...timber, sides: 8 }, [0, 0, QUARTER]);
+    },
+    turn,
+  );
+}
+
+/** 지게: the frame a load is carried on, its feet on `at`, leaning back against a wall behind it (toward -z). */
+export function jige(b: Builder, at: V3, turn = 0, color = '#8a6a48'): void {
+  const wood: Finish = { surface: 'wood', rough: 0.85 };
+  b.group(
+    at,
+    () => {
+      b.group(
+        [0, 0, 0],
+        () => {
+          for (const side of [-1, 1]) {
+            b.box([0.045, 1.55, 0.05], [side * 0.19, 0.775, 0], color, wood, [0, 0, side * 0.07]);
+            // The prongs a load rests on, standing out from each leg.
+            b.box([0.032, 0.032, 0.42], [side * 0.17, 0.62, 0.17], toned(color, 0.9), wood, [-0.55, 0, 0]);
+          }
+          for (const [y, wide] of [[0.32, 0.42], [0.58, 0.37], [0.86, 0.33], [1.14, 0.29]] as const) b.box([wide, 0.035, 0.035], [0, y, 0], toned(color, 1.1), wood);
+          b.box([0.26, 0.42, 0.05], [0, 1.0, -0.045], '#b49b6a', { surface: 'thatch', rough: 1 });
+        },
+        [-0.2, 0, 0],
+      );
+    },
+    turn,
+  );
+}
+
+/** Things hung up to dry on a string from `at`, `length` down it: red peppers by the score, or bulbs of garlic. */
+export function hanging(b: Builder, at: V3, length: number, kind: 'pepper' | 'garlic'): void {
+  b.limb([at, [at[0], at[1] - length, at[2]]], [0.006], '#c9b28a', { sides: 4, shadowless: true });
+  const count = Math.round(length / (kind === 'pepper' ? 0.04 : 0.085));
+  for (let index = 0; index < count; index++) {
+    const y = at[1] - 0.06 - (index / count) * (length - 0.06);
+    const turn = index * 2.4;
+    const [x, z] = [Math.cos(turn), Math.sin(turn)];
+    if (kind === 'pepper') b.sprig('puff', [at[0] + x * 0.04, y, at[2] + z * 0.04], [0.032, 0.12, 0.032], b.pick(['#d6362a', '#c22a22', '#b5231e']), [x * 0.6, -1, z * 0.6]);
+    else b.sprig('puff', [at[0] + x * 0.045, y, at[2] + z * 0.045], [0.075, 0.068, 0.075], b.pick(['#f1ead9', '#e8dcc6', '#f6f0e4']));
+  }
+}
+
+/** A sawhorse with a log across it waiting for the saw, its log along x, standing on `at`. */
+export function sawhorse(b: Builder, at: V3, turn = 0, color = '#8a6648'): void {
+  const wood: Finish = { surface: 'wood', rough: 0.85 };
+  b.group(
+    at,
+    () => {
+      for (const x of [-0.32, 0.32]) for (const lean of [-0.5, 0.5]) b.box([0.05, 0.8, 0.05], [x, 0.36, 0], color, wood, [lean, 0, 0]);
+      b.box([0.72, 0.04, 0.04], [0, 0.2, 0], color, wood);
+      b.cyl(0.09, 1.05, [0.08, 0.68, 0], '#8b6444', { sides: 10, surface: 'bark', rough: 0.95 }, [0, 0, QUARTER]);
+      for (const end of [-1, 1]) b.cyl(0.08, 0.008, [0.08 + end * 0.526, 0.68, 0], '#d9bd92', { sides: 10, surface: 'wood', rough: 0.9 }, [0, 0, QUARTER]);
     },
     turn,
   );

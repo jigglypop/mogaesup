@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 
-import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { problemText } from '../api/client';
 import { useAuth } from '../auth/AuthProvider';
@@ -121,12 +121,9 @@ export function AuthPage() {
             </p>
           )}
           <button className="mg-btn is-primary is-wide" type="submit" disabled={busy}>
-            {mode === 'login' ? '로그인' : '가입하고 내 미니홈피 만들기'}
+            {mode === 'login' ? '로그인' : '가입하고 내 섬 만들기'}
           </button>
         </form>
-        <Link className="mg-btn is-quiet is-wide" to="/explore">
-          <Icon name="compass" /> 미니홈피 둘러보기
-        </Link>
       </section>
     </main>
   );

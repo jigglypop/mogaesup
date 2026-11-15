@@ -11,10 +11,11 @@ const ORDER: readonly PillarKey[] = ['hour', 'day', 'month', 'year'];
 const BLANK = '-';
 
 /**
- * 사주보기: the chart as jamiblossom calculates it. The four pillars with their 십성, 지장간, 12운성 and 납음; the 신살
- * the chart has; and the 대운, the one running now marked. A chart without a birth hour shows its hour pillar empty.
+ * 사주보기: the chart as jamiblossom calculates it, under `head` (the reading of it). The four pillars with their 십성,
+ * 지장간, 12운성 and 납음; the 신살 the chart has; and the 대운, the one running now marked. A chart without a birth hour
+ * shows its hour pillar empty.
  */
-export function ChartPanel({ profile }: { profile: Profile }) {
+export function ChartPanel({ profile, head }: { profile: Profile; head?: ReactNode }) {
   const { reading } = profile;
   const pillars = ORDER.map((key) => ({ key, pillar: reading[key] }));
   const row = (label: string, cell: (pillar: Pillar) => ReactNode) => (
@@ -29,6 +30,7 @@ export function ChartPanel({ profile }: { profile: Profile }) {
   const daYun = reading.daYun.map((item, index) => ({ item, index })).filter(({ item }) => item.ganZhi);
   return (
     <div className="mg-saju-chart">
+      {head}
       <section className="mg-saju-card" aria-label="사주 원국">
         <h2 className="mg-heading">사주 원국</h2>
         <table className="mg-saju-pillars">

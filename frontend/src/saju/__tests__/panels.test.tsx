@@ -230,7 +230,7 @@ describe('마을 주민', () => {
   const villagers = ['sol', 'noeul', 'bori'].map((id) => ({ resident: personOf(id), profile: profile(id), bridged: id === 'noeul' }));
   const owner = { username: 'sol', name: '솔' };
 
-  it('집마다 그 미니홈피로 가는 길과 사주 한 줄이 있고, 내 집과 이웃의 집을 표시한다', async () => {
+  it('집마다 그 섬으로 가는 길과 사주 한 줄이 있고, 내 집과 이웃의 집을 표시한다', async () => {
     const { container, unmount } = await inRouter(<VillagePanel owner={owner} villagers={villagers} viewer="bori" />);
     expect(texts(container, 'h2')).toEqual(['주민 3']);
     const cards = [...container.querySelectorAll<HTMLAnchorElement>('a.mg-saju-villager')];

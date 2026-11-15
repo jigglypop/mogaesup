@@ -6,7 +6,12 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use mogaesup_server::{AppState, MIGRATOR, config::Config, config::Factory, models::Models, rebac, router};
+use mogaesup_server::{
+    AppState, MIGRATOR,
+    config::{Config, Factory, OpenAi},
+    models::Models,
+    rebac, router,
+};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::path::PathBuf;
@@ -62,6 +67,15 @@ pub struct Reply {
 
 impl TestApp {
     pub async fn new(factory: Option<Factory>) -> Self {
+        Self::with(factory, OpenAi::default()).await
+    }
+
+    /// The server with `openai` as its OpenAI API settings (a stand-in served in the test, see tests/saju_made.rs).
+    pub async fn with_openai(openai: OpenAi) -> Self {
+        Self::with(None, openai).await
+    }
+
+    async fn with(factory: Option<Factory>, openai: OpenAi) -> Self {
         let db = TestDb::create().await;
         MIGRATOR.run(&db.pool).await.unwrap();
         let model_dir = std::env::temp_dir().join(&db.name);
@@ -71,6 +85,7 @@ impl TestApp {
             ticket_secret: TICKET_SECRET.to_vec(),
             models: Models::open(model_dir.to_str().unwrap()).unwrap(),
             factory,
+            openai,
         };
         let state = AppState::new(db.pool.clone(), config);
         Self { router: router(state.clone()), state, model_dir, db }

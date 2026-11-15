@@ -2,6 +2,7 @@ import './shell.css';
 
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
+import { flushSync } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 import { problemText } from '../api/client';
@@ -9,9 +10,8 @@ import { socialApi } from '../api/endpoints';
 import type { IlchonRequest } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
-import { can } from '../auth/can';
 import { saveUnsavedWork } from '../auth/sessionWork';
-import { Icon, type IconName } from '../ui/icons';
+import { Icon } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
 import { PasswordDialog, type PasswordAction } from './PasswordDialog';
 
@@ -92,59 +92,90 @@ export function Brand() {
   );
 }
 
-type RailItem = { label: string; icon: IconName; to: string; active: boolean; divided?: boolean };
-
-/** The app's places. Signed-out visitors get the list of members' homes and the way in. */
+/**
+ * The walking island's rail (`minihome/`, kept off the screens): the way to one's own home, or in. The screens have
+ * none, since the brand already leads there and the top bar's search finds the rest; other places open by address.
+ */
 export function Rail() {
   const { user } = useAuth();
   const { pathname } = useLocation();
   const home = user ? `/@${user.username}` : '/';
-  // 운영 opens on the import board; an operator who does not edit the catalog has only the character factory there.
-  const admin = can(user, 'catalog_editor') ? '/admin' : can(user, 'operator') ? '/admin/studio' : null;
-  const items: RailItem[] = [
-    { label: '사주 마을', icon: 'home', to: home, active: !!user && (pathname === home || pathname.startsWith(`${home}/`)) },
-    ...(user ? [{ label: '캐릭터', icon: 'person' as const, to: '/character', active: pathname.startsWith('/character') }] : []),
-    { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
-    ...(admin ? [{ label: '운영', icon: 'shield' as const, to: admin, active: pathname.startsWith('/admin'), divided: true }] : []),
-  ];
+  const here = !!user && (pathname === home || pathname.startsWith(`${home}/`));
   return (
     <nav className="mg-rail mg-glass" aria-label="모개숲">
-      {items.map((item) => (
-        <Link
-          key={item.label}
-          className={item.divided ? 'is-divided' : undefined}
-          to={item.to}
-          aria-current={item.active ? 'page' : undefined}
-        >
-          <Icon name={item.icon} />
-          <span>{item.label}</span>
-        </Link>
-      ))}
+      <Link to={home} aria-current={here ? 'page' : undefined}>
+        <Icon name="home" />
+        <span>사주 마을</span>
+      </Link>
     </nav>
   );
 }
 
+/**
+ * The top bar's search: the box where the bar has room for it, and on a phone a button that opens the box over the bar,
+ * the keyboard with it (see shell.css). Opened so, it folds away with its close button or Escape, or once the focus
+ * leaves it, keeping what was typed: the bar's own buttons under it are never focused unseen.
+ */
 function SearchBox() {
   const navigate = useNavigate();
   const [text, setText] = useState('');
+  const [open, setOpen] = useState(false);
+  const boxId = useId();
+  const field = useRef<HTMLInputElement>(null);
+  const opener = useRef<HTMLButtonElement>(null);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const query = text.trim();
+    setOpen(false);
     navigate(query ? `/explore?q=${encodeURIComponent(query)}` : '/explore');
   };
+  // The box is shown before it takes the focus, within the press: a phone brings its keyboard up for a field focused then.
+  const show = () => {
+    flushSync(() => setOpen(true));
+    field.current?.focus();
+  };
+  // The button stands where it was once the box is gone, and takes the keyboard back.
+  const fold = () => {
+    flushSync(() => setOpen(false));
+    opener.current?.focus();
+  };
   return (
-    <form className="mg-search" role="search" onSubmit={submit}>
-      <Icon name="search" />
-      <input
-        value={text}
-        maxLength={40}
-        placeholder="미니홈피나 사람 찾기"
-        aria-label="미니홈피나 사람 찾기"
-        enterKeyHint="search"
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => event.stopPropagation()}
-      />
-    </form>
+    <>
+      <button ref={opener} type="button" className="mg-icon-btn mg-search-open" aria-label="섬이나 사람 찾기" aria-expanded={open} aria-controls={boxId} onClick={show}>
+        <Icon name="search" />
+      </button>
+      <form
+        id={boxId}
+        className={`mg-search${open ? ' is-open' : ''}`}
+        role="search"
+        onSubmit={submit}
+        onBlur={(event) => {
+          if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+        }}
+      >
+        <Icon name="search" />
+        <input
+          ref={field}
+          value={text}
+          maxLength={40}
+          placeholder="섬이나 사람 찾기"
+          aria-label="섬이나 사람 찾기"
+          enterKeyHint="search"
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === 'Escape' && open) {
+              event.preventDefault();
+              fold();
+            }
+          }}
+        />
+        {/* A press on it leaves the focus in the field, so the box is folded by the press and not before it. */}
+        <button type="button" className="mg-icon-btn is-quiet mg-search-close" aria-label="찾기 닫기" onMouseDown={(event) => event.preventDefault()} onClick={fold}>
+          <Icon name="close" />
+        </button>
+      </form>
+    </>
   );
 }
 
@@ -335,9 +366,6 @@ function UserMenu() {
             <Link role="menuitem" to={home} onClick={() => setOpen(false)}>
               <Icon name="home" /> 내 집
             </Link>
-            <Link role="menuitem" to="/character" onClick={() => setOpen(false)}>
-              <Icon name="person" /> 내 캐릭터
-            </Link>
             <div className="mg-menu-row" role="group" aria-label="화면 밝기">
               <span aria-hidden="true">화면</span>
               <div className="mg-tabs">
@@ -379,7 +407,7 @@ export function TopActions({ search = true, children }: { search?: boolean; chil
   );
 }
 
-/** Screens that are not the world: the rail, a top bar and one large glass panel. */
+/** Screens that are not the world: a top bar and one large glass panel. */
 export function PageShell({ title, children, wide = false }: { title: ReactNode; children: ReactNode; wide?: boolean }) {
   return (
     <div className="mg-app is-page">
@@ -390,7 +418,6 @@ export function PageShell({ title, children, wide = false }: { title: ReactNode;
         </div>
         <TopActions />
       </header>
-      <Rail />
       <main className={`mg-page-main${wide ? ' is-wide' : ''}`}>{children}</main>
     </div>
   );

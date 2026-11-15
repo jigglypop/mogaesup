@@ -10,11 +10,10 @@ import { useSignInPath } from '../auth/signIn';
 import { NeighborActions, NeighborsTab, useNeighbors } from '../minihome/Ilchons';
 import { Loading } from '../pages/Loading';
 import { useStored } from '../minihome/stored';
-import { Brand, PageShell, Rail, TopActions } from '../shell/Shell';
+import { Brand, PageShell, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
 import { compatOf } from './compat';
 import type { Birth } from './engine';
-import { melodyOf } from './melody';
 import { forgetLegacyHome, readLegacyHome, useMinihome, type Minihome } from './minihome';
 import { profileOf, type Profile } from './profile';
 import type { Resident } from './residents';
@@ -22,12 +21,14 @@ import { chartPath, editPath, homePath, routeOf, villagePath, waveOf, ziweiPath 
 import type { StageFlag } from './scene/Flag';
 import { frameOf, NO_INSET, type Inset } from './scene/frames';
 import { Stage, type StageBridge, type StageHandle, type StageHome } from './scene/Stage';
-import { Bgm } from './ui/Bgm';
 import { ChartPanel } from './ui/ChartPanel';
 import { HomePanel, type Bridge } from './ui/HomePanel';
 import { Onboarding } from './ui/Onboarding';
+import { PictureCard, usePicture } from './ui/Picture';
 import { PixelIcon } from './ui/PixelIcon';
+import { ReadingCard, useReading } from './ui/Reading';
 import { SavePicture } from './ui/SavePicture';
+import { SaveReport } from './ui/SaveReport';
 import { FlagCard, VillagePanel } from './ui/VillagePanel';
 import { ZiweiPanel } from './ui/ZiweiPanel';
 import { FLAG_SPOT, flagRaised, plotsOf } from './village';
@@ -35,7 +36,7 @@ import { FLAG_SPOT, flagRaised, plotsOf } from './village';
 const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 /** How much one press of a zoom button brings the picture closer. */
 const ZOOM_STEP = 1.3;
-/** On one's own 미니홈피 there is no bridge to show. */
+/** On one's own 섬 there is no bridge to show. */
 const NO_BRIDGE: Bridge = { compat: null, canShow: false, shown: false, onShow: () => {} };
 
 /** A resident's chart, or null for a stored birth this version cannot read. */
@@ -48,11 +49,10 @@ function profileOrNull(resident: Resident): Profile | null {
 }
 
 /**
- * How much of the canvas, which fills the window, lies under the page's own pieces: the top bar, the rail (down the
- * left on a wide screen, along the bottom on a phone), the open panel (a column at the right, or a sheet at the
- * bottom) and the dock. The picture is fitted to what they leave. Measured from the page as it is laid out: `host` is
- * the page's element while it is in the document, so the measuring starts with it (a render that only redirects has
- * none) and again with the one that takes its place.
+ * How much of the canvas, which fills the window, lies under the page's own pieces: the top bar, the open panel (a
+ * column at the right, or a sheet at the bottom) and the dock. The picture is fitted to what they leave. Measured from
+ * the page as it is laid out: `host` is the page's element while it is in the document, so the measuring starts with
+ * it (a render that only redirects has none) and again with the one that takes its place.
  */
 function useCover(host: HTMLElement | null, panelOpen: boolean): Inset {
   const [cover, setCover] = useState<Inset>(NO_INSET);
@@ -63,14 +63,10 @@ function useCover(host: HTMLElement | null, panelOpen: boolean): Inset {
       if (all.width === 0 || all.height === 0) return;
       const box = (selector: string) => host.querySelector(selector)?.getBoundingClientRect() ?? null;
       const bar = box('.mg-topbar');
-      const rail = box('.mg-rail');
       const dock = box('.mg-saju-dock');
       const panel = panelOpen ? box('.mg-saju-panel') : null;
       const next = { top: bar ? bar.bottom - all.top : 0, right: 0, bottom: dock ? all.bottom - dock.top : 0, left: 0 };
-      if (rail && rail.height >= rail.width) next.left = rail.right - all.left;
-      else if (rail) next.bottom = Math.max(next.bottom, all.bottom - rail.top);
-      // A column stands beside the picture; a sheet, which runs the width of the window or of what the rail leaves
-      // of it, lies under the picture.
+      // A column stands beside the picture; a sheet, which runs the width of the window, lies under the picture.
       if (panel && panel.width < all.width * 0.7) next.right = all.right - panel.left;
       else if (panel) next.bottom = Math.max(next.bottom, all.bottom - panel.top);
       setCover((current) => (current.top === next.top && current.right === next.right && current.bottom === next.bottom && current.left === next.left ? current : next));
@@ -79,7 +75,7 @@ function useCover(host: HTMLElement | null, panelOpen: boolean): Inset {
     if (typeof ResizeObserver !== 'function') return undefined;
     const observer = new ResizeObserver(measure);
     observer.observe(host);
-    for (const selector of ['.mg-saju-panel', '.mg-saju-dock', '.mg-rail']) {
+    for (const selector of ['.mg-saju-panel', '.mg-saju-dock']) {
       const element = host.querySelector(selector);
       if (element) observer.observe(element);
     }
@@ -89,15 +85,35 @@ function useCover(host: HTMLElement | null, panelOpen: boolean): Inset {
 }
 
 /**
+ * Whether the canvas has drawn its first frames (it marks itself so, see Stage): `host` is the page's element, as for
+ * {@link useCover}. Once drawn it stays drawn.
+ */
+function useDrawn(host: HTMLElement | null): boolean {
+  const [drawn, setDrawn] = useState(false);
+  useEffect(() => {
+    if (!host || drawn) return undefined;
+    const check = () => {
+      if (host.querySelector('.mg-saju-canvas[data-drawn]')) setDrawn(true);
+    };
+    check();
+    if (typeof MutationObserver !== 'function') return undefined;
+    const observer = new MutationObserver(check);
+    observer.observe(host, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-drawn'] });
+    return () => observer.disconnect();
+  }, [host, drawn]);
+  return drawn;
+}
+
+/**
  * Whether the story panel starts open: on a phone, upright or on its side, it would cover most of the picture. (The
  * same sizes at which saju.css lays the phone's sheet and the short window's column.)
  */
 const panelFits = () => typeof matchMedia !== 'function' || !matchMedia('(max-width: 720px), (max-height: 500px)').matches;
 
 /**
- * `/@username/*`: a member's 미니홈피. The village's canvas fills the window (the member's 사주 home among their
- * 이웃'), and over it float the title, the app's rail, and a panel with the story of what the address shows: the
- * home, its chart, or the village.
+ * `/@username/*`: a member's 섬. The village's canvas fills the window (the member's 사주 home among their
+ * 이웃'), and over it float the title and a panel with the story of what the address shows: the home, its chart, or
+ * the village.
  */
 export default function SajuPage({ username, rest }: { username: string; rest: string }) {
   const { user } = useAuth();
@@ -105,24 +121,23 @@ export default function SajuPage({ username, rest }: { username: string; rest: s
   const { state, build, demolish, open } = useMinihome(username);
   if (state.status === 'loading') return <Loading />;
   if (state.status === 'failed') {
+    // Somewhere else to go: the viewer's own home, unless it is the one that could not be read, or the way in.
+    const away = user ? (user.username === username ? null : { to: homePath(user.username), label: '내 집' }) : { to: signIn, label: '로그인' };
     return (
-      <PageShell title="미니홈피">
+      <PageShell title="섬">
         <section className="mg-glass mg-panel mg-notice">
           <h1 className="mg-title">
-            {state.code === 404 ? '없는 미니홈피예요' : state.code === 403 ? '주인이 닫아 둔 미니홈피예요' : '미니홈피를 불러오지 못했어요'}
+            {state.code === 404 ? '없는 섬이에요' : state.code === 403 ? '주인이 닫아 둔 섬이에요' : '섬을 불러오지 못했어요'}
           </h1>
           {/* The heading already says why for a home that is missing or closed, and when no answer came at all. */}
           {state.code !== 404 && state.code !== 403 && state.code !== 0 && <p className="mg-muted">{state.message}</p>}
-          <div className="mg-row">
-            <Link className="mg-btn is-primary" to="/explore">
-              둘러보기
-            </Link>
-            {!user && (
-              <Link className="mg-btn" to={signIn}>
-                로그인
+          {away && (
+            <div className="mg-row">
+              <Link className="mg-btn is-primary" to={away.to}>
+                {away.label}
               </Link>
-            )}
-          </div>
+            </div>
+          )}
         </section>
       </PageShell>
     );
@@ -210,7 +225,7 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
   const [bridgeShown, setBridgeShown] = useState(false);
   const joined = !view.isOwner && !!viewer && around.some(({ resident, bridged }) => bridged && resident.id === viewer.username);
   const visitorHome = joined ? (homes.find((home) => home.id === viewer?.username) ?? null) : null;
-  // Another page of the 미니홈피 starts at the top of the panel: the tabs of the home differ in the query alone.
+  // Another page of the 섬 starts at the top of the panel: the tabs of the home differ in the query alone.
   const side = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (side.current) side.current.scrollTop = 0;
@@ -251,8 +266,8 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
   const wave = useMemo(() => waveOf(around.map(({ resident }) => resident.id), viewer?.username ?? null), [around, viewer?.username]);
 
   const name = host?.resident.name ?? ownerName;
-  const title = `${name}의 미니홈피`;
-  // The browser's tab, its history and a bookmark say whose 미니홈피 it is.
+  const title = `${name}의 섬`;
+  // The browser's tab, its history and a bookmark say whose 섬 it is.
   useEffect(() => {
     const before = document.title;
     document.title = before ? `${title} · ${before}` : title;
@@ -261,18 +276,76 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
     };
   }, [title]);
 
+  // What the server makes for the built home from its birth: the reading of its chart, read once its tabs are opened,
+  // and the picture of its island. The owner's are asked for here, and looked at again while they are being made and
+  // shown: the reading on its tabs, the picture on the home's (and for the PDF on the reading's).
+  const tab = route.kind === 'home' && host ? route.tab : 'home';
+  const ownerId = view.isOwner ? view.profile.ownerId : null;
+  const birth = host?.resident.birth ?? null;
+  const reading = useReading({ username, ownerId, birth, shown: route.kind === 'home' && tab !== 'home' });
+  const drawn = useDrawn(world);
+  const picture = usePicture({
+    username,
+    ownerId,
+    birth,
+    profile: host?.profile ?? null,
+    // The island is complete once it is built and on the canvas, and not while its birth is being entered again.
+    complete: drawn && route.kind !== 'edit',
+    poll: route.kind === 'home',
+  });
+
   if (route.kind === 'redirect') return <Navigate to={route.to} replace />;
 
   const element = host?.profile.balance.dominant ?? null;
-  const tab = route.kind === 'home' && host ? route.tab : 'home';
   // The panel widens for the 명반, and a birth without an hour has none.
   const charted = tab === 'ziwei' && !!host?.resident.birth.time;
   const widened = charted && roomy;
   const compat = !view.isOwner && myProfile && host ? compatOf(myProfile, host.profile) : null;
   const villagers = host ? [{ ...host, bridged: false }, ...around] : around;
+  // Each tab of the chart opens with its part of the reading; a written one can be saved as a PDF, with the picture.
+  const pictureUrl = picture.made?.status === 'ready' ? picture.made.url : null;
+  const readingOf = (part: 'saju' | 'ziwei') =>
+    host && (
+      <ReadingCard
+        part={part}
+        state={reading}
+        owner={view.isOwner}
+        onAsk={reading.ask}
+        onReload={reading.reload}
+        report={(written) => <SaveReport name={host.resident.name} birth={host.resident.birth} reading={written} pictureUrl={pictureUrl} />}
+      />
+    );
 
   return (
     <div className={`mg-saju mg-saju-world${panelOpen ? ' has-panel' : ''}${widened ? ' is-roomy' : ''}`} ref={setWorld} data-element={element ?? undefined}>
+      {/* The top bar comes first, to the keyboard and to a screen reader too: the labels on the picture come after it. */}
+      <header className="mg-topbar">
+        <div className="mg-topbar-left">
+          <Brand />
+          <div className="mg-pill mg-glass mg-saju-bar">
+            <span className="mg-saju-bar-mark">
+              <PixelIcon name={element ?? 'house'} size={20} />
+            </span>
+            <h1 className="mg-saju-bar-title">{title}</h1>
+            <p className="mg-saju-visits">
+              오늘 <b>{view.visits.today}</b> · 전체 <b>{view.visits.total}</b>
+            </p>
+          </div>
+        </div>
+        <TopActions>
+          {viewer && !view.isOwner && (
+            <Link className="mg-btn is-small mg-saju-action is-mine" to={homePath(viewer.username)}>
+              <Icon name="home" /> <span>{mine ? '내 집' : '내 집 짓기'}</span>
+            </Link>
+          )}
+          {wave && (
+            <Link className="mg-btn is-small mg-saju-action" to={homePath(wave)}>
+              <Icon name="wave" /> <span>파도타기</span>
+            </Link>
+          )}
+        </TopActions>
+      </header>
+
       {/* What the page's pieces cover, for what the canvas centres in the part they leave open (see saju.css). */}
       <div
         className="mg-saju-stage"
@@ -303,41 +376,12 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
         />
       </div>
 
-      <header className="mg-topbar">
-        <div className="mg-topbar-left">
-          <Brand />
-          <div className="mg-pill mg-glass mg-saju-bar">
-            <span className="mg-saju-bar-mark">
-              <PixelIcon name={element ?? 'house'} size={20} />
-            </span>
-            <h1 className="mg-saju-bar-title">{title}</h1>
-            <p className="mg-saju-visits">
-              오늘 <b>{view.visits.today}</b> · 전체 <b>{view.visits.total}</b>
-            </p>
-          </div>
-        </div>
-        <TopActions>
-          {viewer && !view.isOwner && (
-            <Link className="mg-btn is-small mg-saju-action is-mine" to={homePath(viewer.username)}>
-              <Icon name="home" /> <span>{mine ? '내 집' : '내 집 짓기'}</span>
-            </Link>
-          )}
-          {wave && (
-            <Link className="mg-btn is-small mg-saju-action" to={homePath(wave)}>
-              <Icon name="wave" /> <span>파도타기</span>
-            </Link>
-          )}
-        </TopActions>
-      </header>
-      <Rail />
-
       {together && compat && (
         <p className="mg-saju-say" role="status">
           {compat.headline}
         </p>
       )}
       <div className="mg-saju-dock">
-        {host && !wide && <Bgm melody={melodyOf(host.profile)} />}
         {host && !wide && view.isOwner && <SavePicture name={host.resident.name} profile={host.profile} />}
         <div className="mg-saju-zoom mg-glass" role="group" aria-label="확대와 축소">
           <button className="mg-icon-btn is-quiet" aria-label="축소" onClick={() => stage.current?.zoomBy(1 / ZOOM_STEP)}>
@@ -347,9 +391,18 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
             <Icon name="plus" />
           </button>
         </div>
+        {/* The folded panel opens from the end of this row under a sheet, and from a column's head beside one. */}
+        {!panelOpen && (
+          <button ref={opener} className="mg-btn mg-saju-panel-open" aria-expanded="false" aria-controls={panelId} onClick={() => showPanel(true)}>
+            <Icon name="panel" /> <span>{name}의 이야기</span>
+          </button>
+        )}
       </div>
 
-      {/* What the 미니홈피 says, beside the picture of it. Folded, the panel stays mounted, keeping what was typed in it. */}
+      {/* The island being drawn off the page, to be drawn again as the home's picture. */}
+      {picture.shot}
+
+      {/* What the 섬 says, beside the picture of it. Folded, the panel stays mounted, keeping what was typed in it. */}
       <main id={panelId} className="mg-saju-panel mg-glass" aria-label={title} hidden={!panelOpen}>
         <button ref={folder} className="mg-icon-btn is-quiet mg-saju-panel-close" aria-label="패널 접기" aria-expanded="true" aria-controls={panelId} onClick={() => showPanel(false)}>
           <Icon name="chevronRight" />
@@ -360,7 +413,7 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
             <Icon name={roomy ? 'narrow' : 'widen'} />
           </button>
         )}
-        <nav className="mg-saju-menu" aria-label="미니홈피 메뉴">
+        <nav className="mg-saju-menu" aria-label="섬 메뉴">
           <Link to={homePath(username)} aria-current={route.kind !== 'village' && tab === 'home' ? 'page' : undefined}>
             홈
           </Link>
@@ -410,14 +463,19 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
               </section>
             </>
           ) : tab === 'chart' && host ? (
-            <ChartPanel profile={host.profile} />
+            <ChartPanel profile={host.profile} head={readingOf('saju')} />
           ) : tab === 'ziwei' && host ? (
-            <ZiweiPanel birth={host.resident.birth} editTo={view.isOwner ? editPath(username) : null} />
+            <ZiweiPanel birth={host.resident.birth} editTo={view.isOwner ? editPath(username) : null} head={readingOf('ziwei')} />
           ) : (
             <HomePanel
               view={view}
               viewer={viewer}
               profile={host?.profile ?? null}
+              picture={
+                host && (
+                  <PictureCard name={host.resident.name} state={picture} drawing={picture.drawing} owner={view.isOwner} onDraw={picture.draw} onReload={picture.reload} />
+                )
+              }
               neighbors={neighbors}
               bridge={{ compat, canShow: !!visitorHome, shown: together, onShow: setBridgeShown }}
               onVisibility={onVisibility}
@@ -425,11 +483,6 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
           )}
         </div>
       </main>
-      {!panelOpen && (
-        <button ref={opener} className="mg-btn mg-saju-panel-open" aria-expanded="false" aria-controls={panelId} onClick={() => showPanel(true)}>
-          <Icon name="panel" /> <span>{name}의 이야기</span>
-        </button>
-      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import './ziwei.css';
 
-import { memo, useState } from 'react';
+import { memo, useState, type ReactNode } from 'react';
 
 import { Link } from 'react-router-dom';
 
@@ -264,11 +264,12 @@ const Unseen = memo(function Unseen({ ziwei }: { ziwei: Ziwei }) {
 });
 
 /**
- * 자미두수: the 명반 of a home's birth, as jamiblossom draws it. The twelve palaces stand round a ring by earthly branch
- * with the chart's summary in the middle; picking one marks its 삼방사정 and shows it in full below. `editTo` is where
- * the owner enters the birth again (null for a visitor): a birth without an hour has no 명반.
+ * 자미두수: the 명반 of a home's birth, as jamiblossom draws it, under `head` (the reading of it). The twelve palaces
+ * stand round a ring by earthly branch with the chart's summary in the middle; picking one marks its 삼방사정 and shows
+ * it in full below. `editTo` is where the owner enters the birth again (null for a visitor): a birth without an hour
+ * has no 명반, and no reading of one.
  */
-export function ZiweiPanel({ birth, editTo }: { birth: Birth; editTo: string | null }) {
+export function ZiweiPanel({ birth, editTo, head }: { birth: Birth; editTo: string | null; head?: ReactNode }) {
   const ziwei = ziweiOf(birth);
   // The palace picked on this birth's chart: another birth's starts again from its own 명궁. It is held against the
   // birth and not the chart, which is drawn again each day.
@@ -300,6 +301,7 @@ export function ZiweiPanel({ birth, editTo }: { birth: Birth; editTo: string | n
   const inTurn = [...ziwei.palaces.slice(ziwei.soul), ...ziwei.palaces.slice(0, ziwei.soul)];
   return (
     <div className="mg-ziwei">
+      {head}
       <section className="mg-saju-card mg-ziwei-board" aria-label="자미두수 명반">
         <h2 className="mg-heading">자미두수 명반</h2>
         <div className="mg-ziwei-grid">

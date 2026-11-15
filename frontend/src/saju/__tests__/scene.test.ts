@@ -1,14 +1,41 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
+import type { Material } from 'three';
+
 import { ELEMENTS } from '../elements';
 import type { YardSymbol } from '../profile';
-import { Builder } from '../scene/build';
-import { buildHome, buildLot, EMBLEM_AT, GUARDIAN_AT, KEEPSAKE_AT } from '../scene/homes';
+import { Builder, type Build } from '../scene/build';
+import { buildHome, buildLot, EMBLEM_AT, GUARDIAN_AT, KEEPSAKE_AT, type IslandKind } from '../scene/homes';
 import { WATER_LEVEL } from '../scene/mood';
 import { fbm, hash, rng, tileNoise, worley } from '../scene/noise';
-import { Site } from '../scene/terrain';
+import { sprigGeometry } from '../scene/sprigs';
+import { surfaceMaps } from '../scene/surfaces';
+import { ISLANDS, shoreAt, Site } from '../scene/terrain';
 
 const SYMBOLS: YardSymbol[] = ['tree', 'trellis', 'sun', 'candle', 'mountain', 'field', 'anvil', 'gem', 'lighthouse', 'rain'];
+const KINDS: IslandKind[] = ['home', 'neighbour'];
+
+/** Triangles a build hands the graphics card: its meshes', and each scattered copy's. */
+function trianglesOf(build: Build): number {
+  const meshes = build.meshes.reduce((sum, { geometry }) => sum + geometry.index!.count / 3, 0);
+  return meshes + build.sprigs.reduce((sum, { kind, count }) => sum + count * (sprigGeometry(kind).index?.count ?? sprigGeometry(kind).getAttribute('position').count) / 3, 0);
+}
+
+/** Every corner of a build's meshes but its ground's, and where each scattered thing is put. */
+function pointsOf(build: Build): { built: [number, number, number][]; scattered: [number, number, number][] } {
+  const ground = new Set([surfaceMaps('ground').map, surfaceMaps('rock').map]);
+  const built: [number, number, number][] = [];
+  for (const { geometry, material } of build.meshes) {
+    if (ground.has((material as Material & { map?: unknown }).map as never)) continue;
+    const position = geometry.getAttribute('position');
+    for (let index = 0; index < position.count; index++) built.push([position.getX(index), position.getY(index), position.getZ(index)]);
+  }
+  const scattered = build.sprigs.flatMap(({ count, matrices }) => Array.from({ length: count }, (_, index): [number, number, number] => [matrices[index * 16 + 12]!, matrices[index * 16 + 13]!, matrices[index * 16 + 14]!]));
+  return { built, scattered };
+}
+
+/** The lit panes of a build (windows, paper doors, transoms): a house's every opening. */
+const panesOf = (build: Build) => build.meshes.filter(({ material }) => !!(material as Material & { emissiveMap?: unknown }).emissiveMap).reduce((sum, { geometry }) => sum + geometry.index!.count, 0);
 
 beforeAll(() => {
   // A lit window's picture is drawn on a 2D canvas, which jsdom does not have: the pane is then left plain.
@@ -174,10 +201,120 @@ describe('다섯 집', () => {
     expect(lot.lamps).toHaveLength(0);
   }, 30_000);
 
-  it('수호 캐릭터와 상징, 기념물의 자리는 서로 겹치지 않는다', () => {
+  it('수호 캐릭터와 상징, 기념물의 자리는 서로 겹치지 않고, 주인의 섬 안쪽에 있다', () => {
     const spots = [GUARDIAN_AT, EMBLEM_AT, KEEPSAKE_AT];
     for (const [index, a] of spots.entries()) {
       for (const b of spots.slice(index + 1)) expect(Math.hypot(a[0] - b[0], a[2] - b[2])).toBeGreaterThan(1.6);
+      expect(Math.hypot(a[0], a[2])).toBeLessThan(shoreAt(ISLANDS.home, Math.atan2(a[2], a[0])) - 1.5);
+    }
+    // 수호 캐릭터는 이웃의 섬에도 같은 자리에 선다.
+    expect(Math.hypot(GUARDIAN_AT[0], GUARDIAN_AT[2])).toBeLessThan(shoreAt(ISLANDS.neighbour, Math.atan2(GUARDIAN_AT[2], GUARDIAN_AT[0])) - 1.5);
+  });
+});
+
+describe('섬의 모양', () => {
+  it('미니홈피 주인의 섬은 이웃 섬 네 개쯤을 가로세로로 늘어놓은 만큼 넓다', () => {
+    expect(ISLANDS.home.half / ISLANDS.neighbour.half).toBeGreaterThan(4);
+    expect(ISLANDS.home.half / ISLANDS.neighbour.half).toBeLessThan(4.6);
+    for (const kind of KINDS) {
+      const { half, corner, reach } = ISLANDS[kind];
+      expect(corner).toBeGreaterThan(0);
+      expect(corner).toBeLessThan(half);
+      // 둑은 물가에서 한 미터 반 넘게 내려가 호수 바닥에 닿는다.
+      expect(reach).toBeGreaterThan(half + 1.5);
     }
   });
+
+  it('물가 선은 곧은 변에서 half이고, 둥근 모서리로 갈수록 멀어진다', () => {
+    for (const kind of KINDS) {
+      const shape = ISLANDS[kind];
+      for (const side of [0, 1, 2, 3]) expect(shoreAt(shape, (side * Math.PI) / 2)).toBeCloseTo(shape.half, 9);
+      expect(shoreAt(shape, Math.PI / 4)).toBeCloseTo((shape.half - shape.corner) * Math.SQRT2 + shape.corner, 9);
+      let before = 0;
+      for (let step = 0; step <= 45; step++) {
+        const here = shoreAt(shape, (step / 180) * Math.PI);
+        expect(here).toBeGreaterThanOrEqual(before - 1e-9);
+        before = here;
+      }
+    }
+  });
+
+  it('물가는 그 선을 따라 반 미터 안팎으로만 구불거리고, reach에서는 호수 바닥이다', () => {
+    for (const kind of KINDS) {
+      const shape = ISLANDS[kind];
+      for (const seed of [11, 23, 37, 41, 53, 71]) {
+        const site = new Site(seed, [], shape);
+        for (let step = 0; step < 72; step++) {
+          const bearing = (step / 72) * Math.PI * 2;
+          const [cos, sin] = [Math.cos(bearing), Math.sin(bearing)];
+          const line = shoreAt(shape, bearing);
+          expect(site.height(cos * (line - 1.15), sin * (line - 1.15))).toBe(0);
+          expect(site.height(cos * (line - 0.6), sin * (line - 0.6))).toBeGreaterThan(WATER_LEVEL);
+          expect(site.height(cos * (line + 0.8), sin * (line + 0.8))).toBeLessThan(WATER_LEVEL);
+        }
+        for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) expect(site.height(x * shape.reach, z * shape.reach)).toBeLessThan(-1.4);
+      }
+    }
+  });
+});
+
+describe('주인의 섬과 이웃의 섬', () => {
+  const builds = new Map(ELEMENTS.map((style) => [style, Object.fromEntries(KINDS.map((kind) => [kind, buildHome({ style, accent: 'water', symbol: 'gem' }, true, kind)])) as Record<IslandKind, Build>]));
+
+  it.each(ELEMENTS)('%s: 무엇이든 제 섬의 reach 안에 그려진다', (style) => {
+    for (const kind of KINDS) {
+      const { built, scattered } = pointsOf(builds.get(style)![kind]);
+      const reach = ISLANDS[kind].reach;
+      for (const [x, , z] of [...built, ...scattered]) expect(Math.max(Math.abs(x), Math.abs(z))).toBeLessThanOrEqual(reach);
+    }
+  }, 30_000);
+
+  it.each(ELEMENTS)('%s: 이웃의 섬에도 집은 창 하나 빠짐없이 지어진다', (style) => {
+    const { home, neighbour } = builds.get(style)!;
+    expect(panesOf(neighbour)).toBeGreaterThan(0);
+    expect(panesOf(neighbour)).toBe(panesOf(home));
+  }, 30_000);
+
+  it.each(ELEMENTS)('%s: 이웃의 섬은 집과 땅, 물가와 나무 몇 그루뿐이라 훨씬 가볍다', (style) => {
+    const { home, neighbour } = builds.get(style)!;
+    const kinds = new Set(neighbour.sprigs.map((sprigs) => sprigs.kind));
+    // 풀잎도 수련 잎도 없고, 움직이는 것도 켜 둔 등불도 없다.
+    expect(kinds.has('blade')).toBe(false);
+    expect(kinds.has('pad')).toBe(false);
+    expect(neighbour.lives).toEqual([]);
+    expect(neighbour.lamps).toEqual([]);
+    // 나무와 덤불의 잎은 있다.
+    expect(kinds.has('leaf') || kinds.has('needle')).toBe(true);
+    expect(trianglesOf(neighbour)).toBeLessThan(trianglesOf(home) * 0.55);
+    expect(trianglesOf(neighbour)).toBeLessThan(100_000);
+    const instances = (build: Build) => build.sprigs.reduce((sum, sprigs) => sum + sprigs.count, 0);
+    expect(instances(neighbour)).toBeLessThan(instances(home) * 0.45);
+  }, 30_000);
+
+  it.each(ELEMENTS)('%s: 다리가 닿는 자리(변의 가운데와 네 모서리) 바깥으로는 아무것도 나와 있지 않다', (style) => {
+    for (const kind of KINDS) {
+      const { built, scattered } = pointsOf(builds.get(style)![kind]);
+      for (let index = 0; index < 8; index++) {
+        const bearing = (index / 8) * Math.PI * 2;
+        const [cos, sin] = [Math.cos(bearing), Math.sin(bearing)];
+        const foot = shoreAt(ISLANDS[kind], bearing) - 0.75;
+        // 다리의 발에서 바깥으로 두 걸음, 다리 폭만큼: 가장 짧은 다리(4.5미터)의 아치에 난간과 등불을 더한 높이까지.
+        // 그 위로 드리운 나뭇가지는 다리에 닿지 않는다.
+        const inWay = ([x, y, z]: [number, number, number]) => {
+          const out = x * cos + z * sin - foot;
+          const across = Math.abs(-x * sin + z * cos);
+          const top = 0.9 + 0.72 * Math.sin((Math.PI * Math.min(Math.max(out, 0), 2.25)) / 4.5);
+          return y > WATER_LEVEL - 0.1 && y < top && out > -0.1 && out < 2 && across < 0.75;
+        };
+        expect([...built, ...scattered].filter(inWay)).toEqual([]);
+      }
+    }
+  }, 30_000);
+
+  it('빈 터도 두 가지로 지어진다: 이웃의 것에는 풀이 없다', () => {
+    const [home, neighbour] = KINDS.map((kind) => buildLot(true, kind));
+    expect(home!.sprigs.some((sprigs) => sprigs.kind === 'blade')).toBe(true);
+    expect(neighbour!.sprigs.some((sprigs) => sprigs.kind === 'blade')).toBe(false);
+    expect(trianglesOf(neighbour!)).toBeLessThan(trianglesOf(home!) * 0.5);
+  }, 30_000);
 });

@@ -48,7 +48,7 @@ describe('둘러보기 화면', () => {
     await flush();
     expect(list).toHaveBeenCalledTimes(1);
     expect(list.mock.calls[0]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '' });
-    expect(names(container)).toEqual(['주인0의 미니홈피', '주인1의 미니홈피', '주인2의 미니홈피']);
+    expect(names(container)).toEqual(['주인0의 섬', '주인1의 섬', '주인2의 섬']);
     expect(more(container)).toBeUndefined();
     await unmount();
   });
@@ -65,7 +65,7 @@ describe('둘러보기 화면', () => {
     await flush();
     expect(list.mock.calls[1]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '', before: first[EXPLORE_PAGE - 1]?.updatedAt });
     expect(names(container)).toHaveLength(EXPLORE_PAGE + 2);
-    expect(names(container).at(-1)).toBe(`주인${EXPLORE_PAGE + 1}의 미니홈피`);
+    expect(names(container).at(-1)).toBe(`주인${EXPLORE_PAGE + 1}의 섬`);
     // 둘째 쪽이 모자랐으니 끝이다.
     expect(more(container)).toBeUndefined();
     await unmount();
@@ -95,7 +95,7 @@ describe('둘러보기 화면', () => {
     const { container, unmount } = await open('/explore?q=%EB%AA%A8%EA%B0%9C');
     await flush();
     expect(list.mock.calls[0]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '모개' });
-    expect(container.textContent).toContain('찾는 미니홈피가 없어요');
+    expect(container.textContent).toContain('찾는 섬이 없어요');
     await unmount();
   });
 
@@ -111,11 +111,11 @@ describe('둘러보기 화면', () => {
     list.mockResolvedValueOnce({ homes: [home(900)] });
     await type(container.querySelector<HTMLInputElement>('input[type=search]')!, '새');
     await act(async () => void (await vi.advanceTimersByTimeAsync(300)));
-    expect(names(container)).toEqual(['주인900의 미니홈피']);
+    expect(names(container)).toEqual(['주인900의 섬']);
 
     late({ homes: [home(901)] });
     await flush();
-    expect(names(container)).toEqual(['주인900의 미니홈피']);
+    expect(names(container)).toEqual(['주인900의 섬']);
     await unmount();
   });
 
@@ -132,7 +132,7 @@ describe('둘러보기 화면', () => {
     expect(list).toHaveBeenCalledTimes(2);
     expect(list.mock.calls[1]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '새' });
     answer({ homes: [home(900)] }); await flush();
-    expect(names(container)).toEqual(['주인900의 미니홈피']); await unmount();
+    expect(names(container)).toEqual(['주인900의 섬']); await unmount();
   });
 
   it('같은 렌더 안의 연속 클릭도 더 보기 요청을 한 번만 보낸다', async () => {
@@ -170,7 +170,7 @@ describe('둘러보기 화면', () => {
     await flush();
     expect(list).toHaveBeenCalledTimes(2);
     expect(list.mock.calls[1]?.[0]).toEqual({ limit: EXPLORE_PAGE, q: '모' });
-    expect(names(container)).toEqual(['주인0의 미니홈피', '주인1의 미니홈피']);
+    expect(names(container)).toEqual(['주인0의 섬', '주인1의 섬']);
     expect(container.querySelector('[role=alert]')).toBeNull();
     await unmount();
   });

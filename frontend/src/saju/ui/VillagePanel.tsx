@@ -11,7 +11,7 @@ import { PixelIcon } from './PixelIcon';
 export type Villager = { resident: Resident; profile: Profile; bridged: boolean };
 
 /**
- * 마을 갤러리: the homes of a village, each a way into its 미니홈피: the owner's first (an empty plot until they build
+ * 마을 갤러리: the homes of a village, each a way into its 섬: the owner's first (an empty plot until they build
  * it), then their 이웃' and the other homes around it.
  */
 export function VillagePanel({ owner, villagers, viewer }: {

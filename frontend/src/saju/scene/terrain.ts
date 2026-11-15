@@ -1,6 +1,7 @@
 import { Color } from 'three';
 
 import type { Builder, Finish } from './build';
+import { ESTATE_HALF } from './estate/coast';
 import { WATER_LEVEL } from './mood';
 import { noise2 } from './noise';
 import { reeds, rock, type Palette } from './plants';
@@ -28,11 +29,52 @@ export type GroundLook = {
   rocks: Palette;
 };
 
-/** From the island's middle to a straight side, and how round its corners are. */
-const HALF = 5.5;
-const CORNER = 2.6;
+/** Whose island it is: the page's own, roomy and planted in full, or a neighbour's, kept to its house and a few trees. */
+export type IslandKind = 'home' | 'neighbour';
+
+/**
+ * An island's ground about its middle, at y = 0: the waterline runs round a rounded square `half` from the middle to a
+ * straight side, its corners `corner` round, and wanders half a metre either way of it; the firm ground stops half a
+ * metre inside it, and the bank under the water meets the lake's bed at most `reach` from the middle on a straight side.
+ */
+export type IslandShape = { half: number; corner: number; reach: number };
+
+/**
+ * How round an estate's corners are against its half: its coast runs round a squarish round (estate/coast, a
+ * superellipse of power 2.5), whose diagonal a rounded square meets with corners this much of its half.
+ */
+const ESTATE_CORNER = 0.83;
+
+/**
+ * The page's own island is an estate (see estate/), four neighbours' islands across each way and as round at its
+ * corners as the estate's coast; a neighbour's keeps to its house and a few trees.
+ */
+export const ISLANDS: Record<IslandKind, IslandShape> = {
+  home: { half: ESTATE_HALF, corner: ESTATE_HALF * ESTATE_CORNER, reach: ESTATE_HALF + 1.9 },
+  neighbour: { half: 5.5, corner: 2.6, reach: 7.4 },
+};
+
+/** The ground is cut in squares this many metres across: finer where it is looked at closely, coarser over an estate's breadth. */
+export const GROUND_STEP: Record<IslandKind, number> = { home: 0.3, neighbour: 0.2 };
+
+/**
+ * How far from an island's middle its waterline lies at `bearing` (radians from +x toward +z), before it wanders: a
+ * straight side's `half` square on, more toward a corner.
+ */
+export function shoreAt(shape: IslandShape, bearing: number): number {
+  const a = Math.abs(Math.cos(bearing));
+  const b = Math.abs(Math.sin(bearing));
+  const flat = shape.half - shape.corner;
+  const [near, far] = a > b ? [a, b] : [b, a];
+  const side = shape.half / near;
+  if (side * far <= flat) return side;
+  // Past the straight side, on the corner's arc about (flat, flat).
+  const mid = flat * (a + b);
+  return mid + Math.sqrt(Math.max(0, mid * mid - 2 * flat * flat + shape.corner * shape.corner));
+}
+
+/** A small island's ground (the flag's) is cut as finely as the page's own once was: it is looked at as closely. */
 const STEP = 0.14;
-const REACH = 7.4;
 
 const smooth = (from: number, to: number, value: number) => {
   const t = Math.min(1, Math.max(0, (value - from) / (to - from)));
@@ -47,13 +89,15 @@ export class Site {
   constructor(
     readonly seed: number,
     readonly ponds: readonly Pond[] = [],
+    readonly shape: IslandShape = ISLANDS.neighbour,
   ) {}
 
   /** How far inside the shoreline (x, z) lies, in metres; negative out in the lake. The line wanders, each island its own way. */
   shore(x: number, z: number): number {
-    const qx = Math.abs(x) - (HALF - CORNER);
-    const qz = Math.abs(z) - (HALF - CORNER);
-    const outside = Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0) - CORNER;
+    const { half, corner } = this.shape;
+    const qx = Math.abs(x) - (half - corner);
+    const qz = Math.abs(z) - (half - corner);
+    const outside = Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0) - corner;
     const angle = Math.atan2(z, x);
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
@@ -143,11 +187,15 @@ function faces(b: Builder, finish: Finish, corners: readonly (Corner | null)[], 
   b.raw(finish, positions, normals, uvs, tints, indices);
 }
 
-/** The ground of `site`, added to `b`: turf on the flat, broken stone and earth down the bank, sand and bed under the water. */
-export function ground(b: Builder, site: Site, look: GroundLook): void {
-  const side = Math.round((REACH * 2) / STEP) + 1;
+/**
+ * The ground of `site`, added to `b`: turf on the flat, broken stone and earth down the bank, sand and bed under the
+ * water, cut in squares `step` metres across out to the site's reach.
+ */
+export function ground(b: Builder, site: Site, look: GroundLook, step = STEP): void {
+  const { reach } = site.shape;
+  const side = Math.round((reach * 2) / step) + 1;
   const heights = new Float32Array(side * side);
-  const place = (index: number) => -REACH + index * STEP;
+  const place = (index: number) => -reach + index * step;
   for (let row = 0; row < side; row++) for (let column = 0; column < side; column++) heights[row * side + column] = site.height(place(column), place(row));
   const at = (column: number, row: number) => heights[Math.min(side - 1, Math.max(0, row)) * side + Math.min(side - 1, Math.max(0, column))]!;
 
@@ -172,7 +220,7 @@ export function ground(b: Builder, site: Site, look: GroundLook): void {
       const z = place(row);
       const dx = at(column - 1, row) - at(column + 1, row);
       const dz = at(column, row - 1) - at(column, row + 1);
-      const length = Math.hypot(dx, 2 * STEP, dz);
+      const length = Math.hypot(dx, 2 * step, dz);
       const grain = noise2(x * 2.4 + site.seed, z * 2.4);
       if (height > -0.03) {
         const patch = noise2(x * 0.5 + site.seed * 9, z * 0.5);
@@ -187,7 +235,7 @@ export function ground(b: Builder, site: Site, look: GroundLook): void {
       } else {
         color.copy(sand).multiplyScalar(0.62).lerp(bed, smooth(0, 0.5, WATER_LEVEL - height));
       }
-      corners.push({ x, z, height, normal: [dx / length, (2 * STEP) / length, dz / length], tint: [color.r, color.g, color.b] });
+      corners.push({ x, z, height, normal: [dx / length, (2 * step) / length, dz / length], tint: [color.r, color.g, color.b] });
     }
   }
   const lawn = (a: Corner, c: Corner, d: Corner, e: Corner) => Math.min(a.height, c.height, d.height, e.height) > -0.035;
@@ -201,7 +249,7 @@ function waterline(site: Site, angle: number): [number, number] {
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
   let near = 2;
-  let far = 9;
+  let far = site.shape.reach + 1.6;
   for (let step = 0; step < 14; step++) {
     const middle = (near + far) / 2;
     if (site.height(cos * middle, sin * middle) > WATER_LEVEL) near = middle;
@@ -212,10 +260,19 @@ function waterline(site: Site, angle: number): [number, number] {
 
 /**
  * Stones down the island's bank and in its shallows, and reeds where the water is still. `clear` leaves a stretch
- * free: a landing, a bridge's foot.
+ * free: a landing, a bridge's foot. `share` thins the stones (and `reeds` counts the clumps of reeds) for an island
+ * kept light; a longer shore has more of them. A clump of reeds is left out where `reedless` says, at its middle
+ * (`clear`'s stretch, unless told otherwise): a clump spreads half a metre about it.
  */
-export function dressShore(b: Builder, site: Site, look: GroundLook, clear: (x: number, z: number) => boolean = () => false): void {
-  const stones = 150;
+export function dressShore(
+  b: Builder,
+  site: Site,
+  look: GroundLook,
+  clear: (x: number, z: number) => boolean = () => false,
+  { share = 1, reeds: clumps = 7, reedless = clear }: { share?: number; reeds?: number; reedless?: (x: number, z: number) => boolean } = {},
+): void {
+  const { half, corner } = site.shape;
+  const stones = Math.round((8 * (half - corner) + 2 * Math.PI * corner) * 3.8 * share);
   for (let index = 0; index < stones; index++) {
     const angle = (index / stones) * Math.PI * 2 + b.between(-0.03, 0.03);
     const [x, z] = waterline(site, angle);
@@ -228,10 +285,10 @@ export function dressShore(b: Builder, site: Site, look: GroundLook, clear: (x: 
     const pz = z - Math.sin(angle) * inland;
     rock(b, [px, Math.max(site.height(px, pz), WATER_LEVEL - 0.08) - 0.03, pz], size, b.pick(look.rocks), b.between(0.55, 0.85));
   }
-  for (let clump = 0; clump < 7; clump++) {
+  for (let clump = 0; clump < clumps; clump++) {
     const angle = b.between(0, Math.PI * 2);
     const [x, z] = waterline(site, angle);
-    if (clear(x, z)) continue;
+    if (reedless(x, z)) continue;
     reeds(b, [x + Math.cos(angle) * 0.15, WATER_LEVEL - 0.05, z + Math.sin(angle) * 0.15], 11, 0.5);
   }
 }

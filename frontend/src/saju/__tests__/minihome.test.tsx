@@ -58,7 +58,7 @@ async function open(username = 'sol') {
   };
 }
 
-describe('미니홈피 읽기', () => {
+describe('섬 읽기', () => {
   beforeEach(() => {
     auth = { status: 'signedIn', user: sol };
     mine.mockResolvedValue(view(true));
@@ -122,13 +122,13 @@ describe('미니홈피 읽기', () => {
   });
 
   it('없는 집과 닫힌 집, 닿지 않는 서버를 구분해 알린다', async () => {
-    mine.mockRejectedValue(new ApiRequestError(403, 'home_private', '주인이 공개하지 않은 미니홈피입니다.'));
+    mine.mockRejectedValue(new ApiRequestError(403, 'home_private', '주인이 공개하지 않은 섬입니다.'));
     const closed = await open();
-    expect(closed.hook().state).toEqual({ status: 'failed', code: 403, message: '주인이 공개하지 않은 미니홈피입니다.' });
+    expect(closed.hook().state).toEqual({ status: 'failed', code: 403, message: '주인이 공개하지 않은 섬입니다.' });
     await closed.unmount();
     mine.mockRejectedValue(new TypeError('Failed to fetch'));
     const down = await open();
-    expect(down.hook().state).toEqual({ status: 'failed', code: 0, message: '미니홈피를 불러오지 못했어요' });
+    expect(down.hook().state).toEqual({ status: 'failed', code: 0, message: '섬을 불러오지 못했어요' });
     await down.unmount();
   });
 
@@ -157,10 +157,10 @@ describe('미니홈피 읽기', () => {
     await settle();
     expect(page.ready()!.owner?.name).toBe('솔');
     // 이제 닫힌 집이라는 답이면 닫힌 집으로 보여 준다.
-    village.mockRejectedValue(new ApiRequestError(403, 'home_private', '주인이 공개하지 않은 미니홈피입니다.'));
+    village.mockRejectedValue(new ApiRequestError(403, 'home_private', '주인이 공개하지 않은 섬입니다.'));
     await act(async () => window.dispatchEvent(new Event('mogaesup:requests')));
     await settle();
-    expect(page.hook().state).toEqual({ status: 'failed', code: 403, message: '주인이 공개하지 않은 미니홈피입니다.' });
+    expect(page.hook().state).toEqual({ status: 'failed', code: 403, message: '주인이 공개하지 않은 섬입니다.' });
     await page.unmount();
   });
 

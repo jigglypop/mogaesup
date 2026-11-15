@@ -1087,6 +1087,7 @@ mod tests {
             ticket_secret: vec![0; 32],
             models: crate::models::Models::open(models.to_str().unwrap()).unwrap(),
             factory: Some(settings(&url)),
+            openai: Default::default(),
         };
         // Nothing here reads the database.
         let db = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://127.0.0.1:1/none").unwrap();

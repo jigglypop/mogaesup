@@ -1,8 +1,11 @@
-// Walks the 사주 village in Chrome against the running server, as two new members: the card that builds a home (a lunar
-// birth) and its guardian dog, the home filling the window, a drag that turns the picture, the buttons and the wheel
-// that zoom it, the story panel folding away, its saved picture, BGM, 사주보기, the village, a visit, the guestbook,
-// 이웃 and the bridge between them, 파도타기, a click on the map, entering the 사주 again and taking the home down.
-// Both accounts are made with a password generated for this run.
+// Walks the 사주 village in Chrome against the running server, as two new members: the app's menus (no 운영, 캐릭터 or
+// 둘러보기, and no rail), the card that builds a home (a lunar birth) and its guardian dog, the home filling the window,
+// its island drawn again as a picture once, a drag that turns the picture, the buttons and the wheel that zoom it, the
+// story panel folding away, its saved picture, 사주보기 with the reading asked for once and 자미두수 with its part,
+// the village, a visit (the visitor sees the picture and the reading), the guestbook, 이웃 and the bridge between them,
+// 파도타기, a click on the map, entering the 사주 again and taking the home down.
+// Both accounts are made with a password generated for this run. The reading and the picture are made with paid models:
+// this walk answers their requests itself (being made, then made) and never lets one reach the server.
 // Usage: node scripts/saju-smoke.mjs [webUrl] [screenshotDir] [--allow-remote] [--flag]   (a local server; it creates accounts)
 // --flag also raises the village's flag: nine more members are signed up over the API and become the first member's
 // 이웃. The server takes twenty sign-ups from one address in ten minutes, so this walk runs once in that time.
@@ -26,17 +29,80 @@ mkdirSync(SHOTS, { recursive: true });
 const suffix = randomBytes(3).toString('hex');
 const PASSWORD = randomBytes(16).toString('hex');
 
-// Chrome on this machine's GPU: a software renderer takes minutes over the village.
+// Chrome on this machine's GPU, with WebGPU allowed (the village draws with it): a software renderer takes minutes.
 const browser = await chromium.launch({
   channel: 'chrome',
-  args: ['--enable-gpu', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : [])],
+  args: ['--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu', ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : [])],
 });
 const problems = [];
 /** The guardian dogs' models each page has fetched, and whether each arrived: a dog is fetched once and then shared. */
 const dogs = new Map();
 
+// What the server would make for each member's home, answered here: nothing, then (asked for) being made until this walk
+// has seen it being made (`release`) and for a look or two after, and then made. Building a home again or taking it
+// down makes both nothing again, as the server does.
+const MADE_AFTER = 1;
+const READING = {
+  saju: { summary: '스모크 점검이 쓴 사주 풀이예요.', sections: [{ title: '기질', body: '첫 줄이에요.\n둘째 줄이에요.' }] },
+  ziwei: { summary: '스모크 점검이 쓴 자미두수 풀이예요.', sections: [{ title: '명궁', body: '명궁의 풀이예요.' }] },
+};
+/** Each member's reading and picture as this walk keeps them, and every request to make one, in order. */
+const made = new Map();
+const asked = [];
+const madeOf = (username) => {
+  if (!made.has(username)) made.set(username, { reading: { status: 'none' }, picture: { status: 'none' } });
+  return made.get(username);
+};
+async function answerMade(context, username) {
+  for (const kind of ['reading', 'picture']) {
+    await context.route(new RegExp(`/api/homes/[^/]+/saju/${kind}$`), async (route) => {
+      const request = route.request();
+      const owner = new URL(request.url()).pathname.split('/')[3];
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON();
+        asked.push({ username, kind, again: body.again === true, body });
+        const since = new Date().toISOString();
+        madeOf(username)[kind] = { status: 'pending', since, looks: 0, held: true, url: kind === 'picture' ? body.image : null };
+        return route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify({ status: 'pending', since }) });
+      }
+      const state = madeOf(owner === 'me' ? username : owner)[kind];
+      let answer = state;
+      if (state.status === 'pending') {
+        if (!state.held) state.looks += 1;
+        answer =
+          state.held || state.looks <= MADE_AFTER
+            ? { status: 'pending', since: state.since }
+            : kind === 'reading'
+              ? { status: 'ready', model: 'smoke', createdAt: state.since, reading: READING }
+              : { status: 'ready', model: 'smoke', createdAt: state.since, url: state.url, width: 1024, height: 1024 };
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(answer) });
+    });
+  }
+  context.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/homes/me/saju' && ['PUT', 'DELETE'].includes(request.method())) made.delete(username);
+  });
+}
+/** Lets a member's `kind`, being made, be made: the page has been seen saying it is being made. */
+const release = (username, kind) => {
+  const state = madeOf(username)[kind];
+  if (state.status !== 'pending') throw new Error(`${username}'s ${kind} is not being made`);
+  state.held = false;
+};
+/** The requests to make a member's `kind`, so far. */
+const askedFor = (username, kind) => asked.filter((item) => item.username === username && item.kind === kind);
+/** What a picture sent to be drawn again is: its type and size, and how many bytes it holds. */
+async function pictureOf(dataUrl) {
+  const [, type, base64] = /^data:(image\/[a-z]+);base64,(.+)$/.exec(dataUrl) ?? [];
+  if (!type) throw new Error(`the picture is not a data URL: ${dataUrl.slice(0, 40)}`);
+  const bytes = Buffer.from(base64, 'base64');
+  const { format, width, height } = await sharp(bytes).metadata();
+  return { type, format, width, height, bytes: bytes.length };
+}
+
 async function member(username, name) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
+  await answerMade(context, username);
   const page = await context.newPage();
   dogs.set(page, []);
   page.on('response', (response) => {
@@ -47,6 +113,9 @@ async function member(username, name) {
     if (message.type() === 'error') problems.push(`${username} console: ${message.text().slice(0, 300)}`);
   });
   await page.goto(WEB);
+  // The way in leads nowhere else.
+  await page.getByRole('tab', { name: '가입하기' }).waitFor();
+  if (await page.locator('a').count()) problems.push(`${username}: the sign-in page has links: ${await page.locator('a').allTextContents()}`);
   await page.getByRole('tab', { name: '가입하기' }).click();
   await page.locator('input[name=username]').fill(username);
   await page.locator('input[name=displayName]').fill(name);
@@ -115,7 +184,7 @@ await step('a lunar birth builds the home on the server', async () => {
   const saved = gaon.waitForResponse((response) => response.url().endsWith('/api/homes/me/saju') && response.request().method() === 'PUT');
   await gaon.getByRole('button', { name: '내 집 짓기' }).click();
   if (!(await saved).ok()) throw new Error('the server refused the home');
-  await heading(gaon, '가온의 미니홈피');
+  await heading(gaon, '가온의 섬');
   // The home's guardian is one of the twenty dogs. The picture waits for its model, which this page fetched now or,
   // when a home of the village around the empty plot had the same dog, before the home was built.
   await gaon.locator('.mg-saju-notes', { hasText: '강아지' }).waitFor();
@@ -125,7 +194,7 @@ await step('a lunar birth builds the home on the server', async () => {
   await shot(gaon, '2-home');
   // It is the server's: a reload finds it.
   await gaon.reload();
-  await heading(gaon, '가온의 미니홈피');
+  await heading(gaon, '가온의 섬');
   await gaon.locator('.mg-saju-badge').waitFor();
 });
 await step('the picture fills the window, under the page\'s glass', async () => {
@@ -133,6 +202,47 @@ await step('the picture fills the window, under the page\'s glass', async () => 
   const box = await gaon.locator('.mg-saju-canvas').boundingBox();
   if (box.x !== 0 || box.y !== 0 || box.width !== width || box.height !== height) throw new Error(`the canvas is ${box.width}x${box.height} at ${box.x},${box.y} in a ${width}x${height} window`);
   if (await gaon.evaluate(() => document.documentElement.scrollHeight > innerHeight || document.documentElement.scrollWidth > innerWidth)) throw new Error('the page scrolls');
+});
+await step('the island is drawn again once, and its picture shows on the home and opens larger', async () => {
+  const card = gaon.getByRole('region', { name: '섬 그림' });
+  await card.getByText('그림을 그리고 있어요').waitFor({ timeout: 90_000 });
+  // The island is drawn on the page first, and sent once it is.
+  const until = Date.now() + 60_000;
+  while (!askedFor(gaonName, 'picture').length && Date.now() < until) await gaon.waitForTimeout(250);
+  release(gaonName, 'picture');
+  await card.locator('img').waitFor({ timeout: 60_000 });
+  const sent = askedFor(gaonName, 'picture');
+  if (sent.length !== 1 || sent[0].again) throw new Error(`the picture was asked for ${sent.length} times`);
+  const picture = await pictureOf(sent[0].body.image);
+  if (picture.type !== 'image/webp' || picture.format !== 'webp' || picture.width !== 1024 || picture.height !== 1024) throw new Error(`the picture sent: ${JSON.stringify(picture)}`);
+  if (picture.bytes > 3 * 1024 * 1024) throw new Error(`the picture sent holds ${picture.bytes} bytes`);
+  await shot(gaon, '2-picture');
+  await card.getByRole('button', { name: '가온의 섬 그림 크게 보기' }).click();
+  const large = gaon.getByRole('dialog', { name: '가온의 섬 그림' });
+  await large.locator('img').waitFor();
+  await shot(gaon, '2-picture-large');
+  await gaon.keyboard.press('Escape');
+  await large.waitFor({ state: 'detached' });
+});
+await step('no menu leads to 운영, 캐릭터 or 둘러보기, and no page keeps a rail', async () => {
+  if (await gaon.locator('.mg-rail').count()) throw new Error('the 섬 has a rail');
+  for (const name of ['운영', '캐릭터', '둘러보기']) {
+    if (await gaon.getByRole('link', { name, exact: true }).count()) throw new Error(`a link to ${name}`);
+  }
+  await gaon.getByRole('button', { name: '내 메뉴' }).click();
+  const items = await gaon.getByRole('menu', { name: '내 메뉴' }).getByRole('menuitem').allTextContents();
+  await gaon.keyboard.press('Escape');
+  if (items.some((item) => /캐릭터|운영|둘러보기/.test(item))) throw new Error(`the account menu: ${items.join(', ')}`);
+  // The search still finds homes, on a page that keeps no room for a rail.
+  await gaon.getByRole('search').getByRole('textbox', { name: '섬이나 사람 찾기' }).fill('가온');
+  await gaon.keyboard.press('Enter');
+  await gaon.waitForURL(`**/explore?q=${encodeURIComponent('가온')}`);
+  await gaon.locator('.mg-page-main').waitFor();
+  const room = await gaon.locator('.mg-page-main').evaluate((main) => [getComputedStyle(main).paddingLeft, getComputedStyle(main).paddingRight]);
+  if (room[0] !== room[1] || (await gaon.locator('.mg-rail').count())) throw new Error(`the page keeps room for a rail: ${room.join(' ')}`);
+  await shot(gaon, '2-explore');
+  await gaon.goto(`${WEB}/@${gaonName}`);
+  await heading(gaon, '가온의 섬');
 });
 // For a viewer who asked for less motion the scene holds still but for a little grain from frame to frame, so a picture
 // that changed much more than that was turned or zoomed. The first member's own page asks for it through these steps:
@@ -195,7 +305,7 @@ await step('the buttons and the wheel zoom the picture in and out', async () => 
   } finally {
     await gaon.emulateMedia({ reducedMotion: null });
     await gaon.reload();
-    await heading(gaon, '가온의 미니홈피');
+    await heading(gaon, '가온의 섬');
   }
 });
 await step('the story panel folds away and comes back', async () => {
@@ -211,24 +321,39 @@ await step('the picture saves as a PNG', async () => {
   await download.saveAs(join(SHOTS, '4-saved-picture.png'));
   await gaon.getByText('이미지를 저장했어요').waitFor();
 });
-await step('the BGM plays and stops', async () => {
-  await gaon.getByRole('button', { name: 'BGM 재생' }).click();
-  await gaon.getByRole('button', { name: 'BGM 멈춤' }).waitFor();
-  await gaon.waitForTimeout(1200);
-  await gaon.getByRole('button', { name: 'BGM 멈춤' }).click();
-  await gaon.getByRole('button', { name: 'BGM 재생' }).waitFor();
-});
-await step('사주보기 shows the chart', async () => {
+await step('사주보기 asks for the reading once and shows it written, and 자미두수 its part', async () => {
   await gaon.getByRole('link', { name: '사주보기' }).click();
   await heading(gaon, '사주 원국');
+  const card = gaon.getByRole('region', { name: '사주 풀이' });
+  await card.getByText('풀이를 쓰고 있어요').waitFor();
+  await shot(gaon, '5-reading-pending');
+  const until = Date.now() + 30_000;
+  while (!askedFor(gaonName, 'reading').length && Date.now() < until) await gaon.waitForTimeout(250);
+  release(gaonName, 'reading');
+  await card.getByText(READING.saju.summary).waitFor({ timeout: 45_000 });
+  // Its head has the PDF and, for the owner, a new reading.
+  await card.getByRole('button', { name: '다시 풀기' }).waitFor();
+  if ((await card.locator('.mg-saju-reading-head button').count()) < 2) throw new Error('the reading has no PDF button');
   await shot(gaon, '5-chart');
+  const sent = askedFor(gaonName, 'reading');
+  if (sent.length !== 1 || sent[0].again) throw new Error(`the reading was asked for ${sent.length} times`);
+  const { chart } = sent[0].body;
+  const birth = { calendar: 'lunar', year: 1993, month: 3, day: 15, leapMonth: false, time: '07:40', gender: 'female' };
+  if (Object.keys(birth).some((key) => chart.birth[key] !== birth[key])) throw new Error(`the chart's birth: ${JSON.stringify(chart.birth)}`);
+  if (chart.saju.pillars.length !== 4 || chart.ziwei?.palaces.length !== 12 || !chart.ziwei.palaces[0].soul) throw new Error('the chart sent is not whole');
+  await gaon.getByRole('link', { name: '자미두수' }).click();
+  await gaon.getByRole('region', { name: '자미두수 풀이' }).getByText(READING.ziwei.summary).waitFor();
+  await shot(gaon, '5-ziwei');
+  await gaon.getByRole('link', { name: '사주보기' }).click();
+  await heading(gaon, '사주 원국');
+  if (askedFor(gaonName, 'reading').length !== 1) throw new Error('the reading was asked for again');
 });
 await step('a second member builds a home and finds the first in their village', async () => {
   noeul = await member(noeulName, '노을');
   await heading(noeul, '내 집 짓기');
   await build(noeul, '노을', { calendar: '양력', year: 1987, month: 6, day: 17, time: '08:30', gender: '남성' });
   await noeul.getByRole('button', { name: '내 집 짓기' }).click();
-  await heading(noeul, '노을의 미니홈피');
+  await heading(noeul, '노을의 섬');
   await noeul.getByRole('link', { name: '마을', exact: true }).click();
   await noeul.locator(`.mg-saju-villager[href="/@${gaonName}"]`).waitFor();
   await settled(noeul);
@@ -236,7 +361,7 @@ await step('a second member builds a home and finds the first in their village',
 });
 await step('a visit leaves a line in the guestbook and asks to be 이웃', async () => {
   await noeul.locator(`.mg-saju-villager[href="/@${gaonName}"]`).click();
-  await heading(noeul, '가온의 미니홈피');
+  await heading(noeul, '가온의 섬');
   await noeul.locator('#guestbook-text').fill('집 구경 왔어요');
   await noeul.getByRole('button', { name: '남기기' }).click();
   await noeul.locator('.mg-entries li').first().getByText('집 구경 왔어요').waitFor();
@@ -245,6 +370,18 @@ await step('a visit leaves a line in the guestbook and asks to be 이웃', async
   await noeul.locator('input[name=theirName]').fill('앞집');
   await noeul.getByRole('button', { name: '보내기' }).click();
   await noeul.getByText('이웃 신청을 보냈어요').waitFor();
+});
+await step('the visitor sees the picture and the reading, and can only look', async () => {
+  const picture = noeul.getByRole('region', { name: '섬 그림' });
+  await picture.locator('img').waitFor();
+  if (await picture.getByRole('button', { name: '다시 그리기' }).count()) throw new Error('a visitor can draw the picture again');
+  await noeul.getByRole('link', { name: '사주보기' }).click();
+  const reading = noeul.getByRole('region', { name: '사주 풀이' });
+  await reading.getByText(READING.saju.summary).waitFor();
+  if (await reading.getByRole('button', { name: '다시 풀기' }).count()) throw new Error('a visitor can ask for the reading again');
+  await shot(noeul, '6-visit-reading');
+  if (askedFor(noeulName, 'reading').length) throw new Error('the visit asked for a reading');
+  await noeul.getByRole('link', { name: '홈', exact: true }).click();
 });
 await step('the owner reads the line, accepts, and a bridge joins the two homes', async () => {
   await gaon.goto(`${WEB}/@${gaonName}`);
@@ -306,7 +443,7 @@ await step('a click on an island of the map visits it', async () => {
   const pin = await gaon.locator(`.mg-saju-pin[data-pin=${noeulName}]`).boundingBox();
   await gaon.mouse.click(pin.x + pin.width / 2, pin.y + pin.height + 60);
   await gaon.waitForURL(`**/@${noeulName}`, { timeout: 5000 });
-  await heading(gaon, '노을의 미니홈피');
+  await heading(gaon, '노을의 섬');
 });
 await step('the 사주 is entered again and the home taken down', async () => {
   await gaon.getByRole('link', { name: '내 집' }).click();
@@ -333,6 +470,7 @@ await step('an address of the village\'s first days leads to the member\'s own h
 });
 
 await browser.close();
+console.log(`answered here: ${asked.map(({ username, kind, again }) => `${username.split('_')[0]} ${kind}${again ? ' again' : ''}`).join(', ') || 'nothing'}`);
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):\n${problems.join('\n')}`);
   process.exit(1);

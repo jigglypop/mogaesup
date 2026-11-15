@@ -1,5 +1,7 @@
-import { BufferAttribute, BufferGeometry, DoubleSide, IcosahedronGeometry, MeshStandardMaterial, ShaderChunk, Vector3, type Material } from 'three';
+import { BufferAttribute, BufferGeometry, DoubleSide, FrontSide, IcosahedronGeometry, MeshStandardMaterial, Vector3, type Material } from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { attribute, cos, instanceColor, max, mix, normalize, normalViewGeometry, positionGeometry, positionLocal, sin, transformNormalToView, uniform, vec3 } from 'three/tsl';
+import { MeshStandardNodeMaterial } from 'three/webgpu';
 
 import type { SprigKind } from './build';
 import { noise3, rng } from './noise';
@@ -11,7 +13,7 @@ import { surfaceMaps } from './surfaces';
 // stir in the wind.
 
 /** The wind's clock, in seconds: every leaf reads it. Held still, nothing stirs. */
-export const wind = { value: 0 };
+export const wind = uniform(0);
 
 type Sheet = { positions: number[]; normals: number[]; tints: number[] };
 
@@ -194,15 +196,18 @@ function stone(detail: number): BufferGeometry {
 }
 
 const SHAPES: Record<SprigKind, () => BufferGeometry> = { leaf: leafSpray, needle: needleSpray, blade: grassTuft, bloom: blossom, frond, pad: lilyPad, puff, rock: () => stone(2), pebble: () => stone(1) };
-/** How far the wind moves a copy's top, in its own size; how much it takes the light as its crown does (1) or as itself (0). */
+/**
+ * How far the wind moves the top of a copy of each, in metres at the size it is scattered at; how much it takes the light
+ * as its crown does (1) or as itself (0).
+ */
 const MANNER: Record<Exclude<SprigKind, 'rock' | 'pebble'>, { sway: number; soft: number; rough: number }> = {
-  leaf: { sway: 0.05, soft: 0.72, rough: 0.72 },
-  needle: { sway: 0.03, soft: 0.6, rough: 0.8 },
-  blade: { sway: 0.1, soft: 0.9, rough: 0.85 },
-  bloom: { sway: 0.05, soft: 0.6, rough: 0.7 },
-  frond: { sway: 0.07, soft: 0.5, rough: 0.7 },
+  leaf: { sway: 0.016, soft: 0.72, rough: 0.72 },
+  needle: { sway: 0.012, soft: 0.6, rough: 0.8 },
+  blade: { sway: 0.022, soft: 0.9, rough: 0.85 },
+  bloom: { sway: 0.006, soft: 0.6, rough: 0.7 },
+  frond: { sway: 0.032, soft: 0.5, rough: 0.7 },
   pad: { sway: 0, soft: 0, rough: 0.35 },
-  puff: { sway: 0.02, soft: 0.25, rough: 0.75 },
+  puff: { sway: 0.004, soft: 0.25, rough: 0.75 },
 };
 
 const geometries = new Map<SprigKind, BufferGeometry>();
@@ -225,29 +230,20 @@ export function sprigMaterial(kind: SprigKind): Material {
     material = new MeshStandardMaterial({ map: maps.map, normalMap: maps.normalMap, roughness: 0.92 });
   } else {
     const { sway, soft, rough } = MANNER[kind];
-    const leafy = new MeshStandardMaterial({ roughness: rough, side: kind === 'puff' ? undefined : DoubleSide });
-    leafy.onBeforeCompile = (shader) => {
-      shader.uniforms['uWind'] = wind;
-      shader.uniforms['uSway'] = { value: sway };
-      shader.uniforms['uSoft'] = { value: soft };
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nattribute vec3 aOut;\nattribute vec4 tint;\nuniform float uWind;\nuniform float uSway;\nuniform float uSoft;')
-        .replace('#include <color_vertex>', '#include <color_vertex>\n#ifdef USE_INSTANCING_COLOR\nvColor.rgb = mix(vColor.rgb * tint.rgb, tint.rgb, tint.a);\n#endif')
-        .replace('#include <defaultnormal_vertex>', '#include <defaultnormal_vertex>\ntransformedNormal = normalize(mix(transformedNormal, normalMatrix * aOut, uSoft));')
-        .replace(
-          '#include <begin_vertex>',
-          `#include <begin_vertex>
-          #ifdef USE_INSTANCING
-            float windPhase = instanceMatrix[3].x * 1.3 + instanceMatrix[3].z * 0.9;
-            float windReach = max(position.y, 0.0) * uSway;
-            transformed.x += sin(uWind * 1.9 + windPhase) * windReach;
-            transformed.z += cos(uWind * 1.4 + windPhase * 1.3) * windReach;
-          #endif`,
-        );
-      // A leaf seen from underneath is lit as its crown is, not as the leaf's own back.
-      shader.fragmentShader = shader.fragmentShader.replace('#include <normal_fragment_begin>', ShaderChunk.normal_fragment_begin.replace('normal *= faceDirection;', ''));
-    };
-    leafy.customProgramCacheKey = () => `sprig|${kind === 'puff'}`;
+    const leafy = new MeshStandardNodeMaterial({ roughness: rough, side: kind === 'puff' ? FrontSide : DoubleSide });
+    // Each corner of the little shape shades its copy's colour (darker at a blade's foot, a leaf's crease); a part that
+    // keeps a colour of its own (a flower's yellow heart) keeps it. The material multiplies by the copy's colour after.
+    const tint = attribute('tint', 'vec4');
+    leafy.colorNode = mix(tint.rgb, tint.rgb.div(max(instanceColor, vec3(0.001))), tint.a);
+    // The copy stands in its place already: the wind moves its top, more the higher up the shape, the copies near one
+    // another together.
+    if (sway > 0) {
+      const phase = positionLocal.x.mul(1.3).add(positionLocal.z.mul(0.9));
+      const reach = max(positionGeometry.y, 0).mul(sway);
+      leafy.positionNode = positionLocal.add(vec3(sin(wind.mul(1.9).add(phase)).mul(reach), 0, cos(wind.mul(1.4).add(phase.mul(1.3))).mul(reach)));
+    }
+    // Lit as the crown or the lawn it belongs to would be, and from underneath as from above: not as the leaf's own back.
+    leafy.normalNode = normalize(mix(normalViewGeometry, transformNormalToView(attribute('aOut', 'vec3')), soft));
     material = leafy;
   }
   sprigMaterials.set(kind, material);

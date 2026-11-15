@@ -35,11 +35,12 @@ const SWEEP_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const SWEEP_MOST: usize = 1000;
 
 /// Every stored file's site path the database refers to: catalog items and every version kept of them, members' looks,
-/// islands' link pictures, and the models placed on saved islands.
+/// islands' link pictures, 사주 homes' 미연시 pictures, and the models placed on saved islands.
 const REFERENCED: &str = r"SELECT url FROM (
     SELECT model_url AS url FROM catalog_items UNION SELECT thumbnail_url FROM catalog_items
     UNION SELECT model_url FROM catalog_versions UNION SELECT thumbnail_url FROM catalog_versions
     UNION SELECT model_url FROM user_looks UNION SELECT thumbnail_url FROM homes
+    UNION SELECT url FROM saju_pictures
     UNION SELECT '/models/' || found[1]
       FROM home_worlds, regexp_matches(data::text, '/models/([0-9a-f]{64}\.[a-z]+)', 'g') AS found
   ) refs WHERE url LIKE '/models/%'";

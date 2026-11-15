@@ -1,0 +1,148 @@
+{
+ "birth": {
+  "calendar": "lunar",
+  "year": 1988,
+  "month": 8,
+  "day": 21,
+  "leapMonth": false,
+  "time": null,
+  "gender": "male"
+ },
+ "saju": {
+  "pillars": [
+   {
+    "key": "year",
+    "stem": "戊",
+    "branch": "辰",
+    "tenGodStem": "겁재",
+    "tenGodBranch": "겁재",
+    "hidden": "무을계",
+    "stage": "쇠",
+    "nayin": "대림목"
+   },
+   {
+    "key": "month",
+    "stem": "辛",
+    "branch": "酉",
+    "tenGodStem": "식신",
+    "tenGodBranch": "식신",
+    "hidden": "신",
+    "stage": "장생",
+    "nayin": "석류목"
+   },
+   {
+    "key": "day",
+    "stem": "己",
+    "branch": "丑",
+    "tenGodStem": "일간",
+    "tenGodBranch": "비견",
+    "hidden": "기계신",
+    "stage": "묘",
+    "nayin": "벽력화"
+   }
+  ],
+  "elements": {
+   "wood": 0,
+   "fire": 0,
+   "earth": 4,
+   "metal": 2,
+   "water": 0
+  },
+  "dayMaster": "己",
+  "sinsal": [
+   "문창귀인",
+   "태극귀인",
+   "천주귀인",
+   "학당귀인",
+   "홍염살",
+   "과숙살",
+   "백호대살",
+   "현침살",
+   "천살",
+   "년살(도화)",
+   "장성살",
+   "반안살"
+  ],
+  "daeun": [
+   {
+    "ganzhi": "임술",
+    "from": 4,
+    "to": 13,
+    "current": false
+   },
+   {
+    "ganzhi": "계해",
+    "from": 14,
+    "to": 23,
+    "current": false
+   },
+   {
+    "ganzhi": "갑자",
+    "from": 24,
+    "to": 33,
+    "current": false
+   },
+   {
+    "ganzhi": "을축",
+    "from": 34,
+    "to": 43,
+    "current": true
+   },
+   {
+    "ganzhi": "병인",
+    "from": 44,
+    "to": 53,
+    "current": false
+   },
+   {
+    "ganzhi": "정묘",
+    "from": 54,
+    "to": 63,
+    "current": false
+   },
+   {
+    "ganzhi": "무진",
+    "from": 64,
+    "to": 73,
+    "current": false
+   },
+   {
+    "ganzhi": "기사",
+    "from": 74,
+    "to": 83,
+    "current": false
+   },
+   {
+    "ganzhi": "경오",
+    "from": 84,
+    "to": 93,
+    "current": false
+   },
+   {
+    "ganzhi": "신미",
+    "from": 94,
+    "to": 103,
+    "current": false
+   },
+   {
+    "ganzhi": "임신",
+    "from": 104,
+    "to": 113,
+    "current": false
+   },
+   {
+    "ganzhi": "계유",
+    "from": 114,
+    "to": 123,
+    "current": false
+   },
+   {
+    "ganzhi": "갑술",
+    "from": 124,
+    "to": 133,
+    "current": false
+   }
+  ]
+ },
+ "ziwei": null
+}

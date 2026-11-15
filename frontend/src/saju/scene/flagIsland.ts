@@ -6,7 +6,7 @@ import { Builder, type Build, type Finish, type V3 } from './build';
 import { WATER_LEVEL } from './mood';
 import { hash, noise2 } from './noise';
 import { bush, flowerBed, lawn, lilies, pine, rock, steppingStones, toned, type Palette } from './plants';
-import { dressShore, ground, Site, type GroundLook } from './terrain';
+import { dressShore, ground, Site, type GroundLook, type IslandShape } from './terrain';
 
 // 깃발 섬: the island a village raises its flag on once its owner has ten 이웃. A small round island in the lake past
 // the homes: a court of stone, a mast of bamboo on a dais of three steps, the flag in the colour of the owner's element,
@@ -35,6 +35,8 @@ const THIN = 0.62;
 const LAWN_TUFTS = 1900;
 /** From the island's middle to its shoreline, before the line wanders: six and a half metres of firm ground across. */
 const SHORE = 3.3;
+/** The island's ground as the lake meets it (see terrain's IslandShape): its shore is round, and its bank falls as a home's does. */
+export const FLAG_ISLAND: IslandShape = { half: SHORE, corner: SHORE, reach: SHORE + 1.9 };
 /** The paved court's radius, a step's height, and the dais' three steps from the widest up. */
 const COURT = 1.8;
 const RISE = 0.14;

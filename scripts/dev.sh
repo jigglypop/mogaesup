@@ -7,7 +7,9 @@
 # Logs and PIDs go to .data/dev/. A service already listening on its port is kept as it is. POSTGRES_PORT overrides
 # 55432 when another process holds it. backend/.env holds production keys and is read here, never printed. The
 # character server starts with auto-resume off and its records in mogaesup_character on the compose PostgreSQL;
-# admins may change studio records (FACTORY_ACCESS=write) and paid studio work stays blocked.
+# admins may change studio records (FACTORY_ACCESS=write) and paid studio work stays blocked. The server gets
+# backend/.env's OPENAI_API_KEY for 사주 readings and pictures, but its month's budget of paid calls is none (the page
+# asks for both by itself): READINGS_MONTHLY=3 PICTURES_MONTHLY=1 in front of the command allows that many.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 logs="$root/.data/dev"
@@ -81,7 +83,11 @@ server_env=(
   COOKIE_SECURE=false
   MODEL_STORE="$root/server/data/local/models"
   RUST_LOG="${RUST_LOG:-info}"
+  READINGS_MONTHLY="${READINGS_MONTHLY:-0}"
+  PICTURES_MONTHLY="${PICTURES_MONTHLY:-0}"
 )
+openai_key="$(factory_env OPENAI_API_KEY)"
+[[ -z "$openai_key" ]] || server_env+=(OPENAI_API_KEY="$openai_key")
 
 if $character; then
   # The gateway signs its requests with the secret the character server checks them with. A machine whose

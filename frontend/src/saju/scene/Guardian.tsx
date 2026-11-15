@@ -1,11 +1,11 @@
-import { useMemo, useRef, type ReactNode } from 'react';
+import { useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
 
-import type { Group } from 'three';
+import { Vector3, type Group } from 'three';
 
 import type { Charm, Guardian as GuardianSpec } from '../profile';
-import type { DogModel } from './dogModel';
+import { DogRig, idlePhase, type DogModel } from './dogModel';
 import { At, Ball, Box, BOX, Cone, Cyl, Ring, seeded, type V3 } from './kit';
-import { Hover, useAnimation } from './parts';
+import { Hover, useAnimation, useStill } from './parts';
 import { MOVING, Static } from './Static';
 
 // 수호 강아지: the dog that keeps a home (see dogs), standing on its island as its model, with what the chart's 신살
@@ -142,9 +142,10 @@ const CHARMS: Record<Charm, (fit: Fit) => ReactNode> = {
 };
 
 /**
- * A guardian dog standing at `position`, turned to face `facing` (radians about y; 0 is +z). It breathes and sways on
- * its own, and hops when it is tapped. What it is made of is looked at once: mount it under a `key` that changes with
- * the guardian.
+ * A guardian dog standing at `position`, turned to face `facing` (radians about y; 0 is +z). A rigged dog idles, each
+ * one in its own time, and waves or cheers when it is tapped; one that is not breathes and sways on its own and hops.
+ * Held still, a rigged dog stands at its idle's first frame. What it is made of is looked at once: mount it under a
+ * `key` that changes with the guardian.
  */
 export function Guardian({ guardian, model, position, facing = Math.PI / 4, playful = true }: {
   guardian: GuardianSpec;
@@ -152,25 +153,51 @@ export function Guardian({ guardian, model, position, facing = Math.PI / 4, play
   model: DogModel;
   position: V3;
   facing?: number;
-  /** Hops when tapped; a guardian that is not leaves the tap to whatever it stands on. */
+  /** Moves when tapped; a guardian that is not leaves the tap to whatever it stands on. */
   playful?: boolean;
 }) {
-  // The mesh and its picture are the model's own; only the handful of nodes that hold them are this dog's.
+  const still = useStill();
+  // A rigged dog moves a skeleton of its own. Otherwise the mesh and its picture are the model's own, and only the
+  // handful of nodes that hold them are this dog's.
+  const rig = useMemo(() => (model.clips ? new DogRig(model.scene, model.clips) : null), [model]);
   const figure = useMemo(() => {
-    const copy = model.scene.clone();
+    const copy = rig ? rig.figure : model.scene.clone();
     // Taps are caught by a plain box about the dog, not by its thousands of triangles.
     copy.traverse((object) => {
       object.raycast = () => undefined;
     });
     return copy;
-  }, [model]);
+  }, [model, rig]);
   const fit = useMemo(() => fitOf(model), [model]);
+  const root = useRef<Group>(null);
   const body = useRef<Group>(null);
   /** When the hop under way began, in the clock's seconds. */
   const hop = useRef<number | null>(null);
   const tapped = useRef(false);
+  /** The clock's time at the frame before, which the rig steps on from. */
+  const last = useRef<number | null>(null);
+  // The idle is under way before the first frame the dog is drawn in: it is never seen in its T-pose. Where it stands
+  // in the village sets how far into its idle it starts.
+  useLayoutEffect(() => {
+    if (!rig) return undefined;
+    const place = root.current?.getWorldPosition(new Vector3());
+    rig.rest(still || !place ? 0 : idlePhase(place.x, place.z, rig.idleLength));
+    last.current = null;
+    return () => rig.dispose();
+  }, [rig, still]);
   const phase = position[0] * 1.7 + position[2] * 0.9;
-  useAnimation((time) => {
+  useAnimation((time, held) => {
+    if (rig) {
+      if (held) return rig.rest(0);
+      if (tapped.current) {
+        tapped.current = false;
+        rig.perform();
+      }
+      // A step as long as the time since the frame before, but no leap after the page was hidden for a while.
+      rig.advance(last.current === null ? 0 : Math.min(Math.max(time - last.current, 0), 0.1));
+      last.current = time;
+      return;
+    }
     const t = time + phase;
     if (tapped.current) {
       tapped.current = false;
@@ -189,7 +216,7 @@ export function Guardian({ guardian, model, position, facing = Math.PI / 4, play
     group.rotation.z = Math.sin(t * 0.9) * 0.035;
   });
   return (
-    <group position={position} rotation={[0, facing, 0]} userData={MOVING}>
+    <group ref={root} position={position} rotation={[0, facing, 0]} userData={MOVING}>
       <group ref={body}>
         <group scale={DOG_HEIGHT} userData={MOVING}>
           <primitive object={figure} />

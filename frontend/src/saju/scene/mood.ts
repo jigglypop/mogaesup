@@ -1,7 +1,5 @@
 import { Color, DataTexture, DataUtils, EquirectangularReflectionMapping, HalfFloatType, LinearFilter, RepeatWrapping, RGBAFormat, Vector3 } from 'three';
 
-import { fbm } from './noise';
-
 // The hour the village is seen at: where the sun stands, what colour its light and the sky's are, and how the lake
 // answers them. The sun's lamp, the sky the scene is lit by, the haze and the water all read the same mood, so they agree.
 
@@ -118,31 +116,4 @@ export function skyTexture(mood: Mood): DataTexture {
   texture.wrapS = RepeatWrapping;
   texture.needsUpdate = true;
   return texture;
-}
-
-const RIPPLE_SIZE = 256;
-let ripples: DataTexture | null = null;
-
-/** How the lake's surface leans, as a tile: its slope east in red and south in green, and clouds' cover in blue. */
-export function rippleTexture(): DataTexture {
-  if (ripples) return ripples;
-  const size = RIPPLE_SIZE;
-  const height = new Float32Array(size * size);
-  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) height[y * size + x] = fbm(x / size, y / size, 6, 5, 3);
-  const data = new Uint8Array(size * size * 4);
-  const at = (x: number, y: number) => height[((y + size) % size) * size + ((x + size) % size)]!;
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const index = (y * size + x) * 4;
-      data[index] = Math.round(Math.min(1, Math.max(0, 0.5 + (at(x + 1, y) - at(x - 1, y)) * 9)) * 255);
-      data[index + 1] = Math.round(Math.min(1, Math.max(0, 0.5 + (at(x, y + 1) - at(x, y - 1)) * 9)) * 255);
-      data[index + 2] = Math.round(fbm(x / size, y / size, 3, 4, 91) * 255);
-      data[index + 3] = 255;
-    }
-  }
-  ripples = new DataTexture(data, size, size, RGBAFormat);
-  ripples.wrapS = ripples.wrapT = RepeatWrapping;
-  ripples.minFilter = ripples.magFilter = LinearFilter;
-  ripples.needsUpdate = true;
-  return ripples;
 }

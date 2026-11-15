@@ -234,7 +234,7 @@ fn profile(row: &PgRow) -> HomeProfile {
     }
 }
 
-const HOME_PRIVATE: ApiError = forbidden("home_private", "주인이 공개하지 않은 미니홈피입니다.");
+const HOME_PRIVATE: ApiError = forbidden("home_private", "주인이 공개하지 않은 섬입니다.");
 
 /// The home behind `/@username` if `viewer` holds `home:<owner>#viewer` (see [`crate::rebac`]): it is public, theirs,
 /// open to 일촌 and they are one, or they were granted it.
@@ -244,7 +244,7 @@ pub async fn visible_home(state: &AppState, name: &str, viewer: Option<&User>) -
         .bind(&name)
         .fetch_optional(&state.db)
         .await?
-        .ok_or(not_found("home_not_found", "없는 미니홈피입니다."))?;
+        .ok_or(not_found("home_not_found", "없는 섬입니다."))?;
     let home = profile(&row);
     let is_owner = viewer.is_some_and(|user| user.id == home.owner_id);
     let mut checker = Checker::new(&state.db);
@@ -1277,7 +1277,12 @@ async fn store(db: &PgPool, owner: Uuid, save: &Checked) -> ApiResult<Option<PgR
 
 /// A request's body, up to `max` bytes. Only a body past that is `too_large`; one that stops coming (the connection
 /// dropped) is `cut_short`.
-async fn limited_body(body: Body, max: usize, too_large: ApiError, cut_short: ApiError) -> ApiResult<Vec<u8>> {
+pub(crate) async fn limited_body(
+    body: Body,
+    max: usize,
+    too_large: ApiError,
+    cut_short: ApiError,
+) -> ApiResult<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {

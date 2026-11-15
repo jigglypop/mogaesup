@@ -3,7 +3,7 @@ import { act } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { PermissionName, User } from '../../api/types';
+import type { User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
 import { nextMenuIndex, Rail, usePopover } from '../Shell';
 
@@ -103,26 +103,8 @@ describe('레일', () => {
     auth.user = null;
   });
 
-  it('운영은 카탈로그 편집자에게 가져오기로, 카탈로그를 고치지 않는 운영자에게 캐릭터 공장으로 간다', async () => {
-    const admin = async (...permissions: PermissionName[]) => {
-      auth.user = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user', permissions };
-      const { container, unmount } = await mount(
-        <MemoryRouter>
-          <Rail />
-        </MemoryRouter>,
-      );
-      const link = [...container.querySelectorAll('a')].find((anchor) => anchor.textContent === '운영');
-      await unmount();
-      return link?.getAttribute('href');
-    };
-    expect(await admin('operator', 'studio_viewer')).toBe('/admin/studio');
-    expect(await admin('paid_operator', 'operator', 'studio_viewer')).toBe('/admin/studio');
-    expect(await admin('moderator', 'catalog_editor')).toBe('/admin');
-    expect(await admin('admin', 'paid_operator', 'operator', 'moderator', 'catalog_editor', 'studio_viewer')).toBe('/admin');
-    expect(await admin('studio_viewer')).toBeUndefined();
-  });
-
-  it('사주 마을은 내 집으로 가고, 그 집의 어느 쪽에서든 켜져 있다', async () => {
+  // 화면에는 레일이 없다: 화면에서 뺀 섬의 코드만 쓰며, 사주 마을 하나만 남았다.
+  it('섬의 레일에는 사주 마을만 있고, 내 집으로 가며 그 집의 어느 쪽에서든 켜져 있다', async () => {
     const rail = async (path: string) => {
       const { container, unmount } = await mount(
         <MemoryRouter initialEntries={[path]}>
@@ -134,12 +116,13 @@ describe('레일', () => {
       return links;
     };
     // 로그인하지 않으면 들어가는 길로 간다.
-    expect(await rail('/explore')).toEqual(['사주 마을 /', '둘러보기* /explore']);
-    auth.user = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user' };
-    expect(await rail('/@mogae')).toEqual(['사주 마을* /@mogae', '캐릭터 /character', '둘러보기 /explore']);
-    expect(await rail('/@mogae/village')).toEqual(['사주 마을* /@mogae', '캐릭터 /character', '둘러보기 /explore']);
-    // 남의 집과, 아이디가 내 것으로 시작하는 집에서는 꺼져 있다.
-    expect(await rail('/@sol')).toEqual(['사주 마을 /@mogae', '캐릭터 /character', '둘러보기 /explore']);
-    expect(await rail('/@mogaeland')).toEqual(['사주 마을 /@mogae', '캐릭터 /character', '둘러보기 /explore']);
+    expect(await rail('/explore')).toEqual(['사주 마을 /']);
+    auth.user = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user', permissions: ['admin', 'operator', 'catalog_editor'] };
+    expect(await rail('/@mogae')).toEqual(['사주 마을* /@mogae']);
+    expect(await rail('/@mogae/village')).toEqual(['사주 마을* /@mogae']);
+    // 남의 집과, 아이디가 내 것으로 시작하는 집에서는 꺼져 있다. 운영자에게도 운영은 없다.
+    expect(await rail('/@sol')).toEqual(['사주 마을 /@mogae']);
+    expect(await rail('/@mogaeland')).toEqual(['사주 마을 /@mogae']);
+    expect(await rail('/admin')).toEqual(['사주 마을 /@mogae']);
   });
 });

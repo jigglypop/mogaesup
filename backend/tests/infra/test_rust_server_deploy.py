@@ -499,3 +499,85 @@ def test_the_gateway_token_settings_survive_a_deploy_and_stay_unprinted(server_e
     assert list(found)[-2:] == ['FACTORY_JWT_SECRET', 'FACTORY_OWNER_ID']
     line = bootstrap.describe_factory(found)
     assert 'FACTORY_JWT_SECRET=set' in line and 'jwt-secret-value' not in line
+
+
+# The OpenAI key: the server stack's OpenAiKeySecret holds a placeholder until the key is set by hand.
+
+OPENAI_KEY = 'sk-proj-' + 'A1b2C3d4_e-' * 8
+OPENAI_ARN = 'arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:openai-AbCdEf'
+
+
+@pytest.fixture
+def openai_env(bootstrap, tmp_path):
+    """The OpenAI part of server.env as the bootstrap writes it: from the file already on the instance and what the
+    secret holds (`held`, or an exception when it cannot be read)."""
+    def build(existing, held, *flags):
+        path = tmp_path / 'server.env'
+        path.write_text(existing)
+        args = bootstrap.parse_args([*BASE, *flags])
+
+        def fetch():
+            if isinstance(held, Exception):
+                raise held
+            return held
+        found, note = bootstrap.openai_settings(bootstrap.read_env(path), args, fetch)
+        return found, note, bootstrap.server_env_lines(args, 'postgres://app', 'ticket-secret', {}, found)
+    return build
+
+
+def test_the_openai_key_is_written_only_once_its_secret_holds_one(openai_env):
+    found, note, lines = openai_env(EXISTING, OPENAI_KEY + '\n', '--openai-secret', OPENAI_ARN)
+    assert lines[8:] == [f'OPENAI_API_KEY={OPENAI_KEY}'] and note == 'from the secret'
+    # The placeholder, or anything that is no key (a second line would set another variable), writes none.
+    for held in ('placeholder', 'placeholder\n', 'not a key', OPENAI_KEY + '\nCOOKIE_SECURE=false', 'sk-short', ''):
+        found, note, lines = openai_env(EXISTING, held, '--openai-secret', OPENAI_ARN)
+        assert found == {} and len(lines) == 8, held
+        assert note in ('the secret holds the placeholder', 'the secret holds no key'), held
+
+
+def test_the_secret_decides_when_it_is_named_and_the_file_otherwise(openai_env):
+    had = EXISTING + f'OPENAI_API_KEY={OPENAI_KEY}\n'
+    # Not named (a stack from before the secret), or not readable: the key the instance has stays.
+    found, note, _ = openai_env(had, AssertionError('the secret was read'))
+    assert found == {'OPENAI_API_KEY': OPENAI_KEY} and note == 'kept as server.env had it'
+    unreadable = subprocess.CalledProcessError(255, ['aws'])
+    found, note, _ = openai_env(had, unreadable, '--openai-secret', OPENAI_ARN)
+    assert found == {'OPENAI_API_KEY': OPENAI_KEY} and note.startswith('the secret could not be read')
+    # Named and holding the placeholder: none.
+    assert openai_env(had, 'placeholder', '--openai-secret', OPENAI_ARN)[0] == {}
+    rotated = OPENAI_KEY.replace('A1', 'Z9')
+    assert openai_env(had, rotated, '--openai-secret', OPENAI_ARN)[0] == {'OPENAI_API_KEY': rotated}
+
+
+def test_the_hand_set_openai_settings_stay_after_the_key(openai_env):
+    had = EXISTING + 'PICTURES_MONTHLY=50\nREADINGS_MONTHLY=600\nOPENAI_PICTURE_MODEL=gpt-image-2\nOPENAI_OTHER=x\n'
+    found, _, lines = openai_env(had, OPENAI_KEY, '--openai-secret', OPENAI_ARN)
+    assert list(found) == ['OPENAI_API_KEY', 'OPENAI_PICTURE_MODEL', 'READINGS_MONTHLY', 'PICTURES_MONTHLY']
+    assert lines[-3:] == ['OPENAI_PICTURE_MODEL=gpt-image-2', 'READINGS_MONTHLY=600', 'PICTURES_MONTHLY=50']
+    assert 'OPENAI_OTHER=x' not in lines
+
+
+def test_the_openai_log_line_never_names_the_key(bootstrap, openai_env):
+    found, note, _ = openai_env(EXISTING + 'READINGS_MONTHLY=600\n', OPENAI_KEY, '--openai-secret', OPENAI_ARN)
+    line = bootstrap.describe_openai(found, note)
+    assert line == 'OpenAI: OPENAI_API_KEY=set (from the secret) READINGS_MONTHLY=600'
+    assert OPENAI_KEY not in line
+    assert bootstrap.describe_openai({}, 'the secret holds the placeholder') == (
+        'OpenAI: OPENAI_API_KEY=not set (the secret holds the placeholder)')
+
+
+def test_the_deploy_names_the_openai_secret_the_stack_has(deploy, bootstrap):
+    command = deploy.bootstrap_command(namespace(), {**OUTPUTS, 'OpenAiKeySecretArn': OPENAI_ARN}, INSTANCE)
+    assert bootstrap.parse_args(command[2:]).openai_secret == OPENAI_ARN
+    assert command[-2:] == ['--studio-instance-id', INSTANCE]
+    # A stack from before the secret has no such output: the flag is left out and the instance keeps its key.
+    assert '--openai-secret' not in deploy.bootstrap_command(namespace(), OUTPUTS, INSTANCE)
+    assert 'OpenAiKeySecret' in deploy.KEEP
+
+
+def test_the_stack_keeps_the_openai_key_out_of_the_template(deploy):
+    template = (SCRIPTS.parent / 'infra' / 'aws-server.yaml').read_text(encoding='utf-8')
+    secret = template.split('  OpenAiKeySecret:\n', 1)[1].split('\n  ', 1)[0]
+    assert 'SecretString: placeholder' in template and 'sk-' not in template
+    assert '- !Ref OpenAiKeySecret' in template and 'OpenAiKeySecretArn: {Value: !Ref OpenAiKeySecret}' in template
+    assert secret.strip() == 'Type: AWS::SecretsManager::Secret'

@@ -61,8 +61,15 @@
 .mg-island-meta { display: flex; gap: 10px; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--mg-muted); }
 /* A list that did not load: why, and a way to ask again. */
 .mg-explore-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 16px; }
-/* The top bar's search hides on a phone; there 둘러보기 carries its own. */
+/* The top bar's search folds into a button on a phone; there 둘러보기 carries its own box, and the button is not shown. */
 .mg-search.mg-explore-search { display: none; }
+.mg-app:has(.mg-explore-search) .mg-search-open { display: none; }
+
+/* A touch screen: the way in, a page's buttons and the search's own close button, a fingertip (44px) each. */
+@media (pointer: coarse) {
+  .mg-auth .mg-tabs > button, .mg-auth .mg-field, .mg-notice .mg-btn, .mg-explore-error .mg-btn, .mg-islands ~ .mg-btn { height: 44px; }
+  .mg-explore-query .mg-icon-btn::after { content: ''; position: absolute; inset: -6px; }
+}
 
 @media (max-width: 720px) {
   .mg-auth-card { padding: 26px 22px; }

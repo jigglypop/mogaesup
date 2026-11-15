@@ -6,6 +6,20 @@ import { describe, expect, it } from 'vitest';
 import { DOGS, dogOf, sexagenaryIndex } from '../dogs';
 import { BRANCHES, STEMS, stemElement } from '../elements';
 
+type Gltf = {
+  skins?: { joints: number[] }[];
+  animations?: { name: string }[];
+  meshes: { primitives: { indices?: number; attributes: Record<string, number> }[] }[];
+  accessors: { count: number }[];
+};
+
+/** A binary glTF's JSON chunk. */
+const gltfOf = (bytes: Buffer): Gltf => JSON.parse(bytes.subarray(20, 20 + bytes.readUInt32LE(12)).toString('utf8')) as Gltf;
+const trianglesOf = (gltf: Gltf) =>
+  gltf.meshes.flatMap((mesh) => mesh.primitives).reduce((sum, primitive) => sum + gltf.accessors[primitive.indices ?? primitive.attributes['POSITION']!]!.count / 3, 0);
+/** scripts/guardians/models.json: which dogs' rigs held. */
+const RIGGED = new Set((JSON.parse(readFileSync(resolve(__dirname, '../../../../scripts/guardians/models.json'), 'utf8')) as { rigged?: string[] }).rigged ?? []);
+
 /** The sixty pillars in order: 甲子, 乙丑, … 癸亥. */
 const SIXTY = Array.from({ length: 60 }, (_, index) => ({ stem: STEMS[index % 10]!, branch: BRANCHES[index % 12]! }));
 /** 삼합: the branches four apart. */
@@ -58,14 +72,28 @@ describe('수호 강아지', () => {
     expect(dogOf('?', '?')).toBe(DOGS[0]);
   });
 
-  it('스무 마리 모두 모델이 있고 가볍다', () => {
+  it('스무 마리 모두 모델이 있고 가볍다: 리깅된 강아지는 뼈대와 네 동작을, 나머지는 만든 그대로의 모습을 갖는다', () => {
+    const ids = new Set(DOGS.map((dog) => dog.id));
+    for (const id of RIGGED) expect(ids.has(id), `models.json rigged ${id}`).toBe(true);
     for (const { id } of DOGS) {
       const file = resolve(__dirname, '../../../public/gltf/guardians', `${id}.glb`);
       expect(existsSync(file), `public/gltf/guardians/${id}.glb`).toBe(true);
       const bytes = readFileSync(file);
       // A binary glTF, small enough for nine of them to arrive with a village.
       expect(bytes.subarray(0, 4).toString('latin1')).toBe('glTF');
-      expect(bytes.length).toBeLessThan(260_000);
+      const gltf = gltfOf(bytes);
+      const clips = (gltf.animations ?? []).map((clip) => clip.name).sort();
+      if (RIGGED.has(id)) {
+        expect(gltf.skins, id).toHaveLength(1);
+        expect(clips, id).toEqual(['cheer', 'idle', 'walk', 'wave']);
+        expect(trianglesOf(gltf), id).toBeLessThanOrEqual(10_500);
+        expect(bytes.length, id).toBeLessThanOrEqual(450_000);
+      } else {
+        // A dog whose rig did not hold, or that was never rigged, keeps the model it was made as.
+        expect(gltf.skins ?? [], id).toEqual([]);
+        expect(clips, id).toEqual([]);
+        expect(bytes.length, id).toBeLessThan(260_000);
+      }
     }
   });
 });

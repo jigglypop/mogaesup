@@ -9,14 +9,14 @@ import { REQUESTS_CHANGED } from '../shell/Shell';
 import { isValidBirthDate, type Birth } from './engine';
 import { NAME_MAX, residentOf, type Resident } from './residents';
 
-/** A member's 미니홈피 as the server gave it to this viewer. */
+/** A member's 섬 as the server gave it to this viewer. */
 export type Minihome = {
   view: HomeView;
   /** The owner's 사주 home, once they have built one. */
   owner: Resident | null;
   /** The homes around the owner's: their 이웃' (`neighbour`, joined to it by a bridge) and other members'. */
   village: (Resident & { neighbour: boolean })[];
-  /** The viewer's own home: the owner's on their own 미니홈피, null for a visitor without one. */
+  /** The viewer's own home: the owner's on their own 섬, null for a visitor without one. */
   mine: Resident | null;
   /** Who it was read for: the signed-in viewer's username, null for a signed-out visit. */
   as: string | null;
@@ -47,7 +47,7 @@ async function read(username: string, viewer: string | null): Promise<Minihome> 
 }
 
 /**
- * `username`'s 미니홈피 for whoever is signed in, counted as a visit once. It is read again, without leaving the page,
+ * `username`'s 섬 for whoever is signed in, counted as a visit once. It is read again, without leaving the page,
  * when an 이웃 request is answered here or from the bell: 이웃 come first in a village. `build`, `demolish` and `open`
  * (who may see the home) are the owner's: they keep the change on the server and show the answer.
  */
@@ -56,7 +56,7 @@ export function useMinihome(username: string) {
   const viewer = user?.username ?? null;
   const settled = status !== 'loading';
   const [state, setState] = useState<MinihomeState>({ status: 'loading' });
-  // Only a different person reads the 미니홈피 again, not a new user object for the same one. When the session of the
+  // Only a different person reads the 섬 again, not a new user object for the same one. When the session of the
   // member it was read for lapses, the page stays with what they were writing (signing in again as them keeps it as it
   // is); someone else signing in, or a sign-out, reads it afresh.
   const readFor = state.status === 'ready' ? state.minihome.as : null;
@@ -81,7 +81,7 @@ export function useMinihome(username: string) {
       },
       () => undefined,
     );
-    /** Reads the 미니홈피 and shows the answer, unless a newer read has started; `refused` hears what it could not read. */
+    /** Reads the 섬 and shows the answer, unless a newer read has started; `refused` hears what it could not read. */
     const load = (refused: (error: unknown) => void) => {
       const mine = ++reads;
       const began = writes.current;
@@ -101,7 +101,7 @@ export function useMinihome(username: string) {
       setState(
         error instanceof ApiRequestError
           ? { status: 'failed', code: error.status, message: error.message }
-          : { status: 'failed', code: 0, message: '미니홈피를 불러오지 못했어요' },
+          : { status: 'failed', code: 0, message: '섬을 불러오지 못했어요' },
       ),
     );
     // What was on the page stays while the new village is on its way, and when no answer comes. A refusal (the home

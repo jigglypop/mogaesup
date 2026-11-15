@@ -15,7 +15,21 @@ import { personOf } from './people';
 type StageProps = { ref?: Ref<StageHandle>; homes: StageHome[]; bridges: StageBridge[]; frame: Frame; inset?: Inset; flag?: StageFlag | null; focus: string | null; onVisit: (id: string) => void; pins?: ReactNode };
 const { stage, api } = vi.hoisted(() => ({
   stage: { props: null as StageProps | null, zooms: [] as number[] },
-  api: { mine: vi.fn(), get: vi.fn(), visit: vi.fn(), village: vi.fn(), save: vi.fn(), remove: vi.fn(), ilchons: vi.fn(), requests: vi.fn(), status: vi.fn() },
+  api: {
+    mine: vi.fn(),
+    get: vi.fn(),
+    visit: vi.fn(),
+    village: vi.fn(),
+    save: vi.fn(),
+    remove: vi.fn(),
+    reading: vi.fn(),
+    read: vi.fn(),
+    picture: vi.fn(),
+    draw: vi.fn(),
+    ilchons: vi.fn(),
+    requests: vi.fn(),
+    status: vi.fn(),
+  },
 }));
 
 // The canvas needs WebGL; the page around it is what is looked at here.
@@ -30,7 +44,6 @@ vi.mock('../scene/Snapshot', () => ({ Snapshot: () => null }));
 vi.mock('../../shell/Shell', () => ({
   PageShell: ({ title, children }: { title: ReactNode; children: ReactNode }) => <div data-shell={String(title)}>{children}</div>,
   Brand: () => <b className="brand">모개숲</b>,
-  Rail: () => <nav className="rail" />,
   TopActions: ({ children }: { children?: ReactNode }) => <div className="top-actions">{children}</div>,
   initialOf: (name: string) => name.slice(0, 1),
   toneOf: () => '0',
@@ -39,7 +52,7 @@ vi.mock('../../shell/Shell', () => ({
 vi.mock('../../minihome/Guestbook', () => ({ Guestbook: ({ username }: { username: string }) => <p className="guestbook">{username}</p> }));
 vi.mock('../../api/endpoints', () => ({
   homeApi: { mine: api.mine, get: api.get, visit: api.visit },
-  sajuApi: { village: api.village, save: api.save, remove: api.remove },
+  sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw },
   socialApi: { ilchons: api.ilchons, requests: api.requests, status: api.status },
 }));
 let auth: { status: 'anonymous' | 'signedIn'; user: User | null } = { status: 'anonymous', user: null };
@@ -73,8 +86,10 @@ function Where() {
   return <output>{pathname + search}</output>;
 }
 const settle = () => act(async () => { for (let round = 0; round < 5; round++) await new Promise((done) => setTimeout(done, 0)); });
+/** The frame of the 섬's own home alone, close up: what its home shows. */
+const alone = () => frameOf([stage.props!.homes[0]!]);
 
-describe('미니홈피 화면', () => {
+describe('섬 화면', () => {
   /** What the server holds: each member's village by username. */
   let villages: Record<string, SajuVillage>;
 
@@ -91,6 +106,11 @@ describe('미니홈피 화면', () => {
     api.ilchons.mockResolvedValue({ ilchons: [] });
     api.requests.mockResolvedValue({ received: [], sent: [] });
     api.status.mockResolvedValue(standing('none'));
+    // Nothing written or drawn yet; asked for, it is on its way (readingCards.test.tsx follows it further).
+    api.reading.mockResolvedValue({ status: 'none' });
+    api.picture.mockResolvedValue({ status: 'none' });
+    api.read.mockResolvedValue({ status: 'pending', since: '2026-11-15T00:00:00Z' });
+    api.draw.mockResolvedValue({ status: 'pending', since: '2026-11-15T00:00:00Z' });
     vi.spyOn(Math, 'random').mockReturnValue(0);
   });
   afterEach(() => {
@@ -124,11 +144,13 @@ describe('미니홈피 화면', () => {
   it('집을 짓기 전의 주인에게는 마을 지도와 집 짓는 카드가 있다', async () => {
     villages['sol'] = { saju: null, village: [around('noeul', false), around('bori', false)] };
     const { container, unmount } = await open('/@sol');
-    // 캔버스가 창을 채우고, 앱의 머리띠와 레일이 그 위에 뜬다.
+    // 캔버스가 창을 채우고, 앱의 머리띠가 그 위에 뜬다. 레일은 없다: 상표가 처음으로 간다.
     expect(container.querySelector('.mg-saju-world > .mg-saju-stage .stage')).not.toBeNull();
     expect(container.querySelector('.mg-saju-world > .mg-topbar .brand')).not.toBeNull();
-    expect(container.querySelector('.mg-saju-world > .rail')).not.toBeNull();
-    expect(container.querySelector('h1')?.textContent).toBe('모개의 미니홈피');
+    // 키보드와 화면 낭독기에게도 머리띠가 먼저고, 그림 위의 이름표는 그 뒤다.
+    expect(container.querySelector('.mg-saju-world')?.firstElementChild?.classList.contains('mg-topbar')).toBe(true);
+    expect(container.querySelector('.mg-rail, nav[aria-label="모개숲"]')).toBeNull();
+    expect(container.querySelector('h1')?.textContent).toBe('모개의 섬');
     expect(container.querySelector('.mg-saju-visits')?.textContent).toBe('오늘 3 · 전체 12');
     expect(container.querySelector('.mg-saju-form h2')?.textContent).toBe('내 집 짓기');
     // 로그인한 이름을 미리 적어 둔다.
@@ -186,9 +208,10 @@ describe('미니홈피 화면', () => {
 
   it('내 집은 집만 가까이 보여 주고, 사주 다시 입력과 이미지 저장이 있다', async () => {
     const { container, unmount } = await open('/@sol');
-    expect(container.querySelector('h1')?.textContent).toBe('솔의 미니홈피');
+    expect(container.querySelector('h1')?.textContent).toBe('솔의 섬');
     expect(stage.props?.focus).toBe('sol');
-    expect(stage.props?.frame).toMatchObject({ target: [0, 1.5, 0], halfWidth: 8 });
+    expect(stage.props?.frame).toEqual(alone());
+    expect(stage.props?.frame.target).toEqual([0, 1.5, 0]);
     expect(pins(container)).toEqual([]);
     expect(link(container, '사주 다시 입력')?.getAttribute('href')).toBe('/@sol/edit');
     expect(button(container, '내 집 이미지 저장하기')).toBeDefined();
@@ -211,7 +234,7 @@ describe('미니홈피 화면', () => {
     const village = await open('/@sol/village');
     expect(menu(village.container)).toEqual(['홈 /@sol', '사주보기 /@sol?view=chart', '자미두수 /@sol?view=ziwei', '마을* /@sol/village']);
     expect(stage.props?.focus).toBeNull();
-    expect(stage.props!.frame.halfWidth).toBeGreaterThan(8);
+    expect(stage.props!.frame.halfWidth).toBeGreaterThan(alone().halfWidth);
     expect(pins(village.container)).toEqual(['sol /@sol 솔내 집', 'bori /@bori 보리', 'noeul /@noeul 노을']);
     expect([...village.container.querySelectorAll('a.mg-saju-villager b')].map((name) => name.textContent)).toEqual(['솔내 집', '노을이웃', '보리']);
     expect(village.container.querySelector('.mg-neighbors')).not.toBeNull();
@@ -231,7 +254,7 @@ describe('미니홈피 화면', () => {
     await settle();
     expect(api.save).toHaveBeenCalledExactlyOnceWith({ expectedOwnerId: 'u-sol', name: '솔이', birth: { ...personOf('sol').birth, time: null } });
     expect(where(container)).toBe('/@sol');
-    expect(container.querySelector('h1')?.textContent).toBe('솔이의 미니홈피');
+    expect(container.querySelector('h1')?.textContent).toBe('솔이의 섬');
     await unmount();
   });
 
@@ -260,13 +283,13 @@ describe('미니홈피 화면', () => {
     expect(link(container, '파도타기')?.getAttribute('href')).toBe('/@bori');
     expect(link(container, '사주 다시 입력')).toBeUndefined();
     expect(container.querySelector('.mg-saju-bridge-line')?.textContent).toBe('목생화(木生火) 시너지! 서로 영감을 주는 사이');
-    expect(stage.props?.frame.halfWidth).toBe(8);
+    expect(stage.props?.frame).toEqual(alone());
     await act(async () => button(container, '다리 보기')!.click());
-    expect(stage.props!.frame.halfWidth).toBeGreaterThan(8);
+    expect(stage.props!.frame.halfWidth).toBeGreaterThan(alone().halfWidth);
     expect(container.querySelector('.mg-saju-stage')?.getAttribute('data-view')).toBe('bridge');
     expect(container.querySelector('.mg-saju-say')?.textContent).toBe('목생화(木生火) 시너지! 서로 영감을 주는 사이');
     await act(async () => button(container, '집 보기')!.click());
-    expect(stage.props?.frame.halfWidth).toBe(8);
+    expect(stage.props?.frame).toEqual(alone());
     await unmount();
   });
 
@@ -295,7 +318,7 @@ describe('미니홈피 화면', () => {
     auth = { status: 'signedIn', user: noeul };
     villages['sol'] = { saju: null, village: [around('noeul', true)] };
     const { container, unmount } = await open('/@sol');
-    expect(container.querySelector('h1')?.textContent).toBe('모개의 미니홈피');
+    expect(container.querySelector('h1')?.textContent).toBe('모개의 섬');
     expect(container.querySelector('.mg-saju-form')).toBeNull();
     expect(container.querySelector('.mg-saju-badge')?.textContent).toBe('빈 터');
     expect(pins(container)).toEqual(['sol /@sol 빈 터', 'noeul /@noeul 노을내 집']);
@@ -341,7 +364,7 @@ describe('미니홈피 화면', () => {
     await unmount();
   });
 
-  it('둘레의 집을 누르면 그 미니홈피로 간다', async () => {
+  it('둘레의 집을 누르면 그 섬으로 간다', async () => {
     const { container, unmount } = await open('/@sol/village');
     await act(async () => stage.props!.onVisit('noeul'));
     await settle();
@@ -446,7 +469,7 @@ describe('미니홈피 화면', () => {
     await village.unmount();
     const own = await open('/@sol');
     expect(stage.props?.flag).toEqual({ ...FLAG_SPOT, element: 'wood' });
-    expect(stage.props?.frame).toMatchObject({ target: [0, 1.5, 0], halfWidth: 8 });
+    expect(stage.props?.frame).toEqual(alone());
     await own.unmount();
     // 다리 보기는 두 집만 담는다.
     auth = { status: 'signedIn', user: noeul };
@@ -522,11 +545,11 @@ describe('미니홈피 화면', () => {
     await again.unmount();
   });
 
-  it('창의 제목이 누구의 미니홈피인지 말하고, 이야기 패널이 화면의 본문이다', async () => {
+  it('창의 제목이 누구의 섬인지 말하고, 이야기 패널이 화면의 본문이다', async () => {
     document.title = '모개숲';
     const { container, unmount } = await open('/@sol');
-    expect(document.title).toBe('솔의 미니홈피 · 모개숲');
-    expect(container.querySelector('main.mg-saju-panel')?.getAttribute('aria-label')).toBe('솔의 미니홈피');
+    expect(document.title).toBe('솔의 섬 · 모개숲');
+    expect(container.querySelector('main.mg-saju-panel')?.getAttribute('aria-label')).toBe('솔의 섬');
     await unmount();
     expect(document.title).toBe('모개숲');
   });
@@ -534,7 +557,7 @@ describe('미니홈피 화면', () => {
   it('답이 오지 않으면 까닭을 제목이 한 번만 말한다', async () => {
     api.mine.mockRejectedValue(new TypeError('Failed to fetch'));
     const silent = await open('/@sol');
-    expect(silent.container.querySelector('h1')?.textContent).toBe('미니홈피를 불러오지 못했어요');
+    expect(silent.container.querySelector('h1')?.textContent).toBe('섬을 불러오지 못했어요');
     expect(silent.container.querySelector('.mg-muted')).toBeNull();
     await silent.unmount();
     // 서버가 까닭을 말하면 그 말을 덧붙인다.
@@ -544,19 +567,29 @@ describe('미니홈피 화면', () => {
     await failed.unmount();
   });
 
-  it('없는 집과 닫힌 집은 까닭을 말하고 둘러보기로 보낸다', async () => {
-    api.mine.mockRejectedValue(new ApiRequestError(404, 'home_not_found', '없는 미니홈피입니다.'));
+  it('없는 집과 닫힌 집은 까닭을 말하고, 로그인했으면 내 집으로, 아니면 로그인으로 보낸다', async () => {
+    const links = (container: HTMLElement) => [...container.querySelectorAll('a')].map((anchor) => `${anchor.textContent?.trim()} ${anchor.getAttribute('href')}`);
+    auth = { status: 'signedIn', user: noeul };
+    api.get.mockRejectedValue(new ApiRequestError(404, 'home_not_found', '없는 섬입니다.'));
     const missing = await open('/@sol');
-    expect(missing.container.querySelector('h1')?.textContent).toBe('없는 미니홈피예요');
+    expect(missing.container.querySelector('h1')?.textContent).toBe('없는 섬이에요');
     // 까닭은 제목이 말한다: 서버의 문장을 덧붙이지 않는다.
     expect(missing.container.querySelector('.mg-muted')).toBeNull();
-    expect(link(missing.container, '둘러보기')?.getAttribute('href')).toBe('/explore');
+    // 둘러보기는 없다.
+    expect(links(missing.container)).toEqual(['내 집 /@noeul']);
     await missing.unmount();
     auth = { status: 'anonymous', user: null };
-    api.get.mockRejectedValue(new ApiRequestError(403, 'home_private', '주인이 공개하지 않은 미니홈피입니다.'));
+    api.get.mockRejectedValue(new ApiRequestError(403, 'home_private', '주인이 공개하지 않은 섬입니다.'));
     const closed = await open('/@sol');
-    expect(closed.container.querySelector('h1')?.textContent).toBe('주인이 닫아 둔 미니홈피예요');
-    expect(link(closed.container, '로그인')).toBeDefined();
+    expect(closed.container.querySelector('h1')?.textContent).toBe('주인이 닫아 둔 섬이에요');
+    expect(links(closed.container)).toEqual([`로그인 /?next=${encodeURIComponent('/@sol')}`]);
     await closed.unmount();
+    // 읽지 못한 것이 제 집이면 갈 곳으로 그 집을 내놓지 않는다.
+    auth = { status: 'signedIn', user: sol };
+    api.mine.mockRejectedValue(new TypeError('Failed to fetch'));
+    const own = await open('/@sol');
+    expect(own.container.querySelector('h1')?.textContent).toBe('섬을 불러오지 못했어요');
+    expect(links(own.container)).toEqual([]);
+    await own.unmount();
   });
 });
