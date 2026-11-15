@@ -146,7 +146,8 @@ describe('PDF의 글과 날짜', () => {
     const date = new Date(2026, 10, 5, 7, 8, 9);
     const written = pdfDate(date);
     expect(written).toMatch(/^D:20261105070809[+-]\d{2}'\d{2}'$/);
-    const offset = -date.getTimezoneOffset();
+    // At UTC the negation is -0, which toBe (Object.is) tells from the 0 the PDF's '+00'00'' reads back as.
+    const offset = -date.getTimezoneOffset() || 0;
     const [, sign, hours, minutes] = /([+-])(\d{2})'(\d{2})'$/.exec(written) ?? [];
     expect((sign === '-' ? -1 : 1) * (Number(hours) * 60 + Number(minutes))).toBe(offset);
   });
