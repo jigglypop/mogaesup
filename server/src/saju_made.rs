@@ -323,7 +323,29 @@ async fn view(state: &AppState, headers: &HeaderMap, name: &str, kind: Kind) -> 
     let Some(birth) = home_birth(&state.db, home.owner_id, false).await? else {
         return Ok(Json(json!({"status": "none"})));
     };
-    Ok(Json(state_of(&state.db, kind, home.owner_id, &birth.key()).await?))
+    let mut shown = state_of(&state.db, kind, home.owner_id, &birth.key()).await?;
+    // Nothing made, and nothing can be now: the page shows no card and does not get ready a request that would be
+    // refused (for the picture, the island drawn a second time off the page).
+    if shown["status"] == "none" && !makes(state, kind).await? {
+        shown["off"] = json!(true);
+    }
+    Ok(Json(shown))
+}
+
+/// Whether `kind` can be made now: there is a key, and the month's budget has a call left (as `begin` counts them).
+async fn makes(state: &AppState, kind: Kind) -> Result<bool, sqlx::Error> {
+    let openai = &state.config.openai;
+    let monthly = kind.monthly(openai);
+    if openai.api_key.is_none() || monthly <= 0 {
+        return Ok(false);
+    }
+    let calls: Option<i32> = sqlx::query_scalar(
+        "SELECT calls FROM saju_paid_months WHERE month = date_trunc('month', now() AT TIME ZONE 'UTC')::date AND kind = $1",
+    )
+    .bind(kind.name())
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(calls.is_none_or(|calls| i64::from(calls) < monthly))
 }
 
 #[derive(Deserialize)]

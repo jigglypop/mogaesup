@@ -236,7 +236,8 @@ export type SajuReading = {
  * (since when), failed (why; the owner may ask again), or ready with what was made and by which model.
  */
 export type Made<T> =
-  | { status: 'none' }
+  /** `off`: nothing can be made now either (the server has no key, or the month's budget is spent). */
+  | { status: 'none'; off?: boolean }
   | { status: 'pending'; since: string }
   | { status: 'failed'; code: string; message: string }
   | ({ status: 'ready'; model: string; createdAt: string } & T);

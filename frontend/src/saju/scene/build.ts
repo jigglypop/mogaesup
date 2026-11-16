@@ -249,6 +249,105 @@ function paneMaterial(style: PaneStyle, power: number): MeshStandardMaterial {
 
 const UP = new Vector3(0, 1, 0);
 
+/** The attributes a Builder's pile carries; a mesh with these alone can be joined to another of its material. */
+const PILE_ATTRIBUTES = ['position', 'normal', 'uv', 'color'] as const;
+const joinable = (geometry: BufferGeometry) =>
+  geometry.index !== null && Object.keys(geometry.attributes).length === PILE_ATTRIBUTES.length && PILE_ATTRIBUTES.every((name) => geometry.getAttribute(name)?.itemSize === { position: 3, normal: 3, uv: 2, color: 3 }[name]);
+
+/** `geometries` (Builder piles of one material), each moved by its `at`, as one. */
+function joined(items: readonly { geometry: BufferGeometry; at: V3 }[]): BufferGeometry {
+  const vertices = items.reduce((sum, { geometry }) => sum + geometry.getAttribute('position').count, 0);
+  const corners = items.reduce((sum, { geometry }) => sum + geometry.index!.count, 0);
+  const arrays = { position: new Float32Array(vertices * 3), normal: new Float32Array(vertices * 3), uv: new Float32Array(vertices * 2), color: new Float32Array(vertices * 3) };
+  const index = vertices > 65535 ? new Uint32Array(corners) : new Uint16Array(corners);
+  let vertex = 0;
+  let corner = 0;
+  for (const { geometry, at } of items) {
+    const count = geometry.getAttribute('position').count;
+    for (const name of PILE_ATTRIBUTES) {
+      const source = geometry.getAttribute(name).array as Float32Array;
+      const size = name === 'uv' ? 2 : 3;
+      arrays[name].set(source.subarray(0, count * size), vertex * size);
+    }
+    if (at[0] !== 0 || at[1] !== 0 || at[2] !== 0) {
+      for (let at3 = vertex * 3, end = (vertex + count) * 3; at3 < end; at3 += 3) {
+        arrays.position[at3]! += at[0];
+        arrays.position[at3 + 1]! += at[1];
+        arrays.position[at3 + 2]! += at[2];
+      }
+    }
+    const source = geometry.index!.array;
+    for (let at1 = 0; at1 < source.length; at1++) index[corner + at1] = source[at1]! + vertex;
+    vertex += count;
+    corner += source.length;
+  }
+  const geometry = new BufferGeometry();
+  for (const name of PILE_ATTRIBUTES) geometry.setAttribute(name, new BufferAttribute(arrays[name], name === 'uv' ? 2 : 3));
+  geometry.setIndex(new BufferAttribute(index, 1));
+  return geometry;
+}
+
+const moved = (at: V3, by: V3): V3 => [at[0] + by[0], at[1] + by[1], at[2] + by[2]];
+
+/**
+ * Builds laid down together as one, each moved by its `at` (an estate's parts): the piles of one material that cast
+ * alike become one mesh, the scatterings of one kind one scattering. A part's piles are dozens of meshes, each drawn in
+ * the picture and again for the shadows; an estate built in a dozen parts is drawn in a dozen times fewer so. The parts'
+ * own geometries are let go.
+ */
+export function mergeBuilds(parts: readonly { build: Build; at: V3 }[]): Build {
+  const piles = new Map<string, { material: Material; cast: boolean; items: { geometry: BufferGeometry; at: V3 }[] }>();
+  const meshes: BuiltMesh[] = [];
+  const scattered = new Map<SprigKind, { matrices: Float32Array[]; colors: Float32Array[]; outs: Float32Array[]; count: number }>();
+  const lamps: Lamp[] = [];
+  const lives: Life[] = [];
+  for (const { build, at } of parts) {
+    for (const mesh of build.meshes) {
+      if (!joinable(mesh.geometry)) {
+        if (at[0] !== 0 || at[1] !== 0 || at[2] !== 0) mesh.geometry.translate(at[0], at[1], at[2]);
+        meshes.push(mesh);
+        continue;
+      }
+      const key = `${mesh.material.uuid}|${mesh.cast}`;
+      const pile = piles.get(key) ?? { material: mesh.material, cast: mesh.cast, items: [] };
+      pile.items.push({ geometry: mesh.geometry, at });
+      piles.set(key, pile);
+    }
+    for (const sprigs of build.sprigs) {
+      const matrices = sprigs.matrices.slice();
+      for (let index = 0; index < sprigs.count; index++) {
+        matrices[index * 16 + 12]! += at[0];
+        matrices[index * 16 + 13]! += at[1];
+        matrices[index * 16 + 14]! += at[2];
+      }
+      const kind = scattered.get(sprigs.kind) ?? { matrices: [], colors: [], outs: [], count: 0 };
+      kind.matrices.push(matrices);
+      kind.colors.push(sprigs.colors);
+      kind.outs.push(sprigs.outs);
+      kind.count += sprigs.count;
+      scattered.set(sprigs.kind, kind);
+    }
+    for (const lamp of build.lamps) lamps.push({ ...lamp, at: moved(lamp.at, at) });
+    for (const life of build.lives) lives.push({ ...life, at: moved(life.at, at) });
+  }
+  for (const { material, cast, items } of piles.values()) {
+    const single = items.length === 1 && items[0]!.at.every((value) => value === 0);
+    meshes.push({ geometry: single ? items[0]!.geometry : joined(items), material, cast });
+    if (!single) for (const { geometry } of items) geometry.dispose();
+  }
+  const concat = (arrays: Float32Array[]) => {
+    const all = new Float32Array(arrays.reduce((sum, array) => sum + array.length, 0));
+    let offset = 0;
+    for (const array of arrays) {
+      all.set(array, offset);
+      offset += array.length;
+    }
+    return all;
+  };
+  const sprigs: BuiltSprigs[] = [...scattered].map(([kind, { matrices, colors, outs, count }]) => ({ kind, count, matrices: concat(matrices), colors: concat(colors), outs: concat(outs) }));
+  return { meshes, sprigs, lamps, lives };
+}
+
 export class Builder {
   /** The numbers this build scatters by: the same for the same seed. */
   readonly random: () => number;

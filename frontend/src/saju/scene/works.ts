@@ -23,9 +23,13 @@ export function useMood(): Mood {
 
 /**
  * How many islands are still to be built: the canvas waits for them before it draws its first frame. `warm` says it
- * has stopped waiting and is drawing.
+ * has stopped waiting and is drawing, `shown` that it has drawn what it asked for and shows; `activeAt` is when the
+ * camera last moved (performance.now()), `interval` how many milliseconds apart frames are meant to be drawn now.
  */
-export type Works = { pending: number; warm: boolean };
+export type Works = { pending: number; warm: boolean; shown: boolean; activeAt: number; interval: number };
+
+/** A canvas's works before anything is built. */
+export const newWorks = (): Works => ({ pending: 0, warm: false, shown: false, activeAt: 0, interval: 1000 / 60 });
 export const WorksContext = createContext<Works | null>(null);
 
 /**

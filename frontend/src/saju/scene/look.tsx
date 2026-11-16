@@ -1,7 +1,7 @@
-import { useContext, useEffect, useLayoutEffect, useMemo, useRef, type RefObject } from 'react';
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 
 import { useFrame, useThree } from '@react-three/fiber';
-import { ACESFilmicToneMapping, Color, Fog, type DirectionalLight, type OrthographicCamera, type Scene } from 'three';
+import { ACESFilmicToneMapping, Color, Fog, Matrix4, Vector3, type DirectionalLight, type OrthographicCamera, type Scene } from 'three';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
@@ -31,6 +31,9 @@ const useRenderer = () => useThree((state) => state.gl) as unknown as WebGPURend
 const SUN_DISTANCE = 90;
 /** How quickly the view follows a new frame: about a second to settle. */
 const FOLLOW = 3.4;
+/** How near (in metres) the frame's middle and reach, and (in pixels) the open part of the canvas, count as arrived. */
+const FRAME_SETTLED = 0.0005;
+const VIEW_SETTLED = 0.05;
 /** How quickly it follows the hand that turns and tilts it: a tenth of a second behind. */
 const TURN_FOLLOW = 18;
 /** A turn or tilt still to make, in radians, under which the camera has arrived. */
@@ -44,6 +47,8 @@ const HAZE_NEAR = 4;
 const HAZE_FAR = 95;
 /** Shadows are cast over this many metres more than the picture shows, for what stands outside it and shades what is in it. */
 const SHADOW_MARGIN = 9;
+/** Frames apart the sun's shadows are cast again while neither the view nor the sun moves. */
+const SHADOW_STILL_EVERY = 4;
 
 /**
  * Shade where things meet (N8AO's look): how far it reaches, how deep in front of a surface something still shades it
@@ -112,7 +117,7 @@ const makeDials = () => ({
   exposure: uniform(1),
 });
 
-/** What the darkroom is made of, to be let go together. */
+/** What the darkroom is made of, to be let go together; `shot` is its picture of the scene. */
 type Darkroom = { pipeline: RenderPipeline; shot: ReturnType<typeof pass>; dispose: () => void };
 
 /**
@@ -122,6 +127,7 @@ type Darkroom = { pipeline: RenderPipeline; shot: ReturnType<typeof pass>; dispo
  */
 function darkroom(renderer: WebGPURenderer, scene: Scene, camera: OrthographicCamera, fine: boolean, dials: Dials): Darkroom {
   const shot = pass(scene, camera);
+  const unflatten = flatten(renderer, shot.renderTarget);
   const color = shot.getTextureNode('output');
   const depth = shot.getTextureNode('depth');
   // The camera is orthographic: depth is a straight share of the way from its near plane to its far one.
@@ -163,22 +169,79 @@ function darkroom(renderer: WebGPURenderer, scene: Scene, camera: OrthographicCa
     pipeline,
     shot,
     dispose: () => {
+      unflatten();
       pipeline.dispose();
       for (const part of parts) part.dispose();
     },
   };
 }
 
+type RenderContexts = { get: (renderTarget: unknown, mrt: unknown, callDepth?: number) => unknown };
+
+/** The pictures each renderer draws in one render context, however deep in other renders it draws them (see flatten). */
+const flat = new WeakMap<object, Set<unknown>>();
+
 /**
- * Has the graphics card make ready everything the scene is drawn with, once its islands are built, and says when it
- * has: the first frame then draws at once instead of holding the page while every pipeline is made. Only once: the
- * canvas does not draw while it runs (the darkroom's own picture is the renderer's target until it is done), and a
- * darkroom made later, for a slower device, draws with what is already made.
+ * Has `renderer` draw into `target` in one render context, however deep in other renders the call that draws it is,
+ * until the returned function is called. Three keys the shaders it builds by the render context, and a context by how
+ * deep the render call is: the darkroom draws the scene two calls down (from its output pass, through the glow), while
+ * a compile draws at the top, so the first frame built every shader the compile had built again, all at once. Only the
+ * scene pass draws into its own picture, so one context for it is never shared by two renders at a time.
+ */
+function flatten(renderer: WebGPURenderer, target: unknown): () => void {
+  let targets = flat.get(renderer);
+  if (!targets) {
+    const own = new Set<unknown>();
+    targets = own;
+    flat.set(renderer, own);
+    const contexts = (renderer as unknown as { _renderContexts: RenderContexts })._renderContexts;
+    const get = contexts.get;
+    contexts.get = (renderTarget, mrt, callDepth) => get.call(contexts, renderTarget, mrt, own.has(renderTarget) ? 0 : callDepth);
+  }
+  targets.add(target);
+  return () => void targets.delete(target);
+}
+
+/**
+ * Whether the page can be handed back between tasks at once (`scheduler.yield`). Three's compile yields after every
+ * object and every stage of a shader; without it each yield waits for a frame, which for a village's hundreds of
+ * objects takes longer than building them all in the first frame.
+ */
+const yieldsQuickly = () => typeof (globalThis as { scheduler?: { yield?: unknown } }).scheduler?.yield === 'function';
+
+/**
+ * Builds the shaders of everything the scene pass draws, a little at a time between tasks (three yields as it builds
+ * them), before the first frame: built there, all at once, they held the page for seconds (see flatten for why the
+ * first frame used to build them again). Its pipelines are made in the background as it goes (see making). A browser
+ * that cannot yield quickly (see yieldsQuickly) builds them in the first frame instead.
+ */
+async function prebuild(renderer: WebGPURenderer, room: Darkroom): Promise<void> {
+  if (!yieldsQuickly()) return;
+  const { shot } = room;
+  const target = renderer.getRenderTarget();
+  const mrt = renderer.getMRT();
+  let compiling: Promise<void>;
+  // What the compile is for is taken as it starts: the pass's picture.
+  renderer.setRenderTarget(shot.renderTarget);
+  renderer.setMRT(shot.getMRT());
+  try {
+    compiling = renderer.compileAsync(shot.scene, shot.camera);
+  } finally {
+    renderer.setRenderTarget(target);
+    renderer.setMRT(mrt);
+  }
+  await compiling;
+}
+
+/**
+ * Says once that the scene can be drawn: when every island has been built (each says it is still to be built until it
+ * is) and the shaders they are drawn with are built (see prebuild). Its first frames are then drawn out of sight while
+ * the last of their pipelines are made (see making).
  */
 function useWarm(renderer: WebGPURenderer, room: Darkroom, onWarm: () => void): void {
   const works = useContext(WorksContext);
-  const shot = useRef(room.shot);
-  shot.current = room.shot;
+  const darkroom = useRef(room);
+  darkroom.current = room;
   useEffect(() => {
     let live = true;
     let frame = 0;
@@ -188,9 +251,7 @@ function useWarm(renderer: WebGPURenderer, room: Darkroom, onWarm: () => void): 
         frame = requestAnimationFrame(wait);
         return;
       }
-      // Made ready as the frame will use them: drawn into the darkroom's picture of light's own values.
-      void shot.current
-        .compileAsync(renderer)
+      void prebuild(renderer, darkroom.current)
         .catch(() => undefined)
         .then(() => {
           if (!live) return;
@@ -230,6 +291,9 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
   const room = useMemo(() => darkroom(renderer, scene, camera, fine, dials), [renderer, scene, camera, fine, dials]);
   useEffect(() => () => room.dispose(), [room]);
   useWarm(renderer, room, onWarm);
+  const works = useContext(WorksContext);
+  /** Where the camera and the sun stood when they were last drawn from: a frame after either moved is a moving one. */
+  const stood = useMemo(() => ({ view: new Matrix4(), projection: new Matrix4(), sun: new Vector3(), reach: 0 }), []);
 
   // The sky lights the scene, the air hazes its distance, and where nothing is drawn is deep water.
   useLayoutEffect(() => {
@@ -251,20 +315,17 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
   }, [renderer, scene, camera, sky, haze, mood, dials]);
 
   useFrame(() => {
-    // Shadows are cast afresh every other frame, the frames the lake's mirror is not drawn: almost nothing moves.
     frames.current += 1;
     const light = sun.current;
-    if (light) {
-      light.shadow.autoUpdate = false;
-      if (frames.current < 4 || frames.current % 2 === 1) light.shadow.needsUpdate = true;
-    }
     const now = performance.now();
     const elapsed = Math.min(0.1, (now - last.current) / 1000);
     last.current = now;
     const current = (shown.current ??= { ...frame, target: [frame.target[0], frame.target[1], frame.target[2]] });
     const step = snap ? 1 : 1 - Math.exp(-elapsed * FOLLOW);
-    for (const axis of [0, 1, 2] as const) current.target[axis] += (frame.target[axis] - current.target[axis]) * step;
-    for (const key of ['halfWidth', 'halfHeight', 'across', 'away', 'reach'] as const) current[key] += (frame[key] - current[key]) * step;
+    // Each eases to where it is going and, near enough, is there: a camera that has arrived holds still (see Stage's Cadence).
+    const near = (from: number, to: number, share: number, settled: number) => (Math.abs(to - from) <= settled ? to : from + (to - from) * share);
+    for (const axis of [0, 1, 2] as const) current.target[axis] = near(current.target[axis], frame.target[axis], step, FRAME_SETTLED);
+    for (const key of ['halfWidth', 'halfHeight', 'across', 'away', 'reach'] as const) current[key] = near(current[key], frame[key], step, FRAME_SETTLED);
     // The viewer's turn, tilt, move and zoom, each followed at its own pace; held still, the camera is there at once.
     const want = gaze.current;
     const at = eased.current;
@@ -282,7 +343,7 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
     const open = openArea(size.width, size.height, inset.current);
     const view = shifted.current;
     const first = view.width === 0;
-    const ease = (from: number, to: number) => (first || snap ? to : from + (to - from) * step);
+    const ease = (from: number, to: number) => (first || snap ? to : near(from, to, step, VIEW_SETTLED));
     view.x = ease(view.x, open.x);
     view.y = ease(view.y, open.y);
     view.width = ease(view.width, open.width);
@@ -308,6 +369,11 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
     dials.focus.value = away;
     dials.range.value = Math.max(10, (extent.halfHeight * 2) / Math.max(1, at.zoom));
     dials.bokeh.value = Math.min(3, Math.max(0.5, camera.zoom / 26));
+    // A camera on the move (the viewer's hand, a new frame easing in) is drawn at the moving pace (see Stage's Cadence).
+    const moving = !stood.view.equals(camera.matrixWorld) || !stood.projection.equals(camera.projectionMatrix);
+    stood.view.copy(camera.matrixWorld);
+    stood.projection.copy(camera.projectionMatrix);
+    if (moving && works) works.activeAt = now;
     if (!light) return;
     // A low sun throws long shadows: what stands outside the view still shades what is in it. The view holds the
     // ground about the point it looks at as far as the frame reaches, foreshortened by the tilt, and zoomed out that
@@ -332,12 +398,21 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
       shadow.far = sunFar;
       shadow.updateProjectionMatrix();
     }
+    // Shadows are cast afresh every other frame while the sun's square moves with the view (the frames the lake's mirror
+    // is not drawn), and every fourth while it holds still: then only leaves sway and a guardian idles under it.
+    const sunMoved = !stood.sun.equals(light.position) || stood.reach !== reach;
+    stood.sun.copy(light.position);
+    stood.reach = reach;
+    light.shadow.autoUpdate = false;
+    if (frames.current < 4 || frames.current % (sunMoved ? 2 : SHADOW_STILL_EVERY) === 1) light.shadow.needsUpdate = true;
   });
 
   // The picture is developed after everything in it has moved for the frame, in place of R3F's own drawing.
   useFrame(() => room.pipeline.render(), 1);
 
-  const map = fine ? 4096 : 2048;
+  // The shadow map keeps the size the canvas began with: a slower look taken up later does not make it again (three
+  // would let go of the old one while a frame still drew with it).
+  const [map] = useState(() => (fine ? 4096 : 2048));
   return (
     <>
       <directionalLight ref={sun} castShadow intensity={mood.sunPower} color={mood.sun} shadow-mapSize={[map, map]} shadow-bias={-0.0004} shadow-normalBias={0.05} shadow-radius={2.2}>

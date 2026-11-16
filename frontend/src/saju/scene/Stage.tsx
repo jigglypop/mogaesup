@@ -1,7 +1,7 @@
 import { Component, memo, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type PointerEvent, type ReactNode, type Ref, type RefObject } from 'react';
 
 import { Canvas, useFrame, useThree, type Renderer } from '@react-three/fiber';
-import { AdditiveBlending, CylinderGeometry, MeshBasicMaterial, PCFShadowMap, Plane, Raycaster, RingGeometry, Vector2, Vector3, type Camera } from 'three';
+import { AdditiveBlending, CylinderGeometry, Matrix4, MeshBasicMaterial, PCFShadowMap, Plane, Raycaster, RingGeometry, Vector2, Vector3, type Camera } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 
 import type { Compat } from '../compat';
@@ -21,7 +21,8 @@ import { initialQuality, Look, UNMOVED, type Gaze, type Quality } from './look';
 import { WATER_LEVEL, type Mood } from './mood';
 import { Stillness } from './parts';
 import { ISLANDS, type IslandShape } from './terrain';
-import { useBuild, useMood, WorksContext, type Works } from './works';
+import { makeInBackground, makingOf } from './making';
+import { newWorks, useBuild, useMood, WorksContext, type Works } from './works';
 
 // The village: every home on its own island in one lake at the day's last light, seen by one isometric camera that
 // moves between a single home, two homes with their bridge, and the whole village, and that the viewer turns, tilts,
@@ -56,6 +57,8 @@ const SILENT = () => undefined;
 export async function createRenderer({ canvas }: { canvas?: unknown }): Promise<Renderer> {
   const renderer = new WebGPURenderer({ canvas: canvas as HTMLCanvasElement, antialias: false, alpha: false, powerPreference: 'high-performance' });
   await renderer.init();
+  // Its first frames are drawn out of sight, their pipelines made in the background (see making and Ready).
+  makeInBackground(renderer);
   const dispose = renderer.dispose.bind(renderer);
   renderer.dispose = () => {
     renderer.onDeviceLost = SILENT;
@@ -64,6 +67,13 @@ export async function createRenderer({ canvas }: { canvas?: unknown }): Promise<
   // R3F types the renderer it is given as WebGL's; it calls only what both have.
   return renderer as unknown as Renderer;
 }
+
+/**
+ * The most device pixels the canvas draws to a CSS pixel. On a screen of twice the pixels the darkroom's passes (shade,
+ * lens, glow) and every leaf would be drawn four times over; at one and a half the picture, soft with its lens and glow
+ * already, reads as sharp for a little more than half of that.
+ */
+const MOST_DPR = 1.5;
 
 /** Shadows from the sun, softened by sampling about each point (see the sun's `shadow-radius`). */
 export const SHADOWS = { enabled: true, type: PCFShadowMap } as const;
@@ -206,9 +216,20 @@ function Pins({ homes, layer }: { homes: readonly StageHome[]; layer: RefObject<
   const camera = useThree((state) => state.camera);
   const size = useThree((state) => state.size);
   const point = useRef(new Vector3());
+  /** What the labels were last placed for: they move only when the camera, the canvas or the labels themselves change. */
+  const placed = useRef({ view: new Matrix4(), projection: new Matrix4(), width: 0, height: 0, count: -1, homes: null as readonly StageHome[] | null });
   useFrame(() => {
     const host = layer.current;
     if (!host) return;
+    const last = placed.current;
+    const count = host.childElementCount;
+    if (last.homes === homes && last.count === count && last.width === size.width && last.height === size.height && last.view.equals(camera.matrixWorld) && last.projection.equals(camera.projectionMatrix)) return;
+    last.homes = homes;
+    last.count = count;
+    last.width = size.width;
+    last.height = size.height;
+    last.view.copy(camera.matrixWorld);
+    last.projection.copy(camera.projectionMatrix);
     // A browser without `overflow: clip` lets a focused label scroll the layer; the labels are placed for it unscrolled.
     if (host.scrollLeft || host.scrollTop) host.scrollLeft = host.scrollTop = 0;
     for (const element of host.querySelectorAll<HTMLElement>('[data-pin]')) {
@@ -242,12 +263,14 @@ type SceneProps = {
   still: boolean;
   /** Told once the scene can be drawn without a wait. */
   onWarm: () => void;
+  /** Told once it has drawn every pipeline its first frames asked for: it can be shown. */
+  onReady?: () => void;
   children: ReactNode;
 };
 
 /** Everything the village's canvas and a saved picture's share: the hour, the camera's look, the lights, the wind. */
-export function Scene({ frame, snap, gaze, inset, islands, mood, quality, still, onWarm, children }: SceneProps) {
-  const works = useMemo<Works>(() => ({ pending: 0, warm: false }), []);
+export function Scene({ frame, snap, gaze, inset, islands, mood, quality, still, onWarm, onReady, children }: SceneProps) {
+  const works = useMemo<Works>(newWorks, []);
   return (
     <WorksContext.Provider value={works}>
       <Stillness value={still}>
@@ -256,43 +279,115 @@ export function Scene({ frame, snap, gaze, inset, islands, mood, quality, still,
         <LampPool count={quality === 'high' ? 8 : 4} gain={mood.lamps}>
           <group dispose={null}>{children}</group>
         </LampPool>
+        {onReady && <Ready onReady={onReady} />}
       </Stillness>
     </WorksContext.Provider>
   );
 }
 
-/** How long a frame may take, on average, before the costly parts of the look are given up: under 33 frames a second. */
-const SLOW_FRAME_MS = 30;
+/** Frames drawn in a row asking for no pipeline still being made before the canvas shows: the shadows cast and the darkroom developed. */
+const READY_FRAMES = 3;
+
+/**
+ * Says once that the canvas can be shown: its islands are built and the last few frames asked for no pipeline still
+ * being made (see making). From then on a pipeline is made as a frame asks for it, and the canvas keeps its pace.
+ */
+function Ready({ onReady }: { onReady: () => void }) {
+  const gl = useThree((state) => state.gl);
+  const works = useContext(WorksContext);
+  const seen = useRef({ frames: 0, done: false });
+  useFrame(() => {
+    const ready = seen.current;
+    if (ready.done || (works && !works.warm)) return;
+    const making = makingOf(gl);
+    if (making && making.pending > 0) {
+      ready.frames = 0;
+      return;
+    }
+    ready.frames += 1;
+    if (ready.frames < READY_FRAMES) return;
+    ready.done = true;
+    making?.stop();
+    if (works) works.shown = true;
+    onReady();
+  }, 2);
+  return null;
+}
+
+/**
+ * Frames a second while something moves (the camera, under the viewer's hand or easing to a new frame); while only the
+ * scene's own life moves (waves, leaves, smoke); and while it is held still for a viewer who asked for less motion,
+ * when nothing moves but what the page changes (another home built, a frame to go to).
+ */
+const MOVING_FPS = 60;
+const LIVING_FPS = 30;
+const STILL_FPS = 4;
+/** How long after the camera last moved, or the viewer's hand was on the picture, the canvas keeps the moving pace. */
+const MOVING_FOR_MS = 1200;
+
+/**
+ * Draws the canvas (its frame loop is R3F's `never`, each frame drawn with `advance`) as the screen refreshes, up to
+ * {@link MOVING_FPS} a second, while it is being made ready or the camera moves; at {@link LIVING_FPS} while only the
+ * scene's own life moves; at {@link STILL_FPS} when it is held still. A screen that refreshes 120 or 144 times a second
+ * would otherwise have the village drawn as often, for nothing a viewer can see. `touched` is when the viewer's hand
+ * was last on the picture (performance.now()): the camera moves from the next frame.
+ */
+function Cadence({ running, still, touched }: { running: boolean; still: boolean; touched: RefObject<number> }) {
+  const advance = useThree((state) => state.advance);
+  const works = useContext(WorksContext);
+  useEffect(() => {
+    if (!running) return undefined;
+    let frame = 0;
+    let last = -Infinity;
+    const tick = (now: number) => {
+      frame = requestAnimationFrame(tick);
+      const moved = Math.max(works?.activeAt ?? 0, touched.current ?? 0);
+      const moving = !works || !works.shown || now - moved < MOVING_FOR_MS;
+      const fps = moving ? MOVING_FPS : still ? STILL_FPS : LIVING_FPS;
+      if (works) works.interval = 1000 / fps;
+      // A few milliseconds early still counts: a screen's refresh does not fall on the interval.
+      if (now - last < 1000 / fps - 3) return;
+      last = now;
+      // R3F's clock reads the seconds it is given.
+      advance(now / 1000);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [running, still, advance, works, touched]);
+  return null;
+}
+
+/**
+ * How much longer than the canvas's pace asks (see Cadence) the middle one of the measured frames may take before the
+ * costly parts of the look are given up: at the moving pace, under 33 frames a second.
+ */
+const SLOW_EXCESS_MS = 30 - 1000 / 60;
 const SETTLE_FRAMES = 90;
 const MEASURED_FRAMES = 120;
 
-/** Watches how long frames take once the scene has been built, and says so once if they take too long. */
+/**
+ * Watches how long frames take once the scene shows, against the pace they are drawn at, and says so once if they take
+ * too long. It goes by the middle frame, not the average: a few stalls (a collection, a picture being taken, another
+ * tab) are not the device's pace, and the slow look stays for as long as the page does.
+ */
 function Pace({ onSlow }: { onSlow: () => void }) {
-  const seen = useRef({ frames: 0, total: 0, last: 0, done: false });
+  const works = useContext(WorksContext);
+  const seen = useRef({ frames: 0, excess: [] as number[], last: 0, done: false });
   useFrame(() => {
     const pace = seen.current;
     const now = performance.now();
     const took = now - pace.last;
     pace.last = now;
-    // A stall (the tab was hidden, a home was being built) is not the scene's own pace.
-    if (pace.done || took > 250) return;
+    // A stall (the tab was hidden, a home was being built) is not the scene's own pace, nor a frame before it shows.
+    if (pace.done || took > 250 || (works && !works.shown)) return;
     pace.frames += 1;
     if (pace.frames <= SETTLE_FRAMES) return;
-    pace.total += took;
-    if (pace.frames < SETTLE_FRAMES + MEASURED_FRAMES) return;
+    pace.excess.push(took - (works?.interval ?? 1000 / 60));
+    if (pace.excess.length < MEASURED_FRAMES) return;
     pace.done = true;
-    if (pace.total / MEASURED_FRAMES > SLOW_FRAME_MS) onSlow();
+    const middle = pace.excess.sort((a, b) => a - b)[Math.floor(MEASURED_FRAMES / 2)]!;
+    if (middle > SLOW_EXCESS_MS) onSlow();
   });
-  return null;
-}
-
-/** Says when the canvas has drawn its first few frames: the homes are lit and mirrored, and it can be shown. */
-function Drawn({ onDrawn }: { onDrawn: () => void }) {
-  const frames = useRef(0);
-  useFrame(() => {
-    frames.current += 1;
-    if (frames.current === 4) onDrawn();
-  }, 2);
   return null;
 }
 
@@ -430,8 +525,19 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     const now = gaze.current;
     gaze.current = { turn: Math.round(now.turn / TAU) * TAU, tilt: ELEVATION, pan: { x: 0, z: 0 }, zoom: 1 };
   };
-  useImperativeHandle(ref, () => ({ zoomBy: (factor) => void (gaze.current.zoom = clampZoom(gaze.current.zoom * factor)) }), []);
+  useImperativeHandle(
+    ref,
+    () => ({
+      zoomBy: (factor) => {
+        touched.current = performance.now();
+        gaze.current.zoom = clampZoom(gaze.current.zoom * factor);
+      },
+    }),
+    [],
+  );
   const drag = useRef<{ pointer: number; x: number; y: number; fromX: number; fromY: number; kept: boolean; pan: boolean } | null>(null);
+  /** When the viewer's hand was last on the picture: the canvas draws at its moving pace from then (see Cadence). */
+  const touched = useRef(0);
   /** Fingers on the picture, by pointer; two of them pinch and move, and how far apart they were and where their middle was is what the next move compares with. */
   const touches = useRef(new Map<number, { x: number; y: number }>());
   const spread = useRef(0);
@@ -453,6 +559,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     if (!element) return undefined;
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
+      touched.current = performance.now();
       const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
       zoomAt(wheelZoom(event.deltaY * lines, event.ctrlKey), event.clientX, event.clientY);
     };
@@ -461,6 +568,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     let last = 1;
     const pinch = (event: Event) => {
       event.preventDefault();
+      touched.current = performance.now();
       const { scale, clientX, clientY } = event as Event & { scale?: unknown; clientX?: number; clientY?: number };
       if (typeof scale !== 'number' || !(scale > 0)) return;
       if (event.type === 'gesturechange' && touches.current.size === 0) zoomAt(scale / last, clientX, clientY);
@@ -483,6 +591,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     // What the first render's handlers read, they read through refs.
   }, []);
   const press = (event: PointerEvent<HTMLDivElement>) => {
+    touched.current = performance.now();
     if (event.pointerType === 'touch') {
       touches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
       spread.current = apart();
@@ -524,6 +633,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     if (event.target === event.currentTarget) release(event);
   };
   const pull = (event: PointerEvent<HTMLDivElement>) => {
+    if (drag.current || touches.current.size > 0) touched.current = performance.now();
     const finger = touches.current.get(event.pointerId);
     if (finger) {
       finger.x = event.clientX;
@@ -584,6 +694,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   const lush = first === 'high';
   const mood = useMood();
   const warmed = useCallback(() => setWarm(true), []);
+  const shown = useCallback(() => setDrawn(true), []);
   useEffect(() => {
     const element = box.current;
     if (!element || typeof IntersectionObserver !== 'function') return undefined;
@@ -601,8 +712,8 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
           orthographic
           flat
           shadows={SHADOWS}
-          dpr={slow ? 1 : [1, 2]}
-          frameloop={inView && warm ? 'always' : 'never'}
+          dpr={slow ? 1 : [1, MOST_DPR]}
+          frameloop="never"
           gl={createRenderer}
           camera={{ near: 1, far: 400, position: [60, 60, 60] }}
           onCreated={({ gl, camera }) => {
@@ -614,7 +725,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
             };
           }}
         >
-          <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed}>
+          <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed} onReady={shown}>
             {homes.map((home, index) => (
               <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { landings } : {})} />
             ))}
@@ -622,10 +733,10 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
               <Bridge key={`${bridge.to.id}:${bridge.colors.join()}`} from={[bridge.from.x, bridge.from.z]} to={[bridge.to.x, bridge.to.z]} colors={bridge.colors} tone={bridge.compat.tone} />
             ))}
             {flag && <FlagIsland flag={flag} lush={lush} turn={homes.length} />}
+            <Cadence running={inView && warm} still={still} touched={touched} />
+            {!slow && <Pace onSlow={() => setSlow(true)} />}
           </Scene>
           <Pins homes={homes} layer={layer} />
-          {!slow && <Pace onSlow={() => setSlow(true)} />}
-          <Drawn onDrawn={() => setDrawn(true)} />
         </Canvas>
       </Failsafe>
       <div className="mg-saju-pins" ref={layer}>

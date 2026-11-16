@@ -78,7 +78,8 @@ export function useMade<T>({ key, read, poll, gaveUp }: {
         .then(() => reader.current())
         .then(
           (made) => {
-            if (began === writes.current) update(of, { made, problem: '' });
+            // A server that can make none now says so with nothing made: the card stays away, as after a refusal.
+            if (began === writes.current) update(of, made.status === 'none' && made.off ? { made, problem: '', off: true } : { made, problem: '' });
             then?.();
           },
           (error: unknown) => {
@@ -181,7 +182,7 @@ export function useReading({ username, ownerId, birth, shown }: { username: stri
     [ownerId, birth, send],
   );
   const asked = useRef(new Set<string>());
-  const none = made.made?.status === 'none';
+  const none = made.made?.status === 'none' && !made.off;
   useEffect(() => {
     if (!ownerId || !key || !shown || !none || asked.current.has(key)) return;
     asked.current.add(key);

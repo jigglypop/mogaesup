@@ -354,6 +354,23 @@ describe('섬 그림 카드', () => {
     await unmount();
   });
 
+  it('서버가 지금은 그릴 수 없다고 하면 섬을 다시 그리지도 보내지도 않고 카드도 없다', async () => {
+    api.picture.mockResolvedValue({ status: 'none', off: true });
+    api.reading.mockResolvedValue({ status: 'none', off: true });
+    const { container, unmount } = await open('/@sol');
+    await wait(1_500);
+    await wait(10_000);
+    expect(shots.count).toBe(0);
+    expect(api.draw).not.toHaveBeenCalled();
+    expect(card(container, '섬 그림')).toBeNull();
+    // 풀이 탭을 열어도 청하지 않는다.
+    await tab(container, '사주보기');
+    await wait();
+    expect(api.read).not.toHaveBeenCalled();
+    expect(card(container, '사주 풀이')).toBeNull();
+    await unmount();
+  });
+
   it('그림을 누르면 크게 열리고, Esc로 닫으면 누른 그림으로 돌아간다', async () => {
     api.picture.mockResolvedValue(drawn('/models/island.webp'));
     const { container, unmount } = await open('/@sol');

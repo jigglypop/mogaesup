@@ -453,7 +453,15 @@ async fn 키가_없거나_한_달_예산을_다_쓰면_풀이도_그림도_받�
         (refused.status, refused.body["code"].as_str()),
         (StatusCode::SERVICE_UNAVAILABLE, Some("picture_unavailable"))
     );
-    assert_eq!(app.call("GET", "/api/homes/reader_e/saju/reading", None, None).await.body, json!({"status": "none"}));
+    // The page is told nothing can be made, so it asks for none and does not draw the island to send it.
+    assert_eq!(
+        app.call("GET", "/api/homes/reader_e/saju/reading", None, None).await.body,
+        json!({"status": "none", "off": true})
+    );
+    assert_eq!(
+        app.call("GET", "/api/homes/reader_e/saju/picture", None, None).await.body,
+        json!({"status": "none", "off": true})
+    );
     assert_eq!(calls(&fake), 0);
     app.cleanup().await;
 
@@ -479,6 +487,12 @@ async fn 키가_없거나_한_달_예산을_다_쓰면_풀이도_그림도_받�
     );
     assert_eq!(settled(&app, "reader_f", "reading", None).await["status"], "ready");
     assert_eq!(settled(&app, "reader_f", "picture", None).await["status"], "ready");
+    // With the budget spent, a home that has nothing yet is told so; what is made is shown as ever.
+    assert_eq!(
+        app.call("GET", "/api/homes/reader_g/saju/picture", None, None).await.body,
+        json!({"status": "none", "off": true})
+    );
+    assert_eq!(app.call("GET", "/api/homes/reader_f/saju/picture", None, None).await.body.get("off"), None);
     // What is made stays answerable after the budget is spent.
     assert_eq!(ask(&app, &first, first_id, &chart(), false).await.status, StatusCode::OK);
     let counted: Vec<(String, i32)> = sqlx::query_as("SELECT kind, calls FROM saju_paid_months ORDER BY kind")
@@ -496,6 +510,7 @@ async fn 키가_없거나_한_달_예산을_다_쓰면_풀이도_그림도_받�
     })
     .await;
     let (host, host_id) = member(&app, "reader_h", &chart()["birth"]).await;
+    assert_eq!(app.call("GET", "/api/homes/reader_h/saju/picture", None, None).await.body["off"], true);
     assert_eq!(ask(&app, &host, host_id, &chart(), false).await.body["code"], "reading_unavailable");
     assert_eq!(draw(&app, &host, host_id, &png(1024), false).await.body["code"], "picture_unavailable");
     let counted: i64 =

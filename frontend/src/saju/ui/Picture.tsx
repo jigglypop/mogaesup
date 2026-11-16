@@ -121,7 +121,8 @@ export function usePicture({ username, ownerId, birth, profile, complete, poll }
     [key, ownerId, profile],
   );
   const drawn = useRef(new Set<string>());
-  const none = made.made?.status === 'none';
+  // Nothing drawn, and the server can draw it now: drawn off the page to be sent only then.
+  const none = made.made?.status === 'none' && !made.off;
   useEffect(() => {
     if (!ownerId || !key || !complete || !none || drawn.current.has(key)) return undefined;
     const timer = setTimeout(() => {

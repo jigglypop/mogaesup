@@ -1,7 +1,8 @@
-// Measures a minihome in Chrome on this machine's GPU (WebGPU, vsync off): load time, bytes, frame times standing and
-// walking, long tasks, and the main thread's hottest functions. Signs up a throwaway account on the target server, with a
-// password made for this run.
-// Usage: node scripts/perf-probe.mjs [webUrl] [outFile] [--allow-remote]   (a local server; it creates an account)
+// Measures a member's 섬 (the 사주 village, the app's main page) in Chrome on this machine's GPU (WebGPU): how long the
+// picture takes to show, bytes, long tasks, frames and the main thread's hottest functions while the village rests and
+// while the camera is turned. Signs up throwaway members on the target server (one, and `--village=N` neighbours with
+// homes of their own), with passwords made for this run.
+// Usage: node scripts/perf-probe.mjs [webUrl] [outFile] [--village=N] [--allow-remote]   (a local server; it creates accounts)
 import { randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 
@@ -9,75 +10,83 @@ import { chromium } from 'playwright';
 
 const args = process.argv.slice(2);
 const allowRemote = args.includes('--allow-remote');
-const [WEB = 'http://127.0.0.1:5180', OUT] = args.filter((arg) => arg !== '--allow-remote');
+const neighbours = Number(args.find((arg) => arg.startsWith('--village='))?.slice('--village='.length) ?? 0);
+const [WEB = 'http://127.0.0.1:5180', OUT] = args.filter((arg) => !arg.startsWith('--'));
 const { hostname } = new URL(WEB);
 if (!allowRemote && !/^(localhost|127(\.\d{1,3}){3}|\[::1\])$/.test(hostname)) {
-  console.error(`${WEB} is not a loopback address, and this script signs up an account there. Pass --allow-remote to run it anyway.`);
+  console.error(`${WEB} is not a loopback address, and this script signs up accounts there. Pass --allow-remote to run it anyway.`);
   process.exit(1);
 }
-const PASSWORD = randomBytes(16).toString('hex');
 const PHASE_MS = 8_000;
-/** Extra wait after the island is ready, to tell start-up hitches from steady ones. */
-const SETTLE_MS = Number(process.env['PERF_SETTLE_MS'] ?? 0);
+/** Extra wait after the picture shows, to tell start-up hitches from steady ones. */
+const SETTLE_MS = Number(process.env['PERF_SETTLE_MS'] ?? 3_000);
 
 const browser = await chromium.launch({
   channel: 'chrome',
   headless: true,
-  args: [
-    '--enable-unsafe-webgpu',
-    '--enable-gpu',
-    '--disable-gpu-vsync',
-    '--disable-frame-rate-limit',
-    ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : []),
-  ],
+  args: ['--enable-unsafe-webgpu', '--enable-gpu', ...(process.platform === 'win32' ? ['--use-angle=d3d11'] : [])],
 });
-const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
-const page = await context.newPage();
-// PERF_IDLE=off measures without the minihome's idle frame-rate throttle (the 절전 모드 setting).
-if (process.env['PERF_IDLE'] === 'off') {
-  await page.addInitScript(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('minihome:scene') ?? '{}');
-      localStorage.setItem('minihome:scene', JSON.stringify({ quality: 'auto', postProcessing: false, ...saved, idleThrottle: false }));
-    } catch {}
-  });
+
+/** Signs up a member in `context` and builds their home; the session stays with the context. */
+async function member(context, index) {
+  const page = await context.newPage();
+  await page.goto(WEB);
+  const username = `perf_${randomBytes(3).toString('hex')}`;
+  const password = randomBytes(16).toString('hex');
+  const birth = { calendar: 'solar', year: 1975 + index * 3, month: 1 + ((index * 5) % 12), day: 2 + ((index * 7) % 26), leapMonth: false, time: `${String((index * 7) % 24).padStart(2, '0')}:30`, gender: index % 2 ? 'male' : 'female' };
+  const made = await page.evaluate(
+    async ({ name, password, birth }) => {
+      const send = (path, method, body) => fetch(`/api${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const registered = await send('/auth/register', 'POST', { username: name, displayName: '측정', password });
+      if (registered.status !== 201) return `register answered ${registered.status}`;
+      const { user } = await registered.json();
+      const built = await send('/homes/me/saju', 'PUT', { expectedOwnerId: user.id, name: `측정 ${name.slice(-3)}`, birth });
+      return built.ok ? null : `building the home answered ${built.status}`;
+    },
+    { name: username, password, birth },
+  );
+  if (made) throw new Error(made);
+  await page.close();
+  return username;
 }
-// WorldLoading.tsx keeps the loading cover's is-done class for only ~600 ms after the island is ready, then removes the
-// cover. Polling can miss that window on a busy main thread, so an observer notes when the class first appeared (the time
-// reported), and the wait is for the cover to be gone, a state that stays.
-await page.addInitScript(() => {
-  const watch = new MutationObserver(() => {
-    if (!document.querySelector('.mg-world-loading.is-done')) return;
-    window.__worldReadyAt = performance.now();
-    watch.disconnect();
-  });
-  watch.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
-});
+
+// The neighbours first: the village around the measured home is the latest public homes.
+for (let index = 0; index < neighbours; index++) {
+  const context = await browser.newContext();
+  await member(context, index + 1);
+  await context.close();
+}
+const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+const username = await member(context, 0);
+const page = await context.newPage();
 const errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
-
-const username = `perf_${randomBytes(3).toString('hex')}`;
-await page.goto(WEB);
-const registered = await page.evaluate(
-  async ({ name, password }) => {
-    const response = await fetch('/api/auth/register', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: name, displayName: '측정', password }),
-    });
-    return response.status;
-  },
-  { name: username, password: PASSWORD },
-);
-if (registered !== 201) throw new Error(`register answered ${registered}`);
+// The island's picture is not drawn again for the run (it needs the server's image key and draws a second canvas).
+await page.route('**/saju/picture', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"none","off":true}' }));
+await page.addInitScript(() => {
+  window.__long = [];
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) window.__long.push(entry.duration);
+    }).observe({ type: 'longtask', buffered: true });
+  } catch {}
+  // The canvas marks itself drawn once its first frames have asked for nothing still being made.
+  const watch = new MutationObserver(() => {
+    if (!document.querySelector('.mg-saju-canvas[data-drawn]')) return;
+    window.__shownAt = performance.now();
+    watch.disconnect();
+  });
+  watch.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-drawn'] });
+});
 
 await page.goto(`${WEB}/@${username}`);
-await page.waitForFunction(() => window.__worldReadyAt !== undefined && !document.querySelector('.mg-world-loading'), undefined, {
-  timeout: 180_000,
-  polling: 250,
-});
-// Since this page's navigation began, which is about where the old measure started.
-const worldReadyMs = Math.round(await page.evaluate(() => window.__worldReadyAt));
+await page.waitForFunction(() => window.__shownAt !== undefined, undefined, { timeout: 180_000, polling: 250 });
+const load = await page.evaluate(() => ({
+  shownMs: Math.round(window.__shownAt),
+  longTasks: window.__long.length,
+  longTaskMs: Math.round(window.__long.reduce((sum, d) => sum + d, 0)),
+  longest: Math.round(Math.max(0, ...window.__long)),
+}));
 
 const resources = await page.evaluate(() => {
   const byType = {};
@@ -85,7 +94,7 @@ const resources = await page.evaluate(() => {
     const kind = entry.name.includes('/api/') ? 'api' : (entry.name.split('?')[0].split('.').pop() ?? 'other');
     const bucket = (byType[kind] ??= { count: 0, bytes: 0, cached: 0 });
     bucket.count += 1;
-    // Network bytes: a request answered from the HTTP cache (a prefetched model, say) transfers nothing.
+    // Network bytes: a request answered from the HTTP cache transfers nothing.
     bucket.bytes += entry.transferSize;
     if (entry.transferSize === 0 && entry.encodedBodySize > 0) bucket.cached += 1;
   }
@@ -100,6 +109,7 @@ async function phase(label, act) {
   // Starting the profiler pauses V8 for a few hundred ms; frames are counted only after that.
   await cdp.send('Profiler.start');
   await page.waitForTimeout(500);
+  const started = Date.now();
   await page.evaluate(() => {
     window.__probe = { frames: [], long: [] };
     const tick = (t) => {
@@ -107,8 +117,6 @@ async function phase(label, act) {
       if (window.__probe.on !== false) requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
-    // Kept to be disconnected with the phase: it pushes to whichever __probe is current, so one left running would count
-    // the next phase's long tasks again.
     window.__probe.observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) window.__probe.long.push(entry.duration);
     });
@@ -117,18 +125,14 @@ async function phase(label, act) {
   await act();
   const stats = await page.evaluate(() => {
     window.__probe.on = false;
-    // Long tasks noted but not yet handed to the observer still belong to this phase.
     for (const entry of window.__probe.observer.takeRecords()) window.__probe.long.push(entry.duration);
     window.__probe.observer.disconnect();
     const { frames, long } = window.__probe;
     const deltas = frames.slice(1).map((t, i) => t - frames[i]).sort((a, b) => a - b);
     const at = (q) => deltas[Math.min(deltas.length - 1, Math.floor(q * deltas.length))] ?? 0;
-    const mean = deltas.reduce((sum, d) => sum + d, 0) / Math.max(1, deltas.length);
     return {
-      fps: Math.round(1000 / mean),
       p50: +at(0.5).toFixed(2),
       p95: +at(0.95).toFixed(2),
-      p99: +at(0.99).toFixed(2),
       max: +(deltas.at(-1) ?? 0).toFixed(1),
       longTasks: long.length,
       longTaskMs: Math.round(long.reduce((sum, d) => sum + d, 0)),
@@ -136,7 +140,19 @@ async function phase(label, act) {
     };
   });
   const { profile } = await cdp.send('Profiler.stop');
-  return { label, ...stats, hot: hottest(profile) };
+  const busy = busyOf(profile);
+  return { label, ...stats, mainThreadMsPerSecond: Math.round(busy / ((Date.now() - started) / 1000)), hot: hottest(profile) };
+}
+
+/** The main thread's busy time across a profile, in ms. */
+function busyOf(profile) {
+  const byId = new Map(profile.nodes.map((node) => [node.id, node]));
+  let busy = 0;
+  profile.samples.forEach((id, index) => {
+    const name = byId.get(id).callFrame.functionName;
+    if (name !== '(idle)' && name !== '(program)') busy += (profile.timeDeltas[index] ?? 0) / 1000;
+  });
+  return busy;
 }
 
 /** Self time per function across the profile, highest first. */
@@ -158,29 +174,21 @@ function hottest(profile) {
 }
 
 await page.waitForTimeout(SETTLE_MS);
-// The performance report sits behind the settings menu; it stays open, as the old side panel did.
-await page.getByRole('button', { name: '화면 설정' }).click().catch(() => {});
-await page.getByRole('button', { name: '성능 보기' }).click().catch(() => {});
-const renderer = await page.locator('.mh-status').innerText().catch(() => '');
-const standing = await phase('standing', () => page.waitForTimeout(PHASE_MS));
-await page.locator('.mg-world-canvas canvas').click({ position: { x: 300, y: 300 } }).catch(() => {});
-const walking = await phase('walking', async () => {
-  await page.keyboard.down('KeyW');
-  await page.waitForTimeout(PHASE_MS / 2);
-  await page.keyboard.up('KeyW');
-  await page.keyboard.down('KeyD');
-  await page.waitForTimeout(PHASE_MS / 2);
-  await page.keyboard.up('KeyD');
+const resting = await phase('resting', () => page.waitForTimeout(PHASE_MS));
+const box = await page.locator('.mg-saju-canvas').boundingBox();
+const turning = await phase('turning', async () => {
+  // A slow drag across the picture, back and forth: the camera turns about what it looks at.
+  const y = box.y + box.height * 0.55;
+  await page.mouse.move(box.x + box.width * 0.3, y);
+  await page.mouse.down();
+  for (let step = 0; step < 4; step++) {
+    await page.mouse.move(box.x + box.width * (step % 2 ? 0.3 : 0.7), y, { steps: 60 });
+    await page.waitForTimeout(PHASE_MS / 8);
+  }
+  await page.mouse.up();
 });
 
-const report = {
-  web: WEB,
-  worldReadyMs,
-  resources,
-  renderer: renderer.replace(/\s+/g, ' ').slice(0, 600),
-  phases: [standing, walking],
-  errors,
-};
+const report = { web: WEB, village: neighbours, load, resources, phases: [resting, turning], errors };
 console.log(JSON.stringify({ ...report, phases: report.phases.map(({ hot, ...rest }) => rest) }, null, 2));
 for (const { label, hot } of report.phases) console.log(`\n# ${label} — main thread self time\n${hot.join('\n')}`);
 if (OUT) writeFileSync(OUT, JSON.stringify(report, null, 2));

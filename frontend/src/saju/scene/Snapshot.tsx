@@ -10,8 +10,8 @@ import { createRenderer, Scene, SHADOWS, type StageIsland } from './Stage';
 import { ISLANDS } from './terrain';
 import { useMood } from './works';
 
-/** Frames drawn before the picture is taken: the first have the shadows cast and the lake's mirror drawn. */
-const SETTLE_FRAMES = 8;
+/** Frames drawn, once the canvas is ready (see Stage's Ready), before the picture is taken: the shadows cast and the lake's mirror drawn. */
+const SETTLE_FRAMES = 3;
 const FRAME = frameOf([{ x: 0, z: 0, kind: 'home' }]);
 const ORIGIN = [0, 0, 0] as const;
 const ISLAND: readonly StageIsland[] = [{ x: 0, z: 0, ...ISLANDS.home }];
@@ -21,10 +21,11 @@ const ISLAND: readonly StageIsland[] = [{ x: 0, z: 0, ...ISLANDS.home }];
  * task that drew it (a WebGL one without a kept buffer, likewise), so the copy is made there and then, after the
  * darkroom has developed the frame.
  */
-function Shutter({ onShot }: { onShot: (canvas: HTMLCanvasElement) => void }) {
+function Shutter({ ready, onShot }: { ready: boolean; onShot: (canvas: HTMLCanvasElement) => void }) {
   const canvas = useThree((state) => state.gl.domElement);
   const frames = useRef(0);
   useFrame(() => {
+    if (!ready) return;
     frames.current += 1;
     if (frames.current !== SETTLE_FRAMES) return;
     const picture = document.createElement('canvas');
@@ -44,13 +45,15 @@ export function Snapshot({ profile, onShot }: { profile: Profile; onShot: (canva
   const mood = useMood();
   const [warm, setWarm] = useState(false);
   const warmed = useCallback(() => setWarm(true), []);
+  const [ready, setReady] = useState(false);
+  const readied = useCallback(() => setReady(true), []);
   return (
     <div className="mg-saju-snapshot" style={{ width: PICTURE_SIZE, height: PICTURE_SIZE }} aria-hidden="true">
       <Canvas orthographic flat shadows={SHADOWS} dpr={1} frameloop={warm ? 'always' : 'never'} gl={createRenderer} camera={{ near: 1, far: 400, position: [60, 60, 60] }}>
-        <Scene frame={FRAME} snap islands={ISLAND} mood={mood} quality="high" still onWarm={warmed}>
+        <Scene frame={FRAME} snap islands={ISLAND} mood={mood} quality="high" still onWarm={warmed} onReady={readied}>
           <HomeEstate profile={profile} origin={ORIGIN} />
         </Scene>
-        <Shutter onShot={onShot} />
+        <Shutter ready={ready} onShot={onShot} />
       </Canvas>
     </div>
   );

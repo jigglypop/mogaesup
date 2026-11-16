@@ -166,8 +166,9 @@ function moteMesh(motes: Motes, glow: boolean): Mesh | null {
   const count = motes.at.length / 3;
   if (count === 0) return null;
   const geometry = new InstancedBufferGeometry();
-  geometry.index = QUAD.index;
-  geometry.setAttribute('position', QUAD.getAttribute('position'));
+  // Its own copy of the quad: a geometry let go takes its buffers with it, and another island's motes still draw.
+  geometry.index = QUAD.index!.clone();
+  geometry.setAttribute('position', QUAD.getAttribute('position').clone());
   geometry.setAttribute('aAt', new InstancedBufferAttribute(new Float32Array(motes.at), 3));
   geometry.setAttribute('aLook', new InstancedBufferAttribute(new Float32Array(motes.look), 4));
   geometry.setAttribute('aWay', new InstancedBufferAttribute(new Float32Array(motes.way), 4));
@@ -361,27 +362,48 @@ function Beam({ life }: { life: Extract<Life, { kind: 'beam' }> }) {
 }
 
 /**
+ * Copies a scattering's matrices are padded to: more than a uniform buffer holds (64 KB, 1024 matrices). Three keeps
+ * the matrices of a smaller one in a uniform array of exactly its length, so every scattering of another count was a
+ * program and a pipeline of its own, each made again for the shadows; past that it reads them as vertex attributes,
+ * the same for all.
+ */
+const PADDED_COPIES = 1025;
+
+/** `values`, or a copy of them `length` long with zeros after them. */
+function padded(values: Float32Array, length: number): Float32Array {
+  if (values.length >= length) return values;
+  const copy = new Float32Array(length);
+  copy.set(values);
+  return copy;
+}
+
+/**
  * Mounts `build` where its parent stands. The build's meshes are let go with it; `origin` is where the parent stands
  * in the village, for the lamps it lends.
  */
 export function Built({ build, origin }: { build: Build; origin: readonly [number, number, number] }) {
   useLamps(build.lamps, origin);
   const made = useMemo(() => {
-    const scattered = build.sprigs.map(({ kind, count, matrices, colors, outs }) => {
+    const scattered = build.sprigs.flatMap((sprigs): Mesh[] => {
+      const { kind, count, matrices, colors, outs } = sprigs;
       const base = sprigGeometry(kind);
       const geometry = new BufferGeometry();
-      geometry.index = base.index;
-      for (const name of Object.keys(base.attributes)) geometry.setAttribute(name, base.getAttribute(name));
+      // Its own copy of the shape: a geometry let go takes its buffers with it, while the village's other copies draw on.
+      geometry.index = base.index && base.index.clone();
+      for (const name of Object.keys(base.attributes)) geometry.setAttribute(name, base.getAttribute(name).clone());
       geometry.setAttribute('aOut', new InstancedBufferAttribute(outs, 3));
-      const mesh = new InstancedMesh(geometry, sprigMaterial(kind), count);
-      mesh.instanceMatrix = new InstancedBufferAttribute(matrices, 16);
-      mesh.instanceColor = new InstancedBufferAttribute(colors, 3);
+      // Padded past what a uniform buffer holds, every scattering of a kind is drawn by one program (see PADDED_COPIES).
+      const room = Math.max(count, PADDED_COPIES);
+      const mesh = new InstancedMesh(geometry, sprigMaterial(kind), room);
+      mesh.instanceMatrix = new InstancedBufferAttribute(padded(matrices, room * 16), 16);
+      mesh.instanceColor = new InstancedBufferAttribute(padded(colors, room * 3), 3);
+      mesh.count = count;
       // Only what is big enough to shade something throws a shadow, and the lake does not mirror what lies low.
       mesh.castShadow = kind === 'leaf' || kind === 'needle' || kind === 'puff';
       mesh.receiveShadow = true;
       if (kind === 'blade' || kind === 'bloom') mesh.layers.set(GRASS_LAYER);
       mesh.computeBoundingSphere();
-      return mesh;
+      return [mesh];
     });
     const { glow, soft } = motesOf(build);
     return { scattered, motes: [moteMesh(glow, true), moteMesh(soft, false)].filter((mesh): mesh is Mesh => !!mesh) };
@@ -391,7 +413,7 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
       for (const { geometry } of build.meshes) geometry.dispose();
       for (const mesh of made.scattered) {
         mesh.geometry.dispose();
-        mesh.dispose();
+        if (mesh instanceof InstancedMesh) mesh.dispose();
       }
       for (const mesh of made.motes) mesh.geometry.dispose();
     },

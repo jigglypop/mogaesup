@@ -9,7 +9,7 @@ import { AZIMUTH, dragShift, ELEVATION, frameOf, stand, TILT_RANGE, ZOOM_RANGE }
 import type { Gaze } from '../scene/look';
 import { WATER_LEVEL } from '../scene/mood';
 import { ISLANDS } from '../scene/terrain';
-import { useBuild, WorksContext, type Works } from '../scene/works';
+import { newWorks, useBuild, WorksContext, type Works } from '../scene/works';
 import { PLOT_REACH } from '../village';
 
 type Created = (state: { gl: object; camera: OrthographicCamera }) => void;
@@ -292,7 +292,7 @@ describe('섬을 짓는 차례', () => {
   afterEach(() => void vi.useRealTimers());
 
   it('마을은 한 섬씩 차례로 짓고, 캔버스는 남은 섬을 센다', async () => {
-    const works: Works = { pending: 0, warm: false };
+    const works: Works = newWorks();
     const built: string[] = [];
     const page = await mount(
       <WorksContext.Provider value={works}>
@@ -316,7 +316,7 @@ describe('섬을 짓는 차례', () => {
   });
 
   it('이미 그리고 있는 캔버스에 뒤늦게 서는 섬은 차례를 기다리지 않는다', async () => {
-    const works: Works = { pending: 0, warm: true };
+    const works: Works = { ...newWorks(), warm: true };
     const built: string[] = [];
     const page = await mount(
       <WorksContext.Provider value={works}>
@@ -331,7 +331,7 @@ describe('섬을 짓는 차례', () => {
   });
 
   it('지어지기 전에 사라진 섬은 세지 않는다', async () => {
-    const works: Works = { pending: 0, warm: false };
+    const works: Works = newWorks();
     const page = await mount(
       <WorksContext.Provider value={works}>
         <Island name="깃발" turn={9} built={[]} />

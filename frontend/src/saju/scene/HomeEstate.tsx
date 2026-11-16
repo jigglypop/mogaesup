@@ -1,7 +1,7 @@
 import { Component, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import type { Profile } from '../profile';
-import type { Build, V3 } from './build';
+import { mergeBuilds, type Build, type V3 } from './build';
 import { Built } from './Built';
 import { loadDogModel, type DogModel } from './dogModel';
 import { estateParts } from './estate/draw';
@@ -25,29 +25,43 @@ type Piece = { key: string; at: V3; make: () => Build };
 const MIDDLE: V3 = [0, 0, 0];
 
 /**
- * The pieces' builds, one a turn: the first `turn` builds after the canvas's first island, each next one a frame after
- * the last. The canvas waits for all of them before it draws (works); a piece joins a canvas already drawing at once. A
- * piece that fails to build is reported and left out: the canvas does not wait for it forever.
+ * The pieces built one a turn (the first `turn` builds after the canvas's first island, each next one a frame after the
+ * last) and laid down together as one build (see mergeBuilds). The canvas waits for all of them before it draws (works);
+ * pieces for a canvas already drawing build at once, and the island keeps what it had until they are all built. A piece
+ * that fails to build is reported and left out: the canvas does not wait for it forever.
  */
-function useParts(parts: readonly Piece[], turn: number): readonly (Build | null)[] {
+function useParts(parts: readonly Piece[], turn: number): Build | null {
   const works = useContext(WorksContext);
-  const [built, setBuilt] = useState<{ parts: readonly Piece[]; builds: readonly (Build | null)[] }>({ parts, builds: [] });
+  const [built, setBuilt] = useState<Build | null>(null);
   useEffect(() => {
+    if (parts.length === 0) return undefined;
     let left = parts.length;
     if (works) works.pending += left;
-    const builds: (Build | null)[] = parts.map(() => null);
+    const builds: { build: Build; at: V3 }[] = [];
     let index = 0;
     const next = () => {
+      const part = parts[index]!;
       try {
-        builds[index] = parts[index]!.make();
+        builds.push({ build: part.make(), at: part.at });
       } catch (error) {
         reportError(error);
       }
       index += 1;
+      if (index < parts.length) {
+        left -= 1;
+        if (works) works.pending -= 1;
+        timer = setTimeout(next, PART_EVERY_MS);
+        return;
+      }
+      // The last piece: the island is laid down as one, and only then counted as built.
+      try {
+        setBuilt(mergeBuilds(builds));
+      } catch (error) {
+        reportError(error);
+      }
+      builds.length = 0;
       left -= 1;
       if (works) works.pending -= 1;
-      setBuilt({ parts, builds: builds.slice() });
-      if (index < parts.length) timer = setTimeout(next, PART_EVERY_MS);
     };
     let timer = setTimeout(next, works?.warm ? 0 : turn * BUILD_EVERY_MS);
     return () => {
@@ -56,7 +70,7 @@ function useParts(parts: readonly Piece[], turn: number): readonly (Build | null
       left = 0;
     };
   }, [parts, turn, works]);
-  return built.parts === parts ? built.builds : [];
+  return built;
 }
 
 /** The guardian's model once it has arrived; the canvas waits for it as for a part still to be built (as Stage's own). */
@@ -147,22 +161,12 @@ function Estate({
     const lawn = lawnStrips(estate, blades, lush).map((strip) => ({ ...strip, at: MIDDLE }));
     return [...estateParts(estate, { lush, paint, house: () => buildHouse({ style }, lush) }), ...lawn];
   }, [estate, lush, style]);
-  const builds = useParts(parts, turn);
-  const places = useMemo(() => parts.map((part) => [origin[0] + part.at[0], origin[1] + part.at[1], origin[2] + part.at[2]] as const), [parts, origin]);
+  const build = useParts(parts, turn);
   const dog = useDog(guardian.dog);
   const charms = guardian.charms.map((item) => item.charm).join('+');
   return (
     <>
-      {parts.map((part, index) => {
-        const build = builds[index];
-        return (
-          build && (
-            <group key={part.key} position={part.at}>
-              <Built build={build} origin={places[index]!} />
-            </group>
-          )
-        );
-      })}
+      {build && <Built build={build} origin={origin} />}
       {dog && (
         <group key={`${guardian.dog}:${charms}`} position={[estate.guardian.at[0], 0, estate.guardian.at[1]]} scale={GUARDIAN_SCALE}>
           <Guardian guardian={guardian} model={dog} position={[0, 0, 0]} facing={estate.guardian.facing} playful={playful} />
