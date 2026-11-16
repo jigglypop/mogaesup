@@ -1,9 +1,13 @@
 // The last picture of a 섬 this browser drew, kept to show at once the next time the page opens on it, while the
 // canvas makes the village ready again; the canvas comes up over it when it shows. Kept in the browser's Cache Storage
 // under names of its own (never fetched from anywhere), the latest few: one for each view of each 섬, at each size of
-// the window and each hour of the day, since a picture only lines up with the canvas as it was taken.
+// the window and each hour of the day, since a picture only lines up with the canvas as it was taken. A new version of
+// the 섬's code (__SAJU_SCENE__, see shelf) draws the islands anew, so what an older one drew is let go.
 
-const STORE = 'mg-saju-glimpses-1';
+declare const __SAJU_SCENE__: string;
+
+const STORES = 'mg-saju-glimpses-';
+const STORE = `${STORES}${__SAJU_SCENE__}`;
 /** How many pictures are kept, the ones taken longest ago let go first. */
 const KEEP = 24;
 /** How the pictures are kept: small, and soft enough for the moment they are seen. */
@@ -12,9 +16,16 @@ const QUALITY = 0.8;
 
 const requestOf = (key: string) => new Request(new URL(`/__saju/glimpse/${encodeURIComponent(key)}`, location.origin));
 
+let pruned = false;
+
 async function store(): Promise<Cache | null> {
   if (typeof caches === 'undefined') return null;
   try {
+    if (!pruned) {
+      pruned = true;
+      const names = await caches.keys();
+      await Promise.all(names.filter((name) => name.startsWith(STORES) && name !== STORE).map((name) => caches.delete(name)));
+    }
     return await caches.open(STORE);
   } catch {
     // Storage this page may not use (a private window that refuses it, say): there is just no picture.
