@@ -29,8 +29,14 @@ const { api, shots } = vi.hoisted(() => ({
   shots: { count: 0 },
 }));
 
-// The canvas needs a graphics card: here it is one that has drawn its first frames.
-vi.mock('../scene/Stage', () => ({ Stage: ({ pins }: { pins?: ReactNode }) => <div className="mg-saju-canvas" data-drawn="">{pins}</div> }));
+// The canvas needs a graphics card: here it is one that has drawn its first frames, of the village it was given.
+vi.mock('../scene/Stage', () => ({
+  Stage: ({ pins, homes }: { pins?: ReactNode; homes: readonly { id: string }[] }) => (
+    <div className="mg-saju-canvas" data-drawn={homes[0]?.id ?? ''}>
+      {pins}
+    </div>
+  ),
+}));
 // The island drawn off the page: a canvas handed over once, as soon as it is mounted.
 vi.mock('../scene/Snapshot', () => ({
   Snapshot: ({ onShot }: { onShot: (canvas: HTMLCanvasElement) => void }) => {

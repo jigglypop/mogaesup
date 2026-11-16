@@ -99,6 +99,11 @@ type LookProps = {
   quality: Quality;
   /** Told once the scene can be drawn without a wait: its islands built and every shader they are drawn with made. */
   onWarm: () => void;
+  /**
+   * Whose village it is. Another one is waited for as the first was (its islands built, its shaders made), and the
+   * camera is there at once, not eased over from a lake laid out about another home.
+   */
+  village?: string;
 };
 
 const UNTOUCHED: RefObject<Gaze> = { current: UNMOVED };
@@ -238,7 +243,7 @@ async function prebuild(renderer: WebGPURenderer, room: Darkroom): Promise<void>
  * is) and the shaders they are drawn with are built (see prebuild). Its first frames are then drawn out of sight while
  * the last of their pipelines are made (see making).
  */
-function useWarm(renderer: WebGPURenderer, room: Darkroom, onWarm: () => void): void {
+function useWarm(renderer: WebGPURenderer, room: Darkroom, onWarm: () => void, village: string): void {
   const works = useContext(WorksContext);
   const darkroom = useRef(room);
   darkroom.current = room;
@@ -265,11 +270,11 @@ function useWarm(renderer: WebGPURenderer, room: Darkroom, onWarm: () => void): 
       live = false;
       cancelAnimationFrame(frame);
     };
-  }, [renderer, works, onWarm]);
+  }, [renderer, works, onWarm, village]);
 }
 
 /** Everything about the picture that is not the village itself. Mounted once in a canvas, beside the homes. */
-export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED, islands, mood, quality, onWarm }: LookProps) {
+export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED, islands, mood, quality, onWarm, village = '' }: LookProps) {
   const renderer = useRenderer();
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera) as OrthographicCamera;
@@ -290,7 +295,16 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
   const fine = quality === 'high';
   const room = useMemo(() => darkroom(renderer, scene, camera, fine, dials), [renderer, scene, camera, fine, dials]);
   useEffect(() => () => room.dispose(), [room]);
-  useWarm(renderer, room, onWarm);
+  useWarm(renderer, room, onWarm, village);
+  // Another village is looked at from where the camera begins, at once: the viewer's gaze is put back there as well
+  // (see Stage), and nothing of the lake laid out about the last home is eased over from.
+  const arrived = useRef(village);
+  useLayoutEffect(() => {
+    if (arrived.current === village) return;
+    arrived.current = village;
+    shown.current = null;
+    eased.current = { ...UNMOVED, pan: { ...UNMOVED.pan } };
+  }, [village]);
   const works = useContext(WorksContext);
   /** Where the camera and the sun stood when they were last drawn from: a frame after either moved is a moving one. */
   const stood = useMemo(() => ({ view: new Matrix4(), projection: new Matrix4(), sun: new Vector3(), reach: 0 }), []);

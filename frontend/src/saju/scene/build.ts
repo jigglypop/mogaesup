@@ -70,10 +70,16 @@ export type Life =
 export type PaneStyle = 'room' | 'paper' | 'lantern';
 
 type Template = { positions: ArrayLike<number>; normals: ArrayLike<number>; uvs: ArrayLike<number>; indices: ArrayLike<number>; wrap: boolean };
-type Pile = { material: Material; cast: boolean; tile: number; grain: boolean; positions: number[]; normals: number[]; uvs: number[]; colors: number[]; indices: number[] };
+type Pile = { material: Material; look: Finishing; cast: boolean; tile: number; grain: boolean; positions: number[]; normals: number[]; uvs: number[]; colors: number[]; indices: number[] };
 type Sprigs = { matrices: number[]; colors: number[]; outs: number[] };
 
-export type BuiltMesh = { geometry: BufferGeometry; material: Material; cast: boolean };
+/**
+ * What a mesh's material is made from, as plain data: a finish (see materialOf) or a pane of lit glass (paneMaterial).
+ * A build kept between visits (see shelf) is kept with these, and its materials found again from them.
+ */
+export type Finishing = { finish: Required<Pick<Finish, 'surface' | 'rough' | 'metal' | 'power' | 'opacity' | 'twoSided'>> & { glow: string | null } } | { pane: PaneStyle; power: number };
+/** A mesh of a build: `look` is what its material is made from (a build that has none for a mesh is not kept between visits). */
+export type BuiltMesh = { geometry: BufferGeometry; material: Material; cast: boolean; look?: Finishing };
 export type BuiltSprigs = { kind: SprigKind; count: number; matrices: Float32Array; colors: Float32Array; outs: Float32Array };
 export type Build = { meshes: BuiltMesh[]; sprigs: BuiltSprigs[]; lamps: Lamp[]; lives: Life[] };
 
@@ -139,9 +145,10 @@ export function setLampGain(gain: number): void {
   for (const [material, power] of glowing) material.emissiveIntensity = power * gain;
 }
 
-function materialOf(finish: Finish): { material: MeshStandardMaterial; key: string } {
+function materialOf(finish: Finish): { material: MeshStandardMaterial; key: string; look: Finishing } {
   const { surface = 'plain', rough = 0.85, metal = 0, glow, power = 1, opacity = 1, twoSided = false } = finish;
   const key = `${surface}|${rough}|${metal}|${glow ?? ''}|${power}|${opacity}|${twoSided}`;
+  const look: Finishing = { finish: { surface, rough, metal, glow: glow ?? null, power, opacity, twoSided } };
   let material = materials.get(key);
   if (!material) {
     material = new MeshStandardMaterial({ vertexColors: true, roughness: rough, metalness: metal });
@@ -163,7 +170,14 @@ function materialOf(finish: Finish): { material: MeshStandardMaterial; key: stri
     if (twoSided) material.side = DoubleSide;
     materials.set(key, material);
   }
-  return { material, key };
+  return { material, key, look };
+}
+
+/** The material a kept mesh's `look` calls for: the same one its build was made with. */
+export function materialFor(look: Finishing): Material {
+  if ('pane' in look) return paneMaterial(look.pane, look.power);
+  const { glow, ...finish } = look.finish;
+  return materialOf(glow === null ? finish : { ...finish, glow }).material;
 }
 
 const panes = new Map<string, MeshStandardMaterial>();
@@ -296,7 +310,7 @@ const moved = (at: V3, by: V3): V3 => [at[0] + by[0], at[1] + by[1], at[2] + by[
  * own geometries are let go.
  */
 export function mergeBuilds(parts: readonly { build: Build; at: V3 }[]): Build {
-  const piles = new Map<string, { material: Material; cast: boolean; items: { geometry: BufferGeometry; at: V3 }[] }>();
+  const piles = new Map<string, { material: Material; cast: boolean; look: Finishing | undefined; items: { geometry: BufferGeometry; at: V3 }[] }>();
   const meshes: BuiltMesh[] = [];
   const scattered = new Map<SprigKind, { matrices: Float32Array[]; colors: Float32Array[]; outs: Float32Array[]; count: number }>();
   const lamps: Lamp[] = [];
@@ -309,7 +323,7 @@ export function mergeBuilds(parts: readonly { build: Build; at: V3 }[]): Build {
         continue;
       }
       const key = `${mesh.material.uuid}|${mesh.cast}`;
-      const pile = piles.get(key) ?? { material: mesh.material, cast: mesh.cast, items: [] };
+      const pile = piles.get(key) ?? { material: mesh.material, cast: mesh.cast, look: mesh.look, items: [] };
       pile.items.push({ geometry: mesh.geometry, at });
       piles.set(key, pile);
     }
@@ -330,9 +344,9 @@ export function mergeBuilds(parts: readonly { build: Build; at: V3 }[]): Build {
     for (const lamp of build.lamps) lamps.push({ ...lamp, at: moved(lamp.at, at) });
     for (const life of build.lives) lives.push({ ...life, at: moved(life.at, at) });
   }
-  for (const { material, cast, items } of piles.values()) {
+  for (const { material, cast, look, items } of piles.values()) {
     const single = items.length === 1 && items[0]!.at.every((value) => value === 0);
-    meshes.push({ geometry: single ? items[0]!.geometry : joined(items), material, cast });
+    meshes.push({ geometry: single ? items[0]!.geometry : joined(items), material, cast, ...(look ? { look } : {}) });
     if (!single) for (const { geometry } of items) geometry.dispose();
   }
   const concat = (arrays: Float32Array[]) => {
@@ -398,13 +412,13 @@ export class Builder {
   }
 
   private pile(finish: Finish): Pile {
-    const { material, key } = materialOf(finish);
+    const { material, key, look } = materialOf(finish);
     const cast = !finish.shadowless && !finish.glow && (finish.opacity ?? 1) >= 1;
     const pileKey = `${key}|${cast}`;
     let pile = this.piles.get(pileKey);
     if (!pile) {
       const surface = finish.surface ?? 'plain';
-      pile = { material, cast, tile: surface === 'plain' ? 1 : surfaceMaps(surface).size, grain: surface === 'wood', positions: [], normals: [], uvs: [], colors: [], indices: [] };
+      pile = { material, look, cast, tile: surface === 'plain' ? 1 : surfaceMaps(surface).size, grain: surface === 'wood', positions: [], normals: [], uvs: [], colors: [], indices: [] };
       this.piles.set(pileKey, pile);
     }
     return pile;
@@ -586,7 +600,7 @@ export class Builder {
     const key = `pane|${style}|${power}`;
     let pile = this.piles.get(key);
     if (!pile) {
-      pile = { material, cast: false, tile: 1, grain: false, positions: [], normals: [], uvs: [], colors: [], indices: [] };
+      pile = { material, look: { pane: style, power }, cast: false, tile: 1, grain: false, positions: [], normals: [], uvs: [], colors: [], indices: [] };
       this.piles.set(key, pile);
     }
     const from = pile.uvs.length;
@@ -649,7 +663,7 @@ export class Builder {
       geometry.setAttribute('color', new BufferAttribute(new Float32Array(pile.colors), 3));
       const count = pile.positions.length / 3;
       geometry.setIndex(new BufferAttribute(count > 65535 ? new Uint32Array(pile.indices) : new Uint16Array(pile.indices), 1));
-      meshes.push({ geometry, material: pile.material, cast: pile.cast });
+      meshes.push({ geometry, material: pile.material, cast: pile.cast, look: pile.look });
     }
     const sprigs: BuiltSprigs[] = [];
     for (const [kind, { matrices, colors: tints, outs }] of this.sprigs) {

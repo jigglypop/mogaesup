@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode }
 import { useFrame } from '@react-three/fiber';
 import {
   AdditiveBlending,
+  Box3,
   BufferAttribute,
   BufferGeometry,
   Color,
@@ -10,13 +11,15 @@ import {
   DoubleSide,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
-  InstancedMesh,
+  InstancedInterleavedBuffer,
+  InterleavedBufferAttribute,
   LinearFilter,
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
   RGBAFormat,
   RingGeometry,
+  Sphere,
   SphereGeometry,
   Vector3,
   type Group,
@@ -362,20 +365,27 @@ function Beam({ life }: { life: Extract<Life, { kind: 'beam' }> }) {
   );
 }
 
-/**
- * Copies a scattering's matrices are padded to: more than a uniform buffer holds (64 KB, 1024 matrices). Three keeps
- * the matrices of a smaller one in a uniform array of exactly its length, so every scattering of another count was a
- * program and a pipeline of its own, each made again for the shadows; past that it reads them as vertex attributes,
- * the same for all.
- */
-const PADDED_COPIES = 1025;
+const corner = new Vector3();
+const span = new Box3();
 
-/** `values`, or a copy of them `length` long with zeros after them. */
-function padded(values: Float32Array, length: number): Float32Array {
-  if (values.length >= length) return values;
-  const copy = new Float32Array(length);
-  copy.set(values);
-  return copy;
+/** A sphere about every copy of `shape` that `matrices` place (`count` of them): what the camera's view is tested against. */
+function copiesSphere(shape: BufferGeometry, matrices: Float32Array, count: number): Sphere {
+  if (!shape.boundingSphere) shape.computeBoundingSphere();
+  const { center, radius } = shape.boundingSphere!;
+  const reach = center.length() + radius;
+  span.makeEmpty();
+  for (let index = 0; index < count; index++) {
+    const m = index * 16;
+    const size = Math.sqrt(Math.max(
+      matrices[m]! ** 2 + matrices[m + 1]! ** 2 + matrices[m + 2]! ** 2,
+      matrices[m + 4]! ** 2 + matrices[m + 5]! ** 2 + matrices[m + 6]! ** 2,
+      matrices[m + 8]! ** 2 + matrices[m + 9]! ** 2 + matrices[m + 10]! ** 2,
+    ));
+    const [x, y, z, out] = [matrices[m + 12]!, matrices[m + 13]!, matrices[m + 14]!, reach * size];
+    span.expandByPoint(corner.set(x + out, y + out, z + out));
+    span.expandByPoint(corner.set(x - out, y - out, z - out));
+  }
+  return span.getBoundingSphere(new Sphere());
 }
 
 /**
@@ -394,22 +404,22 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
         return lawn;
       }
       const base = sprigGeometry(kind);
-      const geometry = new BufferGeometry();
+      const geometry = new InstancedBufferGeometry();
       // Its own copy of the shape: a geometry let go takes its buffers with it, while the village's other copies draw on.
       geometry.index = base.index && base.index.clone();
       for (const name of Object.keys(base.attributes)) geometry.setAttribute(name, base.getAttribute(name).clone());
+      // Each copy's matrix (as four columns), colour and way out, read by the kind's material (see sprigMaterial).
+      const columns = new InstancedInterleavedBuffer(matrices, 16);
+      for (let column = 0; column < 4; column++) geometry.setAttribute(`aM${column}`, new InterleavedBufferAttribute(columns, 4, column * 4));
+      geometry.setAttribute('aColor', new InstancedBufferAttribute(colors, 3));
       geometry.setAttribute('aOut', new InstancedBufferAttribute(outs, 3));
-      // Padded past what a uniform buffer holds, every scattering of a kind is drawn by one program (see PADDED_COPIES).
-      const room = Math.max(count, PADDED_COPIES);
-      const mesh = new InstancedMesh(geometry, sprigMaterial(kind), room);
-      mesh.instanceMatrix = new InstancedBufferAttribute(padded(matrices, room * 16), 16);
-      mesh.instanceColor = new InstancedBufferAttribute(padded(colors, room * 3), 3);
-      mesh.count = count;
+      geometry.instanceCount = count;
+      geometry.boundingSphere = copiesSphere(base, matrices, count);
+      const mesh = new Mesh(geometry, sprigMaterial(kind));
       // Only what is big enough to shade something throws a shadow, and the lake does not mirror what lies low.
       mesh.castShadow = kind === 'leaf' || kind === 'needle' || kind === 'puff';
       mesh.receiveShadow = true;
       if (kind === 'bloom') mesh.layers.set(GRASS_LAYER);
-      mesh.computeBoundingSphere();
       return [mesh];
     });
     const { glow, soft } = motesOf(build);
@@ -418,10 +428,7 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
   useEffect(
     () => () => {
       for (const { geometry } of build.meshes) geometry.dispose();
-      for (const mesh of made.scattered) {
-        mesh.geometry.dispose();
-        if (mesh instanceof InstancedMesh) mesh.dispose();
-      }
+      for (const mesh of made.scattered) mesh.geometry.dispose();
       for (const mesh of made.motes) mesh.geometry.dispose();
     },
     [build, made],

@@ -2,7 +2,7 @@ import './ui/tokens.css';
 import './ui/ui.css';
 import './pages/pages.css';
 
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
@@ -11,6 +11,7 @@ import { AuthProvider, useAuth } from './auth/AuthProvider';
 import { AuthPage } from './pages/AuthPage';
 import { ExplorePage } from './pages/ExplorePage';
 import { Loading } from './pages/Loading';
+import { askEarly } from './saju/early';
 import { isMinihomePage, movedPath } from './saju/routes';
 import { AppErrorBoundary } from './ui/ErrorBoundary';
 import { initTheme } from './ui/theme';
@@ -35,15 +36,25 @@ function StudioRedirect() {
   return <Navigate to={`${target}${hash}`} replace />;
 }
 
-/** `/@username` is a member's 섬, with its village and (for its owner) the form its home is built from. */
+/**
+ * `/@username` is a member's 섬, with its village and (for its owner) the form its home is built from. One page serves
+ * every 섬: going to another keeps the village's canvas (see SajuPage).
+ */
 function UsernameRoute() {
   const { slug = '', '*': rest = '' } = useParams();
   const page = rest.replace(/\/+$/, '');
-  if (!slug.startsWith('@') || slug.length < 2 || !isMinihomePage(page)) return <Navigate to="/" replace />;
+  const valid = slug.startsWith('@') && slug.length >= 2 && isMinihomePage(page);
   const username = slug.slice(1).toLowerCase();
+  // The 섬 is asked for as soon as who is looking is known, while the page's code is still arriving.
+  const { status, user } = useAuth();
+  const viewer = user?.username ?? null;
+  useEffect(() => {
+    if (valid && status !== 'loading') askEarly(username, viewer);
+  }, [valid, status, username, viewer]);
+  if (!valid) return <Navigate to="/" replace />;
   return (
     <Suspense fallback={<Loading />}>
-      <SajuPage key={username} username={username} rest={page} />
+      <SajuPage username={username} rest={page} />
     </Suspense>
   );
 }

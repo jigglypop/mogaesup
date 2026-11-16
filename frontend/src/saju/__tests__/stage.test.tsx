@@ -291,7 +291,7 @@ describe('섬을 짓는 차례', () => {
   beforeEach(() => void vi.useFakeTimers());
   afterEach(() => void vi.useRealTimers());
 
-  it('마을은 한 섬씩 차례로 짓고, 캔버스는 남은 섬을 센다', async () => {
+  it('마을은 한 섬씩 차례로, 섬마다 작업 하나에 짓고 사이를 비워 두지 않으며, 캔버스는 남은 섬을 센다', async () => {
     const works: Works = newWorks();
     const built: string[] = [];
     const page = await mount(
@@ -304,10 +304,10 @@ describe('섬을 짓는 차례', () => {
     expect(works.pending).toBe(3);
     await pass(0);
     expect(built).toEqual(['가운데']);
-    await pass(60);
+    await pass(1);
     expect(built).toEqual(['가운데', '동쪽']);
     expect(works.pending).toBe(1);
-    await pass(479);
+    await pass(7);
     expect(built).toHaveLength(2);
     await pass(1);
     expect(built).toEqual(['가운데', '동쪽', '깃발']);

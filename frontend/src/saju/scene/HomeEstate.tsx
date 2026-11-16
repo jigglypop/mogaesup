@@ -2,13 +2,15 @@ import { Component, useCallback, useContext, useEffect, useMemo, useRef, useStat
 
 import type { Profile } from '../profile';
 import { mergeBuilds, type Build, type V3 } from './build';
+import { keepEstate, keptEstate } from './kept';
+import { fromShelf, nameOf, shelving, toShelf } from './shelf';
 import { Built } from './Built';
 import { loadDogModel, type DogModel } from './dogModel';
 import { estateParts } from './estate/draw';
 import { estateHomeOf, lawnOf, lawnStrips } from './estateHome';
 import { Guardian } from './Guardian';
 import { buildHouse, buildLot } from './homes';
-import { useBuild, WorksContext } from './works';
+import { countWork, useBuild, WorksContext } from './works';
 
 // The page's own island in the canvas: its estate (see estateHome) built a piece at a time, the ground first and the
 // house second, each between frames, so the page answers while it comes up; and its guardian at the door. An estate
@@ -16,27 +18,33 @@ import { useBuild, WorksContext } from './works';
 
 /** The guardian stands a little smaller than it was drawn, beside a house whose door is a metre high (as Stage's Diorama). */
 const GUARDIAN_SCALE = 0.8;
-/** Milliseconds between one island's building and the next (works), and between one part of the estate and the next. */
-const BUILD_EVERY_MS = 60;
-const PART_EVERY_MS = 16;
 
 /** One build of the island: an estate's part, or a strip of its lawn, mounted at `at` about the island's middle. */
 type Piece = { key: string; at: V3; make: () => Build };
 const MIDDLE: V3 = [0, 0, 0];
 
 /**
- * The pieces built one a turn (the first `turn` builds after the canvas's first island, each next one a frame after the
- * last) and laid down together as one build (see mergeBuilds). The canvas waits for all of them before it draws (works);
- * pieces for a canvas already drawing build at once, and the island keeps what it had until they are all built. A piece
- * that fails to build is reported and left out: the canvas does not wait for it forever.
+ * The pieces built one a task (the page can answer between them) and laid down together as one build (see
+ * mergeBuilds). The canvas waits for all of them before it draws (works); the island keeps what it had until they are
+ * all built. A piece that fails to build is reported and left out: the canvas does not wait for it forever. An estate
+ * built on an earlier visit, for the same reading, is laid down from what that visit kept (see shelf).
  */
-function useParts(parts: readonly Piece[], turn: number): Build | null {
+function useParts(parts: readonly Piece[], turn: number, reading: object, key: string): Build | null {
   const works = useContext(WorksContext);
   const [built, setBuilt] = useState<Build | null>(null);
+  const order = useRef(turn);
+  order.current = turn;
   useEffect(() => {
     if (parts.length === 0) return undefined;
+    // Built before for this reading (the page has come back to it, or the picture draws it again): no parts to build.
+    const known = keptEstate(reading, key);
+    if (known) {
+      setBuilt(known);
+      return undefined;
+    }
     let left = parts.length;
-    if (works) works.pending += left;
+    countWork(works, left);
+    const shelf = shelving ? `estate|${nameOf(JSON.stringify(reading))}|${key}` : null;
     const builds: { build: Build; at: V3 }[] = [];
     let index = 0;
     const next = () => {
@@ -50,12 +58,15 @@ function useParts(parts: readonly Piece[], turn: number): Build | null {
       if (index < parts.length) {
         left -= 1;
         if (works) works.pending -= 1;
-        timer = setTimeout(next, PART_EVERY_MS);
+        timer = setTimeout(next, 0);
         return;
       }
-      // The last piece: the island is laid down as one, and only then counted as built.
+      // The last piece: the island is laid down as one, kept, and only then counted as built.
       try {
-        setBuilt(mergeBuilds(builds));
+        const merged = mergeBuilds(builds);
+        keepEstate(reading, key, merged);
+        if (shelf) toShelf(shelf, merged);
+        setBuilt(merged);
       } catch (error) {
         reportError(error);
       }
@@ -63,13 +74,29 @@ function useParts(parts: readonly Piece[], turn: number): Build | null {
       left -= 1;
       if (works) works.pending -= 1;
     };
-    let timer = setTimeout(next, works?.warm ? 0 : turn * BUILD_EVERY_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const begin = () => {
+      timer = setTimeout(next, works?.warm ? 0 : order.current);
+    };
+    if (shelf) {
+      void fromShelf(shelf).then((kept) => {
+        if (left === 0) return;
+        if (!kept) return begin();
+        keepEstate(reading, key, kept);
+        setBuilt(kept);
+        if (works) works.pending -= left;
+        left = 0;
+      });
+    } else {
+      begin();
+    }
     return () => {
       clearTimeout(timer);
       if (works) works.pending -= left;
       left = 0;
     };
-  }, [parts, turn, works]);
+    // The parts are made from the reading and the key: a new list of parts comes with them.
+  }, [parts, works]);
   return built;
 }
 
@@ -81,7 +108,7 @@ function useDog(id: string): DogModel | null {
   useEffect(() => {
     let live = true;
     let counted = true;
-    if (works) works.pending += 1;
+    countWork(works, 1);
     const done = () => {
       if (counted && works) works.pending -= 1;
       counted = false;
@@ -161,7 +188,7 @@ function Estate({
     const lawn = lawnStrips(estate, blades, lush).map((strip) => ({ ...strip, at: MIDDLE }));
     return [...estateParts(estate, { lush, paint, house: () => buildHouse({ style }, lush) }), ...lawn];
   }, [estate, lush, style]);
-  const build = useParts(parts, turn);
+  const build = useParts(parts, turn, reading, `${landings ?? ''}|${lush}|${style}`);
   const dog = useDog(guardian.dog);
   const charms = guardian.charms.map((item) => item.charm).join('+');
   return (

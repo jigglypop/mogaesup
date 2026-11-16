@@ -1,9 +1,10 @@
-import { Component, memo, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type PointerEvent, type ReactNode, type Ref, type RefObject } from 'react';
+import { Component, memo, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode, type Ref, type RefObject } from 'react';
 
 import { Canvas, useFrame, useThree, type Renderer } from '@react-three/fiber';
 import { AdditiveBlending, CylinderGeometry, Matrix4, MeshBasicMaterial, PCFShadowMap, Plane, Raycaster, RingGeometry, Vector2, Vector3, type Camera } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 
+import { Icon } from '../../ui/icons';
 import type { Compat } from '../compat';
 import type { Profile } from '../profile';
 import { Bridge } from './Bridge';
@@ -17,12 +18,15 @@ import { HomeEstate } from './HomeEstate';
 import { Guardian } from './Guardian';
 import { buildHome, buildLot, GUARDIAN_AT, type IslandKind } from './homes';
 import { BOX } from './kit';
+import { keptBuild } from './kept';
 import { initialQuality, Look, UNMOVED, type Gaze, type Quality } from './look';
-import { WATER_LEVEL, type Mood } from './mood';
+import { DUSK, WATER_LEVEL, type Mood } from './mood';
 import { Stillness } from './parts';
 import { ISLANDS, type IslandShape } from './terrain';
+import { keepGlimpse, readGlimpse, takeGlimpse } from './glimpse';
 import { makeInBackground, makingOf } from './making';
-import { newWorks, useBuild, useMood, WorksContext, type Works } from './works';
+import { paintsPending } from './painter';
+import { countWork, newWorks, useBuild, useMood, WorksContext, type Works } from './works';
 
 // The village: every home on its own island in one lake at the day's last light, seen by one isometric camera that
 // moves between a single home, two homes with their bridge, and the whole village, and that the viewer turns, tilts,
@@ -90,7 +94,7 @@ function useDog(id: string): DogModel | null {
   useEffect(() => {
     let live = true;
     let counted = true;
-    if (works) works.pending += 1;
+    countWork(works, 1);
     const done = () => {
       if (counted && works) works.pending -= 1;
       counted = false;
@@ -118,7 +122,10 @@ function useDog(id: string): DogModel | null {
  */
 export function Diorama({ profile, origin, playful = false, lush = true, turn = 0, kind = 'home' }: { profile: Pick<Profile, 'house' | 'guardian'>; origin: readonly [number, number, number]; playful?: boolean; lush?: boolean; turn?: number; kind?: IslandKind }) {
   const { house, guardian } = profile;
-  const make = useCallback(() => buildHome({ style: house.style, accent: house.accent, symbol: house.symbol }, lush, kind), [house.style, house.accent, house.symbol, lush, kind]);
+  const make = useCallback(
+    () => keptBuild(`home|${house.style}|${house.accent}|${house.symbol}|${lush}|${kind}`, () => buildHome({ style: house.style, accent: house.accent, symbol: house.symbol }, lush, kind)),
+    [house.style, house.accent, house.symbol, lush, kind],
+  );
   const build = useBuild(make, turn);
   const dog = useDog(guardian.dog);
   const charms = guardian.charms.map((item) => item.charm).join('+');
@@ -136,7 +143,7 @@ export function Diorama({ profile, origin, playful = false, lush = true, turn = 
 }
 
 function EmptyLot({ origin, lush, turn, kind }: { origin: readonly [number, number, number]; lush: boolean; turn: number; kind: IslandKind }) {
-  const make = useCallback(() => buildLot(lush, kind), [lush, kind]);
+  const make = useCallback(() => keptBuild(`lot|${lush}|${kind}`, () => buildLot(lush, kind)), [lush, kind]);
   const build = useBuild(make, turn);
   return build && <Built build={build} origin={origin} />;
 }
@@ -263,23 +270,25 @@ type SceneProps = {
   still: boolean;
   /** Told once the scene can be drawn without a wait. */
   onWarm: () => void;
-  /** Told once it has drawn every pipeline its first frames asked for: it can be shown. */
-  onReady?: () => void;
+  /** Told, with whose village it is, once it has drawn every pipeline its first frames asked for: it can be shown. */
+  onReady?: (village: string) => void;
+  /** Whose village it is: another one is made ready, and told of, as the first was. */
+  village?: string;
   children: ReactNode;
 };
 
 /** Everything the village's canvas and a saved picture's share: the hour, the camera's look, the lights, the wind. */
-export function Scene({ frame, snap, gaze, inset, islands, mood, quality, still, onWarm, onReady, children }: SceneProps) {
+export function Scene({ frame, snap, gaze, inset, islands, mood, quality, still, onWarm, onReady, village = '', children }: SceneProps) {
   const works = useMemo<Works>(newWorks, []);
   return (
     <WorksContext.Provider value={works}>
       <Stillness value={still}>
-        <Look frame={frame} snap={snap} {...(gaze ? { gaze } : {})} {...(inset ? { inset } : {})} islands={islands} mood={mood} quality={quality} onWarm={onWarm} />
+        <Look frame={frame} snap={snap} {...(gaze ? { gaze } : {})} {...(inset ? { inset } : {})} islands={islands} mood={mood} quality={quality} onWarm={onWarm} village={village} />
         <Wind />
         <LampPool count={quality === 'high' ? 8 : 4} gain={mood.lamps}>
           <group dispose={null}>{children}</group>
         </LampPool>
-        {onReady && <Ready onReady={onReady} />}
+        {onReady && <Ready village={village} onReady={onReady} />}
       </Stillness>
     </WorksContext.Provider>
   );
@@ -291,16 +300,33 @@ const READY_FRAMES = 3;
 /**
  * Says once that the canvas can be shown: its islands are built and the last few frames asked for no pipeline still
  * being made (see making). From then on a pipeline is made as a frame asks for it, and the canvas keeps its pace.
+ * Another village (the page has gone to another 섬) is waited for again: out of sight, its islands built, its new
+ * pipelines made in the background.
  */
-function Ready({ onReady }: { onReady: () => void }) {
+function Ready({ village, onReady }: { village: string; onReady: (village: string) => void }) {
   const gl = useThree((state) => state.gl);
   const works = useContext(WorksContext);
-  const seen = useRef({ frames: 0, done: false });
+  const seen = useRef({ frames: 0, done: false, village });
+  useLayoutEffect(() => {
+    const ready = seen.current;
+    if (ready.village === village) return;
+    ready.village = village;
+    ready.frames = 0;
+    ready.done = false;
+    if (works) {
+      works.warm = false;
+      works.shown = false;
+      // The bar counts this village's islands from here (see Meter).
+      works.total = works.pending;
+    }
+    makingOf(gl)?.resume();
+  }, [village, works, gl]);
   useFrame(() => {
     const ready = seen.current;
     if (ready.done || (works && !works.warm)) return;
     const making = makingOf(gl);
-    if (making && making.pending > 0) {
+    // Its pipelines made, and the tiles its surfaces wear painted (see painter).
+    if ((making && making.pending > 0) || paintsPending() > 0) {
       ready.frames = 0;
       return;
     }
@@ -309,9 +335,87 @@ function Ready({ onReady }: { onReady: () => void }) {
     ready.done = true;
     making?.stop();
     if (works) works.shown = true;
-    onReady();
+    onReady(ready.village);
   }, 2);
   return null;
+}
+
+/** How far the bar over the canvas stands, 0 to 1: as a style property for its width and as its value for assistive technology. */
+function setMeter(element: HTMLElement | null, value: number): void {
+  if (!element) return;
+  element.style.setProperty('--saju-progress', value.toFixed(3));
+  element.setAttribute('aria-valuenow', String(Math.round(value * 100)));
+}
+
+/**
+ * Moves the bar over the canvas (`bar`) while it makes `village` ready, by what it has done: the islands built (the
+ * first half), then the shaders made for them, then the pipelines its first frames ask for and the tiles its surfaces
+ * wear. The shaders are made in one go with nothing to count, so that stretch is crossed as time passes, never quite to
+ * its end; the bar never goes back.
+ */
+function Meter({ bar, village }: { bar: RefObject<HTMLElement | null>; village: string }) {
+  const gl = useThree((state) => state.gl);
+  const works = useContext(WorksContext);
+  useEffect(() => {
+    if (!works) return undefined;
+    let frame = 0;
+    let shown = 0;
+    let builtAt: number | null = null;
+    const tick = (now: number) => {
+      if (works.shown) {
+        setMeter(bar.current, 1);
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+      const making = makingOf(gl);
+      let value: number;
+      if (works.pending > 0 || (!works.warm && works.total === 0)) {
+        value = 0.06 + 0.5 * (works.total > 0 ? (works.total - works.pending) / works.total : 0);
+      } else if (!works.warm) {
+        builtAt ??= now;
+        value = 0.56 + 0.3 * (1 - Math.exp(-(now - builtAt) / 900));
+      } else {
+        value = 0.86 + 0.13 * (making && making.total > 0 ? (making.total - making.pending) / making.total : 1);
+        if (paintsPending() > 0) value = Math.min(value, 0.9);
+      }
+      shown = Math.max(shown, value);
+      setMeter(bar.current, shown);
+    };
+    setMeter(bar.current, 0.04);
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [gl, works, bar, village]);
+  return null;
+}
+
+/** How long the camera and the viewer's hand must have been still before the picture is kept (see glimpse). */
+const KEEP_STILL_MS = 1500;
+/** The pictures kept in this page's life: one for each, each visit. */
+const kept = new Set<string>();
+
+/**
+ * Keeps what the canvas shows under `glimpse` (see glimpse) once it has shown its village and been still a moment, once
+ * a visit: the next visit to it shows that picture while the canvas makes the village ready again. Taken right after a
+ * frame is drawn (the callbacks after the darkroom's, in the same task).
+ */
+function Keepsake({ glimpse, touched }: { glimpse: string; touched: RefObject<number> }) {
+  const gl = useThree((state) => state.gl);
+  const size = useThree((state) => state.size);
+  const works = useContext(WorksContext);
+  useFrame(() => {
+    if (!works?.shown || kept.has(glimpse) || document.visibilityState !== 'visible') return;
+    if (performance.now() - Math.max(works.activeAt, touched.current ?? 0) < KEEP_STILL_MS) return;
+    kept.add(glimpse);
+    void takeGlimpse(gl.domElement, size.width, size.height).then((picture) => picture && keepGlimpse(glimpse, picture));
+  }, 3);
+  return null;
+}
+
+/** What a kept picture of the village is kept under: whose, framed how, at what size, under which light and look. */
+function glimpseKey(village: string, frame: Frame, inset: Inset, area: { width: number; height: number }, mood: Mood, quality: Quality): string {
+  const view = [...frame.target, frame.halfWidth, frame.halfHeight].map((value) => value.toFixed(1)).join(',');
+  const cover = [inset.top, inset.right, inset.bottom, inset.left].map((value) => Math.round(value)).join(',');
+  return [village, view, cover, `${Math.round(area.width)}x${Math.round(area.height)}`, mood === DUSK ? 'dusk' : 'day', quality].join('|');
 }
 
 /**
@@ -468,6 +572,12 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const gaze = useRef<Gaze>({ ...UNMOVED, pan: { ...UNMOVED.pan } });
+  /** Whose village it is: the home at its middle. */
+  const village = homes[0]?.id ?? '';
+  // Another village begins where the camera begins, as the first did.
+  useLayoutEffect(() => {
+    gaze.current = { ...UNMOVED, pan: { ...UNMOVED.pan } };
+  }, [village]);
   const cover = useRef(inset);
   cover.current = inset;
   /** The camera, once the canvas has made it: what lies under the pointer is found through it. */
@@ -684,7 +794,9 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   const [generation, setGeneration] = useState(0);
   /** The canvas draws once its materials are ready, and stays out of sight until it has drawn. */
   const [warm, setWarm] = useState(false);
-  const [drawn, setDrawn] = useState(false);
+  // Whose village the canvas last showed: going to another 섬 keeps the canvas, out of sight until it shows that one.
+  const [drawnFor, setDrawnFor] = useState<string | null>(null);
+  const drawn = drawnFor === village;
   const [still] = useState(calm);
   // The gardens are planted once, for the device the page opened on.
   const [first] = useState(initialQuality);
@@ -694,7 +806,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   const lush = first === 'high';
   const mood = useMood();
   const warmed = useCallback(() => setWarm(true), []);
-  const shown = useCallback(() => setDrawn(true), []);
+  const shown = useCallback((of: string) => setDrawnFor(of), []);
   useEffect(() => {
     const element = box.current;
     if (!element || typeof IntersectionObserver !== 'function') return undefined;
@@ -702,8 +814,41 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+  /** The bar over the canvas while it makes the village ready (see Meter). */
+  const meter = useRef<HTMLDivElement>(null);
+  // The canvas's size on the page: a kept picture of the village lines up with it only at the size it was taken at.
+  const [area, setArea] = useState<{ width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const element = box.current;
+    if (!element) return undefined;
+    const measure = () => {
+      const { width, height } = element.getBoundingClientRect();
+      setArea((was) => (was && Math.round(was.width) === Math.round(width) && Math.round(was.height) === Math.round(height) ? was : { width, height }));
+    };
+    measure();
+    if (typeof ResizeObserver !== 'function') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const glimpse = area && glimpseKey(village, frame, inset, area, mood, quality);
+  // The picture this browser kept of the village as it is framed now, shown while the canvas makes it ready.
+  const [picture, setPicture] = useState<{ key: string; url: string } | null>(null);
+  useEffect(() => {
+    if (!glimpse || drawn) return undefined;
+    let live = true;
+    void readGlimpse(glimpse).then((blob) => {
+      if (!live || !blob) return;
+      setPicture({ key: glimpse, url: URL.createObjectURL(blob) });
+    });
+    return () => {
+      live = false;
+    };
+  }, [glimpse, drawn]);
+  useEffect(() => (picture ? () => URL.revokeObjectURL(picture.url) : undefined), [picture]);
   return (
-    <div className="mg-saju-canvas" ref={box} data-drawn={drawn || undefined} onPointerDown={press} onPointerMove={pull} onPointerUp={release} onPointerCancel={release} onLostPointerCapture={lost}>
+    <div className="mg-saju-canvas" ref={box} data-drawn={drawn ? village : undefined} onPointerDown={press} onPointerMove={pull} onPointerUp={release} onPointerCancel={release} onLostPointerCapture={lost}>
+      {picture && picture.key === glimpse && <img className="mg-saju-glimpse" src={picture.url} alt="" draggable={false} />}
       {/* What the canvas shows is said in words beside it; the labels over it are the page's own links. */}
       <Failsafe fallback={<p className="mg-saju-canvas-failed">이 브라우저에서는 마을을 그릴 수 없어요</p>}>
         <Canvas
@@ -720,12 +865,12 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
             eye.current = camera;
             (gl as unknown as WebGPURenderer).onDeviceLost = () => {
               setWarm(false);
-              setDrawn(false);
+              setDrawnFor(null);
               setGeneration((count) => count + 1);
             };
           }}
         >
-          <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed} onReady={shown}>
+          <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed} onReady={shown} village={village}>
             {homes.map((home, index) => (
               <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { landings } : {})} />
             ))}
@@ -735,6 +880,8 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
             {flag && <FlagIsland flag={flag} lush={lush} turn={homes.length} />}
             <Cadence running={inView && warm} still={still} touched={touched} />
             {!slow && <Pace onSlow={() => setSlow(true)} />}
+            <Meter bar={meter} village={village} />
+            {glimpse && <Keepsake glimpse={glimpse} touched={touched} />}
           </Scene>
           <Pins homes={homes} layer={layer} />
         </Canvas>
@@ -742,6 +889,19 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       <div className="mg-saju-pins" ref={layer}>
         {pins}
       </div>
+      {!drawn && (
+        <div className="mg-saju-meter" ref={meter} role="progressbar" aria-label="섬 불러오는 중" aria-valuemin={0} aria-valuemax={100}>
+          <div className="mg-loading-card mg-glass">
+            <span className="mg-brand-mark" aria-hidden="true">
+              <Icon name="island" />
+            </span>
+            <b>불러오는 중</b>
+            <span className="mg-progress">
+              <i />
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

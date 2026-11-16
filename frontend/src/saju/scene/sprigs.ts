@@ -1,14 +1,14 @@
-import { BufferAttribute, BufferGeometry, DoubleSide, FrontSide, IcosahedronGeometry, MeshStandardMaterial, Vector3, type Material } from 'three';
+import { BufferAttribute, BufferGeometry, DoubleSide, FrontSide, IcosahedronGeometry, Vector3, type Material } from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-import { attribute, cos, instanceColor, max, mix, normalize, normalViewGeometry, positionGeometry, positionLocal, sin, transformNormalToView, uniform, vec3 } from 'three/tsl';
-import { MeshStandardNodeMaterial } from 'three/webgpu';
+import { attribute, cos, mat4, max, mix, normalize, normalLocal, normalViewGeometry, positionGeometry, positionLocal, sin, texture, transformNormal, transformNormalToView, uniform, vec3, vec4 } from 'three/tsl';
+import { MeshStandardNodeMaterial, type Node, type NodeBuilder } from 'three/webgpu';
 
 import type { SprigKind } from './build';
 import { noise3, rng } from './noise';
 import { surfaceMaps } from './surfaces';
 
 // The small shapes a garden is made of by the thousand: a spray of leaves, a tuft of grass, a flower, a stone. Each is
-// one little shape drawn over and over (instanced), every copy with its own place, size and colour. Leaves and grass
+// one little shape drawn over and over (instanced), every copy with its own place, size and colour (see SprigMaterial). Leaves and grass
 // take their light as the crown or lawn they belong to would (so a tree shades as one soft mass, not as confetti), and
 // stir in the wind.
 
@@ -220,33 +220,90 @@ export function sprigGeometry(kind: SprigKind): BufferGeometry {
   let geometry = geometries.get(kind);
   if (!geometry) {
     geometry = SHAPES[kind]();
+    // A leafy kind's way with the wind and the light, on each corner of its shape (see LEAFY).
+    if (kind !== 'rock' && kind !== 'pebble') {
+      const { sway, soft } = MANNER[kind];
+      const count = geometry.getAttribute('position').count;
+      const manner = new Float32Array(count * 2);
+      for (let index = 0; index < count; index++) manner.set([sway, soft], index * 2);
+      geometry.setAttribute('manner', new BufferAttribute(manner, 2));
+    }
     geometries.set(kind, geometry);
   }
   return geometry;
 }
+
+/**
+ * A copy's matrix, which a scattering carries beside its shape as four columns (`aM0`..`aM3`, see Built), its colour
+ * (`aColor`) and the way out from the crown or lawn it belongs to (`aOut`), each copy's read from its own vertex buffer.
+ */
+const placing = mat4(attribute('aM0', 'vec4'), attribute('aM1', 'vec4'), attribute('aM2', 'vec4'), attribute('aM3', 'vec4'));
+const copyColor = attribute('aColor', 'vec3');
+
+/**
+ * A scattering's material: each copy of the shape moved, turned and sized by its own matrix, and its normals turned with
+ * it, where and as three places an instanced mesh's copies (before the material's own `positionNode`). Three builds an
+ * instanced mesh's program again for every such mesh, since it binds the mesh's own matrices into it; these are read
+ * from the geometry by name, so every scattering of a kind on every island is one program, built once. The shadow's
+ * pass draws with a material of its own, which takes `castShadowPositionNode`: there the copy is placed as well.
+ */
+class SprigMaterial extends MeshStandardNodeMaterial {
+  static override get type(): string {
+    return 'SprigMaterial';
+  }
+
+  override setupPosition(builder: NodeBuilder): Node {
+    positionLocal.assign(placing.mul(vec4(positionLocal, 1)).xyz);
+    normalLocal.assign(transformNormal(normalLocal, placing));
+    return super.setupPosition(builder);
+  }
+}
+
+/** A copy's corner where the copy stands (the shadow's pass places it itself, see SprigMaterial). */
+const placed = placing.mul(vec4(positionGeometry, 1)).xyz;
+/** A leafy kind's way with the wind (x, metres at its top) and with the light (y), from its shape's corners (see MANNER). */
+const manner = attribute('manner', 'vec2');
+
+/** Where the wind takes `at`, a corner of a copy in its place: more the higher up the shape, copies near one another together. */
+function swayed(at: Node<'vec3'>): Node<'vec3'> {
+  const phase = at.x.mul(1.3).add(at.z.mul(0.9));
+  const reach = max(positionGeometry.y, 0).mul(manner.x);
+  return at.add(vec3(sin(wind.mul(1.9).add(phase)).mul(reach), 0, cos(wind.mul(1.4).add(phase.mul(1.3))).mul(reach)));
+}
+
+/**
+ * What every leafy kind is drawn with, the same nodes for each: three tells programs apart by their nodes, so the
+ * kinds share one program (two, a puff's being one-sided) and what sets them apart rides on their shapes' corners.
+ */
+const tint = attribute('tint', 'vec4');
+const LEAFY = {
+  // Each corner of the little shape shades its copy's colour (darker at a blade's foot, a leaf's crease); a part that
+  // keeps a colour of its own (a flower's yellow heart) keeps it.
+  color: mix(tint.rgb.mul(copyColor), tint.rgb, tint.a),
+  // The copy stands in its place already (see SprigMaterial): the wind moves its top.
+  position: swayed(positionLocal),
+  shadow: swayed(placed),
+  // Lit as the crown or the lawn it belongs to would be, and from underneath as from above: not as the leaf's own back.
+  normal: normalize(mix(normalViewGeometry, transformNormalToView(attribute('aOut', 'vec3')), manner.y)),
+};
+/** A stone's colour, the same node for rocks and pebbles (see LEAFY): made with the first. */
+let stoneColor: Node<'vec3'> | null = null;
 
 export function sprigMaterial(kind: SprigKind): Material {
   let material = sprigMaterials.get(kind);
   if (material) return material;
   if (kind === 'rock' || kind === 'pebble') {
     const maps = surfaceMaps('rock');
-    material = new MeshStandardMaterial({ map: maps.map, normalMap: maps.normalMap, roughness: 0.92 });
+    const stone = new SprigMaterial({ normalMap: maps.normalMap, roughness: 0.92 });
+    stone.colorNode = stoneColor ??= texture(maps.map).rgb.mul(copyColor);
+    stone.castShadowPositionNode = placed;
+    material = stone;
   } else {
-    const { sway, soft, rough } = MANNER[kind];
-    const leafy = new MeshStandardNodeMaterial({ roughness: rough, side: kind === 'puff' ? FrontSide : DoubleSide });
-    // Each corner of the little shape shades its copy's colour (darker at a blade's foot, a leaf's crease); a part that
-    // keeps a colour of its own (a flower's yellow heart) keeps it. The material multiplies by the copy's colour after.
-    const tint = attribute('tint', 'vec4');
-    leafy.colorNode = mix(tint.rgb, tint.rgb.div(max(instanceColor, vec3(0.001))), tint.a);
-    // The copy stands in its place already: the wind moves its top, more the higher up the shape, the copies near one
-    // another together.
-    if (sway > 0) {
-      const phase = positionLocal.x.mul(1.3).add(positionLocal.z.mul(0.9));
-      const reach = max(positionGeometry.y, 0).mul(sway);
-      leafy.positionNode = positionLocal.add(vec3(sin(wind.mul(1.9).add(phase)).mul(reach), 0, cos(wind.mul(1.4).add(phase.mul(1.3))).mul(reach)));
-    }
-    // Lit as the crown or the lawn it belongs to would be, and from underneath as from above: not as the leaf's own back.
-    leafy.normalNode = normalize(mix(normalViewGeometry, transformNormalToView(attribute('aOut', 'vec3')), soft));
+    const leafy = new SprigMaterial({ roughness: MANNER[kind].rough, side: kind === 'puff' ? FrontSide : DoubleSide });
+    leafy.colorNode = LEAFY.color;
+    leafy.positionNode = LEAFY.position;
+    leafy.castShadowPositionNode = LEAFY.shadow;
+    leafy.normalNode = LEAFY.normal;
     material = leafy;
   }
   sprigMaterials.set(kind, material);

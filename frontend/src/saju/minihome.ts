@@ -6,6 +6,7 @@ import type { HomeView, HomeVisibility, VisitCounter } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { visitorId } from '../minihome/stored';
 import { REQUESTS_CHANGED } from '../shell/Shell';
+import { ask, pageArrived, takeEarly } from './early';
 import { isValidBirthDate, type Birth } from './engine';
 import { NAME_MAX, residentOf, type Resident } from './residents';
 
@@ -28,20 +29,19 @@ export type MinihomeState =
   | { status: 'failed'; code: number; message: string }
   | { status: 'ready'; minihome: Minihome };
 
+pageArrived();
+
 async function read(username: string, viewer: string | null): Promise<Minihome> {
-  const own = viewer === username;
-  // One round trip: the visitor's own home does not wait for this one to arrive.
-  const [view, village, mine] = await Promise.all([
-    own ? homeApi.mine() : homeApi.get(username),
-    sajuApi.village(username),
-    viewer && !own ? sajuApi.village(viewer).then(({ saju }) => saju, () => null) : null,
-  ]);
+  // One round trip: the visitor's own home does not wait for this one to arrive. The route may have asked already,
+  // while this page's code was arriving (see early).
+  const answers = takeEarly(username, viewer) ?? ask(username, viewer);
+  const [view, village, mine] = await Promise.all([answers.view, answers.village, answers.mine]);
   const owner = village.saju && residentOf(username, village.saju);
   return {
     view,
     owner,
     village: village.village.map(({ user, saju, neighbour }) => ({ ...residentOf(user.username, saju), neighbour })),
-    mine: own ? owner : mine && viewer ? residentOf(viewer, mine) : null,
+    mine: viewer === username ? owner : mine && viewer ? residentOf(viewer, mine) : null,
     as: viewer,
   };
 }

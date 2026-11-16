@@ -1,4 +1,9 @@
 /// <reference types="vitest/config" />
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
@@ -9,12 +14,31 @@ import { unloadedWasm } from './vite/unloadedWasm.ts';
 /** The Rust server (`server/`), which also upgrades `/api/rooms/*` to WebSocket. */
 const SERVER = process.env['SERVER_URL'] ?? 'http://127.0.0.1:8080';
 
+/**
+ * A hash of the 섬's code (src/saju, its tests aside): the builds a browser keeps between visits are kept under it
+ * (saju/scene/shelf), and new code builds afresh.
+ */
+function sajuCode(): string {
+  const hash = createHash('sha256');
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === '__tests__') continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.tsx?$/.test(entry.name)) hash.update(entry.name).update(readFileSync(path, 'utf8').replace(/\r\n/g, '\n'));
+    }
+  };
+  walk(fileURLToPath(new URL('./src/saju', import.meta.url)));
+  return hash.digest('hex').slice(0, 16);
+}
+
 export default defineConfig(({ mode }) => ({
   plugins: [react(), gaesupAssets(), unloadedWasm()],
   css: { postcss: { plugins: [studioScope()] } },
   define: {
     'process.env.NODE_ENV': JSON.stringify(mode === 'production' ? 'production' : 'development'),
     'process.env.VITE_ENABLE_BRIDGE_LOGS': JSON.stringify(''),
+    __SAJU_SCENE__: JSON.stringify(sajuCode()),
   },
   server: {
     host: '127.0.0.1',

@@ -1,6 +1,6 @@
 import './saju.css';
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
@@ -85,23 +85,25 @@ function useCover(host: HTMLElement | null, panelOpen: boolean): Inset {
 }
 
 /**
- * Whether the canvas has drawn its first frames (it marks itself so, see Stage): `host` is the page's element, as for
- * {@link useCover}. Once drawn it stays drawn.
+ * Whether the canvas has drawn `username`'s village (it marks itself with whose, see Stage): `host` is the page's
+ * element, as for {@link useCover}. Once drawn it stays drawn, for as long as the page shows that 섬.
  */
-function useDrawn(host: HTMLElement | null): boolean {
-  const [drawn, setDrawn] = useState(false);
+function useDrawn(host: HTMLElement | null, username: string): boolean {
+  const [drawn, setDrawn] = useState<string | null>(null);
+  const seen = drawn === username;
   useEffect(() => {
-    if (!host || drawn) return undefined;
+    if (!host || seen) return undefined;
     const check = () => {
-      if (host.querySelector('.mg-saju-canvas[data-drawn]')) setDrawn(true);
+      const canvas = host.querySelector<HTMLElement>('.mg-saju-canvas[data-drawn]');
+      if (canvas?.dataset['drawn'] === username) setDrawn(username);
     };
     check();
     if (typeof MutationObserver !== 'function') return undefined;
     const observer = new MutationObserver(check);
     observer.observe(host, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-drawn'] });
     return () => observer.disconnect();
-  }, [host, drawn]);
-  return drawn;
+  }, [host, seen, username]);
+  return seen;
 }
 
 /**
@@ -118,8 +120,15 @@ const panelFits = () => typeof matchMedia !== 'function' || !matchMedia('(max-wi
 export default function SajuPage({ username, rest }: { username: string; rest: string }) {
   const { user } = useAuth();
   const signIn = useSignInPath();
+  const { search } = useLocation();
   const { state, build, demolish, open } = useMinihome(username);
-  if (state.status === 'loading') return <Loading />;
+  // The 섬 on the page, and the address it was shown for. Going to another 섬 keeps it until the next one has been read:
+  // the canvas, its renderer and every shader it has made stay, and the islands both villages share stay built (see
+  // Stage, which makes the next village ready out of sight). Its panel waits meanwhile.
+  const shown = useRef<{ minihome: Minihome; rest: string; search: string } | null>(null);
+  if (state.status === 'ready') shown.current = { minihome: state.minihome, rest, search };
+  if (state.status === 'failed') shown.current = null;
+  if (state.status === 'loading' && !shown.current) return <Loading />;
   if (state.status === 'failed') {
     // Somewhere else to go: the viewer's own home, unless it is the one that could not be read, or the way in.
     const away = user ? (user.username === username ? null : { to: homePath(user.username), label: '내 집' }) : { to: signIn, label: '로그인' };
@@ -142,20 +151,34 @@ export default function SajuPage({ username, rest }: { username: string; rest: s
       </PageShell>
     );
   }
-  return <Village minihome={state.minihome} viewer={user} rest={rest} onBuild={build} onDemolish={demolish} onVisibility={open} />;
+  const page = shown.current!;
+  return (
+    <Village
+      minihome={page.minihome}
+      viewer={user}
+      rest={page.rest}
+      search={page.search}
+      waiting={state.status === 'loading'}
+      onBuild={build}
+      onDemolish={demolish}
+      onVisibility={open}
+    />
+  );
 }
 
-function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: {
+function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish, onVisibility }: {
   minihome: Minihome;
   viewer: User | null;
   rest: string;
+  search: string;
+  /** The next 섬 is being read: this one's panel waits, and its village stays on the canvas until it comes. */
+  waiting: boolean;
   onBuild: (name: string, birth: Birth) => Promise<void>;
   onDemolish: () => Promise<void>;
   onVisibility: (visibility: HomeVisibility) => Promise<void>;
 }) {
   const { view, owner, village: others, mine } = minihome;
   const { username, ownerName } = view.profile;
-  const { search } = useLocation();
   const navigate = useNavigate();
   const neighbors = useNeighbors(view, viewer);
   // The page's element, kept in state: what measures the page follows the element that is in the document.
@@ -222,14 +245,16 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
   const route = routeOf(username, rest, search, { owner: view.isOwner, built: !!host });
   const building = route.kind === 'edit' || (route.kind === 'home' && view.isOwner && !host);
   // 다리 보기: the stage shows the visitor's own home and this one, 이웃, together. It ends with the visit.
-  const [bridgeShown, setBridgeShown] = useState(false);
+  const [bridge, setBridge] = useState({ of: username, shown: false });
+  const bridgeShown = bridge.of === username && bridge.shown;
+  const setBridgeShown = useCallback((shown: boolean) => setBridge({ of: username, shown }), [username]);
   const joined = !view.isOwner && !!viewer && around.some(({ resident, bridged }) => bridged && resident.id === viewer.username);
   const visitorHome = joined ? (homes.find((home) => home.id === viewer?.username) ?? null) : null;
   // Another page of the 섬 starts at the top of the panel: the tabs of the home differ in the query alone.
   const side = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (side.current) side.current.scrollTop = 0;
-  }, [rest, search]);
+  }, [username, rest, search]);
 
   // The whole village shows on its own page, and around a plot nobody has built on yet.
   const village = route.kind === 'village';
@@ -249,7 +274,7 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
 
   const visit = useCallback((id: string) => navigate(homePath(id)), [navigate]);
   // What this browser kept from the village's first days, for a member who has not built their home here yet.
-  const [legacy] = useState(() => (view.isOwner && !owner ? readLegacyHome() : null));
+  const legacy = useMemo(() => (view.isOwner && !owner ? readLegacyHome() : null), [username, view.isOwner, owner]);
   const buildHome = useCallback(
     async (name: string, birth: Birth) => {
       await onBuild(name, birth);
@@ -283,7 +308,7 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
   const ownerId = view.isOwner ? view.profile.ownerId : null;
   const birth = host?.resident.birth ?? null;
   const reading = useReading({ username, ownerId, birth, shown: route.kind === 'home' && tab !== 'home' });
-  const drawn = useDrawn(world);
+  const drawn = useDrawn(world, username);
   const picture = usePicture({
     username,
     ownerId,
@@ -403,7 +428,8 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
       {picture.shot}
 
       {/* What the 섬 says, beside the picture of it. Folded, the panel stays mounted, keeping what was typed in it. */}
-      <main id={panelId} className="mg-saju-panel mg-glass" aria-label={title} hidden={!panelOpen}>
+      {/* While the next 섬 is read its panel waits: this one's cannot be used for it. */}
+      <main id={panelId} className="mg-saju-panel mg-glass" aria-label={title} aria-busy={waiting || undefined} inert={waiting} hidden={!panelOpen}>
         <button ref={folder} className="mg-icon-btn is-quiet mg-saju-panel-close" aria-label="패널 접기" aria-expanded="true" aria-controls={panelId} onClick={() => showPanel(false)}>
           <Icon name="chevronRight" />
         </button>
@@ -433,6 +459,8 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
         </nav>
         {/* The column takes the keyboard's focus, so the arrow and page keys scroll it where nothing in it does. */}
         <div className="mg-saju-side" ref={side} tabIndex={0}>
+          {/* Each 섬's own: what was typed or opened in one is not carried to the next. */}
+          <Fragment key={username}>
           {building ? (
             <>
               <Onboarding
@@ -481,6 +509,7 @@ function Village({ minihome, viewer, rest, onBuild, onDemolish, onVisibility }: 
               onVisibility={onVisibility}
             />
           )}
+          </Fragment>
         </div>
       </main>
     </div>

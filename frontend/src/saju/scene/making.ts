@@ -6,7 +6,8 @@ import type { WebGPURenderer } from 'three/webgpu';
 // starts on the next object, five seconds on a desktop. Here, until the canvas shows, every pipeline asked for (by a
 // frame or by a compile) is made in the background, all at once: the graphics process builds them side by side, a
 // compile goes on to the next object at once, and what is not ready is left out of a frame drawn out of sight. The
-// canvas shows once a few frames in a row have asked for nothing still being made (Stage's Ready).
+// canvas shows once a few frames in a row have asked for nothing still being made (Stage's Ready). Going to another
+// 섬 keeps the canvas and makes its new pipelines so again, until it shows that one.
 
 type Backend = { createRenderPipeline: (renderObject: { material?: { name?: string } }, promises: Promise<unknown>[] | null) => void };
 
@@ -19,8 +20,12 @@ const once = (renderObject: { material?: { name?: string } }) => renderObject.ma
 export type Making = {
   /** Pipelines asked for and not made yet. */
   readonly pending: number;
+  /** Pipelines asked for in the background since it began, or last resumed. */
+  readonly total: number;
   /** Makes the pipelines asked for from now on as three does (at once, holding the frame): once the canvas shows. */
   stop: () => void;
+  /** Makes them in the background again: while the canvas is out of sight. */
+  resume: () => void;
 };
 
 const makings = new WeakMap<object, Making>();
@@ -32,27 +37,34 @@ export function makeInBackground(renderer: WebGPURenderer): Making {
   const backend = renderer.backend as unknown as Backend;
   const make = backend.createRenderPipeline;
   let pending = 0;
-  let stopped = false;
+  let total = 0;
   const settle = () => {
     pending -= 1;
   };
-  backend.createRenderPipeline = (renderObject, promises) => {
-    if (stopped || once(renderObject)) return make.call(backend, renderObject, promises);
+  const inBackground: Backend['createRenderPipeline'] = (renderObject, promises) => {
+    if (once(renderObject)) return make.call(backend, renderObject, promises);
     const made: Promise<unknown>[] = [];
     make.call(backend, renderObject, made);
     for (const promise of made) {
       pending += 1;
+      total += 1;
       promise.then(settle, settle);
     }
   };
+  backend.createRenderPipeline = inBackground;
   const making: Making = {
     get pending() {
       return pending;
     },
+    get total() {
+      return total;
+    },
     stop: () => {
-      if (stopped) return;
-      stopped = true;
       backend.createRenderPipeline = make;
+    },
+    resume: () => {
+      total = pending;
+      backend.createRenderPipeline = inBackground;
     },
   };
   makings.set(renderer, making);

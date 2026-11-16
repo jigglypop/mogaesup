@@ -1,6 +1,6 @@
 import './social.css';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { Link } from 'react-router-dom';
 
@@ -27,8 +27,10 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
   const { username } = view.profile;
   const viewerId = viewer?.id ?? null;
   const visitor = !!viewer && !view.isOwner;
-  const [list, setList] = useState<Ilchon[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  // Kept with the 섬 it was read for: a page that goes on to another 섬 shows none of the last one's.
+  const [read, setRead] = useState<{ of: string; list: Ilchon[] } | null>(null);
+  const list = useMemo(() => (read?.of === username ? read.list : []), [read, username]);
+  const loaded = read?.of === username;
   const [received, setReceived] = useState<IlchonRequest[]>([]);
   const [status, setStatus] = useState<IlchonStatus | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -49,8 +51,7 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
         visitor ? socialApi.status(username) : null,
       ]);
       if (mine !== reads.current) return;
-      setList(ilchons.ilchons);
-      setLoaded(true);
+      setRead({ of: username, list: ilchons.ilchons });
       setReceived(requests?.received ?? []);
       setStatus(standing);
       setLoadError('');

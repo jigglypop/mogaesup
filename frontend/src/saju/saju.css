@@ -74,17 +74,16 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
   font-weight: 750;
   text-align: center;
 }
-/* The canvas comes up out of the lake's colours once its first frames are drawn; until then three pixels count the wait. */
-.mg-saju-canvas > div { opacity: 0; transition: opacity 0.6s ease; }
-.mg-saju-canvas[data-drawn] > div { opacity: 1; }
-.mg-saju-canvas::before { content: ''; position: absolute; left: var(--open-x); top: var(--open-y); width: 8px; height: 8px; margin: -4px 0 0 -4px; background: rgba(255, 255, 255, 0.85); box-shadow: -16px 0 rgba(255, 255, 255, 0.85), 16px 0 rgba(255, 255, 255, 0.85); animation: mg-saju-wait 1s steps(4) infinite; }
-.mg-saju-canvas[data-drawn]::before { content: none; }
-/* A canvas that could not be made has nothing to wait for. (A rule of its own: a browser without :has() keeps the one above.) */
-.mg-saju-canvas:has(> .mg-saju-canvas-failed)::before { content: none; }
-@keyframes mg-saju-wait { 50% { opacity: 0.25; } }
-@media (prefers-reduced-motion: reduce) {
-  .mg-saju-canvas::before { animation: none; }
-}
+/* The canvas comes up out of the lake's colours, or out of the picture this browser kept of the village (see glimpse),
+   once its first frames are drawn; until then the bar counts the wait. Going to another 섬 it is out of sight at once,
+   while that village is made ready, and comes up again. */
+.mg-saju-canvas > div:not(.mg-saju-meter) { opacity: 0; }
+.mg-saju-canvas[data-drawn] > div:not(.mg-saju-meter) { opacity: 1; transition: opacity 0.6s ease; }
+.mg-saju-glimpse { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
+.mg-saju-meter { position: absolute; left: var(--open-x); top: var(--open-y); z-index: 1; transform: translate(-50%, -50%); pointer-events: none; }
+.mg-saju-meter .mg-progress i { width: calc(var(--saju-progress, 0.04) * 100%); }
+/* A canvas that could not be made has nothing to wait for. */
+.mg-saju-canvas:has(> .mg-saju-canvas-failed) > .mg-saju-meter { display: none; }
 /* The labels' layer cuts what leaves it and never scrolls: a label past its edge that took the keyboard's focus would
    otherwise pull the layer after it, and every label off its island. */
 .mg-saju-pins { position: absolute; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
