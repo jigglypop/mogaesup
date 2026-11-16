@@ -83,7 +83,10 @@ function needleSpray(): BufferGeometry {
   return finished(into);
 }
 
-/** A tuft of grass: blades leaning out from one root, dark at the foot and light at the tip. */
+/**
+ * A tuft of grass: blades leaning out from one root, dark at the foot and light at the tip. The lawn's tufts are drawn
+ * as reed-like clumps the wind bends (see grass); this shape stands for one in what a build is reckoned to cost.
+ */
 function grassTuft(): BufferGeometry {
   const random = rng(17);
   const into = sheet();

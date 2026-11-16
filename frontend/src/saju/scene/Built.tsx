@@ -26,6 +26,7 @@ import { abs, attribute, cameraProjectionMatrix, cos, dot, exp, float, Fn, fract
 import { MeshBasicNodeMaterial, type Node } from 'three/webgpu';
 
 import type { Build, Lamp, Life } from './build';
+import { grassMeshes } from './grass';
 import { WATER_LEVEL } from './mood';
 import { hash } from './noise';
 import { useAnimation } from './parts';
@@ -386,6 +387,12 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
   const made = useMemo(() => {
     const scattered = build.sprigs.flatMap((sprigs): Mesh[] => {
       const { kind, count, matrices, colors, outs } = sprigs;
+      // The lawn's tufts grow as reed-like clumps that the wind bends (see grass).
+      if (kind === 'blade') {
+        const lawn = grassMeshes(sprigs);
+        for (const mesh of lawn) mesh.layers.set(GRASS_LAYER);
+        return lawn;
+      }
       const base = sprigGeometry(kind);
       const geometry = new BufferGeometry();
       // Its own copy of the shape: a geometry let go takes its buffers with it, while the village's other copies draw on.
@@ -401,7 +408,7 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
       // Only what is big enough to shade something throws a shadow, and the lake does not mirror what lies low.
       mesh.castShadow = kind === 'leaf' || kind === 'needle' || kind === 'puff';
       mesh.receiveShadow = true;
-      if (kind === 'blade' || kind === 'bloom') mesh.layers.set(GRASS_LAYER);
+      if (kind === 'bloom') mesh.layers.set(GRASS_LAYER);
       mesh.computeBoundingSphere();
       return [mesh];
     });
