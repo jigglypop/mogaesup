@@ -5,6 +5,8 @@
 # empty when there is none) and BASE_SERVER, BASE_WEB, BASE_STUDIO (the commit each part was last deployed from, found by
 # deploy_bases.py; empty when unknown). Writes name=true|false lines to $GITHUB_OUTPUT.
 set -euo pipefail
+# The associative arrays below need bash 4 or later; macOS's /bin/bash is 3.2.
+((BASH_VERSINFO[0] >= 4)) || { echo "changes.sh needs bash 4 or later, not $BASH_VERSION" >&2; exit 2; }
 
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -56,11 +58,13 @@ deploy() {
 
 declare -A result=(
   [server_check]=$(check '^(server/|backend/src/auth\.py$|\.python-version$|uv\.lock$|\.github/)' && echo true || echo false)
-  # The server's deploy scripts and the prop generator are tested with the character server's tests, and so are the
-  # studio screen files the MCP's garment tools mirror (backend/tests/api/test_studio_garments.py).
-  [backend_check]=$(check '^(backend/|server/scripts/|scripts/props/|frontend/src/character/studio/(garment-styles\.json|meshy-options\.ts|SinglePart\.tsx|garment-fit\.ts)$|pyproject\.toml$|uv\.lock$|\.python-version$|\.dockerignore$|\.github/)' && echo true || echo false)
+  # The server's and the web's deploy scripts and the prop generator are tested with the character server's tests, and
+  # so are the studio screen files the MCP's garment tools mirror (backend/tests/api/test_studio_garments.py).
+  [backend_check]=$(check '^(backend/|server/scripts/|scripts/props/|frontend/scripts/deploy-aws\.ps1$|frontend/src/character/studio/(garment-styles\.json|meshy-options\.ts|SinglePart\.tsx|garment-fit\.ts)$|pyproject\.toml$|uv\.lock$|\.python-version$|\.dockerignore$|\.github/)' && echo true || echo false)
   [frontend_check]=$(check '^(frontend/|package\.json$|package-lock\.json$|\.nvmrc$|\.github/)' && echo true || echo false)
-  [infra_check]=$(check '(^\.github/|/infra/|^server/scripts/|^scripts/|\.ps1$|\.sh$)' && echo true || echo false)
+  # A new path under backend/ deploys the studio without being listed (release_parts.sh); the ReleasePaths test
+  # (test_changes.py) checks that backend/infra/prepare-aws.ps1 packs it as well.
+  [infra_check]=$(check '(^\.github/|/infra/|^server/scripts/|^scripts/|^backend/|\.ps1$|\.sh$)' && echo true || echo false)
 )
 for name in server web studio; do
   result[deploy_$name]=$(deploy "$name")

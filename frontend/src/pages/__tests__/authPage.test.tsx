@@ -1,10 +1,9 @@
 import { act } from 'react';
 
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Credentials, Registration, User } from '../../api/types';
-import { FakeChannel } from '../../__tests__/broadcast';
 import { mount, type } from '../../__tests__/mount';
 import { AuthProvider } from '../../auth/AuthProvider';
 import { expireSession, setSessionOwner, trackUnsaved } from '../../auth/sessionWork';
@@ -37,12 +36,6 @@ const open = (entry: string) =>
     </AuthProvider>,
   );
 const where = (container: HTMLElement) => container.querySelector('.where')?.textContent;
-
-beforeEach(() => vi.stubGlobal('BroadcastChannel', FakeChannel));
-afterEach(() => {
-  vi.unstubAllGlobals();
-  FakeChannel.open.clear();
-});
 
 describe('로그인 화면에서 돌아가는 곳', () => {
   afterEach(() => {
@@ -157,5 +150,20 @@ describe('세션이 풀린 계정의 저장하지 못한 편집', () => {
     expect(login).toHaveBeenCalledTimes(2);
     expect(ask).not.toHaveBeenCalled();
     await second.unmount();
+  });
+});
+
+describe('로그인 화면', () => {
+  afterEach(() => {
+    me.mockReset();
+  });
+
+  it('로그인과 가입 말고 다른 곳으로 가는 길은 없다', async () => {
+    me.mockResolvedValueOnce({ user: null });
+    const { container, unmount } = await open('/');
+    expect(container.querySelector('form')).not.toBeNull();
+    expect(container.querySelectorAll('a')).toHaveLength(0);
+    expect([...container.querySelectorAll('button')].map((button) => button.textContent?.trim())).toEqual(['로그인', '가입하기', '로그인']);
+    await unmount();
   });
 });

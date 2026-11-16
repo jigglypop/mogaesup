@@ -37,8 +37,9 @@ type RequestOptions = {
 
 /**
  * How long a request may go unanswered by default: longer than the server's own waits on an API route (they end within
- * 25 seconds) and than the CDN waits for the server (30 seconds), so that whatever either answers (`wardrobe_busy`,
- * `timeout`, a 504) arrives before the request is given up.
+ * 25 seconds), so that whatever it answers (`wardrobe_busy`, `timeout`) arrives before the request is given up. A
+ * request that waits on the character server (the server answers `factory_timeout` at 57 s, and the CDN waits 60 s for
+ * it, see infra/aws-static.yaml) sets a `timeoutMs` of its own.
  */
 export const DEFAULT_TIMEOUT_MS = 35_000;
 /** The code the server answers a request with when it no longer takes the session cookie (server/src/error.rs). */

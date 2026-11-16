@@ -48,7 +48,7 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
   const [loading, setLoading] = useState(true), [profileLoading, setProfileLoading] = useState(false), [busy, setBusy] = useState(false);
   const [error, setError] = useState(''), [notice, setNotice] = useState('');
   const locked = useRef(false), profileSequence = useRef(0), profileController = useRef<AbortController | null>(null);
-  const gone = useSavedRequests();
+  useSavedRequests();
   let pendingError = '';
   let pending: ReturnType<typeof factoryApi.pendingRefit> = null;
   let restorePending: ReturnType<typeof factoryApi.pendingNativePartsSelection> = null;
@@ -124,13 +124,14 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
     } catch (reason) {
       if (!controller.signal.aborted && sequence === profileSequence.current) { setSourceVersion(previousVersion); setError((reason as Error).message); }
     } finally {
-      if (!controller.signal.aborted && sequence === profileSequence.current) setProfileLoading(false);
+      // A load that took over from the panel's first one (a fit that ended meanwhile) ends the panel's loading too.
+      if (!controller.signal.aborted && sequence === profileSequence.current) { setLoading(false); setProfileLoading(false); }
     }
   }
   async function perform(action: () => Promise<void>) {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError(''); setNotice('');
-    try { await action(); } catch (reason) { if (!gone(reason)) setError((reason as Error).message); }
+    try { await action(); } catch (reason) { setError((reason as Error).message); }
     finally { locked.current = false; setBusy(false); }
   }
   function numberValue(value: number | null | undefined) { return value == null ? '' : String(value); }
@@ -194,7 +195,7 @@ export function PartFitting({ jobId, slot, label, rawUrl, onClose, onPendingSlot
       {ownPending && <small className="generation-recovery">{label} 피팅 · 응답 확인 안 됨</small>}
       <div className="part-fitting-actions"><button type="button" disabled={busy || profileLoading || !anchorsValid || !!foreignPending || !!restorePending || (!canRecoverRefit && !sourceIsCurrent)} onClick={() => void perform(async () => {
         // The saved request goes again exactly as it was saved; the form only shows it.
-        const result = ownPending ? await factoryApi.resumeRefit(jobId, ownPending.key) : await factoryApi.refitPart(jobId, sourceVersion, slot, profile);
+        const result = ownPending ? await factoryApi.resumeRefit(jobId, ownPending) : await factoryApi.refitPart(jobId, sourceVersion, slot, profile);
         setNative(result); setNotice(completionMessage(result));
         const saved = await factoryApi.nativePartsVersions(jobId); setVersions(saved); setRestoreVersion(saved.current || result.version || '');
       })}>{busy ? '처리 중' : ownPending ? '같은 피팅 요청 복구' : '새 피팅 버전 저장'}</button></div>

@@ -8,8 +8,8 @@
 // interact button. The member dresses their character in the wardrobe, and their island (and its live room) wears the
 // look; an island that picked a packaged figure the site no longer ships walks as the fallback. Last, a second server
 // without FACTORY_JWT_SECRET, in front of a studio without one either (as production runs today), opens the same
-// member's wardrobe all the same. Whatever happens, it stops what it started and drops its database; what a run killed
-// outright leaves, the next run removes.
+// member's wardrobe all the same, narrowed to what members may see. Whatever happens, it stops what it started and drops
+// its database; what a run killed outright leaves, the next run removes.
 // Usage: node scripts/character-e2e.mjs [screenshotDir]   (needs the local PostgreSQL at 127.0.0.1:55432, cargo and Chrome)
 import { fork, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -202,9 +202,10 @@ const answers = (url, child, what) =>
   );
 /**
  * Starts the Rust server built for this run on `port`, for the app at `origin`, with its studio gateway in front of the
- * fake character server `studio`. A `scoped` server signs studio requests with FACTORY_JWT_SECRET, which narrows a
- * member's wardrobe read to what members may see; one that is not has no such key, as production has none today.
- * `admin` makes the test's admin account. Its logs go through this process, so it also stops when this one is killed.
+ * fake character server `studio`. A `scoped` server signs studio requests with FACTORY_JWT_SECRET; one that is not has
+ * no such key, as production has none today. Either narrows a member's wardrobe read to what members may see (its
+ * `x-studio-scope` mark). `admin` makes the test's admin account. Its logs go through this process, so it also stops
+ * when this one is killed.
  */
 function startServer(port, origin, studio, { scoped, admin, log: path, name }) {
   const env = { ...process.env };
@@ -517,17 +518,15 @@ if (browser) {
     ['studio'],
   );
 
-  await step('member', 'a new member signs up and reaches their island', async () => {
+  await step('member', 'a new member signs up', async () => {
     ({ page: member, sent: memberSent } = await person('member'));
     await member.goto(WEB);
     await member.getByRole('tab', { name: '가입하기' }).click();
     await member.locator('input[name=username]').fill(MEMBER.username);
     await member.locator('input[name=displayName]').fill(MEMBER.displayName);
     await member.locator('input[name=password]').fill(MEMBER.password);
-    await member.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
+    await member.locator('form button[type=submit]').click();
     await member.waitForURL(`**/@${MEMBER.username}`);
-    await worldReady(member);
-    await closeChooser(member);
   });
 
   await step(
@@ -704,7 +703,7 @@ if (browser) {
     await page.locator('input[name=username]').fill(who.username);
     await page.locator('input[name=displayName]').fill(who.displayName);
     await page.locator('input[name=password]').fill(who.password);
-    await page.getByRole('button', { name: '가입하고 내 섬 만들기' }).click();
+    await page.locator('form button[type=submit]').click();
     await page.waitForURL(`**/@${who.username}`);
     await worldReady(page);
     await closeChooser(page);
@@ -830,7 +829,9 @@ if (browser) {
       await wear.click();
       const response = await queued;
       if (response.status() !== 202) throw new Error(`saving the look answered ${response.status()}: ${await response.text()}`);
-      await member.getByText('섬에서 입고 있어요').waitFor({ timeout: IMPORT_MS });
+      // The server bakes the look and wears it once it is done; the wardrobe shows nothing more of it.
+      for (const deadline = Date.now() + IMPORT_MS; (await json(member, '/api/looks/me')).look?.status === 'baking'; await sleep(1000))
+        if (Date.now() > deadline) throw new Error(`the look was not baked within ${IMPORT_MS / 1000}s`);
       const { look } = await json(member, '/api/looks/me');
       if (look.status !== 'ready' || !look.worn || !/^\/models\/[0-9a-f]{64}\.glb$/.test(look.modelUrl ?? ''))
         throw new Error(`look ${JSON.stringify({ status: look.status, worn: look.worn, modelUrl: look.modelUrl, error: look.error })}`);
@@ -905,7 +906,7 @@ if (browser) {
     'unscoped',
     'a server without FACTORY_JWT_SECRET still opens the wardrobe to a member, without what only operators see',
     async () => {
-      // The site says whose view a member's wardrobe read gets: scoped with the key, the operator's without.
+      // The site says a member's wardrobe read gets a member's view: with the key, and without it (x-studio-scope).
       const keyed = await json(admin, '/api/catalog/admin/factory-usage');
       if (keyed.memberScope !== true) throw new Error(`with the key, factory usage says memberScope ${keyed.memberScope}`);
       // The same site on spare ports: a fake studio without JWT_SECRET, and a server without the key in front of it, on
@@ -928,8 +929,8 @@ if (browser) {
       });
       await answers(`${api}/api/health`, server, 'the Rust server without FACTORY_JWT_SECRET');
       await answers(web, startWeb(webPort, api, 'unscoped', 'second web dev server'), 'the second web dev server');
-      // Its gateway sends a member's reads on as the operator's: the studio answers with every finding, and the page
-      // shows a member none of them.
+      // Without a token its gateway still marks a member's reads `x-studio-scope: member`: the studio answers a member's
+      // view, and the page shows none of what only operators see.
       await member.goto(`${web}/character`);
       await member
         .getByRole('button', { name: 'walk', exact: true })
@@ -940,8 +941,10 @@ if (browser) {
       const alerts = await member.locator('.wardrobe [role=alert]').allInnerTexts();
       if (alerts.length) throw new Error(`the wardrobe shows ${alerts.join(' / ')}`);
       await operatorOnly(member, tokenlessFake);
+      const trashed = await member.request.get(`${web}/api/${tokenlessFake.trashed.file}`);
+      if (trashed.ok()) throw new Error(`without the key, a member downloaded a part in the trash (${trashed.status()})`);
       const unscoped = await json(admin, '/api/catalog/admin/factory-usage', web);
-      if (unscoped.memberScope !== false) throw new Error(`without the key, factory usage says memberScope ${unscoped.memberScope}`);
+      if (unscoped.memberScope !== true) throw new Error(`without the key, factory usage says memberScope ${unscoped.memberScope}`);
       await shoot(member, 'member-wardrobe-unscoped');
     },
     ['wardrobe', 'admin'],

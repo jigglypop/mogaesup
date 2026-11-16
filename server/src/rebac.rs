@@ -6,8 +6,8 @@
 //! of its own tuples, other relations (on the same object or on a fixed one) and facts other tables already hold.
 //! Only explicit grants are stored (`auth_tuples`); a home's owner, its visibility and 일촌 are read from `homes` and
 //! `ilchons` when a check needs them, so they are never written twice. [`Checker`] follows rewrites and usersets with a
-//! depth limit, a lookup budget and memoization, explains a decision as a tree and expands a relation into who holds
-//! it; [`grant`] and [`revoke`] change tuples and append every change to `auth_audit`.
+//! depth limit, budgets and memoization, explains a decision as a tree and expands a relation into who holds it;
+//! [`grant`] and [`revoke`] change tuples and append every change to `auth_audit`.
 
 use futures_util::future::BoxFuture;
 use serde::Serialize;
@@ -21,10 +21,14 @@ use uuid::Uuid;
 
 /// The id of the one `system` object and of the one `catalog` object.
 pub const SITE: &str = "mogaesup";
-/// Rewrites and usersets followed below one check; a deeper branch counts as not holding.
+/// Usersets (a group in a group) followed below one check; a deeper branch counts as not holding. Rewrites do not
+/// count: the schema's are few and acyclic, so a relation holds wherever another that it includes does.
 const MAX_DEPTH: u32 = 12;
 /// Tuple reads one check may make; past it, the branches left count as not holding.
 const LOOKUP_BUDGET: u32 = 64;
+/// Relations one check may ask about, answered from memory or not; past it, the branches left count as not holding. A
+/// check follows each relation again only from less deep, so this only bounds a runaway table.
+const STEP_BUDGET: u32 = 2_000;
 /// Tuples read per object and relation. Grants are few; this only bounds a runaway table.
 const TUPLES_PER_READ: i64 = 500;
 
@@ -402,7 +406,8 @@ impl fmt::Display for Tuple {
 
 /// How a check decided, node by node: a relation (children: its rewrite in order, up to the first part that held),
 /// `direct` (its own tuples; children: the usersets they name), `userset` (child: the subject's membership of that
-/// set), `fact`, or `limit` (a branch cut short by depth, a cycle or the lookup budget; it counts as not holding).
+/// set), `fact`, or `limit` (a branch cut short by depth, a cycle or a budget; it counts as not holding). A relation
+/// the check has followed already, from no deeper, did not hold there and comes again without children.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Trace {
@@ -498,13 +503,21 @@ type Found = Arc<[Stored]>;
 /// build one per request (or per group of checks) and let it go.
 pub struct Checker<'a> {
     db: &'a PgPool,
-    memo: HashMap<(Subject, Object, &'static str), bool>,
+    /// Decisions: a denial nothing cut short, and an allowance with the depth it was reached at (reached deeper, its
+    /// path might not fit under the limit).
+    memo: HashMap<(Subject, Object, &'static str), (bool, u32)>,
     /// Per subject and object: the tuples naming that user directly, and every userset.
     tuples: HashMap<(Subject, Object), Found>,
     visibility: HashMap<String, Option<String>>,
     ilchons: HashMap<(Uuid, String), bool>,
     path: Vec<(Object, &'static str)>,
+    /// The relations this check has followed, each with the least depth it was followed from. One that held has ended
+    /// the check.
+    followed: HashMap<(Subject, Object, &'static str), u32>,
     lookups: u32,
+    steps: u32,
+    /// Whether this check has logged a cut already.
+    warned: bool,
 }
 
 fn cut(object: &Object, relation: &'static str, limit: &'static str) -> Trace {
@@ -520,7 +533,10 @@ impl<'a> Checker<'a> {
             visibility: HashMap::new(),
             ilchons: HashMap::new(),
             path: Vec::new(),
+            followed: HashMap::new(),
             lookups: 0,
+            steps: 0,
+            warned: false,
         }
     }
 
@@ -555,7 +571,10 @@ impl<'a> Checker<'a> {
 
     fn start(&mut self) {
         self.path.clear();
+        self.followed.clear();
         self.lookups = 0;
+        self.steps = 0;
+        self.warned = false;
     }
 
     /// Counts one table read; false once the budget is spent.
@@ -566,11 +585,11 @@ impl<'a> Checker<'a> {
 
     /// Why a branch at `depth` must stop here, if it must.
     fn limit(&self, object: &Object, relation: &'static str, depth: u32) -> Option<&'static str> {
-        if depth > MAX_DEPTH {
-            Some("depth")
-        } else if self.path.iter().any(|(seen, name)| seen == object && *name == relation) {
+        if self.path.iter().any(|(seen, name)| seen == object && *name == relation) {
             Some("cycle")
-        } else if self.lookups > LOOKUP_BUDGET {
+        } else if depth > MAX_DEPTH {
+            Some("depth")
+        } else if self.lookups > LOOKUP_BUDGET || self.steps > STEP_BUDGET {
             Some("budget")
         } else {
             None
@@ -586,13 +605,26 @@ impl<'a> Checker<'a> {
         explain: bool,
     ) -> BoxFuture<'s, sqlx::Result<Eval>> {
         Box::pin(async move {
+            self.steps += 1;
             let key = (subject, object.clone(), relation);
-            if !explain && let Some(&allowed) = self.memo.get(&key) {
+            if !explain
+                && let Some(&(allowed, at)) = self.memo.get(&key)
+                && (!allowed || depth <= at)
+            {
                 return Ok(Eval { allowed, settled: true, trace: None });
             }
-            if let Some(limit) = self.limit(&object, relation, depth) {
-                // Group cycles are allowed and end here; running out of depth or budget means the model needs a look.
-                if limit != "cycle" {
+            let limit = self.limit(&object, relation, depth);
+            // Followed already from no deeper, and it did not hold: every rewrite being a union, nothing new lies
+            // through it. A relation is followed again only from less deep, so even dense cycles of groups stay cheap.
+            if limit != Some("cycle") && self.followed.get(&key).is_some_and(|&at| at <= depth) {
+                let trace = explain.then(|| Trace::node("relation", &object, relation, false, Vec::new()));
+                return Ok(Eval { allowed: false, settled: false, trace });
+            }
+            if let Some(limit) = limit {
+                // Group cycles are allowed and end here; running out of depth or budget means the model needs a look,
+                // and one line a check says so.
+                if limit != "cycle" && !self.warned {
+                    self.warned = true;
                     tracing::warn!(%subject, %object, relation, limit, "Permission check cut short");
                 }
                 return Ok(Eval {
@@ -608,6 +640,7 @@ impl<'a> Checker<'a> {
                     trace: explain.then(|| Trace::node("relation", &object, relation, false, Vec::new())),
                 });
             };
+            self.followed.insert(key.clone(), depth);
             self.path.push((object.clone(), relation));
             let mut settled = true;
             let mut allowed = false;
@@ -615,10 +648,8 @@ impl<'a> Checker<'a> {
             for rule in def.rewrite {
                 let part = match *rule {
                     Rule::This => self.direct(subject, &object, relation, depth, explain).await,
-                    Rule::Computed(other) => self.eval(subject, object.clone(), other, depth + 1, explain).await,
-                    Rule::Site(kind, other) => {
-                        self.eval(subject, Object::new(kind, SITE), other, depth + 1, explain).await
-                    }
+                    Rule::Computed(other) => self.eval(subject, object.clone(), other, depth, explain).await,
+                    Rule::Site(kind, other) => self.eval(subject, Object::new(kind, SITE), other, depth, explain).await,
                     Rule::Fact(fact) => self.fact(subject, &object, relation, fact, explain).await,
                 };
                 let part = match part {
@@ -637,7 +668,7 @@ impl<'a> Checker<'a> {
             }
             self.path.pop();
             if allowed || settled {
-                self.memo.insert(key, allowed);
+                self.memo.insert(key, (allowed, depth));
             }
             Ok(Eval {
                 allowed,
@@ -851,9 +882,9 @@ impl<'a> Checker<'a> {
                         children.push(leaf);
                     }
                 }
-                Rule::Computed(other) => children.push(self.expand_node(object.clone(), other, depth + 1).await?),
+                Rule::Computed(other) => children.push(self.expand_node(object.clone(), other, depth).await?),
                 Rule::Site(kind, other) => {
-                    children.push(self.expand_node(Object::new(kind, SITE), other, depth + 1).await?)
+                    children.push(self.expand_node(Object::new(kind, SITE), other, depth).await?)
                 }
                 Rule::Fact(fact) => {
                     let visibility = self.home(object).await?;

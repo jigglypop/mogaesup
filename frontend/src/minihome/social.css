@@ -1,0 +1,32 @@
+/* The guestbook and the 이웃 list: what a 섬's story shows of the people around it. */
+.mg-list-count { margin: 16px 2px 8px; font-size: 12px; font-weight: 800; color: var(--mg-muted); }
+.mg-list-count b { color: var(--mg-ink); }
+
+.mg-compose { display: grid; gap: 8px; padding: 14px; }
+/* The card is the field: it shows the focus its borderless text area cannot. */
+.mg-compose:focus-within { border-color: var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft); }
+.mg-compose-label { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
+.mg-compose textarea { width: 100%; min-height: 48px; padding: 0; border: 0; outline: none; background: transparent; resize: none; line-height: 1.5; }
+.mg-compose-foot { display: flex; align-items: center; justify-content: space-between; }
+
+.mg-entries { list-style: none; margin: 0; padding: 0; display: grid; }
+.mg-entries li { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 12px 4px; border-top: 1px solid var(--mg-hair); }
+.mg-entries li:first-child { border-top: 0; }
+.mg-entries .mg-avatar { text-decoration: none; }
+.mg-entry-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.mg-entry-meta b { font-size: 14px; }
+.mg-entry-meta time { font-size: 12px; color: var(--mg-muted); }
+.mg-entry-meta .mg-link { margin-left: auto; }
+.mg-entry-body { margin-top: 2px; font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.mg-people { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.mg-people li { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: 14px; }
+@media (hover: hover) {
+  .mg-people li:hover { background: var(--mg-tint); }
+}
+.mg-people li > div { flex: 1; min-width: 0; display: grid; }
+.mg-people li small { color: var(--mg-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mg-people-actions { display: flex; gap: 4px; }
+.mg-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-radius: 14px; background: var(--mg-primary-soft); font-size: 13px; font-weight: 700; }
+.mg-neighbor-form { display: grid; gap: 10px; padding: 14px; }
+.mg-neighbors > .mg-btn { margin-top: 4px; }

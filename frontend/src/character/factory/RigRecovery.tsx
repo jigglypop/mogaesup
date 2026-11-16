@@ -85,11 +85,13 @@ function JobRigRecovery({ jobId, onComplete, refreshKey }: Props) {
   async function start() {
     if (submitted.current || recovered.error) return;
     const saved = readPending(storage);
-    // A recovery sends the request it showed, under its key; once another tab has settled it nothing is sent.
-    if (saved.error || (pending && saved.pending?.key !== pending.key)) { rerender(count => count + 1); void polling.refresh(); return; }
-    // A request another tab saved since this one was drawn is sent under its own key, never written over by a new one.
+    // Another request saved since this one was drawn (another tab) is shown first, never sent in place of the one shown.
+    if (saved.error || (pending && saved.pending && saved.pending.key !== pending.key)) { rerender(count => count + 1); void polling.refresh(); return; }
+    // A recovery sends the request it showed under its key, even when another tab has had its answer and forgotten it
+    // since: the server answers with what that key started. A request another tab saved since this one was drawn is sent
+    // under its own key, never written over by a new one.
     const selectedSource = sources?.find(item => `${item.job_id}:${item.version}` === selected);
-    const request = saved.pending || (selectedSource ? { key: crypto.randomUUID(), input: { source_job_id: selectedSource.job_id, source_version: selectedSource.version } } : null);
+    const request = saved.pending || pending || (selectedSource ? { key: crypto.randomUUID(), input: { source_job_id: selectedSource.job_id, source_version: selectedSource.version } } : null);
     if (!request) return;
     submitted.current = true; setBusy(true); setSubmitError('');
     try {

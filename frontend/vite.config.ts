@@ -4,12 +4,13 @@ import { defineConfig } from 'vite';
 
 import { gaesupAssets } from './vite/gaesupAssets.ts';
 import { studioScope } from './vite/studio.ts';
+import { unloadedWasm } from './vite/unloadedWasm.ts';
 
 /** The Rust server (`server/`), which also upgrades `/api/rooms/*` to WebSocket. */
 const SERVER = process.env['SERVER_URL'] ?? 'http://127.0.0.1:8080';
 
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), gaesupAssets()],
+  plugins: [react(), gaesupAssets(), unloadedWasm()],
   css: { postcss: { plugins: [studioScope()] } },
   define: {
     'process.env.NODE_ENV': JSON.stringify(mode === 'production' ? 'production' : 'development'),

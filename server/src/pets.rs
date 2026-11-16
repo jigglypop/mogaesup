@@ -35,9 +35,9 @@ use crate::{
     auth::{current_user, optional_user, require},
     catalog,
     error::{ApiError, ApiResult, bad, conflict, not_found},
-    homes::{plain_text, visible_home},
+    homes::visible_home,
     rebac::CATALOG_EDITOR,
-    security::{client_address, rate_limit},
+    security::{client_address, plain_text, rate_limit},
 };
 
 /// The brain format the server checks (frontend/src/pets/brain/codec.ts): little-endian, `MGPB`, version 1, senses,

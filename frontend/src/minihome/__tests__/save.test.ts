@@ -48,6 +48,47 @@ describe('island saver', () => {
     expect(saver.getState().dirty).toBe(true);
   });
 
+  it('저장하는 사이에 다시 저장하면 그 사이에 바뀐 것까지 저장되어야 저장했다고 답한다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    let finish!: () => void;
+    world.system.save.mockImplementationOnce(() => new Promise<void>((done) => (finish = done)));
+    world.edit();
+    const first = saver.save();
+    // 보내는 사이에 마지막 물건을 놓고 나간다. 그 섬은 너무 커서 저장되지 않는다.
+    world.edit();
+    world.answers.push(new IslandTooLargeError(3 * 1024 * 1024));
+    const leaving = saver.save();
+    finish();
+    expect(await first).toBe(true);
+    expect(await leaving).toBe(false);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(saver.getState()).toMatchObject({ dirty: true, problem: { kind: 'tooLarge' } });
+
+    // 그 사이에 바뀐 것이 없으면 더 보내지 않고 둘 다 저장했다고 답한다.
+    world.edit();
+    saver.changed();
+    world.system.save.mockImplementationOnce(() => new Promise<void>((done) => (finish = done)));
+    const button = saver.save();
+    const hidden = saver.flush();
+    finish();
+    expect(await button).toBe(true);
+    expect(await hidden).toBe(true);
+    expect(world.system.save).toHaveBeenCalledTimes(3);
+    expect(saver.getState()).toMatchObject({ dirty: false, problem: null });
+
+    // 보낸 섬이 거절되면 그 사이에 바뀐 것이 없으니 같은 섬을 또 보내지 않고 저장하지 못했다고 답한다.
+    let refuse!: (error: unknown) => void;
+    world.edit();
+    world.system.save.mockImplementationOnce(() => new Promise<void>((_done, fail) => (refuse = fail)));
+    const sent = saver.save();
+    const pressedAgain = saver.save();
+    refuse(new ApiRequestError(422, 'invalid_world', ''));
+    expect(await sent).toBe(false);
+    expect(await pressedAgain).toBe(false);
+    expect(world.system.save).toHaveBeenCalledTimes(4);
+  });
+
   it('충돌하면 편집을 남긴 채 자동 저장을 멈추고, 덮어쓰기는 최신 리비전을 읽고 저장한다', async () => {
     const world = fakeWorld();
     const saver = await ready(world, { idleMs: 1_000 });
@@ -80,6 +121,34 @@ describe('island saver', () => {
     expect(await saver.reloadLatest()).toBe(true);
     expect(world.system.load).toHaveBeenCalledTimes(2);
     expect(saver.getState()).toMatchObject({ phase: 'ready', conflict: false, dirty: false, problem: null });
+  });
+
+  it('저장이 오가는 중에 버리고 다시 불러오면 그 저장이 끝나기를 기다리는 동안에도 편집을 다시 보내거나 새로 받지 않는다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world);
+    let fail!: (error: unknown) => void;
+    world.system.save.mockImplementationOnce(() => new Promise<void>((_done, reject) => (fail = reject)));
+    world.edit();
+    saver.changed();
+    void saver.save();
+    // Leaving asked for another save meanwhile, to follow this one.
+    void saver.save();
+
+    const reloading = saver.reloadLatest();
+    expect(saver.getState().phase).toBe('loading');
+    // Finishing decorating flushes; a new edit and the 저장 button come before the save answers.
+    expect(await saver.flush()).toBe(false);
+    world.edit();
+    saver.changed();
+    expect(await saver.save()).toBe(false);
+    expect(world.system.load).toHaveBeenCalledTimes(1);
+
+    fail(new TypeError('Failed to fetch'));
+    expect(await reloading).toBe(true);
+    expect(world.system.load).toHaveBeenCalledTimes(2);
+    expect(saver.getState()).toMatchObject({ phase: 'ready', dirty: false, problem: null });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(world.system.save).toHaveBeenCalledTimes(1);
   });
 
   it('너무 큰 섬은 같은 모습으로 다시 보내지 않고, 바뀌면 다시 저장해 본다', async () => {
@@ -209,6 +278,18 @@ describe('island saver', () => {
     world.edit();
     await saver.save();
     expect(saver.getState().problem?.kind).toBe('network');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(world.system.save).toHaveBeenCalledTimes(2);
+    expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
+  });
+
+  it('보내는 중에 연결이 끊겨 섬을 끝까지 받지 못했다는 400도 잠시 뒤 다시 저장한다', async () => {
+    const world = fakeWorld();
+    const saver = await ready(world, { retryMs: [3_000] });
+    world.answers.push(new ApiRequestError(400, 'incomplete_world', '섬 데이터를 끝까지 받지 못했습니다. 다시 저장해 주세요.'));
+    world.edit();
+    expect(await saver.save()).toBe(false);
+    expect(saver.getState().problem).toMatchObject({ kind: 'network' });
     await vi.advanceTimersByTimeAsync(3_000);
     expect(world.system.save).toHaveBeenCalledTimes(2);
     expect(saver.getState()).toMatchObject({ problem: null, dirty: false });
@@ -448,6 +529,10 @@ describe('save messages', () => {
     expect(large).toMatchObject({ kind: 'tooLarge' });
     expect(large !== 'conflict' && large.message).toContain('2MB');
     expect(describeSaveError(new ApiRequestError(422, 'invalid_world', ''))).toMatchObject({ kind: 'invalid' });
+    const residents = describeSaveError(new ApiRequestError(422, 'invalid_residents', ''));
+    expect(residents).toMatchObject({ kind: 'invalid' });
+    expect(residents !== 'conflict' && residents.message).toContain('주민');
+    expect(describeSaveError(new ApiRequestError(400, 'incomplete_world', ''))).toMatchObject({ kind: 'network' });
     expect(describeSaveError(new ApiRequestError(400, 'http_error', ''))).toMatchObject({ kind: 'invalid' });
     expect(describeSaveError(new ApiRequestError(404, 'not_found', ''))).toMatchObject({ kind: 'invalid' });
     expect(describeSaveError(new ApiRequestError(401, 'login_required', ''))).toMatchObject({ kind: 'session' });

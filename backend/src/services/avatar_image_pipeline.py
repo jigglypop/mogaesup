@@ -29,6 +29,7 @@ from src.services.avatar_factory import IMAGE_PROFILE as PROFILE, _LOCK, _RUN_LO
 from src.services.character_parts import blender_executable
 from src.services.model_providers import base_url, failure_text, uncertain_text
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_request_key
+from src.services.keyed_lock import keyed_lock
 from src.services.process_identity import identity, state as process_state
 from src.services.provider_http import transient
 from src.services.keyed_lock import KeyBusy, keyed_lock
@@ -105,12 +106,21 @@ def resubmittable(task, explicit):
     return bool(task) and (_auto_resubmit(task) or (bool(explicit) and task.get('status') in character_jobs.RETRYABLE))
 
 
+def auto_resubmits(part, task):
+    """A run sends this part's 3D request again without an explicit retry: the provider never took it, and the part
+    has automatic resends left."""
+    return _auto_resubmit(task) and (
+        sum(item.get('reason') == 'auto' for item in part.get('model_attempts', [])) < AUTO_RESUBMIT_LIMIT)
+
+
 def unresolved_image_attempt(directory, part, *, idle=True):
     """True when the images stage cannot go on with this single-image part (a job without views): its request was
     attempted and no answer to it is kept, so resume() refuses it. A request that never left (not_sent) is sent again.
     `idle`: no worker can be writing the answer now, so a complete partial answer is moved into place; otherwise an
     answer of a request in flight is only read."""
     image = part['image']
+    if image['status'] == 'answer_invalid':
+        return True  # Its kept answer holds no usable image: going on would read it again.
     if image['status'] not in ('submitting', 'submission_uncertain', 'rejected', 'failed'):
         return False
     receipt = directory/'output'/f'{part["slot"]}-provider'
@@ -264,6 +274,12 @@ class AvatarImagePipeline:
 
     def create(self, owner, key, payload):
         require_request_key(key, '생산 요청 식별자가 필요합니다.')
+        # A request on a chosen body makes this key's job too (AvatarVariants.create), copying files into it before it
+        # is accepted. Both take this lock: requests with one key run one at a time, and a refused one writes nothing.
+        with keyed_lock(('variant', request_job_id(owner, 'image', key))):
+            return self._create(owner, key, payload)
+
+    def _create(self, owner, key, payload):
         payload = dict(payload)
         if payload.get('meshy_options') is None:
             payload.pop('meshy_options', None)  # Keep pre-options requests recoverable with the same key.
@@ -340,15 +356,19 @@ class AvatarImagePipeline:
             return existing or None
         if replay():
             return self.factory.get(owner, job_id), False
-        # A new request must be affordable before any image is paid for.
-        from src.services.meshy_status import require_credits
-        slots = payload.get('slots') or []
-        require_credits(len(slots), rig='body' in slots)
         # Everything the job is made from is read here, before the factory lock: Meshy's motion library, the owner's
         # prompts and default motions (which may list the owner's whole prefix), the character, its source image and
         # blueprint, and the parts to reuse. The source bytes and blueprint are the ones the request pins
         # (source_sha256, blueprint_revision). The lock only re-checks that this key made no job meanwhile, and writes.
         from src.services.avatar_meshy import AvatarMeshy, SLOTS as MOTION_SLOTS
+        submitted_motions = payload.get('motion_actions', {})
+        motions = {**AvatarMeshy(self.factory).default_actions(owner),
+                   **(submitted_motions if isinstance(submitted_motions, dict) else {})}
+        # A new request must be affordable before any image is paid for: every part at the texture resolution it asks
+        # for, the rig, and the motions it is to receive.
+        from src.services.meshy_status import require_credits
+        slots = payload.get('slots') or []
+        require_credits([payload.get('meshy_options')]*len(slots), rig='body' in slots, actions=motions)
         meshy_actions = AvatarMeshy(self.factory).library(owner)
         from src.services.studio_prompts import StudioPrompts
         prompt_snapshot = StudioPrompts(self.factory, owner).snapshot()
@@ -366,10 +386,8 @@ class AvatarImagePipeline:
             raise PipelineError('invalid_slots', '중복되지 않은 이미지 파츠를 선택하세요.', 422)
         if slots != CHARACTER_PART_SLOTS:
             raise PipelineError('invalid_slots', '몸·머리카락·머리 장식·상의·하의·신발 한 세트를 선택하세요.', 422)
-        submitted_motions = payload.get('motion_actions', {})
         if not isinstance(submitted_motions, dict):
             raise PipelineError('invalid_action', '기본 동작을 다시 선택하세요.', 422)
-        motions = {**AvatarMeshy(self.factory).default_actions(owner), **submitted_motions}
         payload['motion_actions'] = motions
         available = {i['action_id'] for i in meshy_actions} if motions else set()
         if not set(motions) <= set(MOTION_SLOTS) or any(type(v) is not int or v not in available for v in motions.values()):
@@ -401,12 +419,13 @@ class AvatarImagePipeline:
         if multiview:
             from src.services.meshy_options import freeze_options
             reused_slots = {item['slot'] for item in reuse_sources}
+            checked = {}
             for part in parts:
                 if part['slot'] not in reused_slots:
                     # One submitted setting covers the whole set; each slot keeps its own budget and pose.
                     part['meshy_options'] = freeze_options(self.factory, owner, payload.get('meshy_options'),
                                                            part['slot'], prompt_snapshot['meshy_texture'],
-                                                           shared=True)
+                                                           shared=True, checked=checked)
         elif payload.get('meshy_options'):
             raise PipelineError('multiview_required', 'Meshy 7.1 파츠 설정은 다중 시점 파츠 생성에서 사용하세요.', 422)
         # The source and the parts reused are copied and hashed with this request key held, not the process lock that
@@ -808,7 +827,7 @@ class AvatarImagePipeline:
         """Archive a failed or unaccepted Meshy attempt so this part can be sent again."""
         automatic = _auto_resubmit(task) and not job.get('model_retry')
         history = part.setdefault('model_attempts', [])
-        if automatic and sum(item.get('reason') == 'auto' for item in history) >= AUTO_RESUBMIT_LIMIT:
+        if automatic and not auto_resubmits(part, task):
             return False
         character_jobs.archive_attempt(run, 'auto' if automatic else 'explicit')
         history.append({'reason': 'auto' if automatic else 'explicit', 'status': task.get('status'),

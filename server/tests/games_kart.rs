@@ -137,5 +137,19 @@ async fn 혼자_봇_셋과_카트를_시작하면_카운트다운_뒤에_봇이_
     })
     .await;
     assert_eq!(moved["game"]["racers"][0]["bot"], true);
+    // The page puts the kart on the first gate at once, 46 m on from its slot, and goes on saying it stands there (as a
+    // page does every frame): the room takes the jump no farther than a kart's burst and the rest at its speed, and
+    // the race follows it at a kart's top speed, so the gate counts about a second later, not at the next tick.
+    let jumped = Instant::now();
+    loop {
+        send(&mut room, json!({"type": "Update", "state": {"position": spot(40.0, 0.0)}})).await;
+        let counted = |frame: &Value| frame["session"]["game"]["me"]["next"] == 2;
+        if next_where(&mut game, "Session", Duration::from_millis(200), counted).await.is_some() {
+            break;
+        }
+        assert!(jumped.elapsed() < Duration::from_secs(5), "the first gate never counted");
+    }
+    let took = jumped.elapsed();
+    assert!(took >= Duration::from_millis(600), "the first gate counted {took:?} after the jump");
     app.cleanup().await;
 }

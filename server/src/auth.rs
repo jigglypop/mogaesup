@@ -4,7 +4,7 @@ use argon2::{
 };
 use axum::{
     Json,
-    extract::{Request, State},
+    extract::{Extension, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -26,8 +26,8 @@ use crate::{
     error::{ApiError, ApiResult, LOGIN_REQUIRED, bad, conflict, forbidden, internal},
     rebac::{self, Actor, Checker, PERMISSIONS, Permission, ROLE_COLUMN, Subject, Tuple},
     security::{
-        Running, client_address, constant_time_eq, hmac_sha256, rate_exceeded, rate_limit, rate_record, rate_record_in,
-        rate_reserve, rate_running,
+        Running, client_address, constant_time_eq, hmac_sha256, plain_text, rate_exceeded, rate_limit, rate_record,
+        rate_record_in, rate_reserve, rate_running,
     },
 };
 
@@ -37,7 +37,7 @@ const SESSION_COOKIE: &str = "mogaesup_session";
 /// Its name where cookies are Secure. A `__Host-` cookie is the site's own (Secure, Path=/, no Domain): another
 /// subdomain cannot set one for it.
 const HOST_SESSION_COOKIE: &str = "__Host-mogaesup_session";
-/// A device that signed in to an account before (see [`known_device`]), by the same two names.
+/// A device that signed in to an account before (see [`signed_device`]), by the same two names.
 const DEVICE_COOKIE: &str = "mogaesup_device";
 const HOST_DEVICE_COOKIE: &str = "__Host-mogaesup_device";
 /// How long a device stays known after it last signed in (browsers keep a cookie 400 days at most).
@@ -59,18 +59,22 @@ const REPLACED_GRACE: &str = "90 seconds";
 /// in by then, and the page connects again under it (under the old one, until its grace ends, when the answer was lost).
 const SOCKETS_GRACE: Duration = Duration::from_secs(3);
 /// Wrong passwords from one address, for one account, from one device known to the account, and from all of its known
-/// devices together, in the rate window (ten minutes).
+/// devices together, in the rate window (ten minutes). Of the account's budget, sign-ins from devices it does not know
+/// spend at most `LOGIN_FAILURES_PER_ACCOUNT_ADDRESS` from one address, so a few addresses cannot shut its owner out of a
+/// new device.
 const LOGIN_FAILURES_PER_ADDRESS: u32 = 30;
 const LOGIN_FAILURES_PER_ACCOUNT: u32 = 50;
+const LOGIN_FAILURES_PER_ACCOUNT_ADDRESS: u32 = 10;
 const LOGIN_FAILURES_PER_DEVICE: u32 = 10;
 const LOGIN_FAILURES_PER_KNOWN_DEVICES: u32 = 30;
 /// Devices one account keeps known (see `signed_device`). Signing in from another forgets the one used least recently.
 pub const DEVICES_PER_USER: i64 = 10;
-/// Wrong current passwords one sign-in may send while changing the password, in the rate window: all the sessions it
-/// started over to count together, so signing the other devices out does not hand it new guesses.
+/// Wrong current passwords one sign-in may send (changing the password, signing out the other devices), in the rate
+/// window: all the sessions it started over count together, so signing the other devices out does not hand it new
+/// guesses.
 const PASSWORD_FAILURES_PER_SIGN_IN: u32 = 10;
-/// Signing the other devices out, and password changes made, per account in the rate window. Only a change made counts:
-/// someone holding a session but not the password cannot keep the owner from changing it.
+/// Signing the other devices out and changing the password, done per account in the rate window. Only one done counts:
+/// someone holding a session but not the password cannot keep the owner from doing either.
 pub const LOGOUT_OTHERS_PER_USER: u32 = 10;
 pub const PASSWORD_CHANGES_PER_USER: u32 = 5;
 /// Password checks for one account (or one known device, or one sign-in) waiting or running at once: a burst for one
@@ -85,8 +89,12 @@ pub const UNKNOWN_CHECKS_SITE: u32 = 2;
 /// A password change waits twice (the current one checked, the new one hashed), within [`AUTH_DEADLINE`].
 const HASH_WAIT: Duration = Duration::from_secs(10);
 /// How long a sign-in route may take in all: under the API's own deadline (`REQUEST_DEADLINE`), so it answers busy
-/// before CloudFront gives up on it.
+/// before that cuts it off.
 const AUTH_DEADLINE: Duration = Duration::from_secs(24);
+/// A sign-up that made its account stops signing it in this long before its [`Deadline`], to say the account is made
+/// instead of being cut off as busy. The app waits about as long as the deadline, so the answer leaves in time to reach
+/// it.
+const SIGNED_UP_MARGIN: Duration = Duration::from_secs(2);
 const BUSY: ApiError = ApiError::new(
     StatusCode::SERVICE_UNAVAILABLE,
     "busy",
@@ -98,14 +106,20 @@ const INVALID_CREDENTIALS: ApiError =
 const WRONG_PASSWORD: ApiError =
     ApiError::new(StatusCode::BAD_REQUEST, "wrong_password", "현재 비밀번호가 올바르지 않습니다.");
 const PASSWORD_CHANGED: ApiError = conflict("password_changed", "비밀번호가 방금 바뀌었습니다. 다시 시도해 주세요.");
-/// Names that read as the site's own staff. New accounts cannot take them, as a username or a display name, whatever
-/// their capitals, spaces and compatibility forms (see [`name_key`]); existing ones keep working. Usernames are ASCII,
-/// so the Korean ones guard display names.
+/// Names that read as the site's own staff, as letters and digits in lower case. New accounts take none as a username,
+/// nor as a display name in any width, case or spacing (see [`reads_as_staff`]); existing accounts keep theirs.
+/// Usernames are ASCII, so the Korean ones guard display names.
 const RESERVED_NAMES: [&str; 10] =
     ["admin", "administrator", "mogaesup", "root", "system", "support", "staff", "운영자", "관리자", "모개숲"];
 const USERNAME_TAKEN: ApiError = conflict("username_taken", "이미 사용 중인 아이디입니다.");
-const RESERVED_NAME: ApiError = bad("invalid_name", "쓸 수 없는 이름입니다.");
+pub(crate) const STAFF_NAME: ApiError = bad("reserved_name", "운영진처럼 보이는 이름은 쓸 수 없어요.");
 const HIDDEN_IN_NAME: ApiError = bad("invalid_name", "이름에 쓸 수 없는 문자가 들어 있어요.");
+/// Sign-up made the account but could not sign it in.
+const SIGNED_UP: ApiError = ApiError::new(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "signed_up",
+    "가입은 끝났어요. 같은 아이디와 비밀번호로 로그인해 주세요.",
+);
 /// Hangul fillers: letters that draw nothing.
 const HANGUL_FILLERS: [char; 4] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}'];
 
@@ -192,7 +206,8 @@ async fn signed_in(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<(U
     let row = sqlx::query(&format!(
         "SELECT u.id, u.username, u.display_name, {ROLE_COLUMN}, s.created_at, s.replaced_at IS NOT NULL AS replaced
          FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)"
+         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)
+           AND s.created_at > now() - interval '{SESSION_LIFETIME}'"
     ))
     .bind(&hash)
     .bind(presented.legacy)
@@ -213,9 +228,10 @@ pub async fn current_user(state: &AppState, headers: &HeaderMap) -> ApiResult<Us
 }
 
 pub(crate) async fn active_session(state: &AppState, hash: &str, user: Uuid) -> ApiResult<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = $1 AND user_id = $2 AND expires_at > now())",
-    )
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = $1 AND user_id = $2 AND expires_at > now()
+         AND created_at > now() - interval '{SESSION_LIFETIME}')"
+    ))
     .bind(hash)
     .bind(user)
     .fetch_one(&state.db)
@@ -263,19 +279,29 @@ pub(crate) fn username(raw: &str) -> ApiResult<String> {
     Ok(name)
 }
 
-/// A display name as it is kept: what was typed, trimmed (the username when nothing was). Refused when it is too long,
-/// holds a control character or one that draws nothing outside an emoji ([`hides_something`]), or reads as a reserved
-/// name.
+/// Whether a display name reads as one of [`RESERVED_NAMES`]: the same letters and digits once their width and form
+/// are made one (NFKC) and their case too, whatever spaces, marks, symbols or invisible joiners come between them.
+pub(crate) fn reads_as_staff(name: &str) -> bool {
+    let letters: String = name.nfkc().flat_map(char::to_lowercase).filter(|c| c.is_alphanumeric()).collect();
+    RESERVED_NAMES.contains(&letters.as_str())
+}
+
+/// The name a new account shows others, as it is kept: what was typed, trimmed (the username when nothing was).
+/// Refused when it is too long, does not read as it was written ([`plain_text`]), reads as the site's staff
+/// ([`reads_as_staff`]), or holds a character that draws nothing outside an emoji ([`hides_something`]).
 fn display_name(raw: Option<&str>, fallback: &str) -> ApiResult<String> {
     let name = raw.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(fallback).to_owned();
     if name.chars().count() > 20 {
         return Err(bad("invalid_name", "이름은 20자 이하로 입력해 주세요."));
     }
-    if name.chars().any(char::is_control) || hides_something(&name) {
+    if !plain_text(&name, false) {
         return Err(HIDDEN_IN_NAME);
     }
-    if reserved(&name) {
-        return Err(RESERVED_NAME);
+    if reads_as_staff(&name) {
+        return Err(STAFF_NAME);
+    }
+    if hides_something(&name) {
+        return Err(HIDDEN_IN_NAME);
     }
     Ok(name)
 }
@@ -321,16 +347,11 @@ fn emoji_part(c: char) -> bool {
     matches!(c, '\u{200d}' | '\u{fe0e}' | '\u{fe0f}' | '\u{e0020}'..='\u{e007f}')
 }
 
-/// `name` as reserved names are compared: in NFKC (full-width letters and decomposed Hangul read as their plain forms),
-/// lowercase, without spaces or the invisible characters emoji may keep.
+/// `name` as it is compared with the usernames the server reserved (`auth_reserved_usernames`): in NFKC (full-width
+/// letters and decomposed Hangul read as their plain forms), lowercase, without spaces or the invisible characters
+/// emoji may keep.
 fn name_key(name: &str) -> String {
     name.nfkc().filter(|c| !c.is_whitespace() && !invisible(*c)).flat_map(char::to_lowercase).collect()
-}
-
-/// Whether `name` is one of [`RESERVED_NAMES`], capitals, spaces and compatibility forms aside.
-fn reserved(name: &str) -> bool {
-    let key = name_key(name);
-    RESERVED_NAMES.iter().any(|reserved| name_key(reserved) == key)
 }
 
 fn new_password(password: &str) -> ApiResult<()> {
@@ -356,9 +377,16 @@ async fn hashing_slot(state: &AppState) -> ApiResult<OwnedSemaphorePermit> {
     }
 }
 
-/// The sign-in routes answer within [`AUTH_DEADLINE`], whatever they wait for.
-pub async fn deadline(request: Request, next: Next) -> Response {
-    tokio::time::timeout(AUTH_DEADLINE, next.run(request)).await.unwrap_or_else(|_| BUSY.into_response())
+/// When a sign-in route is cut off (see [`deadline`]).
+#[derive(Clone, Copy)]
+pub struct Deadline(tokio::time::Instant);
+
+/// The sign-in routes answer within [`AUTH_DEADLINE`], whatever they wait for. A route that has to answer on its own
+/// before then reads when that is from its [`Deadline`].
+pub async fn deadline(mut request: Request, next: Next) -> Response {
+    let by = tokio::time::Instant::now() + AUTH_DEADLINE;
+    request.extensions_mut().insert(Deadline(by));
+    tokio::time::timeout_at(by, next.run(request)).await.unwrap_or_else(|_| BUSY.into_response())
 }
 
 async fn hash_password(state: &AppState, password: String) -> ApiResult<String> {
@@ -405,8 +433,8 @@ fn address_key(headers: &HeaderMap) -> String {
 }
 
 /// The budgets one password check runs under: wrong passwords from the request's address, and for each of `keys` (the
-/// account; or a device known to it and all of its known devices together; or a sign-in changing its password), in the
-/// rate window.
+/// account and the part of it the address may spend; or a device known to it and all of its known devices together; or
+/// a sign-in confirming its password), in the rate window.
 ///
 /// Only a password found wrong counts. A check still waiting or running holds nothing against anyone, so a burst of
 /// them cannot shut the owner out before a single one was found wrong; at most [`CHECKS_UNDER_WAY`] of one key wait or
@@ -649,6 +677,9 @@ async fn session(
     device: Option<String>,
     status: StatusCode,
 ) -> ApiResult<Response> {
+    // Read before the session is made, so the commit is the last thing waited for: a failure or the deadline cannot leave
+    // a session whose cookie no browser got, which would also have ended another device's session to make room.
+    let body = json!({"user": with_permissions(state, &user).await?});
     let token = new_token();
     let device = device.unwrap_or_else(new_device);
     let mut tx = state.db.begin().await?;
@@ -674,8 +705,7 @@ async fn session(
     remember_device(&mut tx, user.id, &device).await?;
     tx.commit().await?;
     end_sockets(state, &expired);
-    let body = with_permissions(state, &user).await?;
-    let mut response = (status, Json(json!({"user": body}))).into_response();
+    let mut response = (status, Json(body)).into_response();
     send_session(state, headers, &mut response, &token, SESSION_MAX_AGE_SECONDS)?;
     send_device(state, &mut response, &user.username, &device)?;
     Ok(response)
@@ -789,12 +819,13 @@ fn started_over(
 
 pub async fn register(
     State(state): State<AppState>,
+    Extension(Deadline(by)): Extension<Deadline>,
     headers: HeaderMap,
     Json(body): Json<Credentials>,
 ) -> ApiResult<Response> {
     let name = username(&body.username)?;
     new_password(&body.password)?;
-    if reserved(&name) {
+    if RESERVED_NAMES.iter().any(|reserved| reserved.eq_ignore_ascii_case(&name)) {
         return Err(USERNAME_TAKEN);
     }
     let display = display_name(body.display_name.as_deref(), &name)?;
@@ -809,7 +840,7 @@ pub async fn register(
             .fetch_one(&state.db)
             .await?;
     if reserved_account && name_key(&display) != name {
-        return Err(RESERVED_NAME);
+        return Err(STAFF_NAME);
     }
     let created = rate_reserve(&state, &[("register-created".into(), 600)])?;
     let hash = hash_password(&state, body.password).await?;
@@ -818,7 +849,13 @@ pub async fn register(
         return Err(USERNAME_TAKEN);
     }
     created.keep();
-    session(&state, &headers, user, &hash, None, StatusCode::CREATED).await
+    // The account is made by now, and signing up again would only find its name taken: a sign-in that fails, or runs out
+    // of time (`SIGNED_UP_MARGIN`), says the account is there.
+    let signing_in = session(&state, &headers, user, &hash, None, StatusCode::CREATED);
+    match tokio::time::timeout_at(by - SIGNED_UP_MARGIN, signing_in).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) | Err(_) => Err(SIGNED_UP),
+    }
 }
 
 pub async fn login(
@@ -853,14 +890,18 @@ pub async fn login(
     .await?;
     // Only wrong passwords count, per address and per account (see `PasswordCheck`); a limit shared by everyone would
     // let one client lock all players out. A device the account knows has a budget of its own, and its known devices
-    // one together: cookies kept from several devices do not multiply the guesses.
+    // one together: cookies kept from several devices do not multiply the guesses. Other devices share the account's,
+    // of which one address spends a part at most.
     let known = row.as_ref().is_some_and(|row| row.get::<bool, _>("known_device"));
     let keys = match signed.as_deref().filter(|_| known) {
         Some(id) => vec![
             (format!("login-failed-device:{id}"), LOGIN_FAILURES_PER_DEVICE),
             (format!("login-failed-devices:{name}"), LOGIN_FAILURES_PER_KNOWN_DEVICES),
         ],
-        None => vec![(format!("login-failed:{name}"), LOGIN_FAILURES_PER_ACCOUNT)],
+        None => vec![
+            (format!("login-failed:{name}"), LOGIN_FAILURES_PER_ACCOUNT),
+            (format!("login-failed:{name}:{}", client_address(&headers)), LOGIN_FAILURES_PER_ACCOUNT_ADDRESS),
+        ],
     };
     let check = if row.is_some() {
         PasswordCheck::start(&state, &headers, keys)?
@@ -886,25 +927,63 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiRes
     Ok(response)
 }
 
-/// `POST /api/auth/logout-others`: ends every other session of the signed-in account (other devices and browsers) and
-/// closes their realtime sockets. The devices the account knows stay known: someone holding a session cannot shut the
-/// owner's devices out of their own budget this way. This browser stays signed in under a new session cookie (see
-/// [`start_over`]). At most [`LOGOUT_OTHERS_PER_USER`] per account in the rate window. Answers
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordConfirm {
+    current_password: String,
+}
+
+/// `POST /api/auth/logout-others` with `{currentPassword}`: ends every other session of the signed-in account (other
+/// devices and browsers) and closes their realtime sockets. It asks for the password as changing it does: a stolen
+/// session alone cannot end the owner's sessions (again and again, each new one), so the owner can always sign in and
+/// end the stolen one. The devices the account knows stay known: someone holding a session cannot shut the owner's
+/// devices out of their own budget this way. This browser stays signed in under a new session cookie (see
+/// [`start_over`]). At most [`LOGOUT_OTHERS_PER_USER`] done per account in the rate window. Answers
 /// `{"ended": <other sessions ended>}`.
-pub async fn logout_others(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Response> {
+pub async fn logout_others(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PasswordConfirm>,
+) -> ApiResult<Response> {
     let (user, session) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
     if session.replaced {
         return Err(LOGIN_REQUIRED);
     }
-    rate_limit(&state, format!("logout-others:{}", user.id), LOGOUT_OTHERS_PER_USER)?;
+    if !plausible_password(&body.current_password) {
+        return Err(WRONG_PASSWORD);
+    }
+    let done = format!("logout-others:{}", user.id);
+    rate_exceeded(&state, &done, LOGOUT_OTHERS_PER_USER)?;
+    confirm_password(&state, &headers, &user, &session, body.current_password).await?;
     let token = new_token();
     let mut tx = state.db.begin().await?;
     sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE").bind(user.id).execute(&mut *tx).await?;
     let started = start_over(&mut tx, &state, user.id, &session.hash, &token, None).await?;
     tx.commit().await?;
+    rate_record(&state, done);
     let response = Json(json!({"ended": started.others})).into_response();
     close_started_over(&state, &started.ended, session.hash);
     started_over(&state, &headers, response, &user, &token, started.seconds, None)
+}
+
+/// The account's password hash, once `password` is found to be it. A wrong one counts against the sign-in of
+/// `session` (every session it started over together) and the address, not the account, so a stolen session cannot
+/// shut the owner out of signing in.
+async fn confirm_password(
+    state: &AppState,
+    headers: &HeaderMap,
+    user: &User,
+    session: &Session,
+    password: String,
+) -> ApiResult<String> {
+    let budget = vec![(session.password_budget(user), PASSWORD_FAILURES_PER_SIGN_IN)];
+    let check = PasswordCheck::start(state, headers, budget)?;
+    let current: String =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1").bind(user.id).fetch_one(&state.db).await?;
+    if !check.verify(state, Some(current.clone()), password).await? {
+        return Err(WRONG_PASSWORD);
+    }
+    Ok(current)
 }
 
 #[derive(Deserialize)]
@@ -935,13 +1014,7 @@ pub async fn change_password(
     new_password(&body.new_password)?;
     let changes = format!("password-changed:{}", user.id);
     rate_exceeded(&state, &changes, PASSWORD_CHANGES_PER_USER)?;
-    let budget = vec![(session.password_budget(&user), PASSWORD_FAILURES_PER_SIGN_IN)];
-    let check = PasswordCheck::start(&state, &headers, budget)?;
-    let current: String =
-        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1").bind(user.id).fetch_one(&state.db).await?;
-    if !check.verify(&state, Some(current.clone()), body.current_password).await? {
-        return Err(WRONG_PASSWORD);
-    }
+    let current = confirm_password(&state, &headers, &user, &session, body.current_password).await?;
     let hash = hash_password(&state, body.new_password).await?;
     let device = signed_device(&state, &headers, &user.username).unwrap_or_else(new_device);
     let token = new_token();
@@ -988,7 +1061,8 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
            s.replaced_at IS NOT NULL AS replaced,
            floor(extract(epoch FROM coalesce((SELECT expires_at FROM renewed), s.expires_at) - now()))::int8 AS seconds_left
          FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)"
+         WHERE s.token_hash = $1 AND s.expires_at > now() AND (s.legacy_cookie OR NOT $2)
+           AND s.created_at > now() - interval '{SESSION_LIFETIME}'"
     ))
     .bind(&hash)
     .bind(presented.legacy)
@@ -1016,9 +1090,10 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
 
 pub async fn realtime_ticket(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let (user, session) = signed_in(&state, &headers).await?.ok_or(LOGIN_REQUIRED)?;
-    // A page asks for one when its room connects and again each time the connection drops (checked every second, with
-    // waits that double up to 30 seconds), so several tabs or a reconnect loop still fit.
-    rate_limit(&state, format!("realtime-ticket:{}", user.id), 90)?;
+    // A page asks for one when its room connects and another for its game socket once the room is in, and both again
+    // each time a connection drops (checked every second, with waits that double up to 30 seconds), so several tabs or
+    // a reconnect loop still fit.
+    rate_limit(&state, format!("realtime-ticket:{}", user.id), 180)?;
     let (ticket, expires_at) = crate::rooms::issue_ticket(&state.config.ticket_secret, &user, &session.hash);
     Ok(Json(json!({"ticket": ticket, "expiresAt": expires_at, "user": user})))
 }
@@ -1156,13 +1231,12 @@ mod tests {
     #[test]
     fn display_names_hide_nothing_and_cannot_pass_for_staff() {
         let refused = |name: &str| display_name(Some(name), "fallback").unwrap_err().message;
-        // 운영자 drawn backwards behind a right-to-left override, and with a Hangul filler, a variation selector, a
-        // zero-width space, a word joiner or a left-to-right mark in it.
+        // 운영자 drawn backwards behind a right-to-left override, and with a Hangul filler, a zero-width space, a word
+        // joiner or a left-to-right mark in it.
         for hidden in [
             "\u{202e}자영운",
             "운영자\u{3164}",
             "\u{115f}운영자",
-            "운영자\u{fe0f}",
             "운\u{200b}영자",
             "운영\u{2060}자",
             "\u{200e}운영자",
@@ -1170,12 +1244,21 @@ mod tests {
         ] {
             assert_eq!(refused(hidden), HIDDEN_IN_NAME.message, "{hidden:?}");
         }
-        // Full-width letters and Hangul written in its decomposed form read as what they show.
+        // Full-width letters, Hangul written in its decomposed form and a stray variation selector read as what they
+        // show.
         let decomposed: String = "운영자".nfd().collect();
         assert_ne!(decomposed, "운영자");
-        for staff in ["ＡＤＭＩＮ", "Ａｄｍｉｎ", decomposed.as_str(), "관 리 자", "Mo Gae Sup", "ｍｏｇａｅｓｕｐ"]
-        {
-            assert_eq!(refused(staff), RESERVED_NAME.message, "{staff:?}");
+        for staff in [
+            "ＡＤＭＩＮ",
+            "Ａｄｍｉｎ",
+            decomposed.as_str(),
+            "관 리 자",
+            "Mo Gae Sup",
+            "ｍｏｇａｅｓｕｐ",
+            "운영자\u{fe0f}",
+            "모개숲",
+        ] {
+            assert_eq!(refused(staff), STAFF_NAME.message, "{staff:?}");
         }
         // Emoji keep the selectors and joiners they are made of, and names that only hold a reserved one are free.
         for kept in ["고양이❤️", "👩\u{200d}💻개발", "🏳️\u{200d}🌈", "운영자님", "ㅋㅋ왕", "admin_fan"]
@@ -1184,6 +1267,29 @@ mod tests {
         }
         assert_eq!(display_name(Some("  "), "fallback").unwrap(), "fallback");
         assert_eq!(refused("a\u{7}b"), HIDDEN_IN_NAME.message);
+    }
+
+    #[test]
+    fn display_names_that_read_as_staff_or_hide_themselves_are_refused() {
+        let refused = |name: &str| display_name(Some(name), "fallback").err().map(|error| error.code);
+        // In any width, case or spacing, with marks, symbols or joiners between the letters, or spelled in jamo.
+        let jamo = "\u{110b}\u{116e}\u{11ab}\u{110b}\u{1167}\u{11bc}\u{110c}\u{1161}";
+        let spaced = [" 운 영 자 ", "관리\u{3000}자", "운\u{200d}영자", "[운영자]", "관리자✅", jamo];
+        let cased = ["ADMIN", "Ａｄｍｉｎ", "𝐚𝐝𝐦𝐢𝐧", "Staff", "support!", "Mogaesup", "ROOT", "System"];
+        for name in ["운영자", "관리자", "Administrator"].into_iter().chain(spaced).chain(cased) {
+            assert_eq!(refused(name), Some("reserved_name"), "{name:?}");
+        }
+        // Nor a name that hides itself, or reads turned around.
+        for name in ["\u{200b}", "\u{202e}abc", "모개\u{2066}", "a\u{feff}b", "줄\n바꿈", "\u{7}"] {
+            assert_eq!(refused(name), Some("invalid_name"), "{name:?}");
+        }
+        assert_eq!(refused(&"가".repeat(21)), Some("invalid_name"));
+        // Other names are kept as written, emoji too; a blank one is the username.
+        for name in ["운영", "관리인", "모개", "rooted", "모개 👩\u{200d}🏫", &"가".repeat(20)] {
+            assert_eq!(display_name(Some(name), "fallback").unwrap(), name, "{name:?}");
+        }
+        assert_eq!(display_name(Some("  "), "mogae").unwrap(), "mogae");
+        assert_eq!(display_name(None, "mogae").unwrap(), "mogae");
     }
 
     #[test]

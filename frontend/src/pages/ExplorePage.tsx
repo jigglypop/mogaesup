@@ -61,7 +61,7 @@ function useRested<T>(value: T, ms: number): T {
   return rested;
 }
 
-/** `/explore`: public islands, most recently changed first, found by `?q` on the server and a page at a time. */
+/** `/explore`: public 섬, most recently changed first, found by `?q` on the server and a page at a time. */
 export function ExplorePage() {
   const [params, setParams] = useSearchParams();
   const query = params.get('q') ?? '';
@@ -166,11 +166,8 @@ export function ExplorePage() {
                   <span>{home.emoji}</span>
                 </span>
                 <span className="mg-island-info">
-                  <b>{home.title}</b>
-                  <small>
-                    {home.ownerName} · @{home.username}
-                  </small>
-                  {home.statusMessage && <span className="mg-island-status">{home.statusMessage}</span>}
+                  <b>{home.ownerName}의 섬</b>
+                  <small>@{home.username}</small>
                   <span className="mg-island-meta">
                     <span>{since(home.updatedAt)}</span>
                     <span>방문 {home.total.toLocaleString()}</span>

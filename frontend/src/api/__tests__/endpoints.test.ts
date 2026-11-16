@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { onSessionLapse, setSessionOwner } from '../../auth/sessionWork';
-import { authApi, homeApi, homesPath, layoutApi, shareUrl, socialApi } from '../endpoints';
+import { authApi, homeApi, homesPath, layoutApi, lookApi, shareUrl, socialApi } from '../endpoints';
 
 describe('섬 공유 링크', () => {
   it('미리보기를 읽는 서버의 공유 페이지를 가리킨다', () => {
@@ -53,13 +53,15 @@ describe('섬 목록 주소', () => {
     });
 
     it('AI 배치의 재시도는 같은 요청키를 전달한다', async () => {
-      fetchMock.mockResolvedValue(new Response(JSON.stringify({ kind: 'cafe' }), { status: 200 }));
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ kind: 'cafe' }), { status: 200 }));
       const body = { description: '12m 카페', mode: 'ai' as const, requestId: 'layout-request-123' };
       await layoutApi.interpret(body);
       await layoutApi.interpret(body);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
       for (const [url, options] of fetchMock.mock.calls) {
         expect(url).toBe('/api/studio/layouts/interpret');
-        expect(options?.headers).toMatchObject({ 'Idempotency-Key': body.requestId, 'content-type': 'application/json' });
+        const headers = new Headers(options?.headers);
+        expect([headers.get('idempotency-key'), headers.get('content-type')]).toEqual([body.requestId, 'application/json']);
         expect(JSON.parse(options?.body as string)).toEqual(body);
       }
     });
@@ -74,6 +76,25 @@ describe('섬 목록 주소', () => {
             ),
         );
         const result = homeApi.saveWorld({ expectedOwnerId: 'owner', worldId: 'w', baseRevision: 1, data: {} }).catch((problem: unknown) => problem);
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(vi.getTimerCount()).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await result).toMatchObject({ name: 'ApiTimeoutError', ms: 60_000 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('내 캐릭터 저장도 캐릭터 서버를 거쳐 대답하므로 60초를 기다린다', async () => {
+      vi.useFakeTimers();
+      try {
+        fetchMock.mockImplementationOnce(
+          (_url, init) =>
+            new Promise<Response>((_resolve, reject) =>
+              init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError'))),
+            ),
+        );
+        const result = lookApi.save({ body: { jobId: 'body', version: 'v1' }, parts: {}, hairColor: null, colors: {} }).catch((problem: unknown) => problem);
         await vi.advanceTimersByTimeAsync(59_999);
         expect(vi.getTimerCount()).toBe(1);
         await vi.advanceTimersByTimeAsync(1);
@@ -178,7 +199,7 @@ describe('섬 목록 주소', () => {
 
     it.each([
       ['비밀번호 바꾸기', () => authApi.changePassword({ currentPassword: 'old-password', newPassword: 'new-password' }), new Response(null, { status: 204 })],
-      ['다른 기기 로그아웃', () => authApi.logoutOthers(), new Response(JSON.stringify({ ended: 2 }), { status: 200 })],
+      ['다른 기기 로그아웃', () => authApi.logoutOthers({ currentPassword: 'old-password' }), new Response(JSON.stringify({ ended: 2 }), { status: 200 })],
     ])('%s 중 닫힌 실시간 연결이 옛 쿠키로 티켓을 거절당해도 로그아웃하지 않는다', async (_name, call, answered) => {
       let answer!: (response: Response) => void;
       fetchMock.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));

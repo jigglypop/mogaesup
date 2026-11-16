@@ -1,4 +1,4 @@
-import { request, savedRequest, type Pending } from '../api';
+import { request, savedRequest } from '../api';
 import type { FactoryJob } from '../factory/api';
 
 export type BodyType = 'male' | 'female';
@@ -43,18 +43,15 @@ const baseBodies = (bodyType: BodyType) => savedRequest<BaseBodyInput>(`gaesup.b
     && (input.rig_source == null || (typeof input.rig_source.job_id === 'string' && typeof input.rig_source.version === 'string')),
   '저장된 기본 몸 요청을 읽을 수 없습니다. 기존 요청 기록을 확인해 주세요.');
 
-const postBody = (pending: Pending<BaseBodyInput>) => request<FactoryJob>('/api/avatar-factory/base-bodies', {
-  method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-  body: JSON.stringify(pending.input), timeoutMs: 60000,
-});
-
 export const baseBodiesApi = {
   recovery: (bodyType: BodyType) => baseBodies(bodyType).read(),
   imageUrl: (id: string) => `/api/avatar-blueprints/assets/${encodeURIComponent(id)}`,
   upload: (file: File) => request<UploadedBodyImage>('/api/avatar-blueprints/assets', {
     method: 'POST', headers: { 'Content-Type': file.type || 'image/png' }, body: file, timeoutMs: 60000,
   }),
-  create: (input: BaseBodyInput) => baseBodies(input.body_type).send(input, postBody),
-  /** Sends the saved request under `key` again as itself; nothing when it is no longer saved (SavedRequestGone). */
-  recover: (bodyType: BodyType, key: string) => baseBodies(bodyType).resume(key, postBody),
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (input: BaseBodyInput, key?: string) => baseBodies(input.body_type).send(input, pending => request<FactoryJob>('/api/avatar-factory/base-bodies', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+    body: JSON.stringify(pending.input), timeoutMs: 60000,
+  }), key ? { key } : {}),
 };

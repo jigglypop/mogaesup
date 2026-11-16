@@ -7,16 +7,21 @@ import { MeshoptDecoder } from 'meshoptimizer';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createBuildingStore, DEFAULT_BUILDING_OBJECT_CATALOG, type BuildingSerializedState } from 'gaesup-world/building';
 import { createVillage, SPAWN } from '../village';
-import { applyLayout, footprintsOverlap, interpretLayout, objectFootprint, proposeLayout, type LayoutCatalogItem, type XZ } from '../edit/layout';
+import { LayoutError, STORE_PROP_IDS, applyLayout, footprintsOverlap, interpretLayout, measureLayoutCatalog, objectFootprint, proposeLayout, type LayoutCatalogItem, type XZ } from '../edit/layout';
 import { createEditHistory } from '../edit/history';
 import type { EditSession } from '../edit/session';
 import type { LocalBox } from '../edit/objects';
+
+// What the browser's loader measures; the GLBs themselves are read below.
+const load = vi.hoisted(() => vi.fn<(url: string) => Promise<LocalBox>>());
+vi.mock('../edit/bounds', () => ({ loadModelBounds: load }));
 
 // Vite serves public overrides before engine files. Read those actual GLBs with their node transforms,
 // never invented dimensions. Production browser measurements also include the build's quantization.
 const frontend = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const engine = resolve(dirname(fileURLToPath(import.meta.resolve('gaesup-world'))), '../public');
 let measured: LayoutCatalogItem[];
+let measuredStudio: LayoutCatalogItem[];
 const bounds = new Map<string, LocalBox>();
 const wanted = new Set(['table-basic', 'chair-basic', 'shop-stall-basic', 'storage-basic', 'lamp-basic']);
 beforeAll(async () => {
@@ -24,7 +29,9 @@ beforeAll(async () => {
   const io = new NodeIO().registerExtensions(ALL_EXTENSIONS).registerDependencies({ 'meshopt.decoder': MeshoptDecoder });
   const defaults = DEFAULT_BUILDING_OBJECT_CATALOG.filter(v => wanted.has(v.id));
   const village = createVillage();
-  const urls = new Set([...defaults.map(v => v.modelUrl!), ...village.objects!.flatMap(v => v.config?.modelUrl ? [v.config.modelUrl] : [])]);
+  // Studio furniture the layout may place (what the browser measures for each kind): the same GLBs, read the same way.
+  const stores = [...new Set(STORE_PROP_IDS)].map(id => ({ id: `prop-${id}`, label: id, modelUrl: `/gltf/decor/${id}.glb` }));
+  const urls = new Set([...defaults.map(v => v.modelUrl!), ...stores.map(v => v.modelUrl), ...village.objects!.flatMap(v => v.config?.modelUrl ? [v.config.modelUrl] : [])]);
   for (const url of urls) {
     const override = resolve(frontend, 'public', url.replace(/^\//, ''));
     const path = existsSync(override) ? override : resolve(engine, url.replace(/^\//, ''));
@@ -35,6 +42,8 @@ beforeAll(async () => {
     bounds.set(url, { min: value.min, max: value.max });
   }
   measured = defaults.map(v => ({ id: v.id, label: v.label, modelUrl: v.modelUrl!, scale: v.defaultScale, color: v.defaultColor, bounds: bounds.get(v.modelUrl!)! }));
+  // What measureLayoutCatalog adds for a kind: the studio furniture that kind may place.
+  measuredStudio = stores.map(v => ({ id: v.id, label: v.label, modelUrl: v.modelUrl, scale: 1, color: '#ffffff', bounds: bounds.get(v.modelUrl)! }));
 });
 
 const island = () => {
@@ -42,7 +51,7 @@ const island = () => {
   store.getState().hydrate(createVillage());
   return { store, snapshot: store.getState().serialize() };
 };
-const proposal = (snapshot: BuildingSerializedState, text = '12m × 12m 카페 2인') => proposeLayout(snapshot, interpretLayout(text), measured,
+const proposal = (snapshot: BuildingSerializedState, text = '12m × 12m 카페 2인') => proposeLayout(snapshot, interpretLayout(text), [...measured, ...measuredStudio],
   [SPAWN[0], SPAWN[2]], [[SPAWN[0], SPAWN[2]]], url => bounds.get(url));
 
 describe('실제 섬 매장 자동 배치', () => {
@@ -81,7 +90,17 @@ describe('실제 섬 매장 자동 배치', () => {
     const { snapshot } = island();
     const plan = proposal(snapshot, text);
     expect(plan.objects.length).toBeGreaterThan(0);
-    expect(plan.objects.every(v => measured.some(item => item.id === v.config?.modelId))).toBe(true);
+    expect(plan.objects.every(v => [...measured, ...measuredStudio].some(item => item.id === v.config?.modelId))).toBe(true);
+  });
+
+  it('카페·상점·사무실은 각자 쓰는 실제 기물을 자리가 있는 만큼 더 놓는다', () => {
+    const { snapshot } = island();
+    const ids = (text: string) => proposal(snapshot, text).objects.map(v => v.config?.modelId);
+    expect(ids('12m × 12m 카페 2인')).toEqual(expect.arrayContaining(['table-basic', 'chair-basic', 'shop-stall-basic', 'prop-cafe-counter']));
+    expect(ids('12m × 12m 상점')).toEqual(expect.arrayContaining(['prop-shop-checkout', 'prop-shop-wall-shelf']));
+    expect(ids('12m × 12m 사무실 4인')).toEqual(expect.arrayContaining(['prop-office-bookshelf', 'prop-office-whiteboard']));
+    // Only what the kind places: a cafe never gets the office's desks or shelves.
+    expect(ids('12m × 12m 카페 2인').some(id => String(id).startsWith('prop-office-'))).toBe(false);
   });
 
   it('적용은 한 undo 단계이고 재검수 중 섬이 바뀌면 적용하지 않는다', () => {
@@ -101,18 +120,29 @@ describe('실제 섬 매장 자동 배치', () => {
     unsubscribe(); history.stop();
   });
 
-  it('크기를 확인하지 못한 기존 모델 하나로 배치를 통째로 거절하지 않고, 그 둘레 한 칸을 비우고 그 기물을 알린다', () => {
+  it('측정되지 않은 기존 모델을 가정해 배치하지 않는다', () => {
     const { snapshot } = island();
-    const lost = snapshot.objects.find(v => v.type === 'model' && !!v.config?.modelUrl)!;
-    const lostUrl = lost.config!.modelUrl!;
-    const plan = proposeLayout(snapshot, interpretLayout('12m × 12m 카페 2인'), measured, [lost.position.x, lost.position.z],
-      [[SPAWN[0], SPAWN[2]]], url => (url === lostUrl ? undefined : bounds.get(url)));
-    expect(plan.notice).toContain(`${lost.config!.modelLabel ?? lost.config!.modelId}: 크기를 확인하지 못해 한 칸을 비웠어요`);
-    const half = 2 * Math.max(1, lost.config!.modelScale ?? 1);
-    const cell: XZ[] = [[lost.position.x - half, lost.position.z - half], [lost.position.x + half, lost.position.z - half],
-      [lost.position.x + half, lost.position.z + half], [lost.position.x - half, lost.position.z + half]];
-    for (const object of plan.objects) expect(footprintsOverlap(objectFootprint(object, bounds.get(object.config!.modelUrl!)!), cell, .15)).toBe(false);
-    // Everything measured: nothing to say.
-    expect(proposal(snapshot).notice.some(text => text.includes('크기를 확인하지 못해'))).toBe(false);
+    expect(() => proposeLayout(snapshot, interpretLayout('카페'), measured, [0, 0])).toThrow('기존 기물');
+  });
+
+  it('배치에 쓰는 기본 기물과 섬에 놓인 모델만 재고, 재지 못한 놓인 모델은 로더 원문 대신 배치의 이유로 거절한다', async () => {
+    const broken = '/gltf/decor/broken.glb';
+    load.mockImplementation(async url => {
+      const box = bounds.get(url);
+      if (!box) throw new Error(`Could not load ${url}: HTTP 404`);
+      return box;
+    });
+    const { snapshot } = island();
+    const placed = snapshot.objects.flatMap(v => v.config?.modelUrl ? [v.config.modelUrl] : []);
+    const catalog = await measureLayoutCatalog([...placed, broken]);
+    expect(catalog).toEqual(measured);
+    expect(new Set(load.mock.calls.map(([url]) => url))).toEqual(new Set([...measured.map(v => v.modelUrl), ...placed, broken]));
+    expect(proposal(snapshot).objects.length).toBeGreaterThan(0);
+    // The broken model placed on the island: its footprint is unknown, and the planner says so in its own words.
+    const withBroken = structuredClone(snapshot);
+    withBroken.objects.push({ ...structuredClone(withBroken.objects.find(v => v.type === 'model')!), id: 'obj-broken',
+      config: { ...withBroken.objects.find(v => v.type === 'model')!.config, modelUrl: broken } });
+    expect(() => proposal(withBroken)).toThrow(LayoutError);
+    expect(() => proposal(withBroken)).toThrow('기존 기물의 크기를 확인하지 못했어요');
   });
 });

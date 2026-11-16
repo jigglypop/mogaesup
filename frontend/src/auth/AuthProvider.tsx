@@ -3,12 +3,11 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type R
 import { authApi } from '../api/endpoints';
 import type { Credentials, Registration, User } from '../api/types';
 import { clearDrafts } from './drafts';
-import { openSessionChannel, type SessionChannel } from './otherTabs';
 import { followSession, SESSION_RETRY_MS, SESSION_UNREACHABLE_AFTER } from './session';
 import {
   expireSession,
   hasUnsavedWork,
-  onSessionCheck,
+  onSessionDoubt,
   onSessionLapse,
   onSessionRenewed,
   renewedElsewhere,
@@ -20,7 +19,7 @@ import {
 type AuthValue = {
   status: 'loading' | 'anonymous' | 'signedIn';
   user: User | null;
-  /** The member whose session ran out while they were signed in here, until anyone signs in or out. */
+  /** The member whose session ran out (or ended in another tab) while signed in here, until anyone signs in or out. */
   lapsed: User | null;
   /** The server has not said who is signed in after several tries; the screens wait and offer `retry`. */
   unreachable: boolean;
@@ -39,19 +38,49 @@ const AuthContext = createContext<AuthValue | null>(null);
  */
 export const SESSION_RENEW_MS = 12 * 60 * 60 * 1000;
 
+/**
+ * Changed in this browser's storage by a tab that signs in or out, or starts the session over. The other tabs hear it
+ * (`storage`) and ask whose the session cookie is now; one that missed it (asleep, or kept for Back and Forward) finds
+ * it changed once it is shown.
+ */
+export const SESSION_MARK = 'mogaesup:session';
+/**
+ * How a mark ends when the tab that changed it started the same member's session over (a password change, signing out
+ * the other devices, see `startOver`): the browser has a new cookie, so refusals of the old one are no longer news.
+ */
+export const RENEWED_MARK = ':renewed';
+
+const readMark = () => {
+  try {
+    return localStorage.getItem(SESSION_MARK);
+  } catch {
+    return null;
+  }
+};
+/** Changes the mark for the other tabs; returns it as it is stored now. */
+const changeMark = (renewed = false) => {
+  try {
+    localStorage.setItem(SESSION_MARK, `${Date.now()}:${Math.random().toString(36).slice(2)}${renewed ? RENEWED_MARK : ''}`);
+  } catch {
+    // Storage may be unavailable; the other tabs then learn of it from the server.
+  }
+  return readMark();
+};
+
 const sameMember = (a: User, b: User) =>
   a.id === b.id && a.username === b.username && a.displayName === b.displayName && a.role === b.role
   && (a.permissions ?? []).join() === (b.permissions ?? []).join();
 
 /**
- * Asks the server who the session cookie belongs to, then follows sign-in and sign-out. While the server does not
- * answer, nobody is taken for signed out: the screens wait, and it asks again. A session the server stops taking (a 401
- * on any request) signs the member out but keeps their unsaved work: signing in again as them resumes it.
+ * Asks the server who the session cookie belongs to, then follows sign-in and sign-out, in other tabs too. While the
+ * server does not answer, nobody is taken for signed out: the screens wait, and it asks again. A session the server
+ * stops taking (a 401 on any request, or a sign-out in another tab) signs the member out but keeps their unsaved work:
+ * signing in again as them resumes it.
  *
  * The cookie is the whole site's, so another tab signing out, or in as someone else, changes who this one acts as. This
- * tab asks again when it is shown, when another tab says it signed in or out (or started the session over), and when a
- * request answers for someone else (`requestSessionCheck`), and follows the answer; a password change or signing out
- * the other devices here tells the other tabs too, so they take the new cookie for the same member.
+ * tab asks again when another tab changes `SESSION_MARK` (or it finds the mark changed once shown), and when a request
+ * answers for someone else (`doubtSession`), and follows the answer; a password change or signing out the other devices
+ * here marks the session renewed, so the other tabs take the new cookie for the same member.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -64,26 +93,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const changing = useRef(false);
   /** Whom the session belongs to: the signed-in member, or the one whose session lapsed. */
   const owner = useRef<User | null>(null);
+  /** `SESSION_MARK` as this tab last knew it. */
+  const mark = useRef<string | null>(null);
   /** The server has said who is signed in at least once. */
   const answered = useRef(false);
   /** An ask is on its way (or waiting to be sent again). */
   const asking = useRef(false);
-  /** When who is signed in was last asked. */
-  const askedAt = useRef(0);
-  /** Another tab changed the session while this one signed in or out: ask once that is done. */
+  /** A request answered for someone else while this tab signed in or out: ask once that is done. */
   const heardMeanwhile = useRef(false);
-  const channel = useRef<SessionChannel | null>(null);
 
   const accept = (who: User | null, signedOut = false) => {
     answered.current = true;
     setReady(true);
     setFailures(0);
-    // A lapsed session reads as nobody signed in; that alone ends nothing the member left unsaved.
-    if (!who && !signedOut && sessionLapsed()) return;
+    // A member who did not sign out here, taken for nobody, has lost their session (it ran out, or they signed out in
+    // another tab): it lapses, if it has not already, and that alone ends nothing they left unsaved.
+    if (!who && !signedOut && owner.current) {
+      expireSession();
+      return;
+    }
     // Signing in leaves only this member's drafts in the browser, whoever was here before (a page reloaded after a lapse
-    // knows nobody); signing out, or another tab's sign-out, leaves none.
+    // knows nobody); signing out here leaves none.
     if (who) clearDrafts(who.id);
-    else if (signedOut || owner.current) clearDrafts();
+    else if (signedOut) clearDrafts();
     owner.current = who;
     setSessionOwner(who?.id ?? null);
     setUser(who);
@@ -123,7 +155,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const current = () => mounted.current && mine === generation.current;
     let sentAt = sessionEpoch();
     asking.current = true;
-    askedAt.current = Date.now();
     stopChecking.current = followSession(
       () => {
         sentAt = sessionEpoch();
@@ -155,11 +186,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     check();
   };
   /**
-   * Another tab signed in, out or started the session over, or a request answered for someone else: asks again, now or,
-   * while this tab signs in or out itself, once that is done (which of the two the cookie ended with is the server's
-   * to say).
+   * A request answered for someone else: asks again, now or, while this tab signs in or out itself, once that is done
+   * (which of the two the cookie ended with is the server's to say).
    */
-  const heard = () => {
+  const doubted = () => {
     if (changing.current) heardMeanwhile.current = true;
     else askAgain();
   };
@@ -172,30 +202,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLapsed(owner.current);
       setUser(null);
     });
-    const stopCheck = onSessionCheck(heard);
-    const tabs = openSessionChannel((news) => {
-      // The other tab's answer brought the browser a new cookie: refusals of the old one are no longer news.
-      if (news.renewed) renewedElsewhere();
-      heard();
+    const stopDoubt = onSessionDoubt(doubted);
+    // This tab's answer brought the browser a new cookie for the same member: the other tabs hear it from the mark.
+    const stopRenewed = onSessionRenewed(() => {
+      mark.current = changeMark(true);
     });
-    channel.current = tabs;
-    const stopRenewed = onSessionRenewed(() => tabs.announce(owner.current?.id ?? null, true));
     return () => {
       mounted.current = false;
       stopAsking();
       stopLapse();
-      stopCheck();
+      stopDoubt();
       stopRenewed();
-      tabs.close();
-      channel.current = null;
     };
   }, []);
 
-  // Coming back to this tab: another one may have signed out, or in as someone else (or again as the member whose
-  // session lapsed here), meanwhile.
+  // These asks renew the session; their answers are followed as any other (another tab may have signed in or out).
   useEffect(() => {
+    if (!user) return undefined;
+    let asked = Date.now();
+    const renew = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - asked < SESSION_RENEW_MS) return;
+      asked = Date.now();
+      askAgain();
+    };
+    const timer = setInterval(renew, SESSION_RENEW_MS / 12);
+    document.addEventListener('visibilitychange', renew);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', renew);
+    };
+  }, [user]);
+
+  // Signed in again in another tab: coming back to this one finds out.
+  useEffect(() => {
+    if (!lapsed) return undefined;
     const back = () => {
-      if (document.visibilityState === 'visible' && answered.current) askAgain(true);
+      if (document.visibilityState === 'visible') askAgain(true);
     };
     window.addEventListener('focus', back);
     document.addEventListener('visibilitychange', back);
@@ -203,41 +245,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('focus', back);
       document.removeEventListener('visibilitychange', back);
     };
-  }, []);
+  }, [lapsed]);
 
-  // A page left in view, never hidden or left, asks on its own once the half day is up; that renews the session too.
+  // Signed in or out, or the session started over, in another tab: this one asks whose the session cookie is now.
   useEffect(() => {
-    if (!user) return undefined;
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible' && Date.now() - askedAt.current >= SESSION_RENEW_MS) askAgain(true);
-    }, SESSION_RENEW_MS / 12);
-    return () => clearInterval(timer);
-  }, [user]);
+    mark.current = readMark();
+    const changed = () => {
+      // A sign-in or sign-out of this tab on its way answers it: done, it asks again if the mark changed meanwhile;
+      // failed, the mark is compared again when the tab is next shown.
+      if (changing.current) return;
+      const now = readMark();
+      if (now === mark.current) return;
+      mark.current = now;
+      // The other tab's answer brought the browser a new cookie: refusals of the old one are no longer news.
+      if (now?.endsWith(RENEWED_MARK)) renewedElsewhere();
+      askAgain();
+    };
+    const heard = (event: StorageEvent) => {
+      if (event.key === SESSION_MARK) changed();
+    };
+    const shown = () => {
+      if (document.visibilityState === 'visible') changed();
+    };
+    window.addEventListener('storage', heard);
+    window.addEventListener('focus', shown);
+    document.addEventListener('visibilitychange', shown);
+    return () => {
+      window.removeEventListener('storage', heard);
+      window.removeEventListener('focus', shown);
+      document.removeEventListener('visibilitychange', shown);
+    };
+  }, []);
 
   async function change<T>(action: () => Promise<T>, who: (result: T) => User | null, signedOut = false): Promise<T> {
     if (changing.current) throw new Error('세션 요청이 진행 중이에요');
     changing.current = true;
     heardMeanwhile.current = false;
     stopAsking();
+    // Another tab signed in or out while this ran: whose the session cookie is now is asked once this is done.
+    let missed = false;
     try {
       const result = await action();
       // Whatever was asked while it ran answers for the session before it.
       stopAsking();
-      if (mounted.current) {
-        const next = who(result);
-        accept(next, signedOut);
-        channel.current?.announce(next?.id ?? null);
-      }
+      if (mounted.current) accept(who(result), signedOut);
+      missed = readMark() !== mark.current;
+      mark.current = changeMark();
       return result;
     } catch (error) {
       if (!ready && mounted.current) check();
       throw error;
     } finally {
       changing.current = false;
-      if (heardMeanwhile.current) {
-        heardMeanwhile.current = false;
-        if (mounted.current) askAgain();
-      }
+      const again = missed || heardMeanwhile.current;
+      heardMeanwhile.current = false;
+      if (again && mounted.current) askAgain();
     }
   }
 

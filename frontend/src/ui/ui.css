@@ -107,6 +107,8 @@ h1, h2, h3, h4, p { margin: 0; }
 @media (hover: hover) {
   .mg-icon-btn:hover:not(:disabled) { background: var(--mg-card); }
   .mg-icon-btn.is-quiet:hover:not(:disabled) { background: var(--mg-tint); }
+  /* A pressed button keeps its fill under the pointer: its icon is drawn in the ink that goes with it. */
+  .mg-icon-btn[aria-pressed='true']:hover:not(:disabled) { background: var(--mg-primary-hover); }
 }
 .mg-icon-btn[aria-pressed='true'] { background: var(--mg-primary); color: var(--mg-primary-ink); border-color: transparent; }
 .mg-count {

@@ -2,19 +2,20 @@ import './shell.css';
 
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
+import { flushSync } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 import { problemText } from '../api/client';
-import { authApi, socialApi } from '../api/endpoints';
+import { socialApi } from '../api/endpoints';
 import type { IlchonRequest, User } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { can } from '../auth/can';
-import { hasUnsavedWork } from '../auth/sessionWork';
-import { Icon, type IconName } from '../ui/icons';
+import { saveUnsavedWork } from '../auth/sessionWork';
+import { Icon } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
 import { leaveFor } from './leaving';
-import { PasswordDialog } from './PasswordDialog';
+import { PasswordDialog, type PasswordAction } from './PasswordDialog';
 
 /** Where an arrow, Home or End key moves to in a menu of `count` items from `index` (-1: none focused yet). */
 export function nextMenuIndex(key: string, index: number, count: number): number | null {
@@ -93,11 +94,9 @@ export function Brand() {
   );
 }
 
-type RailItem = { label: string; icon: IconName; to: string; active: boolean; divided?: boolean };
-
 /**
- * Where 운영 opens for `user`: the catalog for catalog editors, the character factory for operators (paid operators are
- * operators too), and null for anyone with neither.
+ * Where the operators' pages open for `user`: the catalog for catalog editors, the character factory for operators (paid
+ * operators are operators too), and null for anyone with neither.
  */
 export function adminHome(user: User | null | undefined): string | null {
   if (can(user, 'catalog_editor')) return '/admin';
@@ -105,62 +104,91 @@ export function adminHome(user: User | null | undefined): string | null {
   return null;
 }
 
-/** The app's five places. Signed-out visitors get the island list and the way in. */
+/**
+ * The walking island's rail (`minihome/`, kept off the screens): the way to one's own home, or in. The screens have
+ * none, since the brand already leads there and the top bar's search finds the rest; other places open by address.
+ */
 export function Rail() {
   const { user } = useAuth();
   const { pathname } = useLocation();
   const home = user ? `/@${user.username}` : '/';
-  const admin = adminHome(user);
-  const items: RailItem[] = [
-    { label: '섬', icon: 'island', to: home, active: !!user && pathname === home },
-    ...(user
-      ? [
-          { label: '꾸미기', icon: 'brush' as const, to: `${home}/edit`, active: pathname === `${home}/edit` },
-          { label: '캐릭터', icon: 'person' as const, to: '/character', active: pathname.startsWith('/character') },
-        ]
-      : []),
-    { label: '둘러보기', icon: 'compass', to: '/explore', active: pathname.startsWith('/explore') },
-    ...(admin ? [{ label: '운영', icon: 'shield' as const, to: admin, active: pathname.startsWith('/admin'), divided: true }] : []),
-  ];
+  const here = !!user && (pathname === home || pathname.startsWith(`${home}/`));
   return (
     <nav className="mg-rail mg-glass" aria-label="모개숲">
-      {items.map((item) => (
-        <Link
-          key={item.label}
-          className={item.divided ? 'is-divided' : undefined}
-          to={item.to}
-          aria-current={item.active ? 'page' : undefined}
-        >
-          <Icon name={item.icon} />
-          <span>{item.label}</span>
-        </Link>
-      ))}
+      <Link to={home} aria-current={here ? 'page' : undefined}>
+        <Icon name="home" />
+        <span>사주 마을</span>
+      </Link>
     </nav>
   );
 }
 
-/** The top bar's search: Enter opens 둘러보기 on what was typed, the way a link there would (`leaveFor`). */
+/**
+ * The top bar's search: the box where the bar has room for it, and on a phone a button that opens the box over the bar,
+ * the keyboard with it (see shell.css). Opened so, it folds away with its close button or Escape, or once the focus
+ * leaves it, keeping what was typed: the bar's own buttons under it are never focused unseen. Enter opens 둘러보기 on
+ * what was typed, the way a link there would (`leaveFor`).
+ */
 export function SearchBox() {
   const navigate = useNavigate();
   const [text, setText] = useState('');
+  const [open, setOpen] = useState(false);
+  const boxId = useId();
+  const field = useRef<HTMLInputElement>(null);
+  const opener = useRef<HTMLButtonElement>(null);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const query = text.trim();
+    setOpen(false);
     leaveFor(query ? `/explore?q=${encodeURIComponent(query)}` : '/explore', navigate);
   };
+  // The box is shown before it takes the focus, within the press: a phone brings its keyboard up for a field focused then.
+  const show = () => {
+    flushSync(() => setOpen(true));
+    field.current?.focus();
+  };
+  // The button stands where it was once the box is gone, and takes the keyboard back.
+  const fold = () => {
+    flushSync(() => setOpen(false));
+    opener.current?.focus();
+  };
   return (
-    <form className="mg-search" role="search" onSubmit={submit}>
-      <Icon name="search" />
-      <input
-        value={text}
-        maxLength={40}
-        placeholder="섬이나 사람 찾기"
-        aria-label="섬이나 사람 찾기"
-        enterKeyHint="search"
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => event.stopPropagation()}
-      />
-    </form>
+    <>
+      <button ref={opener} type="button" className="mg-icon-btn mg-search-open" aria-label="섬이나 사람 찾기" aria-expanded={open} aria-controls={boxId} onClick={show}>
+        <Icon name="search" />
+      </button>
+      <form
+        id={boxId}
+        className={`mg-search${open ? ' is-open' : ''}`}
+        role="search"
+        onSubmit={submit}
+        onBlur={(event) => {
+          if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+        }}
+      >
+        <Icon name="search" />
+        <input
+          ref={field}
+          value={text}
+          maxLength={40}
+          placeholder="섬이나 사람 찾기"
+          aria-label="섬이나 사람 찾기"
+          enterKeyHint="search"
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === 'Escape' && open) {
+              event.preventDefault();
+              fold();
+            }
+          }}
+        />
+        {/* A press on it leaves the focus in the field, so the box is folded by the press and not before it. */}
+        <button type="button" className="mg-icon-btn is-quiet mg-search-close" aria-label="찾기 닫기" onMouseDown={(event) => event.preventDefault()} onClick={fold}>
+          <Icon name="close" />
+        </button>
+      </form>
+    </>
   );
 }
 
@@ -280,8 +308,6 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
 
 /** Signing out drops what is held for the member here; it asks first when that loses edits nobody saved. */
 const UNSAVED_QUESTION = '저장하지 못한 변경이 있어요. 로그아웃하면 사라져요. 계속할까요?';
-/** Ending every other session signs the member out on all their other devices at once, so it asks first. */
-const END_OTHERS_QUESTION = '다른 기기에서 모두 로그아웃할까요?';
 
 function UserMenu() {
   const { user, lapsed, logout } = useAuth();
@@ -291,42 +317,37 @@ function UserMenu() {
   const trigger = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useTheme();
   const [leaving, setLeaving] = useState(false);
-  const [endingOthers, setEndingOthers] = useState(false);
   const [error, setError] = useState('');
-  const [status, setStatus] = useState('');
-  const [password, setPassword] = useState(false);
+  /** What the password dialog is open for, if it is. */
+  const [password, setPassword] = useState<PasswordAction | null>(null);
   const pending = useRef(false);
   const userId = user?.id ?? null;
   useEffect(() => {
     setError('');
-    setStatus('');
-    setPassword(false);
+    setPassword(null);
   }, [userId]);
-  // What an item did last time is not news when the menu opens again.
+  // What went wrong last time is not news when the menu opens again.
   useEffect(() => {
     if (!open) return;
     setError('');
-    setStatus('');
   }, [open]);
+  const ask = (action: PasswordAction) => {
+    // Closing the dialog hands the keyboard back to the menu's button.
+    trigger.current?.focus();
+    setOpen(false);
+    setPassword(action);
+  };
   const signOut = async () => {
     if (pending.current) return;
-    if (hasUnsavedWork() && !window.confirm(UNSAVED_QUESTION)) return;
     pending.current = true;
-    setLeaving(true); setError(''); setStatus('');
-    try { await logout(); setOpen(false); navigate('/'); }
+    setLeaving(true); setError('');
+    try {
+      // Edits not saved yet are saved before the session ends; it asks only about what still could not be.
+      if (!(await saveUnsavedWork()) && !window.confirm(UNSAVED_QUESTION)) return;
+      await logout(); setOpen(false); navigate('/');
+    }
     catch (problem) { setError(problemText(problem)); }
     finally { pending.current = false; setLeaving(false); }
-  };
-  const endOthers = async () => {
-    if (pending.current) return;
-    if (!window.confirm(END_OTHERS_QUESTION)) return;
-    pending.current = true;
-    setEndingOthers(true); setError(''); setStatus('');
-    try {
-      const { ended } = await authApi.logoutOthers();
-      setStatus(`다른 기기 ${ended}곳에서 로그아웃했어요`);
-    } catch (problem) { setError(problemText(problem)); }
-    finally { pending.current = false; setEndingOthers(false); }
   };
   if (!user) {
     return (
@@ -361,13 +382,7 @@ function UserMenu() {
           </div>
           <div className="mg-menu-items" role="menu" aria-label="내 메뉴">
             <Link role="menuitem" to={home} onClick={() => setOpen(false)}>
-              <Icon name="island" /> 내 섬
-            </Link>
-            <Link role="menuitem" to={`${home}/edit`} onClick={() => setOpen(false)}>
-              <Icon name="brush" /> 섬 꾸미기
-            </Link>
-            <Link role="menuitem" to="/character" onClick={() => setOpen(false)}>
-              <Icon name="person" /> 내 캐릭터
+              <Icon name="home" /> 내 집
             </Link>
             <div className="mg-menu-row" role="group" aria-label="화면 밝기">
               <span aria-hidden="true">화면</span>
@@ -379,32 +394,21 @@ function UserMenu() {
                 ))}
               </div>
             </div>
-            <button
-              role="menuitem"
-              aria-haspopup="dialog"
-              onClick={() => {
-                // Closing the dialog hands the keyboard back to the menu's button.
-                trigger.current?.focus();
-                setOpen(false);
-                setStatus('');
-                setPassword(true);
-              }}
-            >
+            <button role="menuitem" aria-haspopup="dialog" onClick={() => ask('change')}>
               <Icon name="edit" /> 비밀번호 바꾸기
             </button>
-            <button role="menuitem" aria-disabled={endingOthers || undefined} onClick={() => void endOthers()}>
-              <Icon name="logout" /> {endingOthers ? '로그아웃하는 중…' : '다른 기기에서 모두 로그아웃'}
+            <button role="menuitem" aria-haspopup="dialog" onClick={() => ask('others')}>
+              <Icon name="logout" /> 다른 기기에서 모두 로그아웃
             </button>
             <button role="menuitem" aria-disabled={leaving || undefined} onClick={() => void signOut()}>
               <Icon name="logout" /> {leaving ? '로그아웃 중…' : '로그아웃'}
             </button>
           </div>
-          {/* A menu holds only its items; what one did, or what went wrong with it, is said beside it. */}
-          {status && <p className="mg-menu-status" role="status">{status}</p>}
+          {/* A menu holds only its items; what went wrong with one is said beside it. */}
           {error && <p className="mg-error mg-menu-error" role="alert">{error}</p>}
         </div>
       )}
-      {password && <PasswordDialog onClose={() => setPassword(false)} />}
+      {password && <PasswordDialog action={password} onClose={() => setPassword(null)} />}
     </div>
   );
 }
@@ -421,7 +425,7 @@ export function TopActions({ search = true, children }: { search?: boolean; chil
   );
 }
 
-/** Screens that are not the world: the rail, a top bar and one large glass panel. */
+/** Screens that are not the world: a top bar and one large glass panel. */
 export function PageShell({ title, children, wide = false }: { title: ReactNode; children: ReactNode; wide?: boolean }) {
   return (
     <div className="mg-app is-page">
@@ -432,7 +436,6 @@ export function PageShell({ title, children, wide = false }: { title: ReactNode;
         </div>
         <TopActions />
       </header>
-      <Rail />
       <main className={`mg-page-main${wide ? ' is-wide' : ''}`}>{children}</main>
     </div>
   );

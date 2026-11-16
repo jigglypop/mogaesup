@@ -29,7 +29,7 @@ from src.services.avatar_body_layers import (
     crop_regions, mark_body_coverage, hide_covered_materials, restore_covered_materials, strip_covered_primitives,
 )
 from src.services.avatar_head_geometry import headwear_palette, prepare_rear_hair, fit_hat, fit_reference_frame, hat_target_over_hair, fit_hair, fit_hair_length, fit_hair_scalp, fit_hair_scalp_bounded, head_preview_body, whiten_base_body, seat_legacy_hair_roots, seat_hat_above_brows, fit_hat_cavity
-from src.services.avatar_hair_geometry import add_scalp_cap, fit_hair_cavity, repair_hair_backing
+from src.services.avatar_hair_geometry import add_scalp_cap, fit_hair_cavity, repair_hair_backing, seat_hair_cavity
 from src.services.avatar_arm_geometry import fit_sleeves, bind_top_regions, t_rest_pose
 from src.services.avatar_render_budget import optimize_part
 from src.services.avatar_pipeline_quality import REVISION as QUALITY_REVISION, seal_quality
@@ -206,6 +206,29 @@ def build_body_shell_part(part, body, rig, spec):
     return meshes, report, covered
 
 
+# Worn hair whose top lies this far below the frozen head's top lost its crown when the provider's mannequin head was
+# smaller: the vertices inside the head were removed, and a seat cannot bring them back.
+WORN_CROWN_MISSING_M = .02
+
+
+def seat_worn_hair(extracted, body, rig, spec):
+    """Seat worn hair's inner surface on the frozen scalp, as a hair fitted on its own is.
+
+    A provider rebuilds the mannequin head at another size, so the hair it was worn on floats above the frozen head
+    (a larger head) or is buried in it (a smaller head). The seat, one uniform scale and a move about the head centre,
+    measures the frozen body, never the provider's mannequin. Hair without a crown is left as extracted: the seat
+    would only move the strands that remain. Returns the seat's report, or None when the spec does not seat hair.
+    """
+    if spec['fitting'].get('hair_cavity_seat') != 'two-way-v1':
+        return None
+    _, hi, _ = head_region(body, rig, spec)
+    top = max(((obj.matrix_world @ v.co).z for obj in extracted for v in obj.data.vertices), default=None)
+    if top is None or top < hi.z - WORN_CROWN_MISSING_M:
+        return {'method': 'two_way_inner_hair_seat_v1', 'reason': 'crown_missing',
+                'top_below_head_m': None if top is None else round(float(hi.z - top), 4)}
+    return seat_hair_cavity(extracted, body, rig, spec)
+
+
 def extract_worn_meshes(part, meshes, body, rig, spec):
     """Provider model worn on the key mannequin: register, remove the body, bind like the slot.
 
@@ -223,6 +246,8 @@ def extract_worn_meshes(part, meshes, body, rig, spec):
                 raise InputChanged('Part drawing changed')
             drawings.append(CanvasView(view, path, dict(spec['canvas'])))
     extracted, report = extract_worn_part(meshes, body, rig, part['slot'], key_rgb=part.get('key_rgb'), drawings=drawings)
+    if part['slot'] == 'hair':
+        report['cavity_fitting'] = seat_worn_hair(extracted, body, rig, spec)
     garment_kind, kind_check = ((part.get('fit_profile') or {}).get('kind') or part.get('garment_kind'), None)
     if part['slot'] == 'bottom':
         # A bottom no saved contract names is told apart by the fabric between the legs.
@@ -522,6 +547,10 @@ def fit_uniform_part(part, meshes, body, rig, spec, targets, imported):
         # comes down over the SD face's eyes: its height is taken in until the front clears the brows.
         measurement['cavity_fitting'] = fit_hat_cavity(meshes, body, rig, spec)
         measurement['brow_seat'] = seat_hat_above_brows(meshes, body, rig, spec)
+    elif slot == 'hair' and fitting.get('hair_cavity_seat') == 'two-way-v1':
+        # fit_hair put the outer crown a fixed height over the head: the inner surface comes down onto
+        # the scalp (or out of it), still with one uniform scale. A solid mass of hair keeps its place.
+        measurement['cavity_fitting'] = seat_hair_cavity(meshes, body, rig, spec)
     elif slot == 'hair':
         # Still one uniform scale: enlarge only when the inner surface sits inside the skull.
         measurement['cavity_fitting'] = fit_hair_cavity(meshes, body, rig, spec)

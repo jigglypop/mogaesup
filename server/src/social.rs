@@ -15,11 +15,13 @@ use crate::{
     AppState,
     auth::{current_user, optional_user},
     error::{ApiResult, bad, conflict, forbidden, not_found},
-    homes::{Page, plain_text, visible_home},
+    homes::{Page, visible_home},
     rebac::{Checker, MODERATOR, Subject},
-    security::{client_address, hmac_sha256, rate_limit},
+    security::{client_address, hmac_sha256, plain_text, rate_limit},
 };
 
+/// Entries standing in one guestbook from its visitors, and apart from them its owner's: visitors filling it never
+/// stop the owner writing there.
 const MAX_GUESTBOOK_ENTRIES: i64 = 2_000;
 /// One member's entries standing in one guestbook, and written there in the last 24 hours (deleted ones too). A few
 /// accounts cannot fill someone's guestbook to its cap in a day, and the owner clears one writer's entries at once
@@ -72,7 +74,7 @@ pub fn router() -> Router<AppState> {
 }
 
 /// A user as pages show them: name and their 미니미 emoji.
-fn card(row: &PgRow, prefix: &str) -> Value {
+pub(crate) fn card(row: &PgRow, prefix: &str) -> Value {
     json!({
         "id": row.get::<Uuid, _>(format!("{prefix}id").as_str()),
         "username": row.get::<String, _>(format!("{prefix}username").as_str()),
@@ -162,17 +164,22 @@ async fn write(
     // Kept as a keyed hash: entries can be counted by where they came from, but the address is not stored.
     let from = hex::encode(hmac_sha256(&state.config.ticket_secret, format!("guestbook\0{address}").as_bytes()));
     let id = Uuid::new_v4();
+    let owner = author.id == home.owner_id;
     let mut tx = state.db.begin().await?;
     sqlx::query("SELECT 1 FROM homes WHERE owner_id = $1 FOR UPDATE").bind(home.owner_id).execute(&mut *tx).await?;
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM guestbook_entries WHERE home_owner_id = $1 AND deleted_at IS NULL")
-            .bind(home.owner_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    // Only the entries on the writer's side of the guestbook: the owner's, or all visitors'.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM guestbook_entries
+         WHERE home_owner_id = $1 AND deleted_at IS NULL AND (author_id = home_owner_id) = $2",
+    )
+    .bind(home.owner_id)
+    .bind(owner)
+    .fetch_one(&mut *tx)
+    .await?;
     if count >= MAX_GUESTBOOK_ENTRIES {
         return Err(conflict("guestbook_full", "방명록이 가득 찼어요. 글을 정리한 뒤 다시 남겨 주세요."));
     }
-    if author.id != home.owner_id {
+    if !owner {
         let (standing, today): (i64, i64) = sqlx::query_as(
             "SELECT count(*) FILTER (WHERE deleted_at IS NULL), count(*) FILTER (WHERE created_at > now() - interval '1 day')
              FROM guestbook_entries WHERE home_owner_id = $1 AND author_id = $2",

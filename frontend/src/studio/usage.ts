@@ -57,3 +57,6 @@ export function usePaidWork(): boolean {
   const usage = useContext(FactoryUsageContext);
   return can(user, 'paid_operator') && (usage === null || (usage.connected && usage.access === 'paid'));
 }
+
+/** Beside a paid screen's paid buttons while `usePaidWork` keeps them off. */
+export const PAID_WORK_OFF = '이 서버에서 유료 작업 막힘';

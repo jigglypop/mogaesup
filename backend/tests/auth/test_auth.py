@@ -275,8 +275,9 @@ def test_authentication_needs_no_worker_thread(monkeypatch):
 # The AWS container's nginx sends every studio request to the API from the loopback with Host 127.0.0.1 and, on the SSM
 # port, X-User-Id 1. The studio gateway's token must still decide who the request is from.
 
-def _behind_nginx(token=None, host=b'127.0.0.1'):
-    headers = [(b'host', host), (b'x-user-id', b'1')]
+def _behind_nginx(token=None, host=b'127.0.0.1', gateway=()):
+    # gateway: the x-studio-* headers the app's gateway adds (server/src/factory.rs), which nginx passes on as they came.
+    headers = [(b'host', host), (b'x-user-id', b'1'), *gateway]
     if token is not None:
         headers.append((b'authorization', token.encode()))
     return Request({'type': 'http', 'headers': headers, 'client': ('127.0.0.1', 41234)})
@@ -342,3 +343,33 @@ def test_without_a_token_a_foreign_peer_still_needs_one(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         current_user(request)
     assert exc.value.status_code == 401
+
+
+# Without FACTORY_JWT_SECRET the gateway sends no token, so nginx names the owner; the gateway's own headers still say
+# that a request is a member's wardrobe read and whose request it is.
+
+def test_without_a_token_a_members_read_keeps_the_member_scope_and_the_name_the_gateway_sent(monkeypatch):
+    monkeypatch.delenv('JWT_SECRET', raising=False)
+    member = current_user(_behind_nginx(gateway=[(b'x-studio-scope', b'member'), (b'x-studio-user', b'member-7')]))
+    assert (member.user_id, member.username, member.roles, member.level) == (1, 'member-7', ['ADMIN', 'MEMBER'], 2)
+    # Studio staff on the same routes keep the operator's view, under their own name.
+    staff = current_user(_behind_nginx(gateway=[(b'x-studio-user', b'studio-admin')]))
+    assert (staff.username, staff.roles) == ('studio-admin', ['ADMIN'])
+
+
+@pytest.mark.parametrize('name', [b'', b' ', b'a b', b'dev:1', b'x' * 65, b'<b>', '회원'.encode()])
+def test_a_name_that_is_no_account_name_leaves_the_owners(name):
+    assert current_user(_behind_nginx(gateway=[(b'x-studio-user', name)])).username == 'dev:1'
+
+
+def test_the_member_scope_also_narrows_a_gateway_token(monkeypatch):
+    monkeypatch.setenv('JWT_SECRET', 'x' * 32)
+    scope = [(b'x-studio-scope', b'MEMBER')]
+    member = current_user(_behind_nginx('Bearer ' + _token(name='member-7', roles=['ADMIN']), gateway=scope))
+    assert (member.username, member.roles) == ('member-7', ['ADMIN', 'MEMBER'])
+    # A token already marked MEMBER is not marked twice, and the mark cannot stand in for the operator role.
+    marked = current_user(_behind_nginx('Bearer ' + _token(roles=['ADMIN', 'MEMBER']), gateway=scope))
+    assert marked.roles == ['ADMIN', 'MEMBER']
+    with pytest.raises(HTTPException) as exc:
+        current_user(_behind_nginx('Bearer ' + _token(roles=[]), gateway=scope))
+    assert exc.value.status_code == 403

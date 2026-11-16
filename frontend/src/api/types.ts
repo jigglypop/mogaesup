@@ -18,6 +18,8 @@ export type Credentials = { username: string; password: string };
 export type Registration = Credentials & { displayName: string };
 /** `POST /api/auth/password`; the new one is 10 to 128 characters, as at sign-up. */
 export type PasswordChange = { currentPassword: string; newPassword: string };
+/** The account's current password, asked before an account-wide change such as signing out other devices. */
+export type PasswordConfirm = { currentPassword: string };
 
 /** A single-use pass into a live room; `expiresAt` is in epoch seconds, a minute after issue. */
 export type RealtimeTicket = { ticket: string; expiresAt: number; user: User };
@@ -132,6 +134,118 @@ export type IlchonStatus = {
   request: IlchonRequest | null;
 };
 
+/** When a member was born, by Seoul's clock: what their 사주 home's chart is read from. */
+export type SajuBirth = {
+  calendar: 'solar' | 'lunar';
+  year: number;
+  month: number;
+  day: number;
+  /** A lunar date in that year's leap month. */
+  leapMonth: boolean;
+  /** `HH:MM`, or null when the hour is not known. */
+  time: string | null;
+  gender: 'female' | 'male';
+};
+
+/** A member's 사주 home as the server keeps it: the name on its gate and the birth. */
+export type SajuHome = { name: string; birth: SajuBirth };
+
+/**
+ * `GET /api/homes/{username}/saju`: the member's 사주 home (null until they build one) and the village around it, at
+ * most eight homes: their 이웃' that the viewer may see (`neighbour`, the viewer's own first), then the public homes
+ * built most recently.
+ */
+export type SajuVillage = {
+  saju: SajuHome | null;
+  village: { user: UserCard; saju: SajuHome; neighbour: boolean }[];
+};
+
+/** The five elements as the chart names them, in the order each gives rise to the next. */
+export type ReadingElement = 'wood' | 'fire' | 'earth' | 'metal' | 'water';
+
+/**
+ * What a reading is written from: the chart as the browser calculated it from the home's stored birth (jamiblossom runs
+ * in the browser only). `birth` must equal the birth the server keeps for the home, or the request is refused as stale.
+ * Every name is the chart's own (Korean or 한자, no free text), and the server checks each against its kind.
+ */
+export type ReadingChart = {
+  birth: SajuBirth;
+  saju: {
+    /** 년주, 월주, 일주 and, with a known hour, 시주. */
+    pillars: {
+      key: 'year' | 'month' | 'day' | 'hour';
+      /** The 한자 of the stem and the branch: `丁`, `酉`. */
+      stem: string;
+      branch: string;
+      /** 십성 of the stem and of the branch (`정관`, `비견`; the day stem's own is `일간`). */
+      tenGodStem: string;
+      tenGodBranch: string;
+      /** 지장간 in Korean, as the chart writes it: `경신`. */
+      hidden: string;
+      /** 12운성 and 납음 in Korean: `장생`, `산하화`. */
+      stage: string;
+      nayin: string;
+    }[];
+    /** How many of the eight (or six) characters each element holds. */
+    elements: Record<ReadingElement, number>;
+    /** The day stem's 한자. */
+    dayMaster: string;
+    /** The 신살 the chart holds, by name: `천을귀인`, `도화`. */
+    sinsal: string[];
+    /** 대운 in order: its 간지 in Korean (`임진`), the ages it spans, and whether it runs now. */
+    daeun: { ganzhi: string; from: number; to: number; current: boolean }[];
+  };
+  /** The 자미두수 명반; null for a birth without an hour, which has none. */
+  ziwei: {
+    /** 오행국, 명주 and 신주: `토오국`, `문곡`, `천량`. */
+    bureau: string;
+    soulStar: string;
+    bodyStar: string;
+    /** The twelve palaces, 명궁 first in the chart's own order. */
+    palaces: {
+      name: string;
+      /** 간지 in Korean: `기유`. */
+      ganzhi: string;
+      stars: {
+        name: string;
+        kind: 'major' | 'helper' | 'tough' | 'special' | 'minor';
+        /** 묘·왕·득·리·평·불·함, or '' when the star has none. */
+        brightness: string;
+        sahwa: '록' | '권' | '과' | '기' | null;
+      }[];
+      /** The 대한 the palace runs, by age. */
+      decade: [number, number] | null;
+      soul: boolean;
+      body: boolean;
+      /** The 대한 running now. */
+      current: boolean;
+    }[];
+  } | null;
+};
+
+export type ReadingSection = { title: string; body: string };
+/** A home's reading, written once for its birth and shown to whoever may see the home. */
+export type SajuReading = {
+  saju: { summary: string; sections: ReadingSection[] };
+  /** Null for a birth without an hour: there is no 명반 to read. */
+  ziwei: { summary: string; sections: ReadingSection[] } | null;
+};
+
+/**
+ * Something the server makes for a home with a paid model, bound to the home's current birth: nothing yet, being made
+ * (since when), failed (why; the owner may ask again), or ready with what was made and by which model.
+ */
+export type Made<T> =
+  | { status: 'none' }
+  | { status: 'pending'; since: string }
+  | { status: 'failed'; code: string; message: string }
+  | ({ status: 'ready'; model: string; createdAt: string } & T);
+
+/** `GET /api/homes/{username}/saju/reading`. */
+export type SajuReadingState = Made<{ reading: SajuReading }>;
+/** `GET /api/homes/{username}/saju/picture`: the island drawn again as a 미연시 illustration, a stored file's URL. */
+export type SajuPictureState = Made<{ url: string; width: number; height: number }>;
+
 /** 미니미 are what people walk as, 주민 (`npc`) stand on islands, furniture is placed. */
 export type CatalogKind = 'minime' | 'furniture' | 'npc';
 export type CatalogStatus = 'draft' | 'published' | 'retired';
@@ -159,6 +273,8 @@ export type FactoryImport = Pick<CatalogItem, 'id' | 'kind' | 'label' | 'emoji'>
   factoryJobId: string;
   status?: CatalogStatus;
   sortOrder?: number;
+  /** A new item only: the server refuses an id another item has instead of updating that item. */
+  create?: boolean;
 };
 
 /** Why a catalog copy is behind its character: remade in another job, sealed again, another face, or a later stage. */

@@ -89,6 +89,7 @@ use super::{
     BAD_ACTION, BAD_LAYOUT, Ctx, Game, GameError, Kind, Millis, Movement, Stand, Teleport, distance_xz, distinct,
     layout_points, pick_many, point, within,
 };
+use crate::security::plain_text;
 use bots::Bot;
 use walk::{Route, Walk};
 
@@ -415,6 +416,8 @@ pub(crate) struct Impostor {
     winner: Option<(Role, Reason)>,
     /// Where whoever watches stands.
     stand: Option<[f64; 3]>,
+    /// When the game began: the pages take everyone to their place by the table then.
+    started: Millis,
 }
 
 /// How many impostors play among `players`.
@@ -483,12 +486,10 @@ fn id(value: &Value) -> Option<Uuid> {
 }
 
 /// Text a player may say: something, at most [`MAX_TEXT`] characters once trimmed, with no control characters (nor
-/// the invisible ones that turn the text around).
+/// the invisible ones that hide the text or turn it around, see [`plain_text`]).
 fn clean(text: &str) -> Option<&str> {
     let text = text.trim();
-    let turns = |c: char| matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-    let fine =
-        !text.is_empty() && text.chars().count() <= MAX_TEXT && !text.chars().any(|c| c.is_control() || turns(c));
+    let fine = !text.is_empty() && text.chars().count() <= MAX_TEXT && plain_text(text, false);
     fine.then_some(text)
 }
 
@@ -706,6 +707,7 @@ impl Impostor {
             ends_at: now + GAME_LIMIT,
             winner: None,
             stand,
+            started: now,
         })
     }
 
@@ -1447,6 +1449,21 @@ impl Game for Impostor {
             "emergencyLeft": me.map_or(0, |me| u8::from(me.alive && !me.called)),
             "emergencyFrom": self.calm_until,
         })
+    }
+
+    fn destinations(&self, now: Millis) -> Vec<(Uuid, [f64; 3])> {
+        if self.winner.is_some() {
+            return Vec::new();
+        }
+        // Everyone's seat at the table while a meeting lasts.
+        if let Some(meeting) = &self.meeting {
+            return meeting.seats.clone();
+        }
+        // Each one's place by the table until the first kill may happen (the page takes them into the ship), and the
+        // vent each impostor in the vents is in.
+        let spawns = (now < self.started + FIRST_KILL).then_some(&self.spawns).into_iter().flatten();
+        let vents = self.players.iter().filter_map(|player| Some((player.id, self.vents[player.venting?])));
+        spawns.map(|(id, place)| (*id, *place)).chain(vents).collect()
     }
 
     fn act(&mut self, player: Uuid, action: &Value, ctx: &mut Ctx) -> Result<(), GameError> {

@@ -1,4 +1,5 @@
 import { sessionEpoch } from '../auth/sessionWork';
+import { request } from '../character/api';
 import { api } from './client';
 import type {
   AdminCatalogItem,
@@ -27,9 +28,16 @@ import type {
   LayoutInterpretation,
   LayoutCapabilities,
   PasswordChange,
+  PasswordConfirm,
   ProfileChanges,
   RealtimeTicket,
   Registration,
+  ReadingChart,
+  SajuBirth,
+  SajuHome,
+  SajuPictureState,
+  SajuReadingState,
+  SajuVillage,
   SavedHomeWorld,
   SaveHomeWorld,
   StudioPower,
@@ -74,8 +82,11 @@ export const authApi = {
    * too: the answer brings this browser a new one, and its realtime sockets connect again.
    */
   changePassword: (body: PasswordChange) => api<void>('/auth/password', { method: 'POST', body, startsOver: true }),
-  /** Ends every other session of the member; `ended` counts them. This browser goes on under a new session too. */
-  logoutOthers: () => api<{ ended: number }>('/auth/logout-others', { method: 'POST', startsOver: true }),
+  /**
+   * Ends every other session of the member once the current password is checked; `ended` counts them. The answer may
+   * bring this browser a new session cookie too, so a refusal of the old one meanwhile is not a sign-out (`startsOver`).
+   */
+  logoutOthers: (body: PasswordConfirm) => api<{ ended: number }>('/auth/logout-others', { method: 'POST', body, startsOver: true }),
   realtimeTicket: () => api<RealtimeTicket>('/auth/realtime-ticket', { method: 'POST' }),
 };
 
@@ -143,6 +154,31 @@ export const socialApi = {
   dismissAll: () => changesRequests(api<{ dismissed: number }>('/ilchon-requests', { method: 'DELETE' })),
 };
 
+export const sajuApi = {
+  /** A member's 사주 home and their village. */
+  village: (username: string) => api<SajuVillage>(`/homes/${segment(username)}/saju`),
+  /** Builds the caller's home, or builds it again from a corrected name or birth. */
+  save: (body: { expectedOwnerId: string; name: string; birth: SajuBirth }) => api<{ saju: SajuHome }>('/homes/me/saju', { method: 'PUT', body }),
+  /** Takes the caller's home down; their guestbook and 이웃 stay. */
+  remove: (body: { expectedOwnerId: string }) => api<void>('/homes/me/saju', { method: 'DELETE', body }),
+  /** A home's reading, as far as it has been written. */
+  reading: (username: string) => api<SajuReadingState>(`/homes/${segment(username)}/saju/reading`),
+  /**
+   * Asks for the caller's reading to be written from `chart` (202 pending; 200 with the one already written for this
+   * birth unless `again`). Refused 409 `stale_birth` when the chart's birth is not the stored one.
+   */
+  read: (body: { expectedOwnerId: string; chart: ReadingChart; again?: boolean }) =>
+    api<SajuReadingState>('/homes/me/saju/reading', { method: 'POST', body }),
+  /** A home's 미연시 picture, as far as it has been drawn. */
+  picture: (username: string) => api<SajuPictureState>(`/homes/${segment(username)}/saju/picture`),
+  /**
+   * Asks for the caller's island to be drawn again from `image`: a `data:image/webp;base64,…` (or png/jpeg) of the island
+   * alone, 1024×1024 (202 pending; 200 with the one already drawn for this birth unless `again`).
+   */
+  draw: (body: { expectedOwnerId: string; image: string; again?: boolean }) =>
+    api<SajuPictureState>('/homes/me/saju/picture', { method: 'POST', body, timeoutMs: 60_000 }),
+};
+
 /** The public lists change only when an admin publishes, so an island opened soon after another reuses them. */
 const CATALOG_REUSE_MS = 60_000;
 const catalogLists = new Map<string, { at: number; read: Promise<{ items: CatalogItem[] }> }>();
@@ -192,17 +228,25 @@ export const catalogApi = {
 /** The caller's own character from the wardrobe; each member reaches only theirs. */
 export const lookApi = {
   mine: (signal?: AbortSignal) => api<{ look: Look | null }>('/looks/me', { signal }),
-  /** Saves it and starts assembling it; poll `mine` until it is no longer `baking`. */
-  save: (body: LookRequest) => api<{ look: Look }>('/looks/me', { method: 'PUT', body }),
+  /**
+   * Saves it and starts assembling it; poll `mine` until it is no longer `baking`. The server reads the wardrobe from the
+   * character server first, so a save may take longer than other requests before it counts as unanswered.
+   */
+  save: (body: LookRequest) => api<{ look: Look }>('/looks/me', { method: 'PUT', body, timeoutMs: 60_000 }),
   wear: (worn: boolean) => api<{ look: Look }>('/looks/me', { method: 'PATCH', body: { worn } }),
 };
 
+/**
+ * Store layouts are the character server's, reached through the app server, so they take the studio's client: it reads
+ * the character server's `{error: {code, message}}` as well as the app server's `{code, message}`, and turns a lost
+ * connection into its own words.
+ */
 export const layoutApi = {
-  capabilities: (signal?: AbortSignal) => api<LayoutCapabilities>('/studio/layouts/capabilities', { signal }),
+  capabilities: (signal?: AbortSignal) => request<LayoutCapabilities>('/api/studio/layouts/capabilities', { signal }),
   interpret: (body: LayoutInterpretInput, signal?: AbortSignal) =>
-    api<LayoutInterpretation>('/studio/layouts/interpret', {
-      method: 'POST', body, signal, timeoutMs: 60_000,
-      headers: body.requestId ? { 'Idempotency-Key': body.requestId } : undefined,
+    request<LayoutInterpretation>('/api/studio/layouts/interpret', {
+      method: 'POST', body: JSON.stringify(body), signal, timeoutMs: 60_000,
+      headers: { 'Content-Type': 'application/json', ...(body.requestId ? { 'Idempotency-Key': body.requestId } : {}) },
     }),
 };
 

@@ -10,6 +10,7 @@ from src.services.asset_editor import _write_json
 from src.services.avatar_factory import _LOCK, digest
 from src.services.avatar_glb_bodies import AvatarGlbBodies
 from src.services.avatar_native_parts import AvatarNativeParts, workspace_inputs
+from src.services.avatar_production_spec import production_spec, seal_production_spec
 from src.services.character_pipeline import PipelineError, read_json
 from wardrobe_fixture import OWNER, Library
 
@@ -80,6 +81,27 @@ def test_a_top_refit_carries_its_description_and_the_binding_it_was_fitted_with(
     assert payload['contract']['clothing_binding_sha256'] == digest(
         avatar_native_parts.Path(avatar_native_parts.__file__).with_name('avatar_clothing_binding.py'))
     assert payload['contract']['recipe'] == avatar_native_parts.RECIPE
+
+
+def test_hair_fitted_before_the_two_way_seat_offers_a_refit_that_seats_it(refit):
+    library, native, root = refit
+    # A version fitted under the rules before the seat, from the job's spec of then.
+    record = read_json(root/VERSION/'record.json')
+    record['result']['fitting_revision'] = 'uniform-parts-v1-slot'
+    _write_json(root/VERSION/'record.json', record)
+    _write_json(root/VERSION/'input.json', {'contract': {'recipe': avatar_native_parts.RECIPE}})
+    saved = production_spec()
+    saved['fitting'].pop('hair_cavity_seat', None)
+    saved['fitting']['revision'] = 'uniform-parts-v1-slot'
+    pipeline = read_json(root.parent/'pipeline.json')
+    _write_json(root.parent/'pipeline.json', {**pipeline, 'production_spec': saved})
+    assert native.get(OWNER, JOB)['fit_update_available'] is True
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'hair', 'refit-key-0001')
+    payload = read_json(root/state['version']/'input.json')
+    # Blender fits the saved generated hair again under the current rules; no provider is asked for anything.
+    assert created and payload['production_spec']['fitting']['hair_cavity_seat'] == 'two-way-v1'
+    [hair] = [part for part in payload['parts'] if part['slot'] == 'hair']
+    assert hair['part_method'] == 'isolated' and hair['path'].endswith('generated-hair.glb')
 
 
 class FakeProcess:
@@ -348,3 +370,33 @@ def test_an_assembly_file_is_found_from_the_job_record_alone(refit, monkeypatch)
     with pytest.raises(PipelineError) as changed:
         native.artifact(OWNER, JOB, VERSION, 'hair.glb', record=record)
     assert changed.value.code == 'artifact_changed'
+
+
+def test_a_refit_of_glasses_sealed_at_the_neck_places_them_on_the_head(refit):
+    library, native, root = refit
+    job = root.parent
+    # The spec a GLB registration sealed before glasses were placed on the head: the hair target its body's head was
+    # measured for (.72 m wide, its front at z .30, with the hair clearance), and the glasses at the neck.
+    spec = production_spec('source', ('front', 'side'))
+    spec['fitting']['bounds']['hair'] = [[-.385, .46, -.305], [.385, 1.27, .325]]
+    spec['frozen_body'] = True
+    spec['equipment'] = {'glasses': {'bone': 'Head', 'position_m': [0, .48, .298], 'pivot_fraction': [.5, .5, 1.0],
+                                     'size_m': [.5616, .1184, .364]},
+                         'weapon': {'bone': 'RightHand', 'position_m': [-.39, .43, 0], 'pivot_fraction': [.5, .2, .5],
+                                    'size_m': [.144, .504, .096]},
+                         'tool': {'bone': 'LeftHand', 'position_m': [.39, .43, 0], 'pivot_fraction': [.5, .2, .5],
+                                  'size_m': [.144, .336, .096]}}
+    sealed = seal_production_spec(spec)
+    pipeline = read_json(job/'pipeline.json')
+    pipeline['parts'].append({'slot': 'glasses'})
+    pipeline['production_spec'] = sealed
+    _write_json(job/'pipeline.json', pipeline)
+    _write_json(root/VERSION/'input.json', {'production_spec': sealed})
+    (job/'output/generated-glasses.glb').write_bytes(b'raw glasses model')
+    record = read_json(job/'job.json')
+    record['files']['generated-glasses.glb'] = digest(job/'output/generated-glasses.glb')
+    _write_json(job/'job.json', record)
+    state, created = native.start_refit(OWNER, JOB, VERSION, 'glasses', 'refit-key-0001')
+    # The worker places them two fifths up the head from the neck (.46) to the crown (1.2), on its front.
+    worker_spec = read_json(root/state['version']/'input.json')['production_spec']
+    assert created and worker_spec['equipment']['glasses']['position_m'] == pytest.approx([0, .756, .308])

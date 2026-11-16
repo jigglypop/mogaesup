@@ -26,10 +26,13 @@ const EPS = 1e-6;
 const MARGIN = 0.15;
 const CORRIDOR_HALF = 0.75;
 
+/** A layout refused for a reason the owner can act on, said in their words (unlike a loader's or the browser's). */
+export class LayoutError extends Error {}
+
 /** Free parsing stays in the browser, including when the studio is asleep. */
 export function interpretLayout(description: string): LayoutIntent {
   const text = description.trim().toLowerCase();
-  if (!text || text.length > 2000) throw new Error('공간 설명을 2,000자 이내로 입력해 주세요.');
+  if (!text || text.length > 2000) throw new LayoutError('공간 설명을 2,000자 이내로 입력해 주세요.');
   const kind = /사무|오피스|office|회사/.test(text) ? 'office' : /카페|커피|cafe|café/.test(text) ? 'cafe' : 'shop';
   let width = 12, depth = 12;
   const pair = text.match(/(\d+(?:\.\d+)?)\s*(?:m|미터)?\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(m|미터|칸)?/);
@@ -40,9 +43,9 @@ export function interpretLayout(description: string): LayoutIntent {
     width = Number(text.match(/가로\s*(\d+(?:\.\d+)?)/)?.[1] ?? 12);
     depth = Number(text.match(/세로\s*(\d+(?:\.\d+)?)/)?.[1] ?? 12);
   }
-  if (width < 8 || depth < 8 || width > 24 || depth > 24) throw new Error('가로·세로는 8m부터 24m까지 배치할 수 있어요.');
+  if (width < 8 || depth < 8 || width > 24 || depth > 24) throw new LayoutError('가로·세로는 8m부터 24m까지 배치할 수 있어요.');
   const seats = Number(text.match(/(\d+)\s*(?:인|명|석|좌석)/)?.[1] ?? (kind === 'shop' ? 0 : 2));
-  if (!Number.isInteger(seats) || seats < 0 || seats > 12) throw new Error('좌석은 0개부터 12개까지 입력해 주세요.');
+  if (!Number.isInteger(seats) || seats < 0 || seats > 12) throw new LayoutError('좌석은 0개부터 12개까지 입력해 주세요.');
   const floorPresetId = /대리석|marble/.test(text) ? 'white-marble' : /콘크리트|concrete/.test(text) ? 'concrete' : /어두운|월넛|walnut/.test(text) ? 'walnut-planks' : 'oak-planks';
   return { kind, widthCells: Math.ceil(width / 4), depthCells: Math.ceil(depth / 4), seats, floorPresetId,
     wallPresetId: kind === 'office' ? 'modern-concrete' : 'shopfront', interpretation: 'rules',
@@ -53,23 +56,82 @@ export function checkLayoutIntent(intent: LayoutIntent): void {
   if (!['cafe', 'shop', 'office'].includes(intent.kind) || ![intent.widthCells, intent.depthCells].every(v => Number.isInteger(v) && v >= 2 && v <= 6)
     || !Number.isInteger(intent.seats) || intent.seats < 0 || intent.seats > 12
     || !BUILDING_TILE_PRESETS.some(v => v.id === intent.floorPresetId) || !BUILDING_WALL_PRESETS.some(v => v.id === intent.wallPresetId)) {
-    throw new Error('배치 조건이 올바르지 않아요. 설명을 다시 입력해 주세요.');
+    throw new LayoutError('배치 조건이 올바르지 않아요. 설명을 다시 입력해 주세요.');
   }
 }
 
 /**
  * Every extent comes from the GLB the current browser actually decodes, including overrides/quantization: the pieces
  * the planner places, and `extraUrls` (the island's placed models, its obstacles). Not the whole furniture catalog, whose
- * dozens of studio models the planner never places and would all be downloaded and decoded for each proposal. An island
- * model that cannot be measured (its file gone, or empty) does not stop the plan: `proposeLayout` keeps a cell clear
- * around it and says so.
+ * dozens of studio models the planner never places and would all be downloaded and decoded for each proposal. A placed
+ * model that cannot be measured stays unknown, and `proposeLayout` refuses to guess its footprint in the owner's words.
  */
-export async function measureLayoutCatalog(extraUrls: readonly string[] = []): Promise<LayoutCatalogItem[]> {
+export async function measureLayoutCatalog(extraUrls: readonly string[] = [], kind?: LayoutIntent['kind']): Promise<LayoutCatalogItem[]> {
   const wanted = new Set(['table-basic', 'chair-basic', 'shop-stall-basic', 'storage-basic', 'lamp-basic']);
-  const items = DEFAULT_BUILDING_OBJECT_CATALOG.filter(item => wanted.has(item.id) && !!item.modelUrl)
-    .map(item => ({ id: item.id, label: item.label, modelUrl: item.modelUrl!, scale: item.defaultScale, color: item.defaultColor }));
-  await Promise.allSettled([...new Set(extraUrls)].map(url => loadModelBounds(url)));
+  const items: LayoutCatalogItem[] = DEFAULT_BUILDING_OBJECT_CATALOG.filter(item => wanted.has(item.id) && !!item.modelUrl)
+    .map(item => ({ id: item.id, label: item.label, modelUrl: item.modelUrl!, scale: item.defaultScale, color: item.defaultColor, bounds: undefined! }));
+  // The studio furniture this kind may place: only those, so a proposal downloads what it can use.
+  for (const prop of kind ? storeProps(kind) : []) {
+    if (items.some(item => item.id === propCatalogId(prop.id))) continue;
+    items.push({ id: propCatalogId(prop.id), label: prop.label, modelUrl: storePropUrl(prop.id), scale: 1, color: '#ffffff', bounds: undefined! });
+  }
+  await Promise.all([...new Set(extraUrls)].map(url => loadModelBounds(url).catch(() => undefined)));
   return Promise.all(items.map(async item => ({ ...item, bounds: await loadModelBounds(item.modelUrl) })));
+}
+
+/**
+ * Studio furniture made with scripts/props, per kind, in the order the layout tries to place it after its core pieces:
+ * each where it fits and skipped where it does not. They are built-in catalog items (`prop-<id>`, see
+ * server/migrations/20261011190000_store_props.sql) and are placed the way the decorating drawer places them.
+ */
+const STORE_PROPS: Record<LayoutIntent['kind'], { id: string; label: string; at: StoreSpot }[]> = {
+  cafe: [
+    { id: 'cafe-counter', label: '카페 카운터', at: 'back' },
+    { id: 'cafe-espresso-machine', label: '커피 머신', at: 'backRight' },
+    { id: 'cafe-bread-showcase', label: '빵 진열장', at: 'right' },
+    { id: 'cafe-menu-board', label: '메뉴 입간판', at: 'frontLeft' },
+    { id: 'plant-big-pot', label: '큰 화분', at: 'backLeft' },
+    { id: 'rug-round', label: '러그', at: 'center' },
+  ],
+  shop: [
+    { id: 'shop-checkout', label: '계산대', at: 'front' },
+    { id: 'shop-wall-shelf', label: '벽 진열 선반', at: 'left' },
+    { id: 'shop-wall-shelf', label: '벽 진열 선반', at: 'right' },
+    { id: 'shop-clothes-rack', label: '옷걸이 행거', at: 'backRight' },
+    { id: 'shop-produce-stand', label: '과일·채소 진열대', at: 'right' },
+    { id: 'shop-basket-stand', label: '바구니 진열대', at: 'frontRight' },
+    { id: 'plant-big-pot', label: '큰 화분', at: 'backLeft' },
+    { id: 'rug-round', label: '러그', at: 'center' },
+  ],
+  office: [
+    { id: 'office-bookshelf', label: '책장', at: 'left' },
+    { id: 'office-whiteboard', label: '화이트보드', at: 'right' },
+    { id: 'office-water-cooler', label: '정수기', at: 'frontRight' },
+    { id: 'sofa-two-seat', label: '2인 소파', at: 'back' },
+    { id: 'plant-big-pot', label: '큰 화분', at: 'backLeft' },
+    { id: 'rug-round', label: '러그', at: 'center' },
+  ],
+};
+type StoreSpot = 'back' | 'front' | 'left' | 'right' | 'backLeft' | 'backRight' | 'frontLeft' | 'frontRight' | 'center';
+const storeProps = (kind: LayoutIntent['kind']) => STORE_PROPS[kind];
+/** Every studio piece a layout may place, once each (for tools that measure them ahead of time). */
+export const STORE_PROP_IDS = [...new Set(Object.values(STORE_PROPS).flat().map(prop => prop.id))];
+const propCatalogId = (id: string) => `prop-${id}`;
+const storePropUrl = (id: string) => `/gltf/decor/${id}.glb`;
+/** Where a store piece is wanted inside the room, as a point the scan starts from (a wall or a corner, or the centre). */
+const spotOf = (at: StoreSpot, min: XZ, max: XZ): XZ => {
+  const mid: XZ = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2];
+  switch (at) {
+    case 'back': return [mid[0], min[1] + 1];
+    case 'front': return [mid[0], max[1] - 1];
+    case 'left': return [min[0] + 1, mid[1]];
+    case 'right': return [max[0] - 1, mid[1]];
+    case 'backLeft': return [min[0] + 1, min[1] + 1];
+    case 'backRight': return [max[0] - 1, min[1] + 1];
+    case 'frontLeft': return [min[0] + 1, max[1] - 1];
+    case 'frontRight': return [max[0] - 1, max[1] - 1];
+    case 'center': return mid;
+  }
 }
 
 export function objectFootprint(object: PlacedObject, bounds?: LocalBox): XZ[] {
@@ -84,22 +146,11 @@ export function objectFootprint(object: PlacedObject, bounds?: LocalBox): XZ[] {
 }
 
 const rect = (x0: number, z0: number, x1: number, z1: number): XZ[] => [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
-/** A footprint with an edge too short to give an axis (a model flat along x or z) cannot be tested for overlap. */
-const degenerate = (poly: readonly XZ[]) =>
-  poly.some((from, index) => {
-    const to = poly[(index + 1) % poly.length]!;
-    return Math.hypot(to[0] - from[0], to[1] - from[1]) < EPS;
-  });
-/** What a placed model the browser could not measure keeps clear: a whole cell around it, more for one scaled up. */
-function cellAround(object: PlacedObject): XZ[] {
-  const half = 2 * Math.max(1, object.config?.modelScale ?? 1);
-  return rect(object.position.x - half, object.position.z - half, object.position.x + half, object.position.z + half);
-}
 export function footprintsOverlap(a: readonly XZ[], b: readonly XZ[], margin = 0): boolean {
   for (const poly of [a, b]) for (let i = 0; i < poly.length; i++) {
     const from = poly[i]!, to = poly[(i + 1) % poly.length]!;
     const len = Math.hypot(to[0] - from[0], to[1] - from[1]);
-    if (len < EPS) throw new Error('기물 크기를 측정할 수 없어요.');
+    if (len < EPS) throw new LayoutError('기물 크기를 측정할 수 없어요.');
     const axis: XZ = [-(to[1] - from[1]) / len, (to[0] - from[0]) / len];
     const left = a.map(v => v[0] * axis[0] + v[1] * axis[1]), right = b.map(v => v[0] * axis[0] + v[1] * axis[1]);
     if (Math.max(...left) + margin <= Math.min(...right) + EPS || Math.max(...right) + margin <= Math.min(...left) + EPS) return false;
@@ -122,16 +173,11 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
   // Tiles that can cover a 4 m cell other than their own: larger ones, and any off the grid. A one-cell tile on the grid
   // covers only its own cell, which `allCells` already answers, so the per-cell scan below runs over these few alone.
   const spanning = allTiles.filter(tile => (tile.size ?? 1) !== 1 || tile.position.x % 4 !== 0 || tile.position.z % 4 !== 0);
-  // A placed model whose size is not known keeps a cell clear around it instead of stopping the plan; each one is named.
-  const unmeasured = new Set<string>();
   const existing = snapshot.objects.map(object => {
     const bounds = object.config?.modelUrl ? knownBounds(object.config.modelUrl) : undefined;
-    const footprint = object.type === 'model' && !bounds ? null : objectFootprint(object, bounds);
-    if (footprint && !degenerate(footprint)) return footprint;
-    unmeasured.add(object.config?.modelLabel ?? object.config?.modelId ?? '기물');
-    return cellAround(object);
+    if (object.type === 'model' && !bounds) throw new LayoutError('기존 기물의 크기를 확인하지 못했어요. 다시 배치해 주세요.');
+    return objectFootprint(object, bounds);
   });
-  const unmeasuredNotice = [...unmeasured].map(label => `${label}: 크기를 확인하지 못해 한 칸을 비웠어요`);
   const blockBounds = snapshot.blocks.map(block => rect(block.position.x - 2, block.position.z - 2,
     block.position.x - 2 + 4 * (block.size?.x ?? 1), block.position.z - 2 + 4 * (block.size?.z ?? 1)));
   // A wall pivot is half a wall-length behind its center along local Z, as the engine's wallBox contract specifies.
@@ -180,7 +226,7 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
     const aisle = rect(corridorX - CORRIDOR_HALF, corridor.minZ, corridorX + CORRIDOR_HALF, corridor.maxZ);
     const make = (id: string, x: number, z: number, rotation = 0): PlacedObject => {
       const item = catalog.get(id);
-      if (!item) throw new Error('배치에 필요한 기물이 없어요. 카탈로그를 다시 불러와 주세요.');
+      if (!item) throw new LayoutError('배치에 필요한 기물이 없어요. 카탈로그를 다시 불러와 주세요.');
       return { id: createBuildingScopeId('obj'), type: 'model', position: { x, y: 0, z }, rotation,
         config: { modelId: item.id, modelLabel: item.label, modelUrl: item.modelUrl, modelScale: item.scale, modelColor: item.color } };
     };
@@ -227,6 +273,13 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
     }
     const lamp = scan('lamp-basic', [max[0] - 1, max[1] - 1]);
     if (lamp) keep(lamp);
+    // Studio furniture for the kind, where there is room for it (the core pieces above come first).
+    for (const prop of storeProps(intent.kind)) {
+      const id = propCatalogId(prop.id);
+      if (!catalog.has(id)) continue;
+      const piece = scan(id, spotOf(prop.at, min, max));
+      if (piece) keep(piece);
+    }
     const walls: LayoutWall[] = [];
     const wallGroupId = `${planId}-walls`;
     const wallMeshId = `${planId}-wall`;
@@ -262,21 +315,21 @@ export function proposeLayout(snapshot: BuildingSerializedState, intent: LayoutI
     next.wallGroups.push({ id: wallGroupId, name: intent.kind === 'office' ? '사무실' : intent.kind === 'cafe' ? '카페' : '매장',
       frontMeshId: wallMeshId, backMeshId: wallMeshId, sideMeshId: wallMeshId, walls: walls.map(v => v.wall) });
     next.objects.push(...objects);
-    if (bytes(next) > MAX_BYTES - 64 * 1024) throw new Error('섬의 저장 공간이 부족해요. 기물을 줄인 뒤 다시 배치해 주세요.');
+    if (bytes(next) > MAX_BYTES - 64 * 1024) throw new LayoutError('섬의 저장 공간이 부족해요. 기물을 줄인 뒤 다시 배치해 주세요.');
     return { id: planId, baseline: sameSnapshot(snapshot), snapshot: next, intent, objects, walls, floor: { min, max, color: floorPreset.color },
-      entrance, corridorX, corridor, measured: [...measured], notice: [...intent.warnings, ...unmeasuredNotice] };
+      entrance, corridorX, corridor, measured: [...measured], notice: [...intent.warnings] };
   }
-  throw new Error(`${intent.widthCells * 4}m × ${intent.depthCells * 4}m의 빈 땅과 출입 경로가 없어요.`);
+  throw new LayoutError(`${intent.widthCells * 4}m × ${intent.depthCells * 4}m의 빈 땅과 출입 경로가 없어요.`);
 }
 
 /** One synchronous prepared mutation; the live store and autosaver see no preview writes. */
 export function applyLayout(session: EditSession, proposal: LayoutProposal): void {
-  if (!session.getState().active) throw new Error('꾸미기를 다시 열어 주세요.');
+  if (!session.getState().active) throw new LayoutError('꾸미기를 다시 열어 주세요.');
   const state = session.runtime.buildingStore.getState();
-  if (sameSnapshot(state.serialize()) !== proposal.baseline) throw new Error('섬이 바뀌었어요. 배치를 다시 만들어 주세요.');
+  if (sameSnapshot(state.serialize()) !== proposal.baseline) throw new LayoutError('섬이 바뀌었어요. 배치를 다시 만들어 주세요.');
   const domains: Record<string, unknown> = {};
   for (const binding of session.runtime.save.getBindings()) domains[binding.key] = binding.key === 'building' ? proposal.snapshot : binding.serialize();
-  if (bytes({ version: 1, savedAt: Date.now(), domains }) > MAX_BYTES) throw new Error('섬의 저장 공간이 부족해요.');
+  if (bytes({ version: 1, savedAt: Date.now(), domains }) > MAX_BYTES) throw new LayoutError('섬의 저장 공간이 부족해요.');
   const apply = state.prepareHydrate(proposal.snapshot);
   session.history.flush();
   const release = session.history.hold();

@@ -1,4 +1,4 @@
-import { isDefinitiveRejection, request, SavedRequestGone, savedRequest, type Pending } from '../api';
+import { isDefinitiveRejection, request, savedRequest, type Pending } from '../api';
 import type { MeshyOptions } from '../studio/meshy-options';
 
 export type ImageRetry = { slot: string; view: string; failure_id: string };
@@ -254,12 +254,12 @@ export const factoryApi = {
    * refuses with PendingRequestConflict rather than send the saved one in place of this one; see `resumeRefit`. */
   refitPart: (id: string, source_version: string, slot: string, fit_profile?: FitProfile, part_method?: 'isolated' | 'body_shell', shape?: GarmentShape) =>
     refits(id).send({ source_version, slot, ...(fit_profile ? { fit_profile } : {}), ...(part_method ? { part_method } : {}), ...(shape ? { shape } : {}) }, postRefit(id)),
-  /** Sends the saved refit again, its own input under its own key: the one under `key` (the one a recovery button
-   * showed), or whatever is saved. Nothing is sent when it is no longer saved (SavedRequestGone). */
-  async resumeRefit(id: string, key?: string) {
-    const pending = factoryApi.pendingRefit(id);
-    if (!pending) throw new SavedRequestGone();
-    return refits(id).resume(key ?? pending.key, postRefit(id));
+  /** Sends a saved refit again as itself, its own input under its own key: the one a recovery button showed (`saved`),
+   * even when another tab has had its answer and forgotten it since, or else whatever is saved. */
+  async resumeRefit(id: string, saved?: Pending<RefitInput> | null) {
+    const pending = saved ?? factoryApi.pendingRefit(id);
+    if (!pending) throw new Error('저장된 피팅 요청이 없습니다.');
+    return refits(id).send(pending.input, postRefit(id), { key: pending.key });
   },
   resumeStage: (id: string, stage: FactoryStage, key: string) => request<FactoryStages>(`/api/avatar-factory/jobs/${id}/stages/${stage}/resume`, {
     method: 'POST', headers: { 'Idempotency-Key': key },
@@ -281,17 +281,16 @@ export const factoryApi = {
     } catch { /* Storage is closed; the saved request cannot be read either. */ }
     return imageRequests(id).read();
   },
-  /** Starts an image production. A saved request is replayed only as itself: pass its key as `replay`. It is sent under
-   * that key, and not at all once it is no longer saved (SavedRequestGone); with another one saved this refuses rather
-   * than send the saved one in place of `input`. */
+  /** Starts an image production. A saved request is replayed only as itself: pass its key as `replay` with its own input.
+   * It goes under that key, even when another tab has had its answer and forgotten it since; with another one saved
+   * this refuses rather than send the saved one in place of `input`. */
   async produceImage(input: ImageProductionInput, replay?: string): Promise<FactoryJob> {
     const { pending, error } = factoryApi.imageRecovery(input.character_id);
     if (error) throw new Error(error);
     if (pending && pending.key !== replay) throw new Error('저장된 이미지 생성 요청이 있습니다. 같은 요청을 복구한 뒤 다시 시도해 주세요.');
-    const post = (saved: Pending<ImageProductionInput>) => request<FactoryJob>('/api/avatar-factory/image-jobs', {
+    return imageRequests(input.character_id).send(input, saved => request<FactoryJob>('/api/avatar-factory/image-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': saved.key }, body: JSON.stringify(saved.input),
-    });
-    return replay ? imageRequests(input.character_id).resume(replay, post) : imageRequests(input.character_id).send(input, post);
+    }), replay ? { key: replay } : {});
   },
   detail: (id: string, signal?: AbortSignal) => request<FactoryJob>(`/api/avatar-factory/jobs/${id}`, { signal }),
   list: (signal?: AbortSignal) => request<{ jobs: FactoryJob[] }>('/api/avatar-factory/jobs', { signal, timeoutMs: 60000 }),

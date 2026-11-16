@@ -23,7 +23,7 @@ export function GlbAssetLibrary({ slot, bases, defaultBaseId, onJob }: Props) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [baseId, setBaseId] = useState(defaultBaseId || ''), [bodyType, setBodyType] = useState<'male' | 'female'>('female');
   const lock = useRef(false);
-  const gone = useSavedRequests();
+  useSavedRequests();
   const effectiveSlot = slot || kind;
   const recovery = glbAssetRecovery();
   const visibleItems = (listing.value?.items || []).filter(item => !slot || item.slot === slot);
@@ -55,22 +55,23 @@ export function GlbAssetLibrary({ slot, bases, defaultBaseId, onJob }: Props) {
   async function recoverRegistration() {
     if (lock.current || !recovery.pending) return;
     lock.current = true; setBusy(true); setError('');
-    try { accept(await glbAssetsApi.recoverCreate(recovery.pending.key)); }
-    catch (reason) { if (gone(reason)) void listing.refresh(); else setError((reason as Error).message); }
+    // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
+    try { accept(await glbAssetsApi.create(recovery.pending.input, recovery.pending.key)); }
+    catch (reason) { setError((reason as Error).message); }
     finally { lock.current = false; setBusy(false); }
   }
   async function prepare(action: 'fit' | 'rig') {
     if (lock.current || !selected) return;
     lock.current = true; setBusy(true); setError(''); setNotice('');
     try {
-      // A recovery sends the request it shows under its key, and nothing once another tab has settled it.
-      const job = preparing.pending ? await glbAssetsApi.recoverPrepare(selected.id, preparing.pending.key)
-        : await glbAssetsApi.prepare(selected.id, action === 'fit'
-          ? { action, base_job_id: selectedBase?.id, base_version: baseState?.version }
-          : { action, body_type: bodyType });
+      // A saved request goes again under its own key, even if another tab has since had its answer and forgotten it.
+      const input = preparing.pending?.input || (action === 'fit'
+        ? { action, base_job_id: selectedBase?.id, base_version: baseState?.version }
+        : { action, body_type: bodyType });
+      const job = await glbAssetsApi.prepare(selected.id, input, preparing.pending?.key);
       setNotice(action === 'fit' ? '몸 맞추기·골격 연결 접수 완료' : '새 리깅 접수 완료');
       onJob(job); void listing.refresh();
-    } catch (reason) { if (gone(reason)) void listing.refresh(); else setError((reason as Error).message); }
+    } catch (reason) { setError((reason as Error).message); }
     finally { lock.current = false; setBusy(false); }
   }
   async function openOperation(id: string) {
@@ -84,7 +85,7 @@ export function GlbAssetLibrary({ slot, bases, defaultBaseId, onJob }: Props) {
       <a href={item.source.url} download={`${item.name}.glb`}>GLB 원본 다운로드</a>
       {paid && item.slot !== 'body' && item.slot !== 'prop' && <fieldset disabled={busy || !!preparing.pending || !!preparing.error}>
         <legend>기준몸에 맞추기</legend><label>기준 몸<select value={selectedBase?.id || ''} onChange={event => setBaseId(event.target.value)}><option value="">선택</option>{bases.map(value => <option key={value.id} value={value.id}>{value.character_name} · {value.id.slice(0, 8)}</option>)}</select></label>
-        <button type="button" disabled={!fitReady} onClick={() => void prepare('fit')}>몸에 맞추기 · 기존 골격 연결</button>
+        <button type="button" disabled={!fitReady} onClick={() => void prepare('fit')}>몸에 맞추기 · 기존 골격 연결 · 유료 1회</button>
         {baseState?.origin === 'uploaded_glb' && <a href={studioHref({ tab: 'character', mode: 'body', partsJob: selectedBase!.id })}>기준몸 리깅·피팅 준비</a>}
         {base.error && <p role="alert">{base.error}</p>}
       </fieldset>}

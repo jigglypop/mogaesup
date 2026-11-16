@@ -26,7 +26,7 @@ import {
 
 import { authApi } from '../api/endpoints';
 import type { User } from '../api/types';
-import { requestSessionCheck } from '../auth/sessionWork';
+import { doubtSession } from '../auth/sessionWork';
 import { useSignInPath } from '../auth/signIn';
 import { useHiddenPeers, withoutPeers } from '../games/hiddenPeers';
 import { useRoomQuiet } from '../games/quiet';
@@ -143,9 +143,9 @@ function useLiveRoom(options: {
       try {
         const { ticket, user } = await authApi.realtimeTicket();
         if (stopped) return;
-        // The cookie is someone else's now (another tab signed in): the page finds out who, and joins as them.
+        // The session cookie is someone else's now (another tab signed in as them): the app asks who is signed in.
         if (user.id !== viewerId) {
-          requestSessionCheck();
+          doubtSession();
           return;
         }
         liveRef.current.updateConfig({ websocket: { ...CONFIG.websocket, url: roomUrl(username, ticket) } });

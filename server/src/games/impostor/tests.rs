@@ -1039,7 +1039,7 @@ fn the_living_talk_in_meetings_and_the_dead_among_themselves() {
     assert_eq!(play.onlooker()["talk"], json!([]));
     // Something, at most 120 characters, nothing that is not text, one line a second.
     let long = "가".repeat(121);
-    for bad in ["", "   ", long.as_str(), "a\u{7}b", "a\nb", "\u{202e}abc"] {
+    for bad in ["", "   ", long.as_str(), "a\u{7}b", "a\nb", "\u{202e}abc", "\u{200b}", "a\u{feff}b", "\u{2060}"] {
         assert_eq!(play.act(ghost, say(bad)), Err(BAD_TEXT), "{bad:?}");
     }
     assert_eq!(play.act(ghost, json!({"do": "say"})), Err(BAD_ACTION));
@@ -1594,4 +1594,39 @@ fn a_line_names_someone_by_their_whole_name_and_bots_count_whom_lines_name_by_wh
     play.at(CALM + 2_000);
     play.act(speaker, say("요가 수상해요")).unwrap();
     assert_eq!(play.game.most_named(ids[2]), Some(named));
+}
+
+#[test]
+fn the_game_sends_everyone_by_the_table_at_first_to_their_seat_in_a_meeting_and_an_impostor_to_their_vent() {
+    let mut play = Play::new(5, 3);
+    let (impostor, crew) = (play.impostor(), play.crew());
+    let sorted = |mut sent: Vec<(Uuid, [f64; 3])>| {
+        sent.sort_by_key(|(id, _)| *id);
+        sent
+    };
+    // Until the first kill may happen, each one's place by the table, the one their view shows.
+    let spawns: Vec<(Uuid, [f64; 3])> = play
+        .ids()
+        .into_iter()
+        .map(|id| (id, serde_json::from_value(play.view(id)["spawn"].clone()).unwrap()))
+        .collect();
+    assert_eq!(sorted(play.game.destinations(START)), sorted(spawns.clone()));
+    assert_eq!(sorted(play.game.destinations(START + FIRST_KILL - 1)), sorted(spawns));
+    assert!(play.game.destinations(START + FIRST_KILL).is_empty());
+    // An impostor in the vents is sent to the vent they are in, wherever they move to, until they climb out.
+    play.at(FIRST_KILL);
+    play.stand(impostor, VENTS[0]);
+    play.act(impostor, vent(None)).unwrap();
+    assert_eq!(play.game.destinations(play.now), [(impostor, VENTS[0])]);
+    play.act(impostor, vent(Some(2))).unwrap();
+    assert_eq!(play.game.destinations(play.now), [(impostor, VENTS[2])]);
+    play.act(impostor, vent(None)).unwrap();
+    assert!(play.game.destinations(play.now).is_empty());
+    // A meeting sends everyone alive to their seat while it lasts.
+    play.call(crew[0]);
+    assert_eq!(play.game.destinations(play.now), play.meeting().seats);
+    let end = play.open_vote();
+    play.tick(end);
+    assert!(play.game.meeting.is_none());
+    assert!(play.game.destinations(play.now).is_empty(), "nobody is sent to a seat once it is over");
 }

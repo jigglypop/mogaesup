@@ -7,7 +7,7 @@ import { ApiRequestError } from '../../api/client';
 import type { User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
 import { trackUnsaved } from '../../auth/sessionWork';
-import { adminHome, Rail, TopActions } from '../Shell';
+import { adminHome, TopActions } from '../Shell';
 
 const api = vi.hoisted(() => ({
   requests: vi.fn(),
@@ -100,80 +100,64 @@ describe('비밀번호 바꾸기', () => {
 });
 
 describe('다른 기기에서 모두 로그아웃', () => {
-  it('묻고 나서 끝내고, 끝낸 세션 수를 보인다', async () => {
-    const ask = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    api.logoutOthers.mockResolvedValueOnce({ ended: 3 });
+  it('현재 비밀번호를 받아 보내고, 서버가 말한 문제를 그대로 보이며, 끝낸 세션 수를 보인다', async () => {
     const { container, unmount } = await mount(shell());
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="내 메뉴"]')!;
     await openMenu(container);
     await act(async () => button('다른 기기에서 모두 로그아웃')!.click());
-    expect(ask).toHaveBeenCalledExactlyOnceWith('다른 기기에서 모두 로그아웃할까요?');
-    expect(api.logoutOthers).toHaveBeenCalledOnce();
-    expect(container.querySelector('[role=status]')?.textContent).toBe('다른 기기 3곳에서 로그아웃했어요');
-    expect(auth.logout).not.toHaveBeenCalled();
-    await unmount();
-  });
+    const dialog = document.querySelector<HTMLElement>('[role=dialog][aria-modal=true]')!;
+    expect(dialog.querySelector('#mg-password-title')?.textContent?.trim()).toBe('다른 기기에서 모두 로그아웃');
+    const fields = [...dialog.querySelectorAll<HTMLInputElement>('input[type=password]')];
+    expect(fields).toHaveLength(1);
+    expect(document.activeElement).toBe(fields[0]);
 
-  it('그만두면 아무 세션도 끝내지 않는다', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
-    const { container, unmount } = await mount(shell());
-    await openMenu(container);
-    await act(async () => button('다른 기기에서 모두 로그아웃')!.click());
+    // Nothing is sent without it.
+    await act(async () => button('로그아웃')!.click());
     expect(api.logoutOthers).not.toHaveBeenCalled();
-    expect(container.querySelector('[role=status]')).toBeNull();
-    await unmount();
-  });
+    expect(dialog.querySelector('[role=alert]')?.textContent).toBe('현재 비밀번호를 입력해 주세요.');
 
-  it('실패하면 서버가 말한 문제를 보이고, 메뉴를 다시 열면 지난 결과는 사라져 있다', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    api.logoutOthers.mockRejectedValueOnce(new ApiRequestError(429, 'rate_limited', '잠시 후 다시 시도해 주세요.'));
-    const { container, unmount } = await mount(shell());
-    await openMenu(container);
-    await act(async () => button('다른 기기에서 모두 로그아웃')!.click());
-    expect(container.querySelector('[role=alert]')?.textContent).toBe('잠시 후 다시 시도해 주세요.');
-    await openMenu(container);
-    expect(container.querySelector('.mg-popover')).toBeNull();
-    await openMenu(container);
-    expect(container.querySelector('[role=alert]')).toBeNull();
+    api.logoutOthers.mockRejectedValueOnce(new ApiRequestError(400, 'wrong_password', '현재 비밀번호가 올바르지 않습니다.'));
+    await type(fields[0]!, 'old-password');
+    await act(async () => button('로그아웃')!.click());
+    expect(api.logoutOthers).toHaveBeenCalledExactlyOnceWith({ currentPassword: 'old-password' });
+    expect(dialog.querySelector('[role=alert]')?.textContent).toBe('현재 비밀번호가 올바르지 않습니다.');
 
-    api.logoutOthers.mockResolvedValueOnce({ ended: 1 });
-    await act(async () => button('다른 기기에서 모두 로그아웃')!.click());
-    expect(container.querySelector('[role=status]')?.textContent).toBe('다른 기기 1곳에서 로그아웃했어요');
-    await openMenu(container);
-    await openMenu(container);
-    expect(container.querySelector('[role=status]')).toBeNull();
+    api.logoutOthers.mockResolvedValueOnce({ ended: 3 });
+    await act(async () => button('로그아웃')!.click());
+    expect(dialog.querySelector('[role=status]')?.textContent).toBe('다른 기기 3곳에서 로그아웃했어요');
+    expect(dialog.querySelector('input')).toBeNull();
+    expect(auth.logout).not.toHaveBeenCalled();
+    await act(async () => button('닫기')!.click());
+    expect(document.querySelector('[role=dialog][aria-modal=true]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
     await unmount();
   });
 });
 
-describe('운영 메뉴', () => {
+describe('운영 화면', () => {
   const as = (permissions: User['permissions']): User => ({ ...mogae, permissions });
 
-  it('카탈로그 편집자는 /admin으로, 운영자(유료 운영자 포함)는 캐릭터 공장으로 가고, 둘 다 아니면 메뉴가 없다', async () => {
+  it('카탈로그 편집자는 /admin으로, 운영자(유료 운영자 포함)는 캐릭터 공장으로 가고, 둘 다 아니면 갈 곳이 없다', () => {
     expect(adminHome(as(['catalog_editor', 'studio_viewer']))).toBe('/admin');
     expect(adminHome(as(['operator']))).toBe('/admin/studio');
     expect(adminHome(as(['paid_operator', 'operator']))).toBe('/admin/studio');
     expect(adminHome(as(['moderator']))).toBeNull();
     expect(adminHome(null)).toBeNull();
+  });
+});
 
-    auth.user = as(['paid_operator', 'operator']);
-    const { container, unmount } = await mount(
-      <MemoryRouter initialEntries={['/admin/studio/bodies']}>
-        <Rail />
-      </MemoryRouter>,
-    );
-    const link = [...container.querySelectorAll('a')].find((anchor) => anchor.textContent === '운영');
-    expect(link?.getAttribute('href')).toBe('/admin/studio');
-    expect(link?.getAttribute('aria-current')).toBe('page');
+describe('메뉴의 지난 결과', () => {
+  it('로그아웃에 실패하면 서버가 말한 문제를 보이고, 메뉴를 다시 열면 지난 문제는 사라져 있다', async () => {
+    auth.logout.mockRejectedValueOnce(new ApiRequestError(429, 'rate_limited', '잠시 후 다시 시도해 주세요.'));
+    const { container, unmount } = await mount(shell());
+    await openMenu(container);
+    await act(async () => button('로그아웃')!.click());
+    expect(container.querySelector('[role=alert]')?.textContent).toBe('잠시 후 다시 시도해 주세요.');
+    await openMenu(container);
+    expect(container.querySelector('.mg-popover')).toBeNull();
+    await openMenu(container);
+    expect(container.querySelector('[role=alert]')).toBeNull();
     await unmount();
-
-    auth.user = mogae;
-    const member = await mount(
-      <MemoryRouter>
-        <Rail />
-      </MemoryRouter>,
-    );
-    expect(member.container.textContent).not.toContain('운영');
-    await member.unmount();
   });
 });
 
@@ -188,6 +172,45 @@ describe('로그아웃', () => {
     expect(auth.logout).not.toHaveBeenCalled();
     await act(async () => button('로그아웃')!.click());
     expect(auth.logout).toHaveBeenCalledTimes(1);
+    untrack();
+    await unmount();
+  });
+
+  it('저장하지 않은 편집은 먼저 저장하고, 다 저장되면 묻지 않고 로그아웃한다', async () => {
+    let unsaved = true;
+    let saved!: () => void;
+    const save = vi.fn(() => new Promise<void>((done) => { saved = () => { unsaved = false; done(); }; }));
+    const untrack = trackUnsaved(() => unsaved, save);
+    const ask = vi.spyOn(window, 'confirm');
+    const { container, unmount } = await mount(shell());
+    await openMenu(container);
+    await act(async () => button('로그아웃')!.click());
+    // The session is kept while the save is on its way.
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(auth.logout).not.toHaveBeenCalled();
+    expect(button('로그아웃 중…')).toBeTruthy();
+    await act(async () => button('로그아웃 중…')!.click());
+    await act(async () => saved());
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(ask).not.toHaveBeenCalled();
+    expect(auth.logout).toHaveBeenCalledTimes(1);
+    untrack();
+    await unmount();
+  });
+
+  it('저장해도 남은 편집이 있으면 그때 묻고, 그만두면 로그아웃하지 않는다', async () => {
+    const steps: string[] = [];
+    const untrack = trackUnsaved(() => true, async () => void steps.push('save'));
+    vi.spyOn(window, 'confirm').mockImplementationOnce(() => {
+      steps.push('ask');
+      return false;
+    });
+    const { container, unmount } = await mount(shell());
+    await openMenu(container);
+    await act(async () => button('로그아웃')!.click());
+    expect(steps).toEqual(['save', 'ask']);
+    expect(auth.logout).not.toHaveBeenCalled();
+    expect(button('로그아웃')).toBeTruthy();
     untrack();
     await unmount();
   });

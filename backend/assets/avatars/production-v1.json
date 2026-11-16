@@ -47,12 +47,13 @@
     "shoes": [[-0.22, -0.012, -0.13], [0.22, 0.15, 0.23]]
   },
   "fitting": {
-    "revision": "uniform-parts-v1-slot",
+    "revision": "uniform-parts-v2-hair-seat",
     "part_fit": "uniform-slot-v1",
     "hair_surface_fit": "cavity-reference-v4",
     "hair_rear_surface": "reference-silhouette-v4",
     "hair_backing_grid": [65, 65],
     "hair_cavity_scale_limit": 1.25,
+    "hair_cavity_seat": "two-way-v1",
     "hair_length_profiles": {"source": null, "short": 1.0, "long": 1.7},
     "method": "shared_size_with_body_cut_lines",
     "fit_to_body_surface": false,

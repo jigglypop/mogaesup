@@ -1,20 +1,27 @@
+import { act, createElement } from 'react';
+
 import { describe, expect, it, vi } from 'vitest';
 
+import { mount, type } from '../../__tests__/mount';
 import type { CatalogItem } from '../../api/types';
+import type { EditSession } from '../edit/session';
 import {
   createGreetingStore,
   createResidentStore,
   FACE_RADIUS,
   lookTarget,
   MAX_RESIDENTS,
+  NAME_MAX,
   parseResidents,
   residentInstance,
   residentsBinding,
   residentSpot,
   residentTemplate,
+  residentText,
   shownResidents,
   type Resident,
 } from '../residents';
+import { ResidentsShelf } from '../ResidentsShelf';
 
 const resident = (id: string, changes: Partial<Resident> = {}): Resident => ({
   id,
@@ -50,6 +57,7 @@ describe('섬 주민 저장', () => {
       { version: 1, residents: [resident('a'), resident('a')] },
       { version: 1, residents: [resident('a', { name: '  ' })] },
       { version: 1, residents: [resident('a', { greeting: '줄\n바꿈' })] },
+      { version: 1, residents: [resident('a', { name: '모개\ud83c' })] },
       { version: 1, residents: [resident('a', { npc: '../x' })] },
       { version: 1, residents: [resident('a', { position: [0, 0, 500] })] },
       { version: 1, residents: [{ ...resident('a'), modelUrl: 'https://evil.example/x.glb' }] },
@@ -95,6 +103,52 @@ describe('섬 주민 저장', () => {
     expect(store.getState().map((entry) => entry.id)).not.toContain(second!.id);
     store.remove('nobody');
     expect(listener).toHaveBeenCalledTimes(MAX_RESIDENTS + 2);
+  });
+
+  it('이름과 인사말은 서버가 받는 글로 고친다: 붙여 넣은 탭은 빈칸으로, 이모지는 가운데에서 자르지 않는다', () => {
+    expect(residentText(' 모개\t친구 ', NAME_MAX)).toBe('모개 친구');
+    expect(residentText('\u0000\t', NAME_MAX)).toBe('');
+    expect(residentText('모개\ud83c', NAME_MAX)).toBe('모개');
+    // UTF-16으로 세면 20자 경계가 이모지 가운데에 걸린다. 반쪽만 남기지 않는다.
+    expect(residentText('가나다라마바사아자차카타파하가나다라마🍄요정', NAME_MAX)).toBe('가나다라마바사아자차카타파하가나다라마🍄');
+    expect([...residentText('😊'.repeat(NAME_MAX + 5), NAME_MAX)]).toHaveLength(NAME_MAX);
+  });
+
+  it('서버가 거절할 주민은 두지도 않고 그렇게 고치지도 않는다', () => {
+    const store = createResidentStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    const mogae: Omit<Resident, 'id'> = { npc: 'npc-mogae', name: '모개', greeting: '', position: [0, 0, 0], rotation: 0 };
+    const refused = [{ name: '모개\t친구' }, { name: `${'가'.repeat(NAME_MAX - 1)}\ud83c` }, { name: ' ' }, { greeting: '어서\t와' }];
+    for (const changes of refused) expect(store.add({ ...mogae, ...changes }), JSON.stringify(changes)).toBeNull();
+    const added = store.add(mogae)!;
+    for (const changes of refused) store.update(added.id, changes);
+    expect(store.getState()).toEqual([added]);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('꾸미기의 주민 칸', () => {
+  const session = {
+    pivot: () => ({ x: 10, y: 0, z: 10 }),
+    runtime: { buildingStore: { getState: () => ({ tileGroups: new Map() }) } },
+  } as unknown as EditSession;
+
+  it('붙여 넣은 탭이나 이모지에 걸린 라벨은 고쳐서 두고, 고친 이름도 그렇게 저장한다', async () => {
+    const residents = createResidentStore();
+    const items = [item('npc-mogae', { label: '가나다라마바사아자차카타파하가나다라마🍄요정' })];
+    const { container, unmount } = await mount(createElement(ResidentsShelf, { session, residents, items, query: '' }));
+    // 이름 칸을 비워 두면 라벨이 이름이 된다.
+    await type(container.querySelector<HTMLInputElement>('[name=residentGreeting]')!, '어서\t와');
+    await act(async () => container.querySelector<HTMLButtonElement>('button[type=submit]')!.click());
+    expect(residents.getState()).toMatchObject([{ name: '가나다라마바사아자차카타파하가나다라마🍄', greeting: '어서 와' }]);
+
+    const name = container.querySelector<HTMLInputElement>('[aria-label="주민 이름"]')!;
+    await type(name, '모개\t친구');
+    await act(async () => name.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(residents.getState()[0]!.name).toBe('모개 친구');
+    expect(name.value).toBe('모개 친구');
+    await unmount();
   });
 });
 

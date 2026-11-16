@@ -3,6 +3,12 @@ import bpy
 from mathutils import Vector
 
 from src.services.avatar_blender_common import bounds, blender_to_gltf
+from src.services.avatar_bone_names import bone_name
+
+
+def _bone(rig, name):
+    """The bone `name` of a skeleton that may prefix its bone names; a KeyError as before when it has none."""
+    return rig.data.bones[bone_name(rig, name) or name]
 
 
 def fit_sleeves(meshes, rig, spec):
@@ -15,8 +21,8 @@ def fit_sleeves(meshes, rig, spec):
         t = max(0, min(1, value))
         return t*t*(3-2*t)
     for side, sign in (('Left', 1), ('Right', -1)):
-        shoulder = rig.matrix_world @ rig.data.bones[side+'Arm'].head_local
-        wrist = rig.matrix_world @ rig.data.bones[side+'Hand'].head_local
+        shoulder = rig.matrix_world @ _bone(rig, side+'Arm').head_local
+        wrist = rig.matrix_world @ _bone(rig, side+'Hand').head_local
         points = [obj.matrix_world @ v.co for obj in meshes for v in obj.data.vertices]
         extent = max(sign*p.x for p in points)
         cuff = [p for p in points if sign*p.x >= extent-.035]
@@ -62,6 +68,7 @@ def bind_top_regions(meshes, rig, masks):
     """The shirt hem follows the torso, even when a hand is its nearest surface."""
     torso_names = [b.name for b in rig.data.bones if any(k in b.name.lower() for k in ('hips', 'spine', 'chest'))]
     centers = {name: rig.matrix_world @ rig.data.bones[name].head_local for name in torso_names}
+    arm = {side+name: _bone(rig, side+name).name for side in ('Left', 'Right') for name in ('Arm', 'ForeArm', 'Hand')}
     for obj in meshes:
         groups = {g.name: g for g in obj.vertex_groups}
         for vertex in obj.data.vertices:
@@ -69,13 +76,13 @@ def bind_top_regions(meshes, rig, masks):
             side, amount = masks[obj].get(vertex.index, ('Left' if point.x >= 0 else 'Right', 0))
             core = min(torso_names, key=lambda name: abs(centers[name].z-point.z))
             row = {core: 1-amount}
-            shoulder, elbow, wrist = [rig.matrix_world @ rig.data.bones[side+name].head_local
+            shoulder, elbow, wrist = [rig.matrix_world @ rig.data.bones[arm[side+name]].head_local
                                      for name in ('Arm', 'ForeArm', 'Hand')]
             direction = (wrist-shoulder).normalized()
             distance = (point-elbow).dot(direction)
             blend = max(0, min(1, .5+distance/.05))
-            row[side+'Arm'] = amount*(1-blend)
-            row[side+'ForeArm'] = amount*blend
+            row[arm[side+'Arm']] = amount*(1-blend)
+            row[arm[side+'ForeArm']] = amount*blend
             for index in [group.group for group in vertex.groups]:
                 obj.vertex_groups[index].remove([vertex.index])
             for name, weight in row.items():
@@ -85,22 +92,28 @@ def bind_top_regions(meshes, rig, masks):
 
 def t_rest_pose(rig, meshes):
     """Align rest limbs and skin together; preserve the captured motion frames."""
+    # A skeleton may prefix its bone names ('mixamorig:LeftArm'). One without both arm and leg chains keeps
+    # its own rest pose, and the assembly goes on.
+    limb = {side+suffix: bone_name(rig, side+suffix) for side in ('Left', 'Right')
+            for suffix in ('Arm', 'ForeArm', 'Hand', 'UpLeg', 'Leg', 'Foot', 'ToeBase')}
+    if None in limb.values():
+        return {'preserved': True, 'reason': 'unsupported_skeleton'}
     bones = list(rig.data.bones)
     old = {bone.name: bone.matrix_local.copy() for bone in bones}
     world = rig.matrix_world.copy()
     inverse = world.inverted()
     new = {name: matrix.copy() for name, matrix in old.items()}
-    shoulder_height = sum((world @ old[side+'Arm']).translation.z for side in ('Left', 'Right'))/2
-    shoulder_depth = sum((world @ old[side+'Arm']).translation.y for side in ('Left', 'Right'))/2
-    shoulder_half_width = sum(abs((world @ old[side+'Arm']).translation.x) for side in ('Left', 'Right'))/2
-    arm_lengths = {suffix: sum(((world @ old[side+suffix]).translation-(world @ old[side+parent]).translation).length
+    shoulder_height = sum((world @ old[limb[side+'Arm']]).translation.z for side in ('Left', 'Right'))/2
+    shoulder_depth = sum((world @ old[limb[side+'Arm']]).translation.y for side in ('Left', 'Right'))/2
+    shoulder_half_width = sum(abs((world @ old[limb[side+'Arm']]).translation.x) for side in ('Left', 'Right'))/2
+    arm_lengths = {suffix: sum(((world @ old[limb[side+suffix]]).translation-(world @ old[limb[side+parent]]).translation).length
                               for side in ('Left', 'Right'))/2
                    for suffix, parent in (('ForeArm', 'Arm'), ('Hand', 'ForeArm'))}
     for side, sign in (('Left', 1), ('Right', -1)):
         direction = Vector((sign, 0, 0))
         previous = None
         for suffix in ('Arm', 'ForeArm', 'Hand'):
-            name = side+suffix
+            name = limb[side+suffix]
             source = world @ old[name]
             axis = source.to_3x3() @ Vector((0, 1, 0))
             rotation = axis.normalized().rotation_difference(direction).to_matrix().to_4x4()
@@ -114,13 +127,13 @@ def t_rest_pose(rig, meshes):
                 destination.translation = (world @ new[previous]).translation+direction*length
             new[name] = inverse @ destination
             previous = name
-        for bone in rig.data.bones[side+'Hand'].children_recursive:
+        for bone in rig.data.bones[limb[side+'Hand']].children_recursive:
             new[bone.name] = new[bone.parent.name] @ old[bone.parent.name].inverted() @ old[bone.name]
 
     # A vertical hip/knee/ankle chain and matching sagittal foot axes remove
     # asymmetric knee bends and toe-out from the saved reference pose. This is
     # a new rest-frame derivative, never an edit of the imported source GLB.
-    joints = {side: {suffix: (world @ old[side+suffix]).translation
+    joints = {side: {suffix: (world @ old[limb[side+suffix]]).translation
                     for suffix in ('UpLeg', 'Leg', 'Foot', 'ToeBase')}
               for side in ('Left', 'Right')}
     hip_height = sum(row['UpLeg'].z for row in joints.values())/2
@@ -143,13 +156,13 @@ def t_rest_pose(rig, meshes):
                    'Foot': (ankle, foot_offset.normalized()),
                    'ToeBase': (ankle+foot_offset, Vector((0, -1, 0)))}
         for suffix, (head, direction) in targets.items():
-            name = side+suffix
+            name = limb[side+suffix]
             source = world @ old[name]
             axis = source.to_3x3() @ Vector((0, 1, 0))
             destination = axis.normalized().rotation_difference(direction).to_matrix().to_4x4() @ source
             destination.translation = head
             new[name] = inverse @ destination
-        for bone in rig.data.bones[side+'ToeBase'].children_recursive:
+        for bone in rig.data.bones[limb[side+'ToeBase']].children_recursive:
             new[bone.name] = new[bone.parent.name] @ old[bone.parent.name].inverted() @ old[bone.name]
 
     # Capture channels in the imported rest frame before changing that frame.
@@ -242,7 +255,7 @@ def t_rest_pose(rig, meshes):
     rig.data.pose_position = 'REST'; bpy.context.view_layer.update()
     return {'rest_pose': 'T', 'revision': 'axis-aligned-limbs-v1',
             'animation_rest_bases_rebased': len(replacements),
-            'legs_m': {side.lower(): {suffix: blender_to_gltf(world @ rig.data.bones[side+suffix].head_local)
+            'legs_m': {side.lower(): {suffix: blender_to_gltf(world @ rig.data.bones[limb[side+suffix]].head_local)
                          for suffix in ('UpLeg', 'Leg', 'Foot', 'ToeBase')} for side in ('Left', 'Right')},
-            'wrists_m': {side.lower(): blender_to_gltf(world @ rig.data.bones[side+'Hand'].head_local)
+            'wrists_m': {side.lower(): blender_to_gltf(world @ rig.data.bones[limb[side+'Hand']].head_local)
                          for side in ('Left', 'Right')}}

@@ -2,11 +2,12 @@
 
 `install(monkeypatch)` puts the fake modules in `sys.modules`, imports the named worker modules fresh and takes them
 out again when the test ends, so no other test sees a module bound to the fakes. Geometry is plain numpy: a Vector is a
-point, a Matrix a 4x4 (or 3x3) array, a BVH tree a brute-force nearest-triangle search over a few triangles.
+point, a Matrix a 4x4 (or 3x3) array, a BVH tree a brute-force nearest-triangle search (or ray cast) over a few triangles.
 """
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 import importlib
 import math
 from pathlib import Path
@@ -73,6 +74,10 @@ class Vector:
     @property
     def length(self):
         return float(np.linalg.norm(self._v))
+
+    @property
+    def length_squared(self):
+        return float(self._v @ self._v)
 
     def normalized(self):
         length = self.length
@@ -157,11 +162,18 @@ class Matrix:
     def to_3x3(self):
         return Matrix(self._m[:3, :3])
 
+    def to_4x4(self):
+        matrix = np.eye(4); matrix[:len(self._m), :len(self._m)] = self._m
+        return Matrix(matrix)
+
     def transposed(self):
         return Matrix(self._m.T)
 
     def copy(self):
         return Matrix(self._m)
+
+    def identity(self):
+        self._m = np.eye(len(self._m))
 
     @property
     def translation(self):
@@ -208,6 +220,11 @@ class BVHTree:
     def FromPolygons(cls, points, polygons, all_triangles=False, epsilon=0.):
         return cls(points, polygons)
 
+    @classmethod
+    def FromObject(cls, obj, depsgraph):
+        """The object's mesh in its own frame, as Blender's tree of an evaluated object."""
+        return cls([vertex.co for vertex in obj.data.vertices], obj.data._triangles)
+
     def find_nearest(self, point, distance=1e30):
         p, best = _values(point), None
         for index, (i, j, k) in enumerate(self.triangles):
@@ -220,6 +237,30 @@ class BVHTree:
         if best is None:
             return None, None, None, None
         return Vector(best[0]), Vector(best[1]), best[2], best[3]
+
+    def ray_cast(self, origin, direction, distance=1e30):
+        """The nearest triangle the ray meets within `distance`, from either side, as Blender's does (Moller-Trumbore
+        over every triangle at once; the first of equally near ones)."""
+        if not self.triangles:
+            return None, None, None, None
+        o, d = _values(origin), _values(direction)
+        d = d/(np.linalg.norm(d) or 1.)
+        corners = np.array(self.points)[np.array(self.triangles)]
+        a, ab, ac = corners[:, 0], corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+        p = np.cross(d, ac)
+        determinant = np.einsum('ij,ij->i', ab, p)
+        valid = np.abs(determinant) >= 1e-12
+        determinant = np.where(valid, determinant, 1.)
+        s = o - a
+        q = np.cross(s, ab)
+        u, v = np.einsum('ij,ij->i', s, p)/determinant, (q @ d)/determinant
+        t = np.einsum('ij,ij->i', ac, q)/determinant
+        hit = valid & (u >= 0) & (v >= 0) & (u + v <= 1) & (t >= 0) & (t <= distance)
+        if not hit.any():
+            return None, None, None, None
+        index = int(np.flatnonzero(hit)[np.argmin(t[hit])])
+        normal = np.cross(ab[index], ac[index])
+        return Vector(o + d*t[index]), Vector(normal/(np.linalg.norm(normal) or 1.)), index, float(t[index])
 
 
 def barycentric_transform(point, a, b, c, target_a, target_b, target_c):
@@ -255,6 +296,12 @@ class Mesh:
         self.shape_keys = None
         self.users = 1
 
+    def copy(self):
+        """Blender's ID.copy() as the workers use it, given to one object: its own vertices, the same materials."""
+        duplicate = deepcopy(self, {id(material): material for material in self.materials})
+        duplicate.users = 1
+        return duplicate
+
     def calc_loop_triangles(self):
         self.loop_triangles = [types.SimpleNamespace(vertices=triangle) for triangle in self._triangles]
 
@@ -273,7 +320,8 @@ class VertexGroup:
     def add(self, indices, weight, kind):
         for index in indices:
             groups = self.owner.data.vertices[index].groups
-            groups[:] = [entry for entry in groups if entry.group != self.index] + [Entry(self.index, weight)]
+            previous = sum(entry.weight for entry in groups if entry.group == self.index) if kind == 'ADD' else 0.
+            groups[:] = [entry for entry in groups if entry.group != self.index] + [Entry(self.index, previous+weight)]
 
     def remove(self, indices):
         for index in indices:
@@ -290,6 +338,9 @@ class VertexGroups(list):
         group = VertexGroup(self.owner, len(self), name)
         self.append(group)
         return group
+
+    def get(self, name, default=None):
+        return next((group for group in self if group.name == name), default)
 
     def clear(self):
         for vertex in getattr(self.owner.data, 'vertices', []):
@@ -351,6 +402,9 @@ class Objects:
     def __getitem__(self, name):
         return next(obj for obj in self.items if obj.name == name)
 
+    def get(self, name, default=None):
+        return next((obj for obj in self.items if obj.name == name), default)
+
     def __contains__(self, name):
         return any(obj.name == name for obj in self.items)
 
@@ -385,6 +439,7 @@ class Scene:
         self.objects = Objects()
         self.cycles = types.SimpleNamespace(use_denoising=True, samples=8)
         self.frames = []
+        self.frame_current = 0
 
     def frame_set(self, frame, subframe=0.):
         self.frames.append(frame)
@@ -439,7 +494,7 @@ def install(monkeypatch, *modules):
     bpy = types.ModuleType('bpy')
     bpy.data = types.SimpleNamespace(objects=scene.objects, images=types.SimpleNamespace(load=None),
                                      materials=types.SimpleNamespace(new=None))
-    bpy.context = types.SimpleNamespace(scene=scene, object=None,
+    bpy.context = types.SimpleNamespace(scene=scene, object=None, evaluated_depsgraph_get=lambda: None,
                                         view_layer=types.SimpleNamespace(update=lambda: None, objects=types.SimpleNamespace(active=None)))
     bpy.ops = types.SimpleNamespace(
         wm=types.SimpleNamespace(read_factory_settings=lambda **kw: None, save_as_mainfile=lambda **kw: None),

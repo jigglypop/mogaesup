@@ -87,6 +87,12 @@ impl Member {
         self.at = to;
     }
 
+    /// Says at once that it stands somewhere else, as a page that puts its player there does.
+    async fn jump(&mut self, to: [f64; 3]) {
+        self.at = to;
+        send(&mut self.room, json!({"type": "Update", "state": {"position": to}})).await;
+    }
+
     async fn act(&mut self, action: Value) {
         send(&mut self.game, json!({"type": "Act", "action": action})).await;
     }
@@ -210,12 +216,35 @@ async fn 네_사람이_임포스터를_하며_처치하고_신고해_회의의_�
     let seen = everyone[impostor].session(|session| session["game"]["kill"]["targets"] == json!([target])).await;
     everyone[impostor].act(json!({"do": "kill", "target": target})).await;
     assert_eq!(everyone[impostor].refused().await, "cooldown");
+    // While the cooldown runs, the impostor walks off 150 m and more from everyone.
+    everyone[impostor].walk([-150.0, 0.0, 0.0]).await;
 
-    // Once the cooldown has run (the server's clock, read off the view), the kill goes through. A change's session
-    // view comes before its events.
+    // Once the cooldown has run (the server's clock, read off the view), a page that puts the impostor back beside the
+    // victim and kills at once is refused: the room takes the jump no farther than a run's burst, and the game follows
+    // it at running speed, so the impostor is not there yet. (The room has the jump before the kill is sent.)
     let wait =
         seen["game"]["kill"]["readyAt"].as_u64().unwrap().saturating_sub(views[impostor]["now"].as_u64().unwrap());
     idle(&mut everyone, started + Duration::from_millis(wait + 300)).await;
+    everyone[impostor].jump(near).await;
+    send(&mut everyone[impostor].room, json!({"type": "Ping", "ts": 5})).await;
+    next_where(&mut everyone[impostor].room, "Pong", Duration::from_secs(2), |pong| pong["ts"] == 5).await.unwrap();
+    everyone[impostor].act(json!({"do": "kill", "target": target})).await;
+    assert_eq!(everyone[impostor].refused().await, "too_far");
+
+    // Some seconds on, its page saying all along that it stands there (as a page does while its player stands still),
+    // the server has the impostor beside the victim, and the kill goes through. A change's session view comes before
+    // its events.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        keep_alive(&mut everyone).await;
+        everyone[impostor].jump(near).await;
+        let in_reach = |frame: &Value| frame["session"]["game"]["kill"]["targets"] == json!([target]);
+        let game = &mut everyone[impostor].game;
+        if next_where(game, "Session", Duration::from_millis(500), in_reach).await.is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the server never had the impostor beside the victim");
+    }
     everyone[impostor].act(json!({"do": "kill", "target": target})).await;
     let dead = everyone[victim].session(|session| session["game"]["alive"] == false).await;
     assert_eq!(dead["game"]["bodies"][0]["victim"], json!(target));

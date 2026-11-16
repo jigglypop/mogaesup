@@ -16,8 +16,8 @@ function finished(state: SaverState): boolean {
 }
 
 /**
- * Islands that were left with edits that could not be saved yet (each under the key it was left with), and the question
- * closing the page asks for them.
+ * Islands that were left with edits not saved yet, from the save leaving sends until they are saved or nothing can save
+ * them (each under the key it was left with), and the question closing the page asks for them.
  */
 const holding = new Map<IslandSaver, string | undefined>();
 const closing = (event: BeforeUnloadEvent) => {
@@ -114,6 +114,15 @@ export async function heldSavesSettled(key: string): Promise<void> {
 }
 
 /**
+ * Saves what `saver` holds unsaved now, and resolves once no save of it is on its way (one for edits made while an
+ * earlier save was sent included). Signing out waits for this, for the island open and for those left while saving.
+ */
+export async function saveUnsaved(saver: IslandSaver): Promise<void> {
+  await saver.flush();
+  await idle(saver);
+}
+
+/**
  * Lets go of an island that is being left, once nothing is left to lose. What could not be saved yet is not dropped: its
  * saver keeps retrying in the background (or waits for its owner to sign in again) and `release` runs when it is saved,
  * or when nothing could save it. Until then closing the page asks first. `discard` is the owner's choice to leave
@@ -135,10 +144,12 @@ export function leaveIsland(saver: IslandSaver, release: () => void, discard = f
     letGo();
     return;
   }
+  // Held from the start: the save leaving sends may still be on its way when the same island opens again, and
+  // `heldSavesSettled` waits for that one too (closing the page meanwhile asks first).
+  holding.set(saver, key);
+  askBeforeClosing();
   void saver.flush().then(() => {
     if (saver.disposed || finished(saver.getState())) return letGo();
-    holding.set(saver, key);
-    askBeforeClosing();
     stopWatching = saver.subscribe(() => {
       if (saver.disposed || finished(saver.getState())) letGo();
     });

@@ -16,11 +16,27 @@ _BALANCE_LOCK = Lock()
 # consumed_credits observed for one textured multi-image part and for one rig task.
 PART_CREDITS = 30
 RIG_CREDITS = 5
+# Meshy's price list: a part textured at 8K costs 35, and each animation 3.
+PART_8K_CREDITS = 35
+ANIMATION_CREDITS = 3
 
 
-def require_credits(parts, *, rig=False):
-    """Refuse new Meshy work the account cannot cover, before any image for it is paid for."""
-    need = parts*PART_CREDITS + (RIG_CREDITS if rig else 0)
+def required_credits(parts, *, rig=False, actions=None):
+    """Credits new Meshy work costs. `parts`: the Meshy options of each new part (None for the defaults), priced by
+    their texture resolution; `actions`: the motion actions {slot: action_id} the rig is to receive, one animation for
+    each action id except the default walk and run, which the rig delivers itself."""
+    from src.services.character_motion import DEFAULT_ACTIONS
+    animations = {action_id for slot, action_id in (actions or {}).items()
+                  if not (slot in ('walk', 'run') and action_id == DEFAULT_ACTIONS[slot])}
+    return (sum(PART_8K_CREDITS if (options or {}).get('texture_resolution') == '8k' else PART_CREDITS
+                for options in parts)
+            + (RIG_CREDITS if rig else 0) + len(animations)*ANIMATION_CREDITS)
+
+
+def require_credits(parts, *, rig=False, actions=None):
+    """Refuse new Meshy work the account cannot cover, before any image for it is paid for; the arguments are
+    required_credits'."""
+    need = required_credits(parts, rig=rig, actions=actions)
     if need <= 0:
         return
     balance = meshy_balance(refresh=True)

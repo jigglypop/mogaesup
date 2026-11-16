@@ -16,7 +16,7 @@ from src.services.avatar_fit_profiles import normalize_fit_profile, reject_gener
 from src.services.avatar_image_prompts import DEFAULT_DESIGN_PROMPTS
 from src.services.avatar_reference_preparation import initial_state as initial_reference_state, uses_legacy_side_pose
 from src.services.avatar_openai_images import DEFAULT_BASE
-from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec
+from src.services.avatar_equipment import NATIVE_EQUIPMENT as EQUIPMENT, equipment_spec, head_bounds
 from src.services.character_parts import blender_executable, blender_process, stop_process
 from src.services.character_pipeline import PipelineError, now, read_json, request_job_id, require_bucket, require_request_key
 from src.services.keyed_lock import keyed_lock
@@ -98,15 +98,28 @@ class AvatarVariants:
 
     def _warm_body(self, owner, payload):
         """Parse the base body before the admission checks, so they read the result from memory. What is wrong with the
-        base is reported by those checks; a failure here is not."""
+        base is reported by those checks; a failure here is not. Only the body of a sealed assembly that is still the
+        file it sealed is read: a version the checks refuse (one not sealed, a GLB registered as it was) is never
+        parsed."""
         try:
-            body_file = self.factory.directory(owner, payload['base_job_id'])/'native-parts'/payload['base_version']/'body.glb'
-            body_facts(body_file, digest(body_file))
+            version = self.factory.directory(owner, payload['base_job_id'])/'native-parts'/payload['base_version']
+            record = read_json(version/'record.json')
+            sealed = record.get('files', {}).get('body.glb')
+            if (record.get('status') != 'review_required' or record.get('result', {}).get('origin') == 'uploaded_glb'
+                    or not sealed or digest(version/'body.glb') != sealed):
+                return
+            body_facts(version/'body.glb', sealed)
         except Exception:
             pass
 
     def create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
         require_request_key(key)
+        # One request per key at a time: another with the same key waits, then replays the accepted job or is refused
+        # before it writes anything where that job keeps its files.
+        with keyed_lock(('variant', request_job_id(owner, 'image' if photo_input is not None else 'variant', key))):
+            return self._create(owner, key, payload, photo_input=photo_input, frozen_context=frozen_context)
+
+    def _create(self, owner, key, payload, *, photo_input=None, frozen_context=None):
         require_bucket()
         slots = payload['slots']
         if not slots or len(set(slots)) != len(slots) or not set(slots) <= set(VARIANT_SLOTS):
@@ -135,12 +148,16 @@ class AvatarVariants:
                 uploaded_views=bool(payload.get('uploaded_views')), uploaded_model=bool(payload.get('uploaded_model')),
                 worn_redraw=bool((payload.get('redraw') or {}).get('worn')))
             if resolve_provider(source_input.get('model_provider')) == 'meshy':
-                require_credits(0 if payload.get('uploaded_model') else sum(needs_provider(m) for m in estimate.values()))
+                # Each part the provider makes, at the texture resolution it asks for.
+                require_credits([] if payload.get('uploaded_model') else
+                                [source_input.get('meshy_options') for m in estimate.values() if needs_provider(m)])
         if not read_json(target/'job.json'):
             self._warm_body(owner, payload)
-        # Every read, hash and copy of stored files is made without the process lock: one admission at a time per
-        # request key (keyed_lock), and the process lock only for the final check-and-write of the job. A request with this
-        # key accepted meanwhile is found there, and nothing of a job is visible before its job.json.
+        # Every read and hash of stored files, and the copies (one request each in S3) with the receipts written beside
+        # them once every check has passed, are made without the process lock, one admission of this job at a time (the
+        # request key's lock create holds, and this one); the process lock is taken only for the final check-and-write
+        # of the job. A request with this key accepted meanwhile (by another process) is found there, and nothing of a
+        # job is visible before its job.json.
         staged = []
         with keyed_lock(('variant-admission', str(target))):
             prior = read_json(target/'job.json')
@@ -153,9 +170,12 @@ class AvatarVariants:
             prompt_snapshot = (deepcopy(frozen_context['prompt_snapshot']) if frozen_context
                                else StudioPrompts(self.factory, owner).snapshot())
             from src.services.meshy_options import freeze_options
+            # A texture reference the slots share is read and checked once for all of them.
+            checked = {}
             meshy_options = (deepcopy(frozen_context['meshy_options']) if frozen_context else
                              {slot: freeze_options(self.factory, owner, (photo_input or payload).get('meshy_options'),
-                                                   slot, prompt_snapshot['meshy_texture'], shared=photo_input is not None)
+                                                   slot, prompt_snapshot['meshy_texture'], shared=photo_input is not None,
+                                                   checked=checked)
                               for slot in slots})
             uploaded_views = payload.get('uploaded_views')
             uploaded_model = payload.get('uploaded_model')
@@ -287,9 +307,10 @@ class AvatarVariants:
                     # The frozen body GLB already carries the saved face/body state.
                     # Do not enqueue the five paid default-expression requests again.
                     state['default_expressions'] = None
-                    from src.services.avatar_expression_reuse import snapshot_saved_expressions
-                    state['expression_reuse'] = snapshot_saved_expressions(
+                    from src.services.avatar_expression_reuse import saved_expression_snapshot
+                    state['expression_reuse'], faces = saved_expression_snapshot(
                         self.factory, owner, base_id, native['version'], target)
+                    staged.extend((copy_file, face, frozen) for face, frozen in faces)
                 elif state.get('default_expressions'):
                     from src.services.avatar_expression_pipeline import default_contract
                     state['default_expressions'] = default_contract(prompt_snapshot['expression'])
@@ -373,6 +394,12 @@ class AvatarVariants:
                 if photo_input is None:
                     state['production_spec']['design_from_body_template'] = True
             state['production_spec']['fitting']['bounds'].update(deepcopy(native['fitting_targets']))
+            if inherited_spec.get('measured_head_bounds_m'):
+                # The base's body reference measured this same body's head. A part whose images are not drawn again
+                # never measures it, and its glasses socket is placed on it.
+                state['production_spec']['measured_head_bounds_m'] = deepcopy(inherited_spec['measured_head_bounds_m'])
+            if head_bounds(state['production_spec']) is None:
+                raise PipelineError('head_unmeasured', '기본 몸의 머리 측정값을 확인할 수 없습니다. 피팅·조립을 다시 실행하세요.', 409)
             equipment_spec(state['production_spec'])
             state['production_spec'] = seal_production_spec(state['production_spec'])
             historical_hair = ('head', 'hairBack', 'hairFront')
@@ -439,9 +466,9 @@ class AvatarVariants:
                         model_path = target/'parts'/slot/'generated.glb'
                         model_path.parent.mkdir(parents=True, exist_ok=True)
                         staged.append((copy_file, Path(uploaded_model['path']), model_path))
-                        _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
+                        staged.append((_write_json, model_path.parent/'generation-artifacts.json', {'generated': {
                             'path': str(model_path), 'sha256': uploaded_model['sha256'],
-                            'origin': 'uploaded_glb', 'asset_id': uploaded_model['asset_id']}})
+                            'origin': 'uploaded_glb', 'asset_id': uploaded_model['asset_id']}}))
                     elif uploaded_views:
                         from src.services.avatar_blueprints import AvatarBlueprints
                         assets = AvatarBlueprints(self.factory.data)
@@ -469,9 +496,9 @@ class AvatarVariants:
                     model_path = target/'parts'/'body'/'generated.glb'
                     model_path.parent.mkdir(parents=True, exist_ok=True)
                     staged.append((copy_file, body_file, model_path))
-                    _write_json(model_path.parent/'generation-artifacts.json', {'generated': {
+                    staged.append((_write_json, model_path.parent/'generation-artifacts.json', {'generated': {
                         'path': str(model_path), 'sha256': body_hash,
-                        'reused_from': {'job_id': base_id, 'version': native['version'], 'slot': 'body'}}})
+                        'reused_from': {'job_id': base_id, 'version': native['version'], 'slot': 'body'}}}))
                     continue
                 for view in (part.get('views') or {}).values():
                     name = view['file']

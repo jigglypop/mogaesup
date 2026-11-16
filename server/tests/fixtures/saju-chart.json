@@ -1,0 +1,715 @@
+{
+ "birth": {
+  "calendar": "solar",
+  "year": 1989,
+  "month": 2,
+  "day": 23,
+  "leapMonth": false,
+  "time": "22:10",
+  "gender": "female"
+ },
+ "saju": {
+  "pillars": [
+   {
+    "key": "year",
+    "stem": "己",
+    "branch": "巳",
+    "tenGodStem": "정재",
+    "tenGodBranch": "식신",
+    "hidden": "병경무",
+    "stage": "병",
+    "nayin": "대림목"
+   },
+   {
+    "key": "month",
+    "stem": "丙",
+    "branch": "寅",
+    "tenGodStem": "식신",
+    "tenGodBranch": "비견",
+    "hidden": "갑병무",
+    "stage": "건록",
+    "nayin": "노중화"
+   },
+   {
+    "key": "day",
+    "stem": "甲",
+    "branch": "寅",
+    "tenGodStem": "일간",
+    "tenGodBranch": "비견",
+    "hidden": "갑병무",
+    "stage": "건록",
+    "nayin": "대계수"
+   },
+   {
+    "key": "hour",
+    "stem": "乙",
+    "branch": "亥",
+    "tenGodStem": "겁재",
+    "tenGodBranch": "편인",
+    "hidden": "임갑",
+    "stage": "장생",
+    "nayin": "산두화"
+   }
+  ],
+  "elements": {
+   "wood": 4,
+   "fire": 2,
+   "earth": 1,
+   "metal": 0,
+   "water": 1
+  },
+  "dayMaster": "甲",
+  "sinsal": [
+   "문창귀인",
+   "문곡귀인",
+   "건록",
+   "천주귀인",
+   "학당귀인",
+   "월덕귀인",
+   "현침살",
+   "망신살",
+   "겁살",
+   "지살",
+   "역마살"
+  ],
+  "daeun": [
+   {
+    "ganzhi": "정묘",
+    "from": 4,
+    "to": 13,
+    "current": false
+   },
+   {
+    "ganzhi": "무진",
+    "from": 14,
+    "to": 23,
+    "current": false
+   },
+   {
+    "ganzhi": "기사",
+    "from": 24,
+    "to": 33,
+    "current": false
+   },
+   {
+    "ganzhi": "경오",
+    "from": 34,
+    "to": 43,
+    "current": true
+   },
+   {
+    "ganzhi": "신미",
+    "from": 44,
+    "to": 53,
+    "current": false
+   },
+   {
+    "ganzhi": "임신",
+    "from": 54,
+    "to": 63,
+    "current": false
+   },
+   {
+    "ganzhi": "계유",
+    "from": 64,
+    "to": 73,
+    "current": false
+   },
+   {
+    "ganzhi": "갑술",
+    "from": 74,
+    "to": 83,
+    "current": false
+   },
+   {
+    "ganzhi": "을해",
+    "from": 84,
+    "to": 93,
+    "current": false
+   },
+   {
+    "ganzhi": "병자",
+    "from": 94,
+    "to": 103,
+    "current": false
+   },
+   {
+    "ganzhi": "정축",
+    "from": 104,
+    "to": 113,
+    "current": false
+   },
+   {
+    "ganzhi": "무인",
+    "from": 114,
+    "to": 123,
+    "current": false
+   },
+   {
+    "ganzhi": "기묘",
+    "from": 124,
+    "to": 133,
+    "current": false
+   }
+  ]
+ },
+ "ziwei": {
+  "bureau": "화육국",
+  "soulStar": "문곡",
+  "bodyStar": "천기",
+  "palaces": [
+   {
+    "name": "명궁",
+    "ganzhi": "정묘",
+    "stars": [
+     {
+      "name": "천기",
+      "kind": "major",
+      "brightness": "왕",
+      "sahwa": null
+     },
+     {
+      "name": "거문",
+      "kind": "major",
+      "brightness": "묘",
+      "sahwa": null
+     },
+     {
+      "name": "문곡",
+      "kind": "helper",
+      "brightness": "왕",
+      "sahwa": "기"
+     },
+     {
+      "name": "은광",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     6,
+     15
+    ],
+    "soul": true,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "부모",
+    "ganzhi": "무진",
+    "stars": [
+     {
+      "name": "자미",
+      "kind": "major",
+      "brightness": "득",
+      "sahwa": null
+     },
+     {
+      "name": "천상",
+      "kind": "major",
+      "brightness": "득",
+      "sahwa": null
+     },
+     {
+      "name": "좌보",
+      "kind": "helper",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천희",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "과숙",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     16,
+     25
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "복덕",
+    "ganzhi": "기사",
+    "stars": [
+     {
+      "name": "천량",
+      "kind": "major",
+      "brightness": "함",
+      "sahwa": "과"
+     },
+     {
+      "name": "타라",
+      "kind": "tough",
+      "brightness": "함",
+      "sahwa": null
+     },
+     {
+      "name": "팔좌",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "봉각",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "태보",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천무",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "해신(년)",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     26,
+     35
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "전택",
+    "ganzhi": "경오",
+    "stars": [
+     {
+      "name": "칠살",
+      "kind": "major",
+      "brightness": "왕",
+      "sahwa": null
+     },
+     {
+      "name": "록존",
+      "kind": "special",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "함지",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천수",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천공",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     36,
+     45
+    ],
+    "soul": false,
+    "body": false,
+    "current": true
+   },
+   {
+    "name": "관록",
+    "ganzhi": "신미",
+    "stars": [
+     {
+      "name": "경양",
+      "kind": "tough",
+      "brightness": "묘",
+      "sahwa": null
+     },
+     {
+      "name": "천귀",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "비렴",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     46,
+     55
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "노복",
+    "ganzhi": "임신",
+    "stars": [
+     {
+      "name": "염정",
+      "kind": "major",
+      "brightness": "묘",
+      "sahwa": null
+     },
+     {
+      "name": "천월",
+      "kind": "helper",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "해신",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천재",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천주",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "절로",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "고진",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천상",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     56,
+     65
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "천이",
+    "ganzhi": "계유",
+    "stars": [
+     {
+      "name": "령성",
+      "kind": "tough",
+      "brightness": "득",
+      "sahwa": null
+     },
+     {
+      "name": "삼태",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "용지",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천관",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "공망",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "파쇄",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천형",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     66,
+     75
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "질액",
+    "ganzhi": "갑술",
+    "stars": [
+     {
+      "name": "파군",
+      "kind": "major",
+      "brightness": "왕",
+      "sahwa": null
+     },
+     {
+      "name": "우필",
+      "kind": "helper",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "지겁",
+      "kind": "tough",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "홍란",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천월",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "월덕",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천사",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     76,
+     85
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "재백",
+    "ganzhi": "을해",
+    "stars": [
+     {
+      "name": "천동",
+      "kind": "major",
+      "brightness": "묘",
+      "sahwa": null
+     },
+     {
+      "name": "문창",
+      "kind": "helper",
+      "brightness": "리",
+      "sahwa": null
+     },
+     {
+      "name": "천마",
+      "kind": "special",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "순공",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천허",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     86,
+     95
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "자녀",
+    "ganzhi": "병자",
+    "stars": [
+     {
+      "name": "무곡",
+      "kind": "major",
+      "brightness": "왕",
+      "sahwa": "록"
+     },
+     {
+      "name": "천부",
+      "kind": "major",
+      "brightness": "묘",
+      "sahwa": null
+     },
+     {
+      "name": "천괴",
+      "kind": "helper",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "지공",
+      "kind": "tough",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     96,
+     105
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   },
+   {
+    "name": "부처",
+    "ganzhi": "정축",
+    "stars": [
+     {
+      "name": "태양",
+      "kind": "major",
+      "brightness": "불",
+      "sahwa": null
+     },
+     {
+      "name": "태음",
+      "kind": "major",
+      "brightness": "묘",
+      "sahwa": null
+     },
+     {
+      "name": "천요",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "봉고",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "화개",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "천곡",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     106,
+     115
+    ],
+    "soul": false,
+    "body": true,
+    "current": false
+   },
+   {
+    "name": "형제",
+    "ganzhi": "병인",
+    "stars": [
+     {
+      "name": "탐랑",
+      "kind": "major",
+      "brightness": "평",
+      "sahwa": "권"
+     },
+     {
+      "name": "화성",
+      "kind": "tough",
+      "brightness": "묘",
+      "sahwa": null
+     },
+     {
+      "name": "천복",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "복덕",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     },
+     {
+      "name": "음살",
+      "kind": "minor",
+      "brightness": "",
+      "sahwa": null
+     }
+    ],
+    "decade": [
+     116,
+     125
+    ],
+    "soul": false,
+    "body": false,
+    "current": false
+   }
+  ]
+ }
+}

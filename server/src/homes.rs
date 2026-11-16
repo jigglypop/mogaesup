@@ -31,7 +31,7 @@ use crate::{
     models::model_refs,
     permissions::like_escape,
     rebac::{Checker, Object, Subject},
-    security::{KeyedSlot, KeyedSlots, client_address, hmac_sha256, rate_limit, rate_running},
+    security::{KeyedSlot, KeyedSlots, client_address, hmac_sha256, plain_text, rate_limit, rate_running},
     share,
 };
 
@@ -48,10 +48,11 @@ const READING_PER_ADDRESS: usize = 4;
 /// Island saves checked and stored at once, site-wide, once their bodies are in.
 const SAVE_SLOTS: usize = 4;
 /// How long a save or a picture may take on the server, from its start to its answer, its waits and its body
-/// included: the site's front (CloudFront) waits 30 s for an answer, and a save it gave up on would hold its places for
-/// nothing. A save waits a sixth of it for its places (then `world_busy`; the page saves again later), has its body in
-/// by three quarters of it (then `incomplete_world`, sent again as it is), and waits for a slot until an eighth is
-/// left for checking and storing (then `world_busy`). A picture has its body in by five eighths of it.
+/// included: under the API's deadline (`REQUEST_DEADLINE`), after which the save is answered with a bare `timeout`, and
+/// well under the minute the site's front (CloudFront) waits; a save given up on would hold its places for nothing. A
+/// save waits a sixth of it for its places (then `world_busy`; the page saves again later), has its body in by three
+/// quarters of it (then `incomplete_world`, sent again as it is), and waits for a slot until an eighth is left for
+/// checking and storing (then `world_busy`). A picture has its body in by five eighths of it.
 const SAVE_BUDGET: Duration = Duration::from_secs(24);
 /// Island text kept by all members together. Past it a save that would make its world larger is refused, so accounts
 /// made in bulk cannot fill the database's disk; saves that keep a world's size or shrink it still pass.
@@ -324,11 +325,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/homes/{username}/world", get(world))
 }
 
-/// Whether `text` holds no control character; `multiline` lets line breaks through where the field is a text area.
-pub(crate) fn plain_text(text: &str, multiline: bool) -> bool {
-    text.chars().all(|c| !c.is_control() || (multiline && c == '\n'))
-}
-
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HomeProfile {
@@ -572,7 +568,7 @@ struct ProfileChanges {
 }
 
 /// Refuses a save that a page loaded for another account sends.
-fn same_owner(expected: Option<Uuid>, owner: Uuid) -> ApiResult<()> {
+pub(crate) fn same_owner(expected: Option<Uuid>, owner: Uuid) -> ApiResult<()> {
     if expected == Some(owner) { Ok(()) } else { Err(OWNER_CHANGED) }
 }
 
@@ -1513,8 +1509,27 @@ async fn store(state: &AppState, owner: Uuid, save: &Checked) -> ApiResult<Optio
     Ok(row)
 }
 
-/// A request's body, up to `max` bytes, all of it within `deadline`. Only a body past that size is `too_large`; one
-/// that stops coming (the connection dropped) or does not come in time is `cut_short`.
+/// A request's body, up to `max` bytes. Only a body past that is `too_large`; one that stops coming (the connection
+/// dropped) is `cut_short`.
+pub(crate) async fn limited_body(
+    body: Body,
+    max: usize,
+    too_large: ApiError,
+    cut_short: ApiError,
+) -> ApiResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else { return Err(cut_short) };
+        if chunk.len() > max.saturating_sub(bytes.len()) {
+            return Err(too_large);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// [`limited_body`], all of it within `deadline`: a body that does not come in time is `cut_short` as well.
 async fn read_within(
     deadline: Duration,
     body: Body,
@@ -1522,19 +1537,7 @@ async fn read_within(
     too_large: ApiError,
     cut_short: ApiError,
 ) -> ApiResult<Vec<u8>> {
-    let read = async {
-        let mut bytes = Vec::new();
-        let mut stream = body.into_data_stream();
-        while let Some(chunk) = stream.next().await {
-            let Ok(chunk) = chunk else { return Err(cut_short) };
-            if chunk.len() > max.saturating_sub(bytes.len()) {
-                return Err(too_large);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(bytes)
-    };
-    tokio::time::timeout(deadline, read).await.unwrap_or(Err(cut_short))
+    tokio::time::timeout(deadline, limited_body(body, max, too_large, cut_short)).await.unwrap_or(Err(cut_short))
 }
 
 /// Whether a save's body comes gzipped (`Content-Encoding: gzip`): a slow link sends a large island in a fraction of
@@ -1724,8 +1727,8 @@ mod tests {
 
     #[test]
     fn a_save_is_answered_before_the_sites_front_gives_up_and_each_wait_takes_its_share() {
-        // CloudFront waits 30 s for an answer: everything a save waits for ends a few seconds before that, and before
-        // the server's own deadline for an answer would cut it off with a bare `timeout`.
+        // Everything a save waits for ends before the server's own deadline for an answer would cut it off with a bare
+        // `timeout`, and well before CloudFront (a minute) gives up on it.
         assert!(SAVE_BUDGET <= Duration::from_secs(25) && SAVE_BUDGET < crate::REQUEST_DEADLINE);
         let homes = Homes::default();
         let started = Instant::now();
@@ -1801,5 +1804,9 @@ mod tests {
             assert!(!plain_text(&format!("a{control}b"), true), "{control:?}");
         }
         assert!(plain_text("👩‍🏫 이모지", false));
+        // Nor a title or status that hides itself or reads turned around.
+        for hidden in ["\u{200b}", "\u{202e}섬 제목", "상태\u{2066}"] {
+            assert!(!plain_text(hidden, true), "{hidden:?}");
+        }
     }
 }

@@ -240,6 +240,29 @@ def test_a_job_whose_first_publish_failed_keeps_its_rig_budget(setup, monkeypatc
     assert saved['profile']['rig'] == 'meshy-native' and saved['profile']['height'] == 1.2
 
 
+def test_one_texture_setting_for_the_whole_part_set_reads_each_reference_once(setup, monkeypatch):
+    from src.services.meshy_options import freeze_options
+    from src.services.object_storage import StoredPath
+    from src.services.studio_prompts import StudioPrompts
+    service, factory, payload, _, _, _ = setup
+    textures = [service.blueprints.upload(1, png(color))['id'] for color in ('navy', 'orange')]
+    options = {'texture_mode': 'images', 'texture_image_assets': textures}
+    reads, read = [], StoredPath.read_bytes
+    monkeypatch.setattr(StoredPath, 'read_bytes', lambda self: (reads.append(self.stem), read(self))[1])
+    job, _ = service.create(1, 'character-parts-shared-textures', {
+        **payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS,
+        'view_mode': 'front_side_back', 'meshy_options': options})
+    # Six slots, one setting: each reference is read, hashed and decoded once for the set, not twice per slot.
+    assert sorted(name for name in reads if name in textures) == sorted(textures)
+    parts = read_json(factory.directory(1, job['id'])/'pipeline.json')['parts']
+    assert [part['slot'] for part in parts] == module.CHARACTER_PART_SLOTS
+    prompts = StudioPrompts(factory, 1).snapshot()['meshy_texture']
+    for part in parts:
+        assert part['meshy_options'] == freeze_options(factory, 1, options, part['slot'], prompts, shared=True)
+        assert part['meshy_options']['texture_images'] == [{'asset': asset, 'sha256': asset, 'mime': 'image/png'}
+                                                           for asset in textures]
+
+
 def test_a_run_whose_pause_was_not_saved_reads_as_stopped_and_can_be_resumed(setup, monkeypatch):
     from src.services import avatar_variants, run_lock
     service, factory, payload, _, _, _ = setup
@@ -386,6 +409,36 @@ def test_a_single_image_that_resume_takes_is_offered_for_resume(setup, monkeypat
         receipt = factory.directory(1, job['id'])/'output'/'hair-provider'
         assert receipt.with_suffix('.response.json').is_file() and not receipt.with_suffix('.response.partial').exists()
     service.resume(1, job['id'])
+
+
+def test_a_single_image_whose_kept_answer_holds_no_image_is_not_offered_for_resume(setup, monkeypatch):
+    from src.services.avatar_stage_resume import AvatarStageResume
+    service, factory, payload, _, _, _ = setup
+
+    def image(source, prompt, model, base, **kwargs):
+        receipt = kwargs['receipt']
+        if 'voluminous hairstyle' not in prompt:
+            return png()
+        # The paid answer is kept, but it holds no image: read again, it fails the same way.
+        receipt.with_suffix('.request.json').write_text(json.dumps(
+            {'phase': 'response_saved', 'http_status': 200, 'request_started': True}))
+        receipt.with_suffix('.response.json').write_text(json.dumps({'data': []}))
+        raise PipelineError('image_missing', 'no image', 422)
+    monkeypatch.setattr(module, 'generate_openai_part_image', image)
+    job, _ = service.create(1, 'character-parts-answer-invalid',
+                            {**payload, 'production_mode': 'character_parts', 'slots': module.CHARACTER_PART_SLOTS})
+    service.execute(1, job['id'], poll_seconds=0)
+    public = factory.get(1, job['id'])
+    hair = next(part for part in public['parts'] if part['slot'] == 'hair')
+    assert hair['image_status'] == 'answer_invalid'
+    assert next(step for step in public['production_progress']['steps'] if step['id'] == 'images')['state'] == 'blocked'
+    # resume() would skip it and stop at the same incomplete images, so neither the job nor its images stage offers it.
+    assert not next(action for action in public['next_actions'] if action['id'] == 'resume')['enabled']
+    images = next(action for action in AvatarStageResume(factory).get(1, job['id'])['actions'] if action['stage'] == 'images')
+    assert not images['enabled'] and images['reason'] == '기존 이미지 응답 확인 또는 실패 이미지 재요청이 필요합니다.'
+    with pytest.raises(PipelineError) as refused:
+        service.resume(1, job['id'])
+    assert refused.value.code == 'image_attempt_recorded'
 
 
 # --- the process lock is taken only for the records that accept or queue a job -----------------------------------------

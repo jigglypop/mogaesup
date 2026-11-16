@@ -7,6 +7,8 @@ import { CharacterFactory } from '../factory/CharacterFactory';
 import { factoryApi } from '../factory/api';
 import { api } from '../api';
 import { GlbUpload } from '../studio/GlbUpload';
+import { glbAssetsApi } from '../studio/glb-assets-api';
+import { glbBodiesApi, glbUploadTimeout } from '../studio/glb-bodies-api';
 
 vi.mock('../use-live-characters', () => ({ useLiveCharacters: () => ({ characters: [], failure: '', loading: false, refresh: async () => {} }) }));
 // The panels beside the photo input are not what is tested.
@@ -136,5 +138,57 @@ describe('파일을 고르는 곳', () => {
       expect(container.querySelector('[aria-label="사진 자르기"]')).toBeNull();
       await unmount();
     });
+  });
+});
+
+describe('GLB 업로드 시간', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('파일 크기에 맞춰 2 Mbps로 보낼 시간에 1분을 더해 기다리되, 2분보다 짧게 잡지 않고 앱 서버가 업로드까지 포함해 기다리는 10분에 30초를 더한 것보다 길게 잡지 않는다', () => {
+    expect(glbUploadTimeout(1)).toBe(120_000);
+    expect(glbUploadTimeout(64 * 1048576)).toBe(328_436);
+    expect(glbUploadTimeout(128 * 1048576)).toBe(596_871);
+    expect(glbUploadTimeout(256 * 1048576)).toBe(630_000);
+    expect(glbUploadTimeout(1024 * 1048576)).toBe(630_000);
+  });
+
+  it.each([
+    ['기본 몸', (file: File) => glbBodiesApi.upload(file)],
+    ['GLB 에셋', (file: File) => glbAssetsApi.upload(file)],
+  ])('%s 200MB GLB는 2분에 끊지 않고, 제한 시간이 지나면 업로드 시간 초과로 알린다', async (_screen, upload) => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    // The body is still going up: no answer until the request is cut.
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_done, fail) => {
+      signals.push(init.signal!);
+      init.signal!.addEventListener('abort', () => fail(new DOMException('aborted', 'AbortError')));
+    })));
+    const file = new File([new Uint8Array([1])], 'body.glb');
+    Object.defineProperty(file, 'size', { value: 200 * 1048576 });
+    const failure = upload(file).then(() => null, (error: Error) => error);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(signals[0]?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(glbUploadTimeout(file.size) - 120_000);
+    expect(signals[0]?.aborted).toBe(true);
+    expect((await failure)?.message).toBe('GLB 업로드가 제한 시간 안에 끝나지 않았습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.');
+  });
+
+  it.each([
+    ['기본 몸', (file: File) => glbBodiesApi.upload(file)],
+    ['GLB 에셋', (file: File) => glbAssetsApi.upload(file)],
+  ])('%s 업로드를 앱 서버가 10분에 끊은 factory_timeout도 업로드 시간 초과로 알리고, 다른 거절은 그대로 둔다', async (_screen, upload) => {
+    const answer = (status: number, code: string, message: string) =>
+      new Response(JSON.stringify({ code, message }), { status, headers: { 'content-type': 'application/json' } });
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(answer(504, 'factory_timeout', '캐릭터 서버가 제때 답하지 않았습니다.'))
+      .mockResolvedValueOnce(answer(502, 'factory_unavailable', '캐릭터 서버에 연결하지 못했습니다.')));
+    const file = new File([new Uint8Array([1])], 'body.glb');
+    await expect(upload(file)).rejects.toMatchObject({
+      code: 'factory_timeout', status: 504, message: 'GLB 업로드가 제한 시간 안에 끝나지 않았습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.',
+    });
+    await expect(upload(file)).rejects.toThrow('캐릭터 서버에 연결하지 못했습니다.');
   });
 });

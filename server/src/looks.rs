@@ -189,9 +189,10 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
 
-/// A wardrobe body's parts as a member may wear them, from the operator's listing (read without a member-scoped
-/// token): without a part put in the bin or one the wardrobe does not offer. The operator's `parts` are already only
-/// those; this holds even for a character server that lists the others there, marked.
+/// A wardrobe body's parts as a member may wear them, even from a listing the character server answered as its
+/// operator's (one that does not read the member mark): without a part put in the bin or one the wardrobe does not
+/// offer. The operator's `parts` are already only those; this holds even for a character server that lists the others
+/// there, marked.
 pub fn wearable(mut listing: Value) -> Value {
     if let Some(parts) = listing["parts"].as_array_mut() {
         parts.retain(|part| {
@@ -319,9 +320,8 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
         Ok::<_, ApiError>((bodies.unwrap_or_default(), listing))
     };
     let (bodies, listing) = tokio::time::timeout(WARDROBE_CHECK, wardrobe).await.unwrap_or(Err(factory::TIMED_OUT))?;
-    let listing = listing.ok_or(BODY_CHANGED)?;
-    let scoped = state.config.factory.as_ref().is_some_and(factory::member_scoped);
-    let listing = if scoped { listing } else { wearable(listing) };
+    // A studio that answers with the operator's listing all the same still marks what members may not wear.
+    let listing = wearable(listing.ok_or(BODY_CHANGED)?);
     let body_sha = listed(&bodies, &listing, &look)?;
     // Recorded and started on a task of its own: a request dropped between the two (its connection closing) would leave
     // the look `baking` with nothing baking it, holding the member's next save until it goes stale.

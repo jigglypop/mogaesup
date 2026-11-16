@@ -564,3 +564,65 @@ def test_a_rig_whose_body_changed_after_it_was_hashed_is_refused(setup, monkeypa
     with pytest.raises(PipelineError) as error:
         service.start(1, jid)
     assert error.value.code == 'artifact_changed' and not (directory/'meshy/input.json').exists()
+
+
+def test_waiting_for_a_clip_neither_builds_the_package_again_nor_rewrites_its_records(setup, monkeypatch):
+    service, jid, directory, calls, transport = setup
+    pipeline = read_json(directory/'pipeline.json')
+    pipeline['motion_actions'] = {'jump': 101}
+    _write_json(directory/'pipeline.json', pipeline)
+    job = read_json(directory/'job.json')
+    job['limits'] = {'meshy_rig_tasks': 1, 'meshy_animation_tasks': 1}
+    _write_json(directory/'job.json', job)
+    making = iter(range(4))  # Meshy is still making the clip for four polls.
+
+    def slow_clip(request):
+        if (request.method == 'GET' and '/animations/' in request.url.path and not request.url.path.endswith('/library')
+                and next(making, None) is not None):
+            return httpx.Response(200, json={'status': 'IN_PROGRESS', 'progress': 50})
+        return transport(request)
+    use_handler(monkeypatch, slow_clip)
+    publish, write = module.AvatarMeshy._publish, module._write_json
+    published, written = [], []
+    monkeypatch.setattr(module.AvatarMeshy, '_publish', lambda self, run: (published.append(run), publish(self, run))[1])
+    monkeypatch.setattr(module, '_write_json', lambda path, value: (written.append(path.name), write(path, value))[1])
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert next(making, None) is None
+    # Published with the rig's own clips while the clip was made, and once more when it arrived.
+    assert len(published) == 2 and written.count('delivery.json') == written.count('receipt.json') == 2
+    assert written.count('selected.json') == 1
+    assert next(clip for clip in service.get(1, jid)['clips'] if clip['slot'] == 'jump')['action_id'] == 101
+
+
+def test_a_part_set_the_credits_cannot_cover_is_refused_before_any_image_is_paid_for(tmp_path, monkeypatch):
+    from src.services import meshy_status
+    from src.services.avatar_image_pipeline import AvatarImagePipeline
+    from src.services.character_motion import DEFAULT_ACTIONS
+    # Six parts textured at 8K, the rig, and the three default motions the rig does not deliver itself: 6*35 + 5 + 3*3.
+    assert meshy_status.required_credits([{'texture_resolution': '8k'}]*6, rig=True, actions=DEFAULT_ACTIONS) == 224
+    # Another walk or run is an animation as well, and an action asked for twice is requested once.
+    assert meshy_status.required_credits([None], actions={'walk': 77, 'run': 77, 'idle': 0}) == 30 + 2*3
+    monkeypatch.setattr(meshy_status, 'meshy_balance', lambda refresh=False: 200)
+    with pytest.raises(PipelineError) as error:
+        AvatarImagePipeline(AvatarFactory(tmp_path)).create(1, 'image-key-0001', {
+            'production_mode': 'character_parts', 'view_mode': 'front_side_back', 'image_mode': 'generate',
+            'character_id': 'c'*24, 'source_sha256': '0'*64, 'blueprint_revision': '1',
+            'meshy_options': {'texture_resolution': '8k'}})
+    assert error.value.code == 'insufficient_credits' and '필요 약 224' in error.value.message
+    assert not list(tmp_path.rglob('job.json'))
+
+
+def test_an_explicit_stage_run_counts_its_8k_parts_and_the_motions_of_the_rig_it_starts(tmp_path, monkeypatch):
+    from src.services import meshy_status
+    from src.services.avatar_stage_resume import AvatarStageResume
+    # Enough for the two parts and the rig at the default price (65), not for what the run costs.
+    monkeypatch.setattr(meshy_status, 'meshy_balance', lambda refresh=False: 70)
+    directory = tmp_path/'job'
+    directory.mkdir()
+    _write_json(directory/'pipeline.json', {'motion_actions': {'idle': 0, 'walk': 1, 'run': 14, 'jump': 466, 'fall': 502},
+                                            'parts': [{'slot': 'top', 'meshy_options': {'options': {'texture_resolution': '8k'}}},
+                                                      {'slot': 'shoes'}]})
+    with pytest.raises(PipelineError) as error:
+        AvatarStageResume._require_credits(directory, 'models')
+    # One part at 8K and one at the default, the rig no run has delivered yet, and the three motions it then receives.
+    assert error.value.code == 'insufficient_credits' and '필요 약 79' in error.value.message

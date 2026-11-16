@@ -99,38 +99,6 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
 .mg-profile-text p { color: var(--mg-muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mg-profile-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 
-.mg-list-count { margin: 16px 2px 8px; font-size: 12px; font-weight: 800; color: var(--mg-muted); }
-.mg-list-count b { color: var(--mg-ink); }
-
-.mg-compose { display: grid; gap: 8px; padding: 14px; }
-/* The card is the field: it shows the focus its borderless text area cannot. */
-.mg-compose:focus-within { border-color: var(--mg-primary); box-shadow: 0 0 0 3px var(--mg-primary-soft); }
-.mg-compose-label { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
-.mg-compose textarea { width: 100%; min-height: 48px; padding: 0; border: 0; outline: none; background: transparent; resize: none; line-height: 1.5; }
-.mg-compose-foot { display: flex; align-items: center; justify-content: space-between; }
-
-.mg-entries { list-style: none; margin: 0; padding: 0; display: grid; }
-.mg-entries li { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 12px 4px; border-top: 1px solid var(--mg-hair); }
-.mg-entries li:first-child { border-top: 0; }
-.mg-entries .mg-avatar { text-decoration: none; }
-.mg-entry-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.mg-entry-meta b { font-size: 14px; }
-.mg-entry-meta time { font-size: 12px; color: var(--mg-muted); }
-.mg-entry-meta .mg-link { margin-left: auto; }
-.mg-entry-body { margin-top: 2px; font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
-
-.mg-people { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
-.mg-people li { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: 14px; }
-@media (hover: hover) {
-  .mg-people li:hover { background: var(--mg-tint); }
-}
-.mg-people li > div { flex: 1; min-width: 0; display: grid; }
-.mg-people li small { color: var(--mg-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mg-people-actions { display: flex; gap: 4px; }
-.mg-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-radius: 14px; background: var(--mg-primary-soft); font-size: 13px; font-weight: 700; }
-.mg-neighbor-form { display: grid; gap: 10px; padding: 14px; }
-.mg-neighbors > .mg-btn { margin-top: 4px; }
-
 .mg-about { display: grid; }
 .mg-form { display: grid; gap: 14px; }
 .mg-form .mg-tabs > button { height: 34px; font-size: 12px; }
@@ -455,8 +423,8 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   .mg-world { --mg-side: 330px; }
   .mg-time { display: none; }
 }
-/* Landscape phones and small tablets: the pet and game buttons keep only their icons and the search waits in 둘러보기,
-   so the island's name keeps its room next to the actions. */
+/* Landscape phones and small tablets: the pet and game buttons keep only their icons and the search folds into its button
+   (as on a phone, see shell.css), so the island's name keeps its room next to the actions. */
 @media (max-width: 1024px) {
   .mg-world:not(.is-editing) .mg-topbar .mg-pet-toggle,
   .mg-world:not(.is-editing) .mg-topbar .mg-game-toggle { width: 44px; padding: 0; }
@@ -467,7 +435,13 @@ html:has(.mg-world), html:has(.mg-world) body { overscroll-behavior: none; }
   .mg-world:not(.is-editing) .mg-island-pill { min-width: 0; }
 }
 @media (max-width: 900px) {
-  .mg-world:not(.is-editing) .mg-topbar-right .mg-search { display: none; }
+  .mg-world:not(.is-editing) .mg-topbar-right .mg-search:not(.is-open) { display: none; }
+  .mg-world:not(.is-editing) .mg-search-open { display: inline-grid; }
+  .mg-world:not(.is-editing) .mg-search-open[aria-expanded='true'] { visibility: hidden; }
+  .mg-world:not(.is-editing) .mg-topbar-right .mg-search.is-open {
+    position: absolute; z-index: 1; top: 0; left: 0; right: 0; width: auto; height: 46px; padding-right: 0; background: var(--mg-glass-strong);
+  }
+  .mg-world:not(.is-editing) .mg-search.is-open .mg-search-close { display: inline-grid; width: 44px; height: 44px; }
 }
 @media (max-width: 720px) {
   .mg-island-name small, .mg-island-pill .mg-badge { display: none; }

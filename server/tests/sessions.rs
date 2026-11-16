@@ -205,8 +205,24 @@ async fn change_password(app: &TestApp, cookie: &str, current: &str, new: &str) 
     app.call("POST", "/api/auth/password", Some(body), Some(cookie)).await
 }
 
+async fn logout_others(app: &TestApp, cookie: &str, current: &str) -> Reply {
+    app.call("POST", "/api/auth/logout-others", Some(json!({"currentPassword": current})), Some(cookie)).await
+}
+
 async fn login_with(app: &TestApp, username: &str, password: &str) -> Reply {
     app.call("POST", "/api/auth/login", Some(json!({"username": username, "password": password})), None).await
+}
+
+/// A sign-in from `address`, as CloudFront forwards it.
+async fn login_at(app: &TestApp, address: &str, username: &str, password: &str) -> Reply {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-forwarded-for", address);
+    let body = json!({"username": username, "password": password}).to_string();
+    app.send(request.body(Body::from(body)).unwrap()).await
 }
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -327,17 +343,19 @@ async fn 지금_비밀번호를_틀려도_계정의_로그인은_잠기지_않�
     let app = TestApp::new(None).await;
     let stolen = app.register("guess_pw", "추측").await;
     // Wrong guesses through a session count against its sign-in (and its address), not the account.
-    for _ in 0..10 {
+    for _ in 0..9 {
         assert_eq!(change_password(&app, &stolen, "a wrong guess", NEW_PASSWORD).await.status, StatusCode::BAD_REQUEST);
     }
+    // Starting the session over (signing the other devices out, which asks for the password too) keeps the sign-in:
+    // it hands no new guesses.
+    let rotated = logout_others(&app, &stolen, PASSWORD).await;
+    let stolen = rotated.cookie.expect("a new session cookie");
+    assert_eq!(change_password(&app, &stolen, "a wrong guess", NEW_PASSWORD).await.status, StatusCode::BAD_REQUEST);
     let spent = change_password(&app, &stolen, PASSWORD, NEW_PASSWORD).await;
     assert_eq!((spent.status, spent.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    let rotate = logout_others(&app, &stolen, PASSWORD).await;
+    assert_eq!((rotate.status, rotate.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
     assert!(rate_exceeded(&app.state, "login-failed:guess_pw", 1).is_ok());
-    // Starting the session over (signing the other devices out) keeps the sign-in: it hands no new guesses.
-    let rotated = app.call("POST", "/api/auth/logout-others", None, Some(&stolen)).await;
-    let stolen = rotated.cookie.expect("a new session cookie");
-    let still = change_password(&app, &stolen, PASSWORD, NEW_PASSWORD).await;
-    assert_eq!((still.status, still.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
     // The owner signs in afresh, with guesses of their own, and the password change ends the other sign-in.
     let owner = login(&app, "guess_pw").await;
     assert_eq!(change_password(&app, &owner, PASSWORD, NEW_PASSWORD).await.status, StatusCode::NO_CONTENT);
@@ -349,12 +367,15 @@ async fn 지금_비밀번호를_틀려도_계정의_로그인은_잠기지_않�
 async fn 다른_기기_로그아웃과_비밀번호_변경은_계정마다_횟수가_정해져_있다() {
     let app = TestApp::new(None).await;
     let mut cookie = app.register("rotations", "횟수").await;
+    // A wrong password signs nothing out and takes none of them.
+    let wrong = logout_others(&app, &cookie, "a wrong guess").await;
+    assert_eq!((wrong.status, wrong.body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("wrong_password")));
     for _ in 0..LOGOUT_OTHERS_PER_USER {
-        let reply = app.call("POST", "/api/auth/logout-others", None, Some(&cookie)).await;
+        let reply = logout_others(&app, &cookie, PASSWORD).await;
         assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
         cookie = reply.cookie.expect("a new session cookie");
     }
-    let refused = app.call("POST", "/api/auth/logout-others", None, Some(&cookie)).await;
+    let refused = logout_others(&app, &cookie, PASSWORD).await;
     assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
     // Signing the other devices out cannot keep the owner from changing the password, and only changes made count.
     let passwords = [PASSWORD, NEW_PASSWORD];
@@ -441,21 +462,29 @@ async fn 기기_쿠키는_비밀번호를_바꾸면_끝나고_계정당_개수�
 #[tokio::test]
 async fn 운영진처럼_보이는_표시_이름은_새_계정이_쓰지_못한다() {
     let app = TestApp::new(None).await;
-    // Also behind a right-to-left override, a Hangul filler, a variation selector, in full-width letters, or as
-    // decomposed Hangul.
+    // In any spacing, with a variation selector, in full-width letters, or as decomposed Hangul: a name that reads as
+    // staff (reserved_name).
     for name in [
         "운영자",
         "운 영 자",
-        "관\u{200b}리자",
         "ADMIN",
         " Mo Gae Sup ",
         "모개숲",
-        "\u{202e}자영운",
-        "운영자\u{3164}",
         "운영자\u{fe0f}",
         "ＡＤＭＩＮ",
         "\u{110b}\u{116e}\u{11ab}\u{110b}\u{1167}\u{11bc}\u{110c}\u{1161}",
     ] {
+        let body = json!({"username": "staffish", "displayName": name, "password": PASSWORD});
+        let reply = app.call("POST", "/api/auth/register", Some(body), None).await;
+        assert_eq!(
+            (reply.status, reply.body["code"].as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, Some("reserved_name")),
+            "{name}"
+        );
+    }
+    // Behind a zero-width space, a right-to-left override or a Hangul filler: a name that hides something
+    // (invalid_name).
+    for name in ["관\u{200b}리자", "\u{202e}자영운", "운영자\u{3164}"] {
         let body = json!({"username": "staffish", "displayName": name, "password": PASSWORD});
         let reply = app.call("POST", "/api/auth/register", Some(body), None).await;
         assert_eq!(
@@ -470,7 +499,7 @@ async fn 운영진처럼_보이는_표시_이름은_새_계정이_쓰지_못한�
         .await
         .unwrap();
     let body = json!({"username": "lookalike", "displayName": "The_Operator", "password": PASSWORD});
-    assert_eq!(app.call("POST", "/api/auth/register", Some(body), None).await.body["code"], "invalid_name");
+    assert_eq!(app.call("POST", "/api/auth/register", Some(body), None).await.body["code"], "reserved_name");
     let body = json!({"username": "staffish", "displayName": "운영자님", "password": PASSWORD});
     assert_eq!(app.call("POST", "/api/auth/register", Some(body), None).await.status, StatusCode::CREATED);
     // Emoji keep the selectors and joiners they are made of, and the name is kept as it was typed.
@@ -490,7 +519,14 @@ async fn 다른_기기_모두_로그아웃은_이_기기만_남긴다() {
     let stranger = app.register("others_keep", "남").await;
     let base = serve(&app).await;
     let mut ended = joined(&app, &base, "others_out", &tablet).await;
-    let reply = app.call("POST", "/api/auth/logout-others", None, Some(&phone)).await;
+    // Without the password (as the app sent it before it asked for one), or with a wrong one, nothing ends; a wrong one
+    // is no sign that the session ended (not 401).
+    let missing = app.call("POST", "/api/auth/logout-others", None, Some(&phone)).await;
+    assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY, "{:?}", missing.body);
+    let wrong = logout_others(&app, &phone, "not the password").await;
+    assert_eq!((wrong.status, wrong.body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("wrong_password")));
+    assert_eq!(signed_in(&app, &laptop).await, "others_out");
+    let reply = logout_others(&app, &phone, PASSWORD).await;
     assert_eq!((reply.status, reply.body["ended"].as_i64()), (StatusCode::OK, Some(2)));
     // This browser stays signed in, under a new session: the old cookie, wherever a copy of it went, is done once the
     // requests already on their way with it had their moment.
@@ -503,14 +539,35 @@ async fn 다른_기기_모두_로그아웃은_이_기기만_남긴다() {
     assert_eq!(signed_in(&app, &phone).await, "others_out");
     assert!(days_left(&app, &phone).await.is_some_and(|days| days * 86_400.0 <= 90.5), "a grace of 90 seconds");
     // A session replaced, or already ended, starts nothing over.
-    let gone = app.call("POST", "/api/auth/logout-others", None, Some(&phone)).await;
+    let gone = logout_others(&app, &phone, PASSWORD).await;
     assert_eq!((gone.status, gone.cookie), (StatusCode::UNAUTHORIZED, None));
     // Starting over again ends the replaced one as well, which was no other device.
-    let again = app.call("POST", "/api/auth/logout-others", None, Some(&renewed)).await;
+    let again = logout_others(&app, &renewed, PASSWORD).await;
     assert_eq!(again.body["ended"], 0);
     assert_eq!(signed_in(&app, &phone).await, Value::Null);
-    let anonymous = app.call("POST", "/api/auth/logout-others", None, None).await;
+    let anonymous = app.call("POST", "/api/auth/logout-others", Some(json!({"currentPassword": PASSWORD})), None).await;
     assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 훔친_세션만으로는_주인의_세션을_끝내지_못하고_주인은_다시_로그인해_그_세션을_끝낸다() {
+    let app = TestApp::new(None).await;
+    let stolen = app.register("stolen_out", "주인").await;
+    let laptop = login(&app, "stolen_out").await;
+    // The stolen session does not know the password: its guesses end nothing and count against it alone.
+    for _ in 0..10 {
+        assert_eq!(logout_others(&app, &stolen, "a wrong guess").await.status, StatusCode::BAD_REQUEST);
+    }
+    let spent = logout_others(&app, &stolen, PASSWORD).await;
+    assert_eq!((spent.status, spent.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
+    assert_eq!(signed_in(&app, &laptop).await, "stolen_out");
+    assert!(rate_exceeded(&app.state, "login-failed:stolen_out", 1).is_ok());
+    // The owner, on the laptop, ends it.
+    let reply = logout_others(&app, &laptop, PASSWORD).await;
+    assert_eq!((reply.status, reply.body["ended"].as_i64()), (StatusCode::OK, Some(1)));
+    assert_eq!(signed_in(&app, &stolen).await, Value::Null);
+    assert_eq!(signed_in(&app, &laptop).await, "stolen_out");
     app.cleanup().await;
 }
 
@@ -520,7 +577,7 @@ async fn 계정_전체를_바꾸는_요청도_다른_사이트에서는_받지_�
     let cookie = app.register("cross_site", "출처").await;
     for (path, body) in [
         ("/api/auth/password", json!({"currentPassword": PASSWORD, "newPassword": NEW_PASSWORD})),
-        ("/api/auth/logout-others", json!({})),
+        ("/api/auth/logout-others", json!({"currentPassword": PASSWORD})),
     ] {
         let request = Request::builder()
             .method("POST")
@@ -572,12 +629,42 @@ async fn 쓰는_세션도_로그인한_지_90일이_지나면_끝난다() {
         .execute(&app.state.db)
         .await
         .unwrap();
-    let reply = app.call("POST", "/api/auth/logout-others", None, Some(&cookie)).await;
+    let reply = logout_others(&app, &cookie, PASSWORD).await;
     let renewed = reply.cookie.clone().expect("a new session cookie");
     assert!((0.99..1.01).contains(&days_left(&app, &renewed).await.unwrap()));
     let sent = set_cookie(&reply).unwrap();
     let max_age: u32 = sent.split("Max-Age=").nth(1).unwrap().split(';').next().unwrap().parse().unwrap();
     assert!((86_000..=86_400).contains(&max_age), "{sent}");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 예전_서버가_더_늘린_세션도_로그인한_지_90일이_지나면_받지_않는다() {
+    let app = TestApp::new(None).await;
+    let cookie = app.register("lifetime_past", "수명").await;
+    let base = serve(&app).await;
+    let ticket = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await.body["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Renewed past its end by a server from before the lifetime (a rollback): signed in 91 days ago, 20 days left.
+    sqlx::query(
+        "UPDATE sessions SET created_at = now() - interval '91 days', expires_at = now() + interval '20 days'
+         WHERE token_hash = $1",
+    )
+    .bind(hash(&cookie))
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let reply = me(&app, &cookie).await;
+    assert_eq!(reply.body["user"], Value::Null);
+    assert_eq!(set_cookie(&reply), None);
+    let refused = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("login_required")));
+    // Nor does a ticket issued before open a socket on it.
+    let mut request = format!("{base}/api/rooms/lifetime_past?ticket={ticket}").into_client_request().unwrap();
+    request.headers_mut().insert(header::ORIGIN, ORIGIN.parse().unwrap());
+    assert!(connect_async(request).await.is_err());
     app.cleanup().await;
 }
 
@@ -722,7 +809,9 @@ async fn 확인을_기다리는_틀린_비밀번호는_틀리기_전까지_계�
     app.register("in_flight", "대기").await;
     let held = app.state.hashing.clone().acquire_many_owned(2).await.unwrap();
     let waiting = CHECKS_UNDER_WAY as usize;
-    let attempts = join_all((0..=waiting).map(|_| login_with(&app, "in_flight", "a wrong guess")));
+    // Each from an address of its own, so no address's share of the account's budget turns any away.
+    let addresses: Vec<String> = (1..=waiting + 1).map(|at| format!("198.51.100.{at}")).collect();
+    let attempts = join_all(addresses.iter().map(|address| login_at(&app, address, "in_flight", "a wrong guess")));
     let probe = async {
         tokio::time::sleep(Duration::from_millis(300)).await;
         // The checks wait for a hashing slot, and none of them holds the account's budget yet.
@@ -732,17 +821,150 @@ async fn 확인을_기다리는_틀린_비밀번호는_틀리기_전까지_계�
     };
     let (replies, free) = tokio::join!(attempts, probe);
     assert!(free, "checks under way held the account's budget");
+    // A check that waits longer than the hashing wait is turned away as busy, so how many finish depends on the load of
+    // the machine. What must hold: every reply is either a check found wrong or busy, and the one more than the
+    // checks under way is turned away.
     let statuses: Vec<StatusCode> = replies.iter().map(|reply| reply.status).collect();
     let checked = statuses.iter().filter(|status| **status == StatusCode::UNAUTHORIZED).count();
-    assert_eq!(checked, waiting, "{statuses:?}");
     let busy = replies.iter().filter(|reply| reply.body["code"] == "busy").count();
-    assert_eq!(busy, 1, "one check more of the same account at once is turned away: {statuses:?}");
-    // Found wrong, they count.
-    assert!(rate_exceeded(&app.state, "login-failed:in_flight", CHECKS_UNDER_WAY).is_err());
+    assert!(checked > 0 && checked + busy == waiting + 1, "{statuses:?}");
+    assert!(busy >= 1, "one check more of the same account at once is turned away: {statuses:?}");
+    // Found wrong, exactly these count.
+    assert!(rate_exceeded(&app.state, "login-failed:in_flight", checked as u32).is_err());
+    assert!(rate_exceeded(&app.state, "login-failed:in_flight", checked as u32 + 1).is_ok());
     // A name nobody has keeps no window of its own; its guesses still cost the address.
     assert_eq!(login_with(&app, "nobody_here", "a wrong guess").await.status, StatusCode::UNAUTHORIZED);
     assert!(rate_exceeded(&app.state, "login-failed:nobody_here", 1).is_ok());
-    assert!(rate_exceeded(&app.state, "login-failed-address:local", CHECKS_UNDER_WAY + 1).is_err());
+    assert!(rate_exceeded(&app.state, "login-failed-address:local", 1).is_err());
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 주소_몇_개로는_계정_한도를_다_쓰지_못해_새_기기에서도_로그인한다() {
+    let app = TestApp::new(None).await;
+    app.register("budget_owner", "한도").await;
+    // Fifty wrong passwords from two addresses, as many as the account's budget.
+    let mut checked = 0;
+    for address in ["198.51.100.1", "198.51.100.2"] {
+        for _ in 0..25 {
+            if login_at(&app, address, "budget_owner", "a wrong guess").await.status == StatusCode::UNAUTHORIZED {
+                checked += 1;
+            }
+        }
+    }
+    // The owner still signs in with the right password from a browser never used before, elsewhere.
+    assert_eq!(login_at(&app, "203.0.113.2", "budget_owner", PASSWORD).await.status, StatusCode::OK);
+    // Each address spent ten of the account's fifty and waits out the window, even with the right password.
+    assert_eq!(checked, 20);
+    let spent = login_at(&app, "198.51.100.1", "budget_owner", PASSWORD).await;
+    assert_eq!(spent.status, StatusCode::TOO_MANY_REQUESTS);
+    // More addresses spend the rest: browsers the account does not know wait (known ones do not, see above).
+    for _ in 0..30 {
+        rate_record(&app.state, "login-failed:budget_owner".into());
+    }
+    assert_eq!(login_at(&app, "203.0.113.3", "budget_owner", PASSWORD).await.status, StatusCode::TOO_MANY_REQUESTS);
+    app.cleanup().await;
+}
+
+/// From here on permissions cannot be read, as when the database fails in the middle of a sign-in: `auth_tuples`
+/// becomes a view whose `subject_relation` raises. The account's role, which the sign-in reads first, never asks for it.
+async fn break_permissions(app: &TestApp) {
+    for statement in [
+        "ALTER TABLE auth_tuples RENAME TO auth_tuples_kept",
+        "CREATE FUNCTION unreadable() RETURNS text STABLE LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unreadable'; END $$",
+        "CREATE VIEW auth_tuples AS SELECT object_type, object_id, relation, subject_type, subject_id,
+         unreadable() AS subject_relation FROM auth_tuples_kept",
+    ] {
+        sqlx::query(statement).execute(&app.state.db).await.unwrap();
+    }
+}
+
+async fn mend_permissions(app: &TestApp) {
+    for statement in ["DROP VIEW auth_tuples", "ALTER TABLE auth_tuples_kept RENAME TO auth_tuples"] {
+        sqlx::query(statement).execute(&app.state.db).await.unwrap();
+    }
+}
+
+/// Until the transaction it returns ends, permissions cannot be read, as when the database is slow in the middle of a
+/// sign-in: it holds `auth_tuples` locked. Making an account never reads it.
+async fn hold_permissions(app: &TestApp) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut held = app.state.db.begin().await.unwrap();
+    sqlx::query("LOCK TABLE auth_tuples IN ACCESS EXCLUSIVE MODE").execute(&mut *held).await.unwrap();
+    held
+}
+
+#[tokio::test]
+async fn 권한을_읽지_못한_로그인과_가입은_세션을_남기지_않고_다른_기기를_밀어내지_않는다() {
+    let app = TestApp::new(None).await;
+    let phone = app.register("perm_owner", "권한").await;
+    app.register("perm_other", "다른 계정").await;
+    app.grant("perm_other", "system:mogaesup", "moderator").await;
+    // The account is at its cap, and its phone is the device used least recently.
+    age(&app, &phone, 24).await;
+    let user = app.user_id("perm_owner").await;
+    for at in 1..SESSIONS_PER_USER {
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '30 days')",
+        )
+        .bind(hash(&format!("mogaesup_session={at:064x}")))
+        .bind(user)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    }
+    let before = sessions(&app).await;
+
+    break_permissions(&app).await;
+    let body = json!({"username": "perm_owner", "password": PASSWORD});
+    let refused = app.call("POST", "/api/auth/login", Some(body), None).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("database")));
+    assert_eq!(refused.cookie, None);
+    // A sign-up whose sign-in fails says the account is there.
+    let body = json!({"username": "perm_late", "password": PASSWORD});
+    let late = app.call("POST", "/api/auth/register", Some(body), None).await;
+    assert_eq!((late.status, late.body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("signed_up")));
+    assert_eq!(late.cookie, None);
+    // Neither made a session, nor ended the phone's to make room for one.
+    assert_eq!(sessions(&app).await, before);
+    assert!(days_left(&app, &phone).await.is_some());
+
+    mend_permissions(&app).await;
+    assert_eq!(signed_in(&app, &phone).await, "perm_owner");
+    login(&app, "perm_late").await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 가입_뒤_로그인이_마감까지_끝나지_않아도_가입은_끝났다고_답한다() {
+    let app = TestApp::new(None).await;
+    let held = hold_permissions(&app).await;
+    // The account is made, and its sign-in waits for permissions past the route's deadline. The sign-up answers before
+    // it is cut off as busy, which would send the member to sign up again and find the name taken.
+    let body = json!({"username": "slow_late", "password": PASSWORD});
+    let late = app.call("POST", "/api/auth/register", Some(body.clone()), None).await;
+    assert_eq!((late.status, late.body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("signed_up")));
+    assert_eq!(late.cookie, None);
+    assert_eq!(sessions(&app).await, 0);
+
+    held.rollback().await.unwrap();
+    let again = app.call("POST", "/api/auth/register", Some(body), None).await;
+    assert_eq!((again.status, again.body["code"].as_str()), (StatusCode::CONFLICT, Some("username_taken")));
+    login(&app, "slow_late").await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 실시간_티켓은_계정당_10분에_180장까지_나온다() {
+    let app = TestApp::new(None).await;
+    let cookie = app.register("tickets", "티켓").await;
+    // A room and its game socket take one each at every reconnect: two tabs whose connection drops every 25 seconds
+    // ask for about a hundred in ten minutes.
+    for _ in 0..180 {
+        let reply = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    let refused = app.call("POST", "/api/auth/realtime-ticket", None, Some(&cookie)).await;
+    assert_eq!((refused.status, refused.body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many")));
     app.cleanup().await;
 }
 
@@ -755,7 +977,7 @@ async fn 다른_기기_로그아웃은_알려진_기기를_잊지_않는다() {
     let other = device(&login_with(&app, "kept_devices", PASSWORD).await);
     // Whoever holds this session signs the other devices out: the owner's devices keep the budget of their own, so
     // guesses at the account cannot shut the owner out of the devices they use.
-    let out = app.call("POST", "/api/auth/logout-others", None, Some(&format!("{session}; {own}"))).await;
+    let out = logout_others(&app, &format!("{session}; {own}"), PASSWORD).await;
     assert_eq!((out.status, out.body["ended"].as_i64()), (StatusCode::OK, Some(1)));
     assert_eq!(pair(&set_cookies(&out.headers), "mogaesup_device"), None, "the devices are left as they are");
     let known: i64 = sqlx::query_scalar("SELECT count(*) FROM login_devices").fetch_one(&app.state.db).await.unwrap();

@@ -1,14 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, PendingRequestConflict, SavedRequestGone, savedRequest, type Pending } from '../api';
+import { ApiError, PendingRequestConflict, request, savedRequest, type Pending } from '../api';
 
 type Input = { name: string; options?: { size: number; tone: string } };
 const STORAGE = 'test.saved-request';
 const saved = () => savedRequest<Input>(STORAGE, ({ input }) => typeof input.name === 'string', '읽을 수 없음');
 const stored = () => JSON.parse(localStorage.getItem(STORAGE) ?? 'null') as Pending<Input> | null;
+const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+/** Posts through the app server, which answers `response`. */
+const answeredWith = (response: Response) => {
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response));
+  return () => request('/api/avatar-factory/image-jobs', { method: 'POST' });
+};
 
 describe('saved request', () => {
-  afterEach(() => localStorage.clear());
+  afterEach(() => {
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
 
   it('보내기 전에 키와 함께 저장하고, 답을 받으면 지운다', async () => {
     const post = vi.fn(async (pending: Pending<Input>) => {
@@ -84,12 +94,28 @@ describe('saved request', () => {
     expect(stored()).toBeNull();
   });
 
-  it('앱 서버가 한도·권한으로 거절한 유료 요청은 확정 거절이라 지운다', async () => {
+  it('처음 보낸 유료 요청을 앱 서버가 한도·권한으로 거절하면 확정 거절이라 지운다', async () => {
     for (const [status, code] of [[429, 'factory_budget'], [403, 'factory_paid_off'], [403, 'factory_read_only'], [403, 'admin_only']] as const) {
-      const refused = new ApiError(code, '거절', status);
+      const refused = new ApiError(code, '거절', status, 'gateway');
       await expect(saved().send({ name: 'a' }, async () => Promise.reject(refused))).rejects.toBe(refused);
       expect(stored()).toBeNull();
     }
+  });
+
+  it('저장된 요청을 다시 보냈다가 앱 서버가 로그인·권한·한도로 거절하면 남겨 둔다: 첫 요청은 스튜디오에 닿았을 수 있다', async () => {
+    for (const [status, code] of [[401, 'login_required'], [403, 'paid_operator_only'], [403, 'factory_paid_off'], [429, 'factory_budget']] as const) {
+      localStorage.setItem(STORAGE, JSON.stringify({ key: 'lost', input: { name: 'a' } }));
+      const post = answeredWith(json(status, { code, message: '거절' }));
+      await expect(saved().send({ name: 'a' }, post)).rejects.toMatchObject({ status, code, from: 'gateway' });
+      expect(stored()).toEqual({ key: 'lost', input: { name: 'a' } });
+    }
+  });
+
+  it('저장된 요청을 다시 보냈다가 스튜디오가 직접 거절하면 지운다', async () => {
+    localStorage.setItem(STORAGE, JSON.stringify({ key: 'lost', input: { name: 'a' } }));
+    const post = answeredWith(json(409, { error: { code: 'job_conflict', message: '이미 다른 작업이 진행 중입니다.' } }));
+    await expect(saved().send({ name: 'a' }, post)).rejects.toMatchObject({ status: 409, code: 'job_conflict', from: 'studio' });
+    expect(stored()).toBeNull();
   });
 
   it('코드가 없는 429나 스튜디오에 닿지 못한 거절은 남겨 둔다', async () => {
@@ -111,17 +137,18 @@ describe('saved request', () => {
   it('복구는 저장된 요청을 그 키와 입력 그대로 보낸다', async () => {
     localStorage.setItem(STORAGE, JSON.stringify({ key: 'saved-key', input: { name: 'a' } }));
     const post = vi.fn(async (pending: Pending<Input>) => pending);
-    await expect(saved().resume('saved-key', post)).resolves.toEqual({ key: 'saved-key', input: { name: 'a' } });
+    await expect(saved().send({ name: 'a' }, post, { key: 'saved-key' })).resolves.toEqual({ key: 'saved-key', input: { name: 'a' } });
     expect(stored()).toBeNull();
   });
 
-  it('복구할 요청이 다른 탭에서 이미 처리돼 지워졌으면 아무것도 보내지 않는다', async () => {
+  it('복구할 요청을 다른 탭이 이미 처리해 지웠어도 새 키가 아니라 그 키로 보내고, 그 뒤 저장된 다른 요청은 대신 보내지 않는다', async () => {
     const post = vi.fn(async (pending: Pending<Input>) => pending);
-    await expect(saved().resume('settled-key', post)).rejects.toBeInstanceOf(SavedRequestGone);
-    // Another request saved since is not the one the screen showed either.
+    await expect(saved().send({ name: 'a' }, post, { key: 'settled-key' })).resolves.toEqual({ key: 'settled-key', input: { name: 'a' } });
+    expect(stored()).toBeNull();
+    // Another request saved since is not the one the screen showed.
     localStorage.setItem(STORAGE, JSON.stringify({ key: 'newer-key', input: { name: 'b' } }));
-    await expect(saved().resume('settled-key', post)).rejects.toBeInstanceOf(SavedRequestGone);
-    expect(post).not.toHaveBeenCalled();
+    await expect(saved().send({ name: 'a' }, post, { key: 'settled-key' })).rejects.toBeInstanceOf(PendingRequestConflict);
+    expect(post).toHaveBeenCalledOnce();
     expect(stored()?.key).toBe('newer-key');
   });
 

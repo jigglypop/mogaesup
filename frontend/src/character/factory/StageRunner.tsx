@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { isDefinitiveRejection } from '../api';
+import { isDefinitiveRejection, PendingRequestConflict } from '../api';
 import { usePolling } from '../use-polling';
 import { factoryApi, type FactoryStage } from './api';
 
@@ -31,12 +31,17 @@ export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () =
   function clearPending(intent: Pending) {
     if (readPending(storage)?.key === intent.key) localStorage.removeItem(storage);
   }
-  /** Starts `stage`, or (`recovering`) sends the saved request shown again under its key: nothing once another tab has
-   * settled it. */
-  async function start(stage: FactoryStage, recovering = false) {
+  /** Starts `stage`, or sends the saved request shown again under its key, even when another tab has had its answer and
+   * forgotten it since. */
+  async function start(stage: FactoryStage) {
     if (locked.current) return;
-    const saved = readPending(storage);
-    if (recovering && (!saved || saved.key !== pending?.key)) { setPending(saved); void polling.refresh(); return; }
+    // Storage is read as it is sent, so a stage saved since this screen looked (another tab) is not sent in place of the
+    // one asked for: it shows here to be recovered first, as a saved request does elsewhere (savedRequest).
+    const saved = readPending(storage) || pending;
+    if (saved && saved.stage !== stage) {
+      setPending(saved); setError(new PendingRequestConflict({ key: saved.key, input: saved.stage }).message);
+      return;
+    }
     const intent = saved || { stage, key: crypto.randomUUID() };
     locked.current = true; setSending(true); setError('');
     try {
@@ -64,7 +69,7 @@ export function StageRunner({ jobId, onChange }: { jobId: string; onChange: () =
       <small>{action.reason || action.warning || (action.paid ? '미완료 유료 작업 포함' : '저장된 결과 재사용')}</small>
     </div>)}</div>
     {!state && !polling.error && <p role="status">저장된 단계 불러오는 중…</p>}
-    {pending && <button disabled={sending} onClick={() => void start(pending.stage, true)}>{sending ? '접수 중…' : `${labels[pending.stage]} 실행 응답 복구`}</button>}
+    {pending && <button disabled={sending} onClick={() => void start(pending.stage)}>{sending ? '접수 중…' : `${labels[pending.stage]} 실행 응답 복구`}</button>}
     {state?.busy && <p role="status">{labels[state.operation?.stage || state.recommended_stage || 'assemble']} 단계에서 이어서 실행 중…</p>}
     {(error || polling.error || state?.operation?.error) && <p role="alert">{error || polling.error || state?.operation?.error}</p>}
   </section>;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, SavedRequestGone } from '../api';
+import { ApiError } from '../api';
 import { factoryApi } from '../factory/api';
 
 const CHARACTER = 'char-1';
@@ -99,15 +99,17 @@ describe('이미지 생성 요청 기록', () => {
     expect(stored()).toEqual(saved);
   });
 
-  it('복구 버튼을 누르기 전에 다른 탭이 그 요청을 처리했으면 새 키로 다시 생산하지 않는다', async () => {
+  it('복구 버튼을 누르기 전에 다른 탭이 그 요청을 처리해 지웠어도 새 키가 아니라 그 키로 다시 보낸다', async () => {
     fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
     await factoryApi.produceImage(input()).catch(() => undefined);
     const saved = stored()!;
-    // The other tab had the answer and settled it.
+    // The other tab had the answer and settled it; the server answers the same key with the job it made.
     localStorage.removeItem(STORAGE);
     fetchMock.mockClear();
-    await expect(factoryApi.produceImage(saved.input, saved.key)).rejects.toBeInstanceOf(SavedRequestGone);
-    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockResolvedValueOnce(json(200, { id: 'job-1' }));
+    await expect(factoryApi.produceImage(saved.input, saved.key)).resolves.toEqual({ id: 'job-1' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Idempotency-Key')).toBe(saved.key);
     expect(stored()).toBeNull();
   });
 

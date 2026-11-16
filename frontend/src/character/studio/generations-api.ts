@@ -1,4 +1,4 @@
-import { request, savedRequest, type Pending } from '../api';
+import { request, savedRequest } from '../api';
 
 export type GenerationKind = 'prop' | 'texture' | 'illustration';
 export type GenerationSize = 256 | 512 | 1024;
@@ -19,6 +19,8 @@ export type Generation = {
   error?: string;
   can_resume: boolean;
   created_at: string;
+  /** A prop's 3D provider, frozen when it was accepted. */
+  provider?: 'meshy' | 'tripo' | null;
   progress?: number;
   task_id?: string;
   artifacts: GenerationArtifact[];
@@ -57,7 +59,8 @@ type GenerationInput = {
 
 type GenerationList = {
   items: Generation[];
-  capabilities: { ready: boolean; reason?: string };
+  /** For props, the 3D providers with keys and the one a new prop is sent to. */
+  capabilities: { ready: boolean; reason?: string; providers?: ('meshy' | 'tripo')[]; default_provider?: 'meshy' | 'tripo' };
   defaults: Record<string, string>;
 };
 
@@ -72,14 +75,6 @@ const generations = (kind: GenerationKind) => savedRequest<GenerationInput>(`gae
     && (input.reference_id === undefined || /^[a-f0-9]{24}$/.test(input.reference_id)),
   '저장된 생성 요청을 읽을 수 없습니다. 브라우저 저장소의 요청 기록을 확인해 주세요.');
 
-const postGeneration = (pending: Pending<GenerationInput>) => request<Generation>('/api/studio/generations', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
-  body: JSON.stringify(pending.input),
-  timeoutMs: 60000,
-});
-const answered = (result: Generation, key: string) => result.request_key === key;
-
 export const generationsApi = {
   async list(kind: GenerationKind, signal?: AbortSignal) {
     const result = await request<GenerationList>(`/api/studio/generations?${new URLSearchParams({ kind })}`, { signal });
@@ -92,9 +87,13 @@ export const generationsApi = {
     method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({generation_id,revision}),
   }),
   recovery: (kind: GenerationKind) => generations(kind).read(),
-  create: (input: GenerationInput) => generations(input.kind).send(input, postGeneration, { answered }),
-  /** Sends the saved request under `key` again as itself; nothing when it is no longer saved (SavedRequestGone). */
-  recover: (kind: GenerationKind, key: string) => generations(kind).resume(key, postGeneration, { answered }),
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (input: GenerationInput, key?: string) => generations(input.kind).send(input, pending => request<Generation>('/api/studio/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': pending.key },
+    body: JSON.stringify(pending.input),
+    timeoutMs: 60000,
+  }), { ...(key ? { key } : {}), answered: (result, sent) => result.request_key === sent }),
   resume: (id: string) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/resume`, { method: 'POST', timeoutMs: 60000 }),
   vectorize: (id: string, colors: VectorColors) => request<Generation>(`/api/studio/generations/${encodeURIComponent(id)}/vector`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ colors }), timeoutMs: 60000,

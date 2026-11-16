@@ -22,13 +22,15 @@ def reuse_contract(pipeline):
     return contract if contract and contract.get('expressions') else None
 
 
-def snapshot_saved_expressions(factory, owner, source_job, source_version, target_directory):
-    """Freeze reusable face inputs and the selected expression at acceptance."""
+def saved_expression_snapshot(factory, owner, source_job, source_version, target_directory):
+    """(the reusable face inputs and selected expression to freeze at acceptance, the (saved face, frozen copy) pairs
+    that freeze them). Every saved face is checked here; nothing is copied, so a caller can copy after its other checks
+    and outside the process lock."""
     source_root = factory.directory(owner, source_job)/'native-parts'/source_version/'expressions'
     selection = read_json(source_root/'selection.json')
     selected = selection.get('expression_id')
     inputs = target_directory/'expression-inputs'
-    expressions = []
+    expressions, copies = [], []
     for source_record_path in sorted(source_root.glob('*/record.json')):
         source_id = source_record_path.parent.name
         source_record = read_json(source_record_path)
@@ -41,13 +43,20 @@ def snapshot_saved_expressions(factory, owner, source_job, source_version, targe
         if not face.is_file() or digest(face) != expected:
             raise PipelineError('saved_expression_missing', '저장된 기존 표정 원본을 확인할 수 없습니다.', 409)
         frozen_name = f'{source_id}.png'
-        inputs.mkdir(parents=True, exist_ok=True)
-        copy_file(face, inputs/frozen_name)
+        copies.append((face, inputs/frozen_name))
         expressions.append({'source_id': source_id, 'name': source_record['name'],
                             'file': frozen_name, 'sha256': expected})
     return {'source_job_id': source_job, 'source_version': source_version,
             'source_selection_revision': selection.get('revision', '0'),
-            'selected_source_id': selected, 'expressions': expressions}
+            'selected_source_id': selected, 'expressions': expressions}, copies
+
+
+def snapshot_saved_expressions(factory, owner, source_job, source_version, target_directory):
+    """Freeze reusable face inputs and the selected expression at acceptance."""
+    contract, copies = saved_expression_snapshot(factory, owner, source_job, source_version, target_directory)
+    for face, frozen in copies:
+        copy_file(face, frozen)
+    return contract
 
 
 def reuse_running(directory):

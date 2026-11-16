@@ -44,14 +44,39 @@ describe('파츠 수신 현황의 피팅 복구', () => {
     await unmount();
   });
 
-  it('복구를 누르기 전에 다른 탭이 그 피팅을 처리했으면 보내지 않고 화면만 다시 그린다', async () => {
-    localStorage.setItem(STORAGE, JSON.stringify({ key: 'lost-key', input: { source_version: 'v1', slot: 'top' } }));
+  it('복구를 누르기 전에 다른 탭이 그 피팅을 처리해 지웠어도 새 키가 아니라 그 키로 보낸다', async () => {
+    const saved = { key: 'lost-key', input: { source_version: 'v1', slot: 'top' } };
+    localStorage.setItem(STORAGE, JSON.stringify(saved));
+    fetchMock.mockResolvedValue(json(202, { status: 'accepted', artifacts: [], parts: [] }));
     const { container, unmount } = await mount(<PartProgress job={job} busy={false} retryImage={async () => undefined} />);
+    // Settled elsewhere without this tab hearing of it: the server answers the same key with the refit it started.
     localStorage.removeItem(STORAGE);
     await act(async () => button(container, '같은 피팅 요청 복구')!.click());
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(new Headers(init?.headers).get('Idempotency-Key')).toBe('lost-key');
+    expect(JSON.parse(String(init?.body))).toEqual(saved.input);
     expect(container.querySelector('[role=alert]')).toBeNull();
+    expect(localStorage.getItem(STORAGE)).toBeNull();
     expect(button(container, '같은 피팅 요청 복구')).toBeUndefined();
+    await unmount();
+  });
+});
+
+describe('파츠 수신 현황', () => {
+  it('이미지로 쓸 수 없는 응답을 받은 뷰는 그 상태와 유료 다시 요청을 보여 준다', async () => {
+    const failed = {
+      id: 'job', status: 'pipeline_paused', artifacts: [],
+      parts: [{ slot: 'top', image_status: 'pending', model_status: 'pending',
+        views: { front: { status: 'answer_invalid', failure: { id: 'f1' } }, side: { status: 'pending' } } }],
+      next_actions: [{ id: 'retry_image', enabled: true, slot: 'top', view: 'front', failure_id: 'f1' }],
+    } as unknown as FactoryJob;
+    const { container, unmount } = await mount(<PartProgress job={failed} busy={false} retryImage={async () => undefined} />);
+    const [front, side] = container.querySelectorAll('.part-view');
+    expect(front!.querySelector('span')!.textContent).toBe('정면 · 응답 이미지 오류');
+    expect(front!.querySelector('button')!.textContent).toBe('다시 요청 · 유료 1장');
+    expect(front!.querySelector('.part-retry-warning')).toBeNull();
+    expect(side!.textContent).toBe('좌측면 · 대기');
     await unmount();
   });
 });

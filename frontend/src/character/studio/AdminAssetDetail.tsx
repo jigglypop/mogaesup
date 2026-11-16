@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { usePaidWork } from '../../studio/usage';
 import { factoryApi, type BodyProfileState, type FactoryJob, type NativePartsState } from '../factory/api';
 import { usePolling } from '../use-polling';
@@ -48,6 +48,8 @@ export function AdminAssetDetail({ managedAsset, adminSlot, base, hidden, name, 
   [managedAsset.id, managedNativeDisplayed?.version, showInfo]);
   const managedExpressions = usePolling(readManagedExpressions, 15000);
   const managedExpressionState = managedExpressions.value?.jobId === managedAsset.id && managedExpressions.value?.version === managedNativeDisplayed?.version ? managedExpressions.value?.library : undefined;
+  // The name form keeps the fields the operator changed until they are saved; the others follow the catalog as it is read again.
+  const [draft, setDraft] = useState<{ id: string; name?: string; archived?: boolean }>();
   if (!base || hidden) return null;
   const runtime = nativeState?.parts.reduce((total, part) => ({
     source: total.source + (part.runtime_budget?.source_triangles || 0),
@@ -81,6 +83,9 @@ export function AdminAssetDetail({ managedAsset, adminSlot, base, hidden, name, 
     `${managedSlot}-front.png`, `${managedSlot}-image.png`,
     'front.png', 'canonical-reference.png', 'reference.png', 'body-front.png',
   ].map(file => managedAsset.artifacts.find(artifact => artifact.name === file)).find(Boolean);
+  const changed = draft?.id === managedAsset.id ? draft : { id: managedAsset.id };
+  const metadata = { name: changed.name ?? (catalog.value?.items[managedAsset.id]?.name || managedAsset.part_name || managedAsset.character_name),
+    archived: changed.archived ?? (catalog.value?.items[managedAsset.id]?.archived || false) };
   return <AssetDetailDialog title={name(managedAsset)} onClose={onClose}><section id="admin-selection">
     <div className="admin-inspection-toolbar"><AssetProductionStatus job={managedAsset} slot={managedSlot} hasModel={hasManagedSlotModel} hasAssembly={managedStoredArtifacts.some(item => item.name === `${managedSlot}.glb`)} />{!managedDeleted && <button className="asset-delete" disabled={busy || !catalog.value} onClick={() => void perform(async () => {
       catalog.setValue(await studioApi.savePartMetadata(managedAsset.id, managedSlot, { deleted: true }, catalog.value!.revision));
@@ -120,7 +125,7 @@ export function AdminAssetDetail({ managedAsset, adminSlot, base, hidden, name, 
       </div>
     </div>
     <details className="admin-record"><summary>이름·보관·다운로드</summary>
-    <form key={`${managedAsset.id}:${catalog.value?.revision}`} onSubmit={e => { e.preventDefault(); const data = new FormData(e.currentTarget); void perform(async () => { catalog.setValue(await studioApi.saveMetadata(managedAsset.id, String(data.get('name')), data.get('archived') === 'on', catalog.value!.revision)); }); }}><label>이름<input name="name" required maxLength={80} defaultValue={catalog.value?.items[managedAsset.id]?.name || managedAsset.part_name || managedAsset.character_name} /></label><label className="slot-choice"><input type="checkbox" name="archived" defaultChecked={catalog.value?.items[managedAsset.id]?.archived || false} />보관</label><button disabled={busy || !catalog.value}>저장</button></form>
+    <form onSubmit={e => { e.preventDefault(); void perform(async () => { catalog.setValue(await studioApi.saveMetadata(managedAsset.id, metadata.name, metadata.archived, catalog.value!.revision)); setDraft(undefined); }); }}><label>이름<input name="name" required maxLength={80} value={metadata.name} onChange={e => setDraft({ ...changed, name: e.target.value })} /></label><label className="slot-choice"><input type="checkbox" name="archived" checked={metadata.archived} onChange={e => setDraft({ ...changed, archived: e.target.checked })} />보관</label><button disabled={busy || !catalog.value}>저장</button></form>
     <div className="artifact-grid">{managedGlbs.map(a => <a key={`${a.name}:${a.url}`} href={a.url} download>{managedModelLabel(a, !a.name.startsWith('generated-'))}</a>)}</div></details>
   </section>{paid && managedAsset.id === base.id && <details className="admin-record base-motion-panel" open={showMotion} onToggle={event => onShowMotion(event.currentTarget.open)}><summary>기본 몸 동작</summary>{showMotion && <>
     {runtime && runtime.optimized > 0 && <dl className="runtime-budget"><div><dt>런타임 삼각형</dt><dd>{runtime.optimized.toLocaleString()}</dd></div><div><dt>원본 삼각형</dt><dd>{runtime.source.toLocaleString()}</dd></div><div><dt>파츠 예산 합계</dt><dd>{runtime.target.toLocaleString()}</dd></div><div><dt>축소 텍스처</dt><dd>{runtime.textures.toLocaleString()}</dd></div></dl>}

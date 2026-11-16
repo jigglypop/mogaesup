@@ -1,11 +1,14 @@
 import { act } from 'react';
 
-import { describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
-import { nextMenuIndex, usePopover } from '../Shell';
+import { nextMenuIndex, Rail, usePopover } from '../Shell';
 
-vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: null }) }));
+const auth = vi.hoisted(() => ({ user: null as User | null }));
+vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => ({ user: auth.user }) }));
 
 function Menu() {
   const { open, setOpen, ref } = usePopover();
@@ -92,5 +95,34 @@ describe('팝오버 메뉴', () => {
     expect(last).toBeTruthy();
     outside.remove();
     await unmount();
+  });
+});
+
+describe('레일', () => {
+  afterEach(() => {
+    auth.user = null;
+  });
+
+  // 화면에는 레일이 없다: 화면에서 뺀 섬의 코드만 쓰며, 사주 마을 하나만 남았다.
+  it('섬의 레일에는 사주 마을만 있고, 내 집으로 가며 그 집의 어느 쪽에서든 켜져 있다', async () => {
+    const rail = async (path: string) => {
+      const { container, unmount } = await mount(
+        <MemoryRouter initialEntries={[path]}>
+          <Rail />
+        </MemoryRouter>,
+      );
+      const links = [...container.querySelectorAll('a')].map((anchor) => `${anchor.textContent}${anchor.getAttribute('aria-current') ? '*' : ''} ${anchor.getAttribute('href')}`);
+      await unmount();
+      return links;
+    };
+    // 로그인하지 않으면 들어가는 길로 간다.
+    expect(await rail('/explore')).toEqual(['사주 마을 /']);
+    auth.user = { id: 'u1', username: 'mogae', displayName: '모개', role: 'user', permissions: ['admin', 'operator', 'catalog_editor'] };
+    expect(await rail('/@mogae')).toEqual(['사주 마을* /@mogae']);
+    expect(await rail('/@mogae/village')).toEqual(['사주 마을* /@mogae']);
+    // 남의 집과, 아이디가 내 것으로 시작하는 집에서는 꺼져 있다. 운영자에게도 운영은 없다.
+    expect(await rail('/@sol')).toEqual(['사주 마을 /@mogae']);
+    expect(await rail('/@mogaeland')).toEqual(['사주 마을 /@mogae']);
+    expect(await rail('/admin')).toEqual(['사주 마을 /@mogae']);
   });
 });

@@ -86,18 +86,20 @@ class AvatarNativeReviews:
             except ValueError as exc:
                 # Only another review holding the lock is busy; a record that cannot be read below is its own error.
                 raise PipelineError('review_busy', '다른 검수 작업이 진행 중입니다.', 409) from exc
-            # Every artifact is hashed and the model read and inspected under the review lock alone. The process lock is
-            # taken last, to see the same sealed assembly still current and write the review.
-            record = self._reviewable(directory, version, expected)
-            if not self.intact(directory, record):
-                raise PipelineError('artifact_changed', '조립 산출물 검증을 통과하지 못했습니다.', 409)
-            # Only a review writes reviews.json, and it holds the review lock.
+            # Only a review writes reviews.json, and it holds the review lock. A review already recorded under this key
+            # is answered as recorded, also once a refit made another version current: the replay of a lost answer
+            # must not report a recorded review as refused.
             stored = read_json(directory/'reviews.json', {'receipts': {}})
             old = stored.get('receipts', {}).get(receipt_key)
             if old:
                 if old['fingerprint'] != fingerprint:
                     raise PipelineError('idempotency_conflict', '같은 요청 식별자의 검수 내용이 변경되었습니다.', 409)
                 return deepcopy(old['review'])
+            # Every artifact is hashed and the model read and inspected under the review lock alone. The process lock is
+            # taken last, to see the same sealed assembly still current and write the review.
+            record = self._reviewable(directory, version, expected)
+            if not self.intact(directory, record):
+                raise PipelineError('artifact_changed', '조립 산출물 검증을 통과하지 못했습니다.', 409)
             from src.services.avatar_native_parts import expression_pending
             if expression_pending(job_directory, version):
                 raise PipelineError('expression_pending', '표정 적용이 완료된 뒤 검수해 주세요.', 409)

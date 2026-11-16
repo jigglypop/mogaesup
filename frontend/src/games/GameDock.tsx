@@ -20,8 +20,9 @@ function layoutFor(room: GameRoomValue, session: GameSession, options: unknown):
 
 /**
  * The 게임 button and its panel: the games to open; a lobby's players with 참가·나가기 and the host's 시작; the game's
- * own panel while it plays; its result once it ends, with the host's 다시 하기. 닫기 for whoever may close the session
- * (its host, and the island's owner). Shown while the viewer is in the island's live room.
+ * own panel while it plays; its result once it ends, with the host's 다시 하기. 닫기 for whoever may close the session (its
+ * host, the island's owner, or whoever the server says may) in the lobby and once it has ended; a game under way goes on,
+ * but its host may still close it. Shown while the viewer is in the island's live room.
  */
 export function GameDock() {
   const room = useGameRoom();
@@ -62,7 +63,9 @@ export function GameDock() {
   const definition = gameOf(session?.kind);
   const count = session?.players.length ?? 0;
   const host = !!session && session.host === session.you;
-  const closer = !!session?.canClose;
+  const owner = !!room.owner;
+  // Who may close the session: its host, and the island's owner whoever hosts it (the server says so too: `canClose`).
+  const closer = host || owner || !!session?.canClose;
   const fold = () => {
     setOpen(false);
     toggle.current?.focus();
@@ -156,7 +159,7 @@ export function GameDock() {
       <>
         {active && Panel && <Panel {...active.props} />}
         {active && Result && <Result {...active.props} result={active.result} />}
-        {(plays || closer) && (
+        {(plays || (ended && closer)) && (
           <div className="mg-game-actions">
             {plays && ended && host && (
               <button type="button" className="mg-btn is-small is-primary" onClick={() => client.open(session.kind)}>
@@ -168,7 +171,7 @@ export function GameDock() {
                 나가기
               </button>
             )}
-            {closer && (
+            {(host || (ended && closer)) && (
               <button type="button" className="mg-btn is-small is-quiet" onClick={client.close}>
                 닫기
               </button>

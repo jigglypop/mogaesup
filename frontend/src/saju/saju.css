@@ -1,0 +1,473 @@
+/* 사주 마을: a member's 섬. The village's canvas fills the window, and the page's own pieces float over it in the
+   app's glass: the title, the story panel with its tab menu, and the row of buttons along the bottom. */
+
+.mg-saju {
+  --el: var(--mg-primary);
+  --el-soft: var(--mg-primary-soft);
+  --el-ink: var(--mg-primary);
+}
+.mg-saju[data-element='wood'], .mg-saju [data-element='wood'] { --el: var(--mg-wood); --el-soft: var(--mg-wood-soft); --el-ink: var(--mg-wood-ink); }
+.mg-saju[data-element='fire'], .mg-saju [data-element='fire'] { --el: var(--mg-fire); --el-soft: var(--mg-fire-soft); --el-ink: var(--mg-fire-ink); }
+.mg-saju[data-element='earth'], .mg-saju [data-element='earth'] { --el: var(--mg-earth); --el-soft: var(--mg-earth-soft); --el-ink: var(--mg-earth-ink); }
+.mg-saju[data-element='metal'], .mg-saju [data-element='metal'] { --el: var(--mg-metal); --el-soft: var(--mg-metal-soft); --el-ink: var(--mg-metal-ink); }
+.mg-saju[data-element='water'], .mg-saju [data-element='water'] { --el: var(--mg-water); --el-soft: var(--mg-water-soft); --el-ink: var(--mg-water-ink); }
+.mg-saju-pixel { display: block; flex: none; }
+
+/* The window: the lake's own colours until the canvas has drawn. `--mg-column` is how wide the story panel stands as
+   a column and `--mg-side` how wide it is now (the 명반 widens it). */
+.mg-saju-world {
+  --mg-column: 392px;
+  --mg-side: var(--mg-column);
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--mg-saju-lake-top), var(--mg-saju-lake-bottom));
+}
+/* Nothing here scrolls the page, so a drag past a panel's end must not pull-to-refresh or bounce it. A second quick tap
+   (on the zoom, say) is a second press, never the page zooming in; two fingers still zoom it. */
+html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: none; }
+.mg-saju-world { touch-action: manipulation; }
+
+/* The title in the top bar: the home's mark, whose 섬 it is, and TODAY and TOTAL as one counts its visitors. What
+   the bar has no room for is cut at the pill's edge, never drawn over the actions beside it. */
+.mg-saju-bar { gap: 10px; min-width: 0; padding: 0 16px 0 7px; overflow: hidden; }
+.mg-saju-bar-mark { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 12px; background: var(--el-soft); color: var(--el-ink); }
+.mg-saju-bar-title { min-width: 0; overflow: hidden; font-size: 15px; font-weight: 850; letter-spacing: -0.02em; text-overflow: ellipsis; white-space: nowrap; }
+.mg-saju-visits { margin: 0; font-family: var(--mg-mono); font-size: 11px; color: var(--mg-muted); white-space: nowrap; }
+.mg-saju-visits b { color: var(--mg-ink); }
+/* The actions keep their size and the title gives way. The left group is no wider than its pieces: the water between
+   it and the actions is the picture's to turn and zoom. */
+.mg-saju-world .mg-topbar-left { flex: 0 1 auto; }
+.mg-saju-world .mg-topbar-right { flex: none; }
+/* Over a picture the glass is the stronger one: muted and tinted text on it keeps its contrast whatever lies behind. */
+.mg-saju-world .mg-saju-bar, .mg-saju-world .mg-search, .mg-saju-world .mg-saju-panel { background: var(--mg-glass-strong); }
+
+/* The canvas, edge to edge. */
+.mg-saju-stage { position: absolute; inset: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.mg-saju-canvas { position: absolute; inset: 0; }
+/* The picture turns with a drag to either side, and zooms with the wheel or two fingers. */
+.mg-saju-canvas { cursor: grab; user-select: none; -webkit-user-select: none; }
+.mg-saju-canvas[data-turning], .mg-saju-canvas[data-turning] canvas { cursor: grabbing !important; }
+/* Every gesture on the picture is the picture's: nothing under it scrolls. */
+.mg-saju-canvas canvas { display: block; touch-action: none; }
+.mg-saju-pin { touch-action: none; }
+/* The middle of what the page's pieces leave open of the canvas (the page says how much they cover): where the wait
+   and a canvas that cannot be made are shown, not under a panel. */
+.mg-saju-canvas {
+  --open-x: calc((100% + var(--mg-cover-left, 0px) - var(--mg-cover-right, 0px)) / 2);
+  --open-y: calc((100% + var(--mg-cover-top, 0px) - var(--mg-cover-bottom, 0px)) / 2);
+}
+.mg-saju-canvas-failed {
+  position: absolute;
+  left: var(--open-x);
+  top: var(--open-y);
+  width: max-content;
+  max-width: calc(100% - var(--mg-cover-left, 0px) - var(--mg-cover-right, 0px) - var(--mg-edge) * 2);
+  margin: 0;
+  padding: 10px 16px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--mg-line);
+  border-radius: 14px;
+  background: var(--mg-glass-strong);
+  color: var(--mg-ink);
+  font-size: 14px;
+  font-weight: 750;
+  text-align: center;
+}
+/* The canvas comes up out of the lake's colours once its first frames are drawn; until then three pixels count the wait. */
+.mg-saju-canvas > div { opacity: 0; transition: opacity 0.6s ease; }
+.mg-saju-canvas[data-drawn] > div { opacity: 1; }
+.mg-saju-canvas::before { content: ''; position: absolute; left: var(--open-x); top: var(--open-y); width: 8px; height: 8px; margin: -4px 0 0 -4px; background: rgba(255, 255, 255, 0.85); box-shadow: -16px 0 rgba(255, 255, 255, 0.85), 16px 0 rgba(255, 255, 255, 0.85); animation: mg-saju-wait 1s steps(4) infinite; }
+.mg-saju-canvas[data-drawn]::before { content: none; }
+/* A canvas that could not be made has nothing to wait for. (A rule of its own: a browser without :has() keeps the one above.) */
+.mg-saju-canvas:has(> .mg-saju-canvas-failed)::before { content: none; }
+@keyframes mg-saju-wait { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .mg-saju-canvas::before { animation: none; }
+}
+/* The labels' layer cuts what leaves it and never scrolls: a label past its edge that took the keyboard's focus would
+   otherwise pull the layer after it, and every label off its island. */
+.mg-saju-pins { position: absolute; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
+.mg-saju-pin {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  justify-items: center;
+  padding: 5px 11px 6px;
+  border: 2px solid var(--mg-ink);
+  border-radius: 10px;
+  background: var(--mg-glass-strong);
+  box-shadow: 3px 3px 0 var(--mg-saju-edge);
+  color: var(--mg-ink);
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+  pointer-events: auto;
+  will-change: transform;
+  /* Out of sight, and out of the pointer's and the keyboard's reach, until the canvas has put it over its island. */
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.3s ease;
+}
+.mg-saju-pin[data-placed] { opacity: 1; visibility: visible; }
+.mg-saju-pin small { font-size: 10px; font-weight: 750; color: var(--el-ink); }
+.mg-saju-pin::before { content: ''; position: absolute; left: 50%; bottom: -7px; width: 8px; height: 8px; margin-left: -4px; background: var(--el); border: 2px solid var(--mg-ink); border-radius: 2px; }
+@media (hover: hover) {
+  .mg-saju-pin:hover { background: var(--mg-card); }
+}
+
+/* What 궁합 found, said over the two homes, in the middle of the open water. A drag across it turns the picture. */
+.mg-saju-say {
+  position: absolute;
+  z-index: 16;
+  pointer-events: none;
+  top: calc(var(--mg-edge) + 72px);
+  left: 50%;
+  width: max-content;
+  max-width: calc(100% - var(--mg-edge) * 3);
+  padding: 10px 16px;
+  transform: translateX(-50%);
+  border: 2px solid var(--mg-ink);
+  border-radius: 12px;
+  background: var(--mg-glass-strong);
+  box-shadow: 4px 4px 0 var(--mg-saju-edge);
+  font-size: 15px;
+  font-weight: 850;
+  letter-spacing: -0.02em;
+  text-align: center;
+  animation: mg-saju-pop 0.35s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+@keyframes mg-saju-pop { from { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(0.94); } }
+
+/* Along the bottom of the open water, in one row: the picture to save and the zoom (and under a folded sheet, at the
+   row's end, the button that opens it). The dock is as wide as the water is open and only its pieces take the pointer;
+   how wide it is tells them how much room they have. */
+.mg-saju-dock {
+  position: absolute;
+  z-index: 17;
+  left: var(--mg-edge);
+  right: var(--mg-edge);
+  bottom: var(--mg-edge);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  container: mg-saju-dock / inline-size;
+  pointer-events: none;
+}
+.mg-saju-dock > * { pointer-events: auto; }
+.mg-saju-world.has-panel .mg-saju-dock { right: calc(var(--mg-side) + var(--mg-edge) * 2); }
+.mg-saju-world.has-panel .mg-saju-say { left: calc(50% - (var(--mg-side) + var(--mg-edge)) / 2); max-width: calc(100% - var(--mg-side) - var(--mg-edge) * 4); }
+/* The row's buttons are one glass, the strong one over the picture, and one height. */
+.mg-saju-dock > .mg-btn, .mg-saju-zoom {
+  height: 48px;
+  border: 1px solid var(--mg-line);
+  border-radius: 999px;
+  background: var(--mg-glass-strong);
+  box-shadow: var(--mg-shadow-soft);
+  backdrop-filter: var(--mg-blur);
+  -webkit-backdrop-filter: var(--mg-blur);
+}
+.mg-saju-zoom { display: flex; align-items: center; gap: 2px; padding: 0 3px; }
+.mg-saju-zoom .mg-icon-btn { width: 40px; height: 40px; }
+/* Over the dock, however many rows it stands in. */
+.mg-saju-toast { position: absolute; z-index: 3; left: 50%; bottom: calc(100% + 12px); display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px 16px; transform: translateX(-50%); border-radius: 999px; font-size: 13px; font-weight: 750; white-space: nowrap; }
+.mg-saju-toast svg { width: 16px; height: 16px; color: var(--mg-good); }
+/* Where a picture is drawn: off the page, at the picture's own size. */
+.mg-saju-snapshot { position: fixed; top: 0; left: -99999px; pointer-events: none; }
+/* Short of room for the save button's name beside the zoom, the button keeps its icon, and its name for a screen
+   reader. (Under a folded sheet it gives way sooner, to the button that opens the sheet: see the phone's rules.) */
+@container mg-saju-dock (max-width: 319px) {
+  .mg-saju-save { width: 48px; padding: 0; }
+  .mg-saju-save span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+
+/* The story panel: glass over the right of the picture, with the tab menu at its head. It folds away. `--pad` is its
+   padding, which the column inside reaches back over to scroll edge to edge. */
+.mg-saju-panel {
+  --pad: 16px;
+  position: absolute;
+  z-index: 18;
+  top: calc(var(--mg-edge) + 72px);
+  right: var(--mg-edge);
+  bottom: var(--mg-edge);
+  width: var(--mg-side);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: var(--pad);
+}
+/* Folded it stays in the page (keeping what was typed in it), out of sight. */
+.mg-saju-panel[hidden] { display: none; }
+.mg-saju-panel-close { position: absolute; top: 14px; right: 12px; }
+/* The 명반's panel widens over the picture; a window too narrow for that keeps the one width. */
+.mg-saju-panel-roomy { position: absolute; top: 14px; right: 54px; }
+.mg-saju-panel { transition: width 0.25s ease; }
+@media (min-width: 1101px) and (min-height: 501px) {
+  .mg-saju-world.is-roomy { --mg-side: min(760px, calc(100vw - var(--mg-edge) * 3 - 260px)); }
+  /* The menu keeps one box on every tab and at both widths, so no tab moves under the pointer that pressed it: the
+     widen button's place beside it is kept on the tabs without one, and the panel grows to the menu's left. (34px is
+     the panel's own padding and edge, 86px the two buttons.) */
+  .mg-saju-panel .mg-saju-menu { align-self: flex-end; width: calc(var(--mg-column) - 34px - 86px); margin-right: 86px; }
+}
+@media (max-width: 1100px), (max-height: 500px) {
+  .mg-saju-panel-roomy { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mg-saju-panel { transition: none; }
+}
+/* Folded, the panel opens from a button the dock holds. Beside a column it stands at the column's head, where the
+   panel's own button was: fixed to the window, out of the row. Under a sheet the row keeps it (see below). */
+.mg-saju-panel-open { position: fixed; top: calc(var(--mg-edge) + 72px); right: var(--mg-edge); max-width: var(--mg-side); }
+.mg-saju-panel-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The tab menu, the open tab in the home's colour. */
+.mg-saju-menu { display: flex; gap: 4px; margin-right: 44px; padding: 4px; border-radius: 16px; background: var(--mg-tint); }
+.mg-saju-menu a { flex: 1; display: grid; place-items: center; height: 38px; border-radius: 12px; color: var(--mg-muted); font-size: 13px; font-weight: 800; text-decoration: none; transition: color 0.15s, background 0.15s; }
+.mg-saju-menu a[aria-current='page'] { background: var(--el); color: var(--mg-accent-ink); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
+@media (hover: hover) {
+  .mg-saju-menu a:hover:not([aria-current='page']) { color: var(--mg-ink); }
+}
+.mg-saju-side { flex: 1; display: flex; flex-direction: column; gap: 12px; min-height: 0; margin: 0 calc(var(--pad) * -1) calc(var(--pad) * -1); padding: 2px var(--pad) var(--pad); border-radius: 0 0 var(--mg-r-panel) var(--mg-r-panel); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* The column's own focus ring lies on the panel's edge, clear of the first card. */
+.mg-saju-side:focus-visible { outline-offset: -1px; }
+.mg-saju-side > * { flex: none; }
+.mg-saju-side .mg-heading { display: flex; align-items: baseline; gap: 6px; }
+.mg-saju-side .mg-heading b { color: var(--el-ink); }
+.mg-saju-side .mg-heading small { font-size: 12px; font-weight: 650; color: var(--mg-muted); }
+.mg-saju-card { display: grid; gap: 10px; padding: 14px; background: var(--mg-card); border: 1px solid var(--mg-hair); border-radius: var(--mg-r-card); }
+
+.mg-saju-who { position: relative; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px; }
+.mg-saju-who-mark { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: var(--el-soft); color: var(--el-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
+.mg-saju-who-text { display: grid; gap: 8px; min-width: 0; }
+.mg-saju-who-edit { justify-self: start; }
+.mg-saju-badge { font-size: 16px; font-weight: 850; letter-spacing: -0.025em; line-height: 1.3; color: var(--el-ink); }
+.mg-saju-notes { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.mg-saju-notes .mg-chip { height: 26px; padding: 0 9px; }
+
+/* One block a character, lit in the element's colour. */
+.mg-saju-gauge { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.mg-saju-gauge li { display: grid; grid-template-columns: 58px minmax(0, 1fr) 38px; align-items: center; gap: 8px; }
+.mg-saju-gauge-name { display: flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 800; color: var(--el-ink); }
+.mg-saju-gauge-name small { font-size: 11px; font-weight: 650; opacity: 0.75; }
+.mg-saju-gauge-bar { display: flex; gap: 3px; }
+.mg-saju-gauge-bar i { flex: 1; height: 14px; border-radius: 3px; background: var(--mg-tint); }
+.mg-saju-gauge-bar i.is-lit { background: var(--el); box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.1); }
+.mg-saju-gauge b { font-family: var(--mg-mono); font-size: 12px; font-weight: 700; text-align: right; }
+
+.mg-saju-bridge-line { font-size: 15px; font-weight: 850; letter-spacing: -0.02em; line-height: 1.35; }
+.mg-saju-bridge.is-built { border-color: transparent; background: linear-gradient(135deg, var(--mg-primary-soft), var(--mg-accent-soft)); }
+.mg-saju-bridge.is-built .mg-btn { justify-self: start; }
+
+.mg-saju-guestbook { display: grid; gap: 10px; }
+
+/* The card a home is built from. It lays the hour's two fields out by its own width, which is a sheet's or a column's. */
+.mg-saju-form { gap: 14px; container: mg-saju-form / inline-size; }
+.mg-saju-form .mg-tabs > button { height: 34px; font-size: 13px; }
+.mg-saju-date { display: grid; grid-template-columns: 1.5fr auto 1fr auto 1fr auto; align-items: center; gap: 6px; }
+.mg-saju-date span { font-size: 13px; font-weight: 700; color: var(--mg-muted); }
+.mg-saju-date .mg-field, .mg-saju-time .mg-field { padding: 0 10px; text-align: center; }
+.mg-saju-time { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 6px; }
+.mg-saju-time select.mg-field { text-align: left; }
+/* Side by side in a narrow card the 시진's hours are cut off, and sooner at a touch screen's larger type: one under
+   the other there. */
+@container mg-saju-form (max-width: 289px) {
+  .mg-saju-time { grid-template-columns: minmax(0, 1fr); }
+}
+@media (pointer: coarse) {
+  @container mg-saju-form (max-width: 349px) {
+    .mg-saju-time { grid-template-columns: minmax(0, 1fr); }
+  }
+}
+.mg-saju-form-foot { display: flex; justify-content: space-between; }
+
+/* 사주보기. */
+.mg-saju-chart { display: grid; gap: 12px; }
+.mg-saju-pillars, .mg-saju-twelve { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: center; font-size: 12.5px; }
+.mg-saju-pillars th, .mg-saju-twelve th { padding: 5px 2px; font-size: 11.5px; font-weight: 800; color: var(--mg-muted); }
+.mg-saju-pillars th[scope='row'], .mg-saju-twelve th[scope='row'], .mg-saju-twelve thead th:first-child { width: 58px; text-align: left; }
+.mg-saju-pillars td, .mg-saju-twelve td { padding: 5px 2px; border-top: 1px solid var(--mg-hair); font-weight: 650; }
+.mg-saju-pillars thead td { border-top: 0; }
+.mg-saju-glyph { display: grid; justify-items: center; gap: 1px; padding: 6px 0 5px; border-radius: 10px; background: var(--el-soft); color: var(--el-ink); }
+.mg-saju-glyph b { font-size: 23px; font-weight: 800; line-height: 1.1; }
+.mg-saju-glyph small { font-size: 11px; font-weight: 750; }
+.mg-saju-pillars td:has(.mg-saju-glyph) { padding: 3px; border-top: 0; }
+.mg-saju-sinsal { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.mg-saju-sinsal .mg-chip { height: 26px; padding: 0 9px; }
+.mg-saju-sinsal .mg-chip[data-kind='귀인'] { background: var(--mg-good-soft); color: var(--mg-good); }
+.mg-saju-sinsal .mg-chip small { font-size: 10.5px; font-weight: 700; opacity: 0.75; }
+.mg-saju-dayun { display: flex; gap: 6px; margin: 0 -14px -4px; padding: 2px 14px 8px; overflow-x: auto; list-style: none; scrollbar-width: thin; }
+.mg-saju-dayun li { display: grid; justify-items: center; gap: 1px; flex: none; min-width: 58px; padding: 8px 6px; border: 1px solid var(--mg-hair); border-radius: 12px; background: var(--mg-tint); }
+.mg-saju-dayun li b { font-size: 14px; font-weight: 850; }
+.mg-saju-dayun li span { font-size: 12px; color: var(--mg-muted); }
+.mg-saju-dayun li small { font-family: var(--mg-mono); font-size: 10.5px; color: var(--mg-muted); }
+.mg-saju-dayun li[aria-current='true'] { border: 2px solid var(--mg-ink); background: var(--el-soft); box-shadow: 2px 2px 0 var(--mg-saju-edge); }
+
+/* 사주 풀이 and 자미두수 풀이 at the head of their tabs: the summary, then each section under its title. The head's
+   buttons (the PDF, and the owner's) stand at its right and go under the title when the card is narrow. */
+.mg-saju-reading { gap: 12px; }
+.mg-saju-reading-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.mg-saju-reading-head .mg-heading { margin-right: auto; }
+.mg-saju-reading-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.mg-saju-reading-actions > .mg-btn { height: 32px; padding: 0 12px; font-size: 13px; }
+.mg-saju-reading-actions > .mg-btn svg { width: 16px; height: 16px; }
+.mg-saju-reading-summary { display: grid; gap: 6px; font-size: 15px; font-weight: 750; line-height: 1.6; letter-spacing: -0.015em; }
+.mg-saju-reading-part { display: grid; gap: 6px; padding-top: 12px; border-top: 1px solid var(--mg-hair); }
+.mg-saju-reading-part h3 { font-size: 13.5px; font-weight: 850; letter-spacing: -0.01em; color: var(--el-ink); }
+.mg-saju-reading-part p { font-size: 13.5px; line-height: 1.7; }
+.mg-saju-reading-retry, .mg-saju-picture-again { justify-self: start; }
+/* Something being written or drawn: what is being done, over a thin bar that slides while it goes on. */
+.mg-saju-making { display: grid; gap: 8px; font-size: 13px; font-weight: 700; color: var(--mg-muted); }
+.mg-saju-making .mg-progress { width: 100%; height: 4px; }
+
+/* 섬 그림: the island drawn again, opening larger on a press. In a sheet as wide as a tablet it keeps a column's size. */
+.mg-saju-picture-open { display: block; width: 100%; max-width: 420px; padding: 0; overflow: hidden; border: 2px solid var(--mg-ink); border-radius: 14px; background: var(--el-soft); box-shadow: 3px 3px 0 var(--mg-saju-edge); cursor: zoom-in; }
+.mg-saju-picture-open img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; transition: transform 0.2s ease; }
+@media (hover: hover) {
+  .mg-saju-picture-open:hover img { transform: scale(1.02); }
+}
+.mg-saju-picture-view { position: relative; width: min(1024px, 100%, calc(100vh - var(--mg-edge) * 2)); }
+@supports (height: 1dvh) {
+  .mg-saju-picture-view { width: min(1024px, 100%, calc(100dvh - var(--mg-edge) * 2)); }
+}
+.mg-saju-picture-view img { display: block; width: 100%; height: auto; aspect-ratio: 1; border: 2px solid var(--mg-ink); border-radius: 18px; background: var(--mg-surface); box-shadow: var(--mg-shadow); }
+.mg-saju-picture-close { position: absolute; top: 10px; right: 10px; background: var(--mg-glass-strong); }
+
+/* 깃발 섬: ten blocks, one an 이웃, lit in the home's colour. */
+.mg-saju-flag .mg-saju-gauge-bar i { height: 12px; }
+
+/* 마을 주민. */
+.mg-saju-villagers { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.mg-saju-villager { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; padding: 12px; color: var(--mg-ink); text-decoration: none; transition: transform 0.15s, box-shadow 0.15s; }
+@media (hover: hover) {
+  .mg-saju-villager:hover { transform: translateY(-2px); box-shadow: var(--mg-shadow-soft); }
+}
+@media (hover: none) {
+  .mg-saju-villager:active { transform: scale(0.98); }
+}
+.mg-saju-villager.is-lot { border: 2px dotted var(--mg-hair-strong); background: transparent; }
+.mg-saju-villager-mark { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: var(--el-soft); color: var(--el-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
+.mg-saju-villager-text { display: grid; gap: 2px; min-width: 0; }
+.mg-saju-villager-text b { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 15px; font-weight: 850; }
+.mg-saju-villager-text small { overflow: hidden; font-size: 12px; color: var(--mg-muted); text-overflow: ellipsis; white-space: nowrap; }
+.mg-saju-mix { display: flex; gap: 2px; margin-top: 4px; }
+.mg-saju-mix i { flex: 1; max-width: 26px; height: 6px; border-radius: 2px; background: var(--el); }
+
+/* The title keeps its room in the top bar before anything else there. The visit counts go first. */
+@media (max-width: 1100px) {
+  .mg-saju-visits { display: none; }
+}
+/* Then the page's own actions keep their icons, and their names for a screen reader. */
+@media (max-width: 860px) {
+  .mg-saju-world .mg-topbar-right > .mg-btn.mg-saju-action { width: 40px; height: 40px; padding: 0; }
+  .mg-saju-action span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  @media (pointer: coarse) {
+    .mg-saju-world .mg-topbar-right > .mg-btn.mg-saju-action { width: 44px; height: 44px; }
+  }
+}
+/* The narrowest window that still has the search box takes a little of the box for the title. */
+@media (min-width: 721px) and (max-width: 760px) {
+  .mg-saju-world .mg-search { width: 170px; }
+  .mg-saju-world .mg-search input { text-overflow: ellipsis; }
+}
+@media (max-width: 720px) {
+  .mg-saju-bar { gap: 8px; padding: 0 12px 0 6px; }
+  .mg-saju-bar-mark { width: 32px; height: 32px; }
+  .mg-saju-world .mg-topbar-right { gap: 6px; }
+  .mg-saju-world .mg-topbar-right > .mg-btn { padding: 0 10px; font-size: 12px; }
+  /* The bell's list and the account menu open as a sheet under the top bar, as on the app's pages: anchored to their
+     buttons they would run off a narrow phone's left edge. */
+  .mg-saju-world .mg-topbar .mg-menu { position: fixed; top: calc(var(--mg-edge) + 54px); left: var(--mg-edge); right: var(--mg-edge); min-width: 0; }
+  .mg-saju-pin { padding: 3px 8px 4px; font-size: 12px; }
+}
+/* A phone's bar has the search's button besides (see the shell): a visitor's way to their own home is the 내 집
+   button, in the brand's place. */
+@media (max-width: 720px) {
+  .mg-saju-world .mg-topbar:has(.mg-saju-action.is-mine) .mg-brand { display: none; }
+}
+/* On a narrow phone the name takes the mark's room, */
+@media (max-width: 440px) {
+  .mg-saju-bar { padding: 0 14px; }
+  .mg-saju-bar-mark { display: none; }
+}
+/* and on the narrowest the name's room is the brand's and the 내 집 button's too: the menu's 내 집 (or 로그인) goes where
+   they went. */
+@media (max-width: 360px) {
+  .mg-saju-world .mg-topbar .mg-brand, .mg-saju-world .mg-topbar-right > .mg-btn.mg-saju-action.is-mine { display: none; }
+}
+
+/* Where the story panel lies. A column at the right is its place; three kinds of window have another, and the page
+   tells them apart as these rules do: it measures the panel to fit the picture beside a column or above a sheet
+   (useCover), and starts the panel folded on a phone (panelFits). */
+
+/* A phone held upright: the panel is a sheet along the bottom, and the dock sits on the sheet (or, with the sheet
+   folded, along the bottom, ending in the button that opens it). The sheet leaves the picture 150px at the least,
+   between the top bar and the dock: 126px is what the top bar and the dock take. A phone whose browser makes the page
+   shorter for its keyboard is still upright: the sheet stays a sheet while something in it is typed into. */
+@media (max-width: 720px) and (min-height: 501px), (max-width: 720px) and (orientation: portrait) {
+  .mg-saju-world { --mg-sheet: min(46vh, calc(100vh - 126px - 150px)); }
+  @supports (height: 1dvh) {
+    .mg-saju-world { --mg-sheet: min(46dvh, calc(100dvh - 126px - 150px)); }
+  }
+  .mg-saju-panel { --pad: 14px; top: auto; left: var(--mg-edge); right: var(--mg-edge); bottom: var(--mg-edge); width: auto; height: var(--mg-sheet); }
+  /* The sheet folds down, not to the side. */
+  .mg-saju-panel-close svg { transform: rotate(90deg); }
+  /* Folded, the sheet opens from the end of the row, where it folded away; the save button keeps its icon alone first. */
+  .mg-saju-panel-open { position: static; min-width: 0; max-width: none; margin-left: auto; }
+  @container mg-saju-dock (max-width: 559px) {
+    .mg-saju-save:has(~ .mg-saju-panel-open) { width: 48px; padding: 0; }
+    .mg-saju-save:has(~ .mg-saju-panel-open) span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  }
+  .mg-saju-world.has-panel .mg-saju-dock { right: var(--mg-edge); bottom: calc(var(--mg-edge) + var(--mg-sheet) + 8px); }
+  .mg-saju-say, .mg-saju-world.has-panel .mg-saju-say { top: calc(var(--mg-edge) + 60px); left: 50%; max-width: calc(100% - var(--mg-edge) * 2); font-size: 14px; }
+}
+/* An upright tablet: a column would leave the picture a strip beside it, so the panel lies as a sheet along the
+   bottom, and the dock sits on it. Folded, the sheet opens from the end of the row, as on a phone. */
+@media (min-width: 721px) and (max-width: 900px) and (orientation: portrait) {
+  .mg-saju-world { --mg-sheet: 46vh; }
+  @supports (height: 1dvh) {
+    .mg-saju-world { --mg-sheet: 46dvh; }
+  }
+  .mg-saju-panel { top: auto; left: var(--mg-edge); width: auto; height: var(--mg-sheet); }
+  .mg-saju-panel-close svg { transform: rotate(90deg); }
+  .mg-saju-panel-open { position: static; min-width: 0; max-width: none; margin-left: auto; }
+  .mg-saju-world.has-panel .mg-saju-dock { right: var(--mg-edge); bottom: calc(var(--mg-edge) + var(--mg-sheet) + 8px); }
+  .mg-saju-world.has-panel .mg-saju-say { left: 50%; max-width: calc(100% - var(--mg-edge) * 3); }
+}
+/* A short window (a phone on its side): slim bars (see the shell) and a narrower column. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .mg-saju-world { --mg-column: 340px; }
+  .mg-saju-panel, .mg-saju-panel-open, .mg-saju-say { top: calc(var(--mg-edge) + 58px); }
+  .mg-saju-panel { --pad: 12px; gap: 10px; }
+}
+/* A short window that is narrow too: the column is narrower still, with tabs as wide as their names (and on a touch
+   screen as wide as a fingertip, which the narrowest column still has room for). */
+@media (max-height: 500px) and (max-width: 720px) and (orientation: landscape) {
+  .mg-saju-world { --mg-column: clamp(300px, 46vw, 340px); }
+  .mg-saju-menu a { flex: 1 1 auto; padding: 0 2px; }
+}
+
+/* A touch screen: everything pressed on the page is a fingertip (44px) at the least. */
+@media (pointer: coarse) {
+  /* The zoom's two buttons fill its pill. */
+  .mg-saju-zoom { padding: 0 1px; }
+  .mg-saju-zoom .mg-icon-btn { width: 44px; height: 44px; }
+  /* The tabs, and the fold in the middle of their height, in the room the menu leaves it. */
+  .mg-saju-menu { margin-right: 48px; }
+  .mg-saju-menu a { height: 44px; min-width: 44px; }
+  .mg-saju-panel .mg-icon-btn.mg-saju-panel-close, .mg-saju-panel .mg-icon-btn.mg-saju-panel-roomy { top: calc(var(--pad) + 4px); width: 44px; height: 44px; }
+  .mg-saju-panel-close { right: calc(var(--pad) + 2px); }
+  .mg-saju-panel-roomy { right: calc(var(--pad) + 48px); }
+  @media (min-width: 1101px) and (min-height: 501px) {
+    .mg-saju-panel .mg-saju-menu { width: calc(var(--mg-column) - 34px - 96px); margin-right: 96px; }
+  }
+  /* In the story: the buttons, the choices, the fields, the checks and the links in its text. */
+  .mg-saju-panel .mg-saju-side .mg-btn, .mg-saju-side .mg-tabs > button, .mg-saju-side input.mg-field, .mg-saju-side select.mg-field { height: 44px; }
+  .mg-saju-side .mg-check { min-height: 44px; }
+  .mg-saju-side .mg-link { padding: 14px 8px; margin: -14px -8px; }
+  /* A guestbook writer's initial is pressed in a fingertip's reach about it, at the size it is. */
+  .mg-saju-side .mg-entries .mg-avatar { width: 44px; height: 44px; border: 4px solid transparent; border-radius: 16px; margin: -4px; background-clip: padding-box; }
+  /* So is a label over the picture. */
+  .mg-saju-pin::after { content: ''; position: absolute; inset: -10px -4px; }
+}

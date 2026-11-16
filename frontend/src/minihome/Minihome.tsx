@@ -36,7 +36,7 @@ import { EditBar, EditHelp, SaveBanners, StartBanner } from './edit/EditChrome';
 import { createEditHistory, readParts, sameParts } from './edit/history';
 import { arriveAtStart, changeIsland, createIslandBackup, restoreIsland } from './edit/islandChange';
 import { IslandChooser, useIslandChooser } from './edit/IslandChooser';
-import { hasUnsaved, heldSavesSettled, leaveIsland } from './edit/leave';
+import { hasUnsaved, heldSavesSettled, leaveIsland, saveUnsaved } from './edit/leave';
 import { createIslandSaver } from './edit/save';
 import { createEditSession } from './edit/session';
 import { useIslandLeaving } from './edit/useIslandLeaving';
@@ -183,8 +183,9 @@ export default function Minihome({ view, viewer, viewerMinime, viewerBalloon, mi
     const session = isOwner ? createEditSession(runtime, history, labels) : null;
     let released = false;
     let stopSession = () => {};
-    // Until the island is let go (left with nothing unsaved, or dropped), signing out asks before losing its edits.
-    const untrack = isOwner ? trackUnsaved(() => !saver.disposed && hasUnsaved(saver.getState())) : () => {};
+    // Until the island is let go (left with nothing unsaved, or dropped), signing out saves its edits first and asks
+    // before losing what could not be saved.
+    const untrack = isOwner ? trackUnsaved(() => !saver.disposed && hasUnsaved(saver.getState()), () => saveUnsaved(saver)) : () => {};
     const release = () => {
       if (released) return;
       released = true;
@@ -354,6 +355,8 @@ export default function Minihome({ view, viewer, viewerMinime, viewerBalloon, mi
     world.history.stop();
     world.history.start();
   };
+  // Leaving saves first (see useIslandLeaving). Going to the island itself keeps it open, so edits the owner chose to
+  // leave without go at once (the stored island is loaded again); any other page closes it, and closing drops them.
   const { leave } = useIslandLeaving({
     saver,
     save,

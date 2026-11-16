@@ -6,6 +6,7 @@ No secret is printed or bundled; credentials stay in root-readable files under /
 import argparse
 import json
 import os
+import re
 import secrets
 import subprocess
 import urllib.parse
@@ -15,6 +16,13 @@ from pathlib import Path
 # (the tokens the gateway signs for the studio, set by set-factory-jwt.py) are kept as the file has them.
 FACTORY_KEYS = ('FACTORY_URL', 'FACTORY_ACCESS', 'FACTORY_PAID_MONTHLY', 'FACTORY_GATEWAY_KEY', 'STUDIO_INSTANCE_ID',
                 'FACTORY_JWT_SECRET', 'FACTORY_JWT_ISSUER', 'FACTORY_JWT_AUDIENCE', 'FACTORY_OWNER_ID')
+# What the server stack's OpenAiKeySecret holds until the key is set by hand (README "배포").
+OPENAI_PLACEHOLDER = 'placeholder'
+# A key server.env can carry on its line: OpenAI's keys are letters, digits, '-' and '_'.
+OPENAI_KEY = re.compile(r'[A-Za-z0-9_-]{20,512}')
+# The OpenAI entries of server.env set by hand on the instance (the models and the monthly budgets), kept as the file has
+# them after the key.
+OPENAI_KEPT = ('OPENAI_BASE_URL', 'OPENAI_READING_MODEL', 'OPENAI_PICTURE_MODEL', 'READINGS_MONTHLY', 'PICTURES_MONTHLY')
 
 
 def parse_args(argv=None):
@@ -30,6 +38,8 @@ def parse_args(argv=None):
     parser.add_argument('--factory-gateway-secret', default='')
     parser.add_argument('--studio-instance-id', default=None)
     parser.add_argument('--model-store', required=True)
+    # The server stack's OpenAiKeySecret. Left out, server.env keeps the OPENAI_API_KEY it has.
+    parser.add_argument('--openai-secret', default=None)
     parser.add_argument('--region', default='ap-northeast-2')
     # The install restarts the service itself, once, after it has swapped the binary (deploy-rust-server.py).
     parser.add_argument('--no-restart', action='store_true')
@@ -91,13 +101,43 @@ def model_sweep(existing):
                        'instance (/etc/mogaesup/server.env) and deploy again')
 
 
-def server_env_lines(args, database_url, ticket_secret, settings, sweep='on'):
-    """server.env, with the model store's sweep as model_sweep() decided."""
+def openai_settings(existing, args, fetch_key):
+    """The OpenAI entries server.env ends with, and what the deploy log says of the key. With --openai-secret the secret
+    decides: OPENAI_API_KEY is its value once it holds a real key, and there is none while it holds the placeholder (or
+    anything that is not a key). Left out, or when the secret cannot be read, the key the file had stays, so a deploy
+    that does not name the secret switches nothing off. The entries in OPENAI_KEPT stay as the file has them."""
+    key, note = existing.get('OPENAI_API_KEY') or None, 'kept as server.env had it'
+    if args.openai_secret:
+        try:
+            value = fetch_key().strip()
+        except subprocess.CalledProcessError:
+            note = 'the secret could not be read; kept as server.env had it'
+        else:
+            if value == OPENAI_PLACEHOLDER:
+                key, note = None, 'the secret holds the placeholder'
+            elif not OPENAI_KEY.fullmatch(value):
+                key, note = None, 'the secret holds no key'
+            else:
+                key, note = value, 'from the secret'
+    settings = {'OPENAI_API_KEY': key} if key else {}
+    settings.update({name: existing[name] for name in OPENAI_KEPT if existing.get(name)})
+    return settings, note
+
+
+def describe_openai(settings, note):
+    """The deploy log's line about the OpenAI API; the key only as set or not."""
+    kept = ''.join(f' {name}={settings[name]}' for name in OPENAI_KEPT if name in settings)
+    return f"OpenAI: OPENAI_API_KEY={'set' if settings.get('OPENAI_API_KEY') else 'not set'} ({note}){kept}"
+
+
+def server_env_lines(args, database_url, ticket_secret, settings, sweep='on', openai=None):
+    """server.env, with the model store's sweep as model_sweep() decided and the OpenAI entries openai_settings() found."""
     origins = [value.strip() for value in args.origin.split(',') if value.strip()]
     return [f'DATABASE_URL={database_url}', 'LISTEN_ADDR=0.0.0.0:8080', f"APP_ORIGIN={','.join(dict.fromkeys(origins))}",
             'COOKIE_SECURE=true', f'REALTIME_TICKET_SECRET={ticket_secret}', f'MODEL_STORE={args.model_store}',
             f'MODEL_SWEEP={sweep}', f'AWS_REGION={args.region}', 'RUST_LOG=info',
-            *(f'{key}={value}' for key, value in settings.items())]
+            *(f'{key}={value}' for key, value in settings.items()),
+            *(f'{key}={value}' for key, value in (openai or {}).items())]
 
 
 def describe_factory(settings):
@@ -197,12 +237,14 @@ def main():
         create_app_role(args, root, password)
     url = (f"postgres://mogaesup_app:{urllib.parse.quote(password, safe='')}@{args.endpoint}:5432/mogaesup"
            f"?sslmode=verify-full&sslrootcert={root}/global-bundle.pem")
-    # The studio gateway settings come from the arguments given and, for the rest, from the file this run replaces; the
-    # model store's sweep from that file.
+    # The studio gateway and OpenAI settings come from the arguments given and, for the rest, from the file this run
+    # replaces; the model store's sweep from that file.
     existing = read_env(config / 'server.env')
     sweep = model_sweep(existing)
     settings = factory_settings(existing, args, lambda: secret_value(args.factory_gateway_secret, args.region))
-    (config / 'server.env').write_text('\n'.join(server_env_lines(args, url, ticket_secret, settings, sweep)) + '\n')
+    openai, openai_note = openai_settings(existing, args, lambda: secret_value(args.openai_secret, args.region))
+    lines = server_env_lines(args, url, ticket_secret, settings, sweep, openai)
+    (config / 'server.env').write_text('\n'.join(lines) + '\n')
     (config / 'server.env').chmod(0o600)
     Path('/etc/systemd/system/mogaesup.service').write_text(SERVICE)
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
@@ -212,6 +254,7 @@ def main():
     print('Application role and service installed. Credentials stay in root-readable configuration.')
     print(describe_factory(settings))
     print(f'Model sweep: {sweep}')
+    print(describe_openai(openai, openai_note))
 
 
 if __name__ == '__main__':

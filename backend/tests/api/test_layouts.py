@@ -213,8 +213,28 @@ def test_definite_provider_refusal_is_a_failure_that_frees_the_request_id(client
         StoreLayouts(1).interpret('사무실', 'ai', 'layout-req-001')
 
 
+@pytest.mark.parametrize('failure', [httpx.ConnectError('offline'), httpx.ConnectTimeout('offline'),
+                                     httpx.PoolTimeout('offline')])
+def test_a_connection_that_never_opened_frees_the_request_id(client, monkeypatch, failure):
+    api, root, _ = client
+    path = root/'avatar-factory/layout-interpretations/1/layout-req-001/record.json'
+    result = {**interpret_rules('카페'), 'interpretation': 'ai'}
+    calls = scripted_provider(monkeypatch, path, [failure, result])
+    body = {'description': '카페', 'mode': 'ai', 'requestId': 'layout-req-001'}
+    unsent = api.post('/api/studio/layouts/interpret', json=body, headers={'Idempotency-Key': 'layout-req-001'})
+    # Nothing left this machine: a 503, which the gateway does not count against the paid budget.
+    assert unsent.status_code == 503 and unsent.json()['error']['code'] == 'layout_ai_unreachable'
+    record = read_json(path)
+    assert record['status'] == 'failed' and record['failure'] == 'layout_ai_unreachable'
+    assert record['errorType'] == type(failure).__name__ and 'providerStatus' not in record
+    again = api.post('/api/studio/layouts/interpret', json=body, headers={'Idempotency-Key': 'layout-req-001'})
+    assert again.status_code == 200 and again.json() == result and len(calls) == 2
+    assert read_json(path)['status'] == 'completed' and read_json(path)['attempt'] == 2
+
+
 @pytest.mark.parametrize('answer', [500, 502, 503, 409, 408, b'{"status": "comp', b'[]',
-                                    httpx.ConnectError('offline'), httpx.RemoteProtocolError('offline')])
+                                    httpx.ReadTimeout('offline'), httpx.WriteError('offline'),
+                                    httpx.RemoteProtocolError('offline')])
 def test_unclear_provider_answers_stay_uncertain_and_are_not_sent_again(client, monkeypatch, answer):
     _, root, _ = client
     path = root/'avatar-factory/layout-interpretations/1/layout-req-001/record.json'

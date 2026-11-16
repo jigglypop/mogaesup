@@ -35,7 +35,7 @@ Parameters:
     Default: mogaesup-runtime-960243570517-ap-northeast-2
   ServerInstanceId:
     Type: String
-    Default: i-0bc178f1e70898d6f
+    Default: i-0c627726afba9f052
   StudioBucket:
     Type: String
     Default: gaesup-character-assets-960243570517-apne2

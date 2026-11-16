@@ -1,3 +1,5 @@
+import './social.css';
+
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { Link } from 'react-router-dom';
@@ -8,13 +10,15 @@ import type { HomeView, Ilchon, IlchonRequest, IlchonStatus, User } from '../api
 import { useSignInPath } from '../auth/signIn';
 import { initialOf, REQUESTS_CHANGED, toneOf } from '../shell/Shell';
 
-type Neighbors = {
+export type Neighbors = {
   list: Ilchon[];
+  /** Whether `list` is what the server answered: not until it has been read, and not when it could not be. */
+  loaded: boolean;
   received: IlchonRequest[];
   status: IlchonStatus | null;
   error: string;
   /** An action is on its way; the others wait for it. */
-  busy: boolean;
+  busy?: boolean;
   act: (action: () => Promise<unknown>) => void;
 };
 
@@ -24,6 +28,7 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
   const viewerId = viewer?.id ?? null;
   const visitor = !!viewer && !view.isOwner;
   const [list, setList] = useState<Ilchon[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [received, setReceived] = useState<IlchonRequest[]>([]);
   const [status, setStatus] = useState<IlchonStatus | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -45,6 +50,7 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
       ]);
       if (mine !== reads.current) return;
       setList(ilchons.ilchons);
+      setLoaded(true);
       setReceived(requests?.received ?? []);
       setStatus(standing);
       setLoadError('');
@@ -83,7 +89,7 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
         setBusy(false);
       });
   }, []);
-  return { list, received, status, error: actError || loadError, busy, act };
+  return { list, loaded, received, status, error: actError || loadError, busy, act };
 }
 
 function Person({ username, name, detail }: { username: string; name: string; detail: string }) {
@@ -100,12 +106,15 @@ function Person({ username, name, detail }: { username: string; name: string; de
   );
 }
 
-export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; viewer: User | null; neighbors: Neighbors }) {
+/**
+ * What can be done about 이웃 here: the owner's waiting requests, and the visitor's own standing with the owner (asking,
+ * a request on its way from either side, or 이웃 already).
+ */
+export function NeighborActions({ view, viewer, neighbors }: { view: HomeView; viewer: User | null; neighbors: Neighbors }) {
   const { username, ownerName } = view.profile;
   const visitor = !!viewer && !view.isOwner;
-  const { list, received, status, error, busy, act } = neighbors;
+  const { received, status, error, busy, act } = neighbors;
   const [asking, setAsking] = useState(false);
-  const signIn = useSignInPath();
 
   const submitRequest = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -118,7 +127,7 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
   };
 
   return (
-    <div className="mg-neighbors">
+    <>
       {received.length > 0 && (
         <section>
           <p className="mg-list-count">
@@ -192,7 +201,22 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
           </button>
         </p>
       )}
+      {error && (
+        <p className="mg-error" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
 
+export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; viewer: User | null; neighbors: Neighbors }) {
+  const { ownerName } = view.profile;
+  const { list } = neighbors;
+  const signIn = useSignInPath();
+  return (
+    <div className="mg-neighbors">
+      <NeighborActions view={view} viewer={viewer} neighbors={neighbors} />
       <p className="mg-list-count">
         이웃 <b>{list.length}</b>
       </p>
@@ -215,11 +239,6 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
           <Link className="mg-btn is-small" to={signIn}>
             로그인
           </Link>
-        </p>
-      )}
-      {error && (
-        <p className="mg-error" role="alert">
-          {error}
         </p>
       )}
     </div>

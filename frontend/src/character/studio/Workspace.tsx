@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { rememberStudioQuery, studioHref } from '../../studio/screens';
 import { usePaidWork } from '../../studio/usage';
+import { isRevisionConflict } from '../api';
 import { factoryApi, type FactoryJob } from '../factory/api';
 import { NativeAssembly } from '../factory/NativeAssembly';
 import { usePolling } from '../use-polling';
@@ -23,9 +24,8 @@ const Generations = lazy(() => import('./Generations'));
 const Emoticons = lazy(() => import('./Emoticons'));
 const Prompts = lazy(() => import('./Prompts'));
 const tabs = { admin: '관리자페이지', animals: '동물', character: '캐릭터', props: '기물', textures: '기본 바닥 타일', emoticons: '2D 이모티콘', prompts: '프롬프트 관리' };
-/** The screens that show the job list, catalog and common body; the others read none of them. */
-const listingTabs: readonly string[] = ['admin', 'character'];
-const unread = () => Promise.resolve(undefined);
+// The read a screen keeps in place of a shared list it does not show.
+const unread = async () => undefined;
 
 export function Workspace() {
   const navigate = useNavigate();
@@ -45,14 +45,13 @@ export function Workspace() {
   const [showInfo, setShowInfo] = useState(false);
   const [deletedAsset, setDeletedAsset] = useState<{ id: string; slot: string; name: string }>();
   const [composeId, setComposeId] = useState('');
-  // The server refreshes its job snapshot every 10 seconds; child screens share these three reads. The workspace opens
-  // on one screen (StudioPage mounts it per screen), so a screen that shows none of them never reads them.
-  const listed = listingTabs.includes(tab);
-  const jobs = usePolling<Awaited<ReturnType<typeof factoryApi.list>> | undefined>(listed ? factoryApi.list : unread, listed ? 10000 : null);
-  const catalog = usePolling<Awaited<ReturnType<typeof studioApi.catalog>> | undefined>(listed ? studioApi.catalog : unread, listed ? 15000 : null);
+  // The server refreshes its job snapshot every 10 seconds; the character and admin screens share these three reads.
+  // The other screens use none of them, so they never read them.
+  const shared = tab === 'character' || tab === 'admin';
+  const jobs = usePolling(shared ? factoryApi.list : unread, shared ? 10000 : null), catalog = usePolling(shared ? studioApi.catalog : unread, shared ? 15000 : null);
   // The base body screen does not use the common body.
-  const profiled = listed && !(tab === 'character' && characterMode === 'body');
-  const bodyProfile = usePolling<Awaited<ReturnType<typeof factoryApi.bodyProfile>> | undefined>(profiled ? factoryApi.bodyProfile : unread, profiled ? 15000 : null);
+  const profiled = shared && !(tab === 'character' && characterMode === 'body');
+  const bodyProfile = usePolling(profiled ? factoryApi.bodyProfile : unread, profiled ? 15000 : null);
   const candidates = (jobs.value?.jobs || []).filter(j => j.production_mode === 'character_parts').sort((a,b) => b.created_at.localeCompare(a.created_at));
   const baseCandidates = candidates.filter(j => !j.base_job_id);
   const composeJob = candidates.find(j => j.id === composeId && !isCatalogJobDeleted(j, catalog.value));
@@ -108,7 +107,11 @@ export function Workspace() {
   async function perform(action: () => Promise<void>) {
     if (locked.current) return;
     locked.current = true; setBusy(true); setError('');
-    try { await action(); } catch (e) { setError((e as Error).message); }
+    try { await action(); } catch (e) {
+      setError((e as Error).message);
+      // Someone saved first: the revision sent is stale, so read the lists again before the next try.
+      if (isRevisionConflict(e)) await Promise.all([catalog.refresh(), bodyProfile.refresh()]);
+    }
     finally { locked.current = false; setBusy(false); }
   }
   const name = (j: FactoryJob) => catalog.value?.parts?.[`${j.id}:${j.requested_slots?.[0] || 'body'}`]?.name || catalog.value?.items[j.id]?.name || j.part_name || `${j.character_name} · ${new Date(j.created_at).toLocaleString()}`;
@@ -123,7 +126,7 @@ export function Workspace() {
     {tab === 'admin' && <div className="workspace-content admin-library"><div className="workspace-heading"><h1>에셋 라이브러리</h1><div className="admin-heading-actions">{paid && <><button onClick={() => navigate(studioHref({ tab: 'character', mode: 'body' }))}>기본 몸 추가</button><button onClick={() => choosePart('hair')}>헤어 생성</button></>}<button aria-expanded={showUploads} onClick={() => setShowUploads(value => !value)}>GLB 등록</button></div></div>
         {deletedAsset && <div className="asset-delete-notice" role="status"><span>{deletedAsset.name} · 휴지통으로 이동했습니다.</span><button disabled={busy || !catalog.value} onClick={() => void perform(async () => { catalog.setValue(await studioApi.savePartMetadata(deletedAsset.id, deletedAsset.slot, { deleted: false }, catalog.value!.revision)); setDeletedAsset(undefined); })}>삭제 취소</button></div>}
         {showUploads && <GlbAssetLibrary bases={bases} defaultBaseId={base?.id} onJob={result => { setBaseId(result.base_job_id || result.id); setAdminAssetId(result.id); setAdminSlot(''); receiveJob(result); void jobs.refresh(); }} />}
-        <AssetGallery jobs={candidates} loading={jobs.loading && !jobs.value} catalog={catalog.value} onCatalogChange={catalog.setValue} onRefresh={catalog.refresh} nativeJobId={managedAsset?.id} nativeState={managedNativeState} onOpen={(item, slot) => { setBaseId(item.base_job_id || item.id); setAdminAssetId(item.id); setAdminSlot(slot || ''); setJobId(item.id); setShowMotion(false); }} onCompose={item => setComposeId(item.id)} />
+        <AssetGallery jobs={candidates} loading={jobs.loading && !jobs.value} failed={(!jobs.value && !!jobs.error) || (!catalog.value && !!catalog.error)} onReload={() => { void jobs.refresh(); void catalog.refresh(); }} catalog={catalog.value} onCatalogChange={catalog.setValue} onRefresh={catalog.refresh} nativeJobId={managedAsset?.id} nativeState={managedNativeState} onOpen={(item, slot) => { setBaseId(item.base_job_id || item.id); setAdminAssetId(item.id); setAdminSlot(slot || ''); setJobId(item.id); setShowMotion(false); }} onCompose={item => setComposeId(item.id)} />
         {composeJob && <AssetDetailDialog title={`착용·조합 · ${name(composeJob)}`} onClose={() => setComposeId('')}><NativeAssembly key={composeJob.id} jobId={composeJob.id} simple flow={composeJob.character_flow} /></AssetDetailDialog>}
         {managedAsset && <AdminAssetDetail managedAsset={managedAsset} adminSlot={adminSlot} base={base} hidden={!!composeJob} name={name}
           catalog={catalog} bodyProfile={bodyProfile} native={native} nativeState={nativeState} managedNativeState={managedNativeState} setManagedNative={managedNative.setValue}

@@ -120,8 +120,10 @@ export function useIslandLeaving({ saver, save, owner, decorating, editing, user
   }, [guarding]);
 
   // Finishing decorating saves what is left, rather than waiting for the autosave (unless the owner chose to leave it).
+  // Decorating again starts with nothing chosen to be dropped: leaving keeps the new edits unless the owner chooses again.
   useEffect(() => {
     if (!decorating) return undefined;
+    discarding.current = false;
     return () => {
       if (!discarding.current) void saver.flush();
     };

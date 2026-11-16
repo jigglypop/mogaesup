@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { NoColorSpace, TextureLoader, type Texture } from 'three';
-import { problemText } from '../../api/client';
+import { ApiRequestError, problemText } from '../../api/client';
 import { lookApi } from '../../api/endpoints';
 import type { Look, LookRequest } from '../../api/types';
 import { useAuth } from '../../auth/AuthProvider';
@@ -74,6 +74,9 @@ function unionBits(target: Record<string, Uint8Array>, bitsets: Record<string, U
 type PendingSave = { id: string; key: string; revision: string; input: WardrobeOutfit };
 /** How often a look being assembled is asked about. */
 const LOOK_POLL_MS = 1500;
+/** A save the server may have taken after all (no answer, a proxy's or a server error), or one refused because a look
+ * is baking: the look the server holds is read again. */
+const lookMayBeBaking = (reason: unknown) => !(reason instanceof ApiRequestError) || reason.status >= 500 || reason.code === 'look_baking';
 type PreviewOutfit = WardrobeOutfit & { partEdits?: Record<string, PartEdit> };
 const outfitOfLook = (request: LookRequest): PreviewOutfit => ({
   name: '', body: { job_id: request.body.jobId, version: request.body.version }, hair_color: request.hairColor,
@@ -215,6 +218,9 @@ export default function Wardrobe() {
       .finally(() => { if (active) setWearing(false); });
     return () => { active = false; };
   }, [wornKey, viewer]);
+  // The hair colour goes on every hair part worn (full, front, back); with none left, the next starts from its own.
+  const hairWorn = hairSlots.some(slot => worn[slot]);
+  useEffect(() => { if (!hairWorn && hairColor) setHairColor(null); }, [hairWorn, hairColor]);
   useEffect(() => { viewer?.setHairColor(hairColor); }, [viewer, hairColor]);
   // A refit gives a job a new version: wear it in place of the one the list no longer has.
   useEffect(() => {
@@ -291,8 +297,9 @@ export default function Wardrobe() {
     }
   }, [appliedKey, coverages, editedKey, viewer]);
 
-  /** Wears a saved look or outfit: each part the wardrobe offers, with its edit and colours. A part it no longer offers
-   * (put in the trash, or its job gone) is left off and named, and the rest is worn all the same. */
+  /** Wears a saved look or outfit from `listed`, the body's own part list: each part with its edit and colours. A part
+   * the list no longer has (put in the trash, its job gone, or not fitted to this body) is left off and named, and the
+   * rest is worn all the same. */
   function applyOutfit(outfit: PreviewOutfit, listed: WardrobePart[]) {
     const slots = compatiblePartSlots(Object.keys(outfit.parts));
     const { worn: next, missing } = partsOf(outfit.parts, slots, listed);
@@ -302,9 +309,9 @@ export default function Wardrobe() {
       return edit && ref && part.version === ref.version && part.sha256 === ref.sha256 ? [[keyOf(part, slotName), edit]] : [];
     })));
     const removed = Object.keys(outfit.parts).filter(slot => !slots.includes(slot));
-    const named = (list: string[]) => list.map(slot => labels[slot] || slot).join(', ');
+    const named = (slotNames: string[]) => slotNames.map(slot => labels[slot] || slot).join(', ');
     setNotice([removed.length ? `겹치는 머리 파츠를 벗겼어요: ${named(removed)}` : '',
-      missing.length ? `옷장에 없는 파츠는 빼고 입혔어요: ${named(missing)}` : ''].filter(Boolean).join(' · '));
+      missing.length ? `옷장에 없는 파츠를 빼고 입혔어요: ${named(missing)}` : ''].filter(Boolean).join(' · '));
     setColors(current => {
       const updated = { ...current };
       Object.entries(next).forEach(([slotName, part]) => {
@@ -392,7 +399,8 @@ export default function Wardrobe() {
     const outfit = outfits.value?.outfits[id];
     if (!outfit) return;
     setLoadedId(id); setOutfitName(outfit.name);
-    if (body && onBody(body, outfit.body)) applyOutfit(outfit, parts);
+    // Worn against the body's own part list: one still loading is waited for, as another body's is.
+    if (body && onBody(body, outfit.body) && libraryMatchesBody) applyOutfit(outfit, parts);
     else if (registered.some(item => onBody(item, outfit.body))) { pendingOutfit.current = outfit; setBodyId(outfit.body.job_id); }
     else setWearError('이 조합의 옷장 몸이 등록돼 있지 않거나 버전이 바뀌었어요.');
   }
@@ -447,17 +455,17 @@ export default function Wardrobe() {
     lookRead.current?.abort();
     setLookBusy(true); setLookError('');
     try { const value = await lookApi.save(request); if (mine === lookGeneration.current) setLook(value.look); }
-    catch (reason) { if (mine === lookGeneration.current) setLookError(problemText(reason)); }
-    finally { if (mine === lookGeneration.current) { lookPending.current = false; setLookBusy(false); } }
-  }
-  async function wearLook() {
-    if (lookPending.current) return;
-    lookPending.current = true;
-    const mine = ++lookGeneration.current;
-    lookRead.current?.abort();
-    setLookBusy(true); setLookError('');
-    try { const value = await lookApi.wear(true); if (mine === lookGeneration.current) setLook(value.look); }
-    catch (reason) { if (mine === lookGeneration.current) setLookError(problemText(reason)); }
+    catch (reason) {
+      if (mine !== lookGeneration.current) return;
+      setLookError(problemText(reason));
+      // The look the server holds shows instead, polled while it bakes; if it cannot be read, the save's error stays.
+      if (lookMayBeBaking(reason)) {
+        const controller = new AbortController();
+        lookRead.current = controller;
+        const value = await lookApi.mine(controller.signal).catch(() => null);
+        if (value && mine === lookGeneration.current) setLook(value.look);
+      }
+    }
     finally { if (mine === lookGeneration.current) { lookPending.current = false; setLookBusy(false); } }
   }
   async function remove(id: string) {
@@ -495,7 +503,7 @@ export default function Wardrobe() {
         <div className="meshy-scene wardrobe-scene" ref={mount} />
         <div className="meshy-clips"><button disabled={!viewer} aria-pressed={motion === -1} onClick={() => { viewer?.play(-1); setMotion(-1); }}>기본 자세</button>
           {clips.map(clip => <button key={clip.index} disabled={!viewer} aria-pressed={motion === clip.index} onClick={() => { viewer?.play(clip.index); setMotion(clip.index); }}>{clip.name}</button>)}</div>
-        {hairSlots.some(slotName => worn[slotName]) && <div className="wardrobe-hair-color"><label>헤어 색상<input type="color" value={hairColor || '#8a7998'} onChange={event => setHairColor(event.target.value)} /></label>
+        {hairWorn && <div className="wardrobe-hair-color"><label>헤어 색상<input type="color" value={hairColor || '#8a7998'} onChange={event => setHairColor(event.target.value)} /></label>
           <span>{hairColor || '원래 색'}</span><button type="button" onClick={() => setHairColor(null)}>원래 색</button></div>}
         {(!viewer || wearing) && !modelError && !(bodies.error && !body) && <p role="status">{viewer ? '파츠를 입히는 중…' : '옷장 몸을 불러오는 중…'}</p>}
         {bodies.error && <p role="alert">{bodies.error} <button type="button" onClick={() => void bodies.refresh()}>몸 목록 다시 불러오기</button></p>}
@@ -545,9 +553,10 @@ export default function Wardrobe() {
           })}</ul>
         </div>}
         {shapes.length > 0 && <div className="wardrobe-shapes"><h2>모양</h2>
+          {/* A panel per garment: wearing another ends the wait for this one's rebuild, which replaces only its own garment. */}
           <ul>{shapes.map(([slotName, part]) =>
-            <WardrobeShape key={slotName} part={part} label={labels[slotName] || slotName} reload={reloadParts}
-              replace={next => setWorn(current => ({ ...current, [slotName]: next }))} />)}</ul>
+            <WardrobeShape key={`${slotName}:${part.job_id}`} part={part} label={labels[slotName] || slotName} reload={reloadParts}
+              replace={next => setWorn(current => current[slotName]?.job_id === next.job_id ? { ...current, [slotName]: next } : current)} />)}</ul>
         </div>}
         {Object.keys(worn).some(slotName => (EDITABLE_PARTS as readonly string[]).includes(slotName)) && <div className="wardrobe-part-edits"><h2>크기와 위치</h2>
           {EDITABLE_PARTS.filter(slotName => worn[slotName]).map(slotName => <PartEditControls key={keyOf(worn[slotName]!, slotName)} label={labels[slotName] || slotName}
@@ -559,9 +568,6 @@ export default function Wardrobe() {
         <div className="wardrobe-look"><h2>내 캐릭터</h2>
           <div className="wardrobe-look-row">
             <button type="button" className="is-primary" disabled={!lookReady || lookBusy || baking || !settled || !!wearError || !!editError} onClick={() => void saveLook()}>{baking ? '입히는 중' : '내 캐릭터로 입기'}</button>
-            {look?.status === 'ready' && (look.worn
-              ? <><span role="status">섬에서 입고 있어요</span>{user && <Link to={`/@${user.username}`}>내 섬으로</Link>}</>
-              : <button type="button" disabled={lookBusy} onClick={() => void wearLook()}>섬에서 입기</button>)}
             {baking && <span role="status">모델을 만드는 중…</span>}
           </div>
           {look?.status === 'failed' && look.error && <p role="alert">{look.error.message}</p>}

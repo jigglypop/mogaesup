@@ -70,6 +70,9 @@ class AvatarBaseBodies:
     def _character(self, owner, receipt, marker, name, front):
         character_id = receipt.get('character_id')
         if not character_id:
+            # No process lock: this request's key is held (one request per key, so one marker at a time), and the
+            # character registry takes this process's registrations one at a time and waits a few seconds for another
+            # process's writer before 'busy' (CharacterPipeline._registry), so accepts sent together are not refused.
             matches = [item for item in self.factory.pipeline.records()
                        if item.get('owner_id', self.factory.pipeline.owner) == owner and item.get('name') == marker]
             if len(matches) > 1:
@@ -103,15 +106,21 @@ class AvatarBaseBodies:
         job_id = request_job_id(owner, 'base-body', key)
         directory = self.factory.directory(owner, job_id)
         receipt_path = self._receipt(owner, key)
-        # The sources are hashed, the rig source parsed, Meshy's action list fetched (HTTP, up to 120 s) and the
-        # character and files staged without the process lock, which every admission waits for: one request per key
-        # at a time (keyed_lock), and the process lock only for the job.json that accepts it.
-        with keyed_lock(('base-body-admission', str(directory))):
+
+        def accepted():
             saved_job = read_json(directory/'job.json')
-            if saved_job:
-                if _submitted_fingerprint(saved_job.get('input', {})) != submitted_fingerprint:
-                    raise PipelineError('idempotency_conflict', '같은 요청 식별자에 다른 기본 몸 입력이 사용되었습니다.', 409)
-                return self.factory.get(owner, job_id), False
+            if not saved_job:
+                return None
+            if _submitted_fingerprint(saved_job.get('input', {})) != submitted_fingerprint:
+                raise PipelineError('idempotency_conflict', '같은 요청 식별자에 다른 기본 몸 입력이 사용되었습니다.', 409)
+            return self.factory.get(owner, job_id), False
+        # One request per key at a time. Asking Meshy for its motions, checking the sources, uploading the front view
+        # and copying the views happen under this lock alone: a slow Meshy or store must not stall every other job
+        # action. The process lock only covers the character registry write and the records that accept the job.
+        with keyed_lock(('base-body', job_id)):
+            replay = accepted()
+            if replay:
+                return replay
 
             require_bucket('storage_unavailable', '기본 몸 원본을 저장할 S3 버킷 설정이 필요합니다.', 422)
             if not os.getenv('MESHY_API_KEY', '').strip():
@@ -201,10 +210,6 @@ class AvatarBaseBodies:
                 'base_body_setup': setup, 'uploaded_views': list(VIEWS),
                 'image_provider': 'uploaded', 'image_model': None,
                 'image_base': None, 'meshy_base': base_url('meshy')}
-            _write_json(directory/'pipeline.json', state)
-            _write_json(output/'progress.json', {'stage': 'models', 'message': '기본 몸 3D 생성 대기 중',
-                                                 'images_received': 3, 'images_total': 3,
-                                                 'active_images': 0})
 
             base_body = {'body_type': canonical['body_type'], 'views': deepcopy(canonical['views'])}
             if frozen_rig:
@@ -236,14 +241,15 @@ class AvatarBaseBodies:
                    'files': {f'body-{view}.png': canonical['views'][view] for view in VIEWS}}
             with _LOCK:
                 # Accepted meanwhile only by another process (a CLI) on the same data root: that job stands.
-                saved_job = read_json(directory/'job.json')
-                if not saved_job:
-                    _write_json(directory/'job.json', job)
-            if saved_job:
-                if _submitted_fingerprint(saved_job.get('input', {})) != submitted_fingerprint:
-                    raise PipelineError('idempotency_conflict', '같은 요청 식별자에 다른 기본 몸 입력이 사용되었습니다.', 409)
-                return self.factory.get(owner, job_id), False
-            _write_json(receipt_path, {**receipt, 'status': 'accepted', 'character_id': character['id'],
-                                       'accepted_at': now(), 'updated_at': now()})
-            self.factory._listings.pop(int(owner), None)
-        return self.factory.get(owner, job_id), True
+                replay = accepted()
+                if replay:
+                    return replay
+                _write_json(directory/'pipeline.json', state)
+                _write_json(output/'progress.json', {'stage': 'models', 'message': '기본 몸 3D 생성 대기 중',
+                                                     'images_received': 3, 'images_total': 3,
+                                                     'active_images': 0})
+                _write_json(directory/'job.json', job)
+                _write_json(receipt_path, {**receipt, 'status': 'accepted', 'character_id': character['id'],
+                                           'accepted_at': now(), 'updated_at': now()})
+                self.factory._listings.pop(int(owner), None)
+            return self.factory.get(owner, job_id), True

@@ -1,5 +1,5 @@
 """A base body is accepted with its sources hashed, Meshy's action list fetched and its files staged outside the
-process lock: the lock that every admission of every job waits for is taken only for the job record."""
+process lock: the lock that every admission of every job waits for is taken only for the records that accept it."""
 import io
 import threading
 import time
@@ -46,8 +46,9 @@ def test_the_sources_and_the_meshy_list_are_read_without_the_process_lock(bodies
     job, created = service.create(1, KEY, payload)
     assert created and job['status'] == 'pipeline_queued' and job['job_kind'] == 'base_body'
     assert hashed and not any(hashed) and fetched and not any(fetched)
-    # Only the record that accepts the job is written under the lock.
-    assert [name for name, locked in written if locked] == ['job.json']
+    # Only the records that accept the job are written under the lock.
+    assert [name for name, locked in written if locked] == ['pipeline.json', 'progress.json', 'job.json',
+                                                            service._receipt(1, KEY).name]
     directory = service.factory.directory(1, job['id'])
     assert read_json(directory/'pipeline.json')['motion_actions'] == character_motion.DEFAULT_ACTIONS
     assert all((directory/'output'/f'body-{view}.png').is_file() for view in ('front', 'side', 'back'))

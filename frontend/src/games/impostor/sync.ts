@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { standFor, useArenaTrip } from '../arena';
 import type { GameProps } from '../game';
@@ -12,8 +12,8 @@ import type { ImpostorView } from './index';
  * stood on the island when it is over, to their seat when a meeting starts, and to the vent they move to, once each;
  * and a player does not talk in the island's live room between meetings. The live room itself hides the dead from the
  * living and whoever is in a vent; a server from before it did (a release rolled back) names them in the view instead,
- * and the island leaves their avatars out. The game's World mounts it: that stays while the game is on, panel open or
- * not.
+ * and the island leaves their avatars out, the dead even after they leave the game, until it ends. The game's World
+ * mounts it: that stays while the game is on, panel open or not.
  */
 export function useImpostorSync({
   view,
@@ -28,8 +28,15 @@ export function useImpostorSync({
   const entry = view.phase !== 'ended' ? (view.spawn ?? standFor(session)) : null;
   useArenaTrip(entry, { session, teleport, position, body, trip, setTrip });
 
+  // The live-room peers of those hidden, by player, kept once they have left the game (the dead stay hidden until it ends).
+  const [known, setKnown] = useState<Readonly<Record<string, string>>>({});
+  const seen: Record<string, string> = {};
+  for (const { id, peer } of session.players) {
+    if (peer && id !== session.you && known[id] !== peer) seen[id] = peer;
+  }
+  if (Object.keys(seen).length) setKnown({ ...known, ...seen });
   const named = view.phase !== 'ended' && Array.isArray(view.hidden) ? view.hidden : [];
-  const peers = named.filter((id) => id !== session.you).map((id) => session.players.find((player) => player.id === id)?.peer);
+  const peers = named.filter((id) => id !== session.you).map((id) => known[id] ?? seen[id]);
   useHidePeers('impostor', peers);
 
   const plays = view.role !== null && view.phase === 'play';

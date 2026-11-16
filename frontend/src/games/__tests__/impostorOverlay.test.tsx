@@ -165,6 +165,31 @@ describe('임포스터가 섬 위에 두는 것', () => {
     expect(shown.container.querySelector('.mg-impostor-dark')).toBeNull();
   });
 
+  it('마우스로 누른 행동과 고치기는 섬의 키보드 포커스를 가져가지 않고, 키보드로는 고를 수 있다', async () => {
+    /** Whether pressing the mouse on it keeps the focus where it was (the island's canvas, off this overlay). */
+    const keepsFocus = (item: HTMLButtonElement) => {
+      const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+      item.dispatchEvent(down);
+      return down.defaultPrevented;
+    };
+    const reactor = game({ near: { station: 5, body: 2, table: false, vent: null, panel: true }, sabotage: { kind: 'reactor', endsAt: NOW + 31_000, held: [true, false] } });
+    const crew = await overlay(reactor);
+    // WASD keeps walking away from the panel, and Space jumps instead of pressing 고치기 again.
+    expect(['고치기', '작업', '신고'].map((name) => keepsFocus(crew.button(name)!))).toEqual([true, true, true]);
+    await crew.press('고치기');
+    expect(crew.act).toHaveBeenLastCalledWith({ do: 'fix' });
+    await crew.press('작업');
+    expect(crew.act).toHaveBeenLastCalledWith({ do: 'task' });
+    crew.button('고치기')!.focus();
+    expect(document.activeElement).toBe(crew.button('고치기'));
+
+    const near = { station: null, body: null, table: false, vent: 1, panel: false };
+    const impostor = await overlay(game({ role: 'impostor', impostors: ['me'], kill: { readyAt: NOW - 1, targets: ['b'] }, sabotageFrom: NOW - 1, near }));
+    expect(['처치', '환풍구', '정전'].map((name) => keepsFocus(impostor.button(name)!))).toEqual([true, true, true]);
+    await impostor.show(game({ role: 'impostor', impostors: ['me'], venting: 1, vents: [[0, 0, 0], [10, 0, 0], [20, 0, 0]] }));
+    expect(['환풍구 1', '나가기'].map((name) => keepsFocus(impostor.button(name)!))).toEqual([true, true]);
+  });
+
   it('처치, 회의, 판정이 오면 크게 알린다', async () => {
     vi.useFakeTimers();
     const shown = await overlay(game());

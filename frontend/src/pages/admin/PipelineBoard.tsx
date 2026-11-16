@@ -23,18 +23,23 @@ import {
 import { ImportProgress, ThumbButton } from './parts';
 import type { PreviewTarget } from './PreviewDialog';
 
-/** What the import form sends: a new item's id, name, emoji and kind (a 미니미 people walk as, or a 주민 islands stand), or an existing item's to update it. */
-export type ImportFields = { id: string; label: string; emoji: string; kind: CatalogKind };
+/**
+ * What the import form sends: a new item's id, name, emoji and kind (a 미니미 people walk as, or a 주민 islands stand),
+ * with `create` so the server refuses an id taken meanwhile, or an existing item's to update it.
+ */
+export type ImportFields = { id: string; label: string; emoji: string; kind: CatalogKind; create?: boolean };
 /** The kinds a finished character can become. */
 const CHARACTER_KINDS: CatalogKind[] = ['minime', 'npc'];
 
 type ImportFormProps = {
   character: FactoryCharacter;
+  /** Ids the catalog already has; a new item may not take one. */
+  taken: ReadonlySet<string>;
   onSubmit: (fields: ImportFields) => Promise<boolean>;
   onCancel: () => void;
 };
 
-function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
+function ImportForm({ character, taken, onSubmit, onCancel }: ImportFormProps) {
   const imported = character.imported;
   const [mode, setMode] = useState<'update' | 'new'>(imported ? 'update' : 'new');
   const [kind, setKind] = useState<CatalogKind>('minime');
@@ -47,10 +52,12 @@ function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
     const fields =
       mode === 'update' && imported
         ? { id: imported.id, label: imported.label, emoji: imported.emoji, kind: imported.kind ?? 'minime' }
-        : { id: field('id'), label: field('label'), emoji: field('emoji'), kind };
+        : { id: field('id'), label: field('label'), emoji: field('emoji'), kind, create: true };
     const issue = !CATALOG_ID.test(fields.id)
       ? '카탈로그 ID는 영문 소문자·숫자·밑줄·하이픈 2~64자예요'
-      : (textProblem(fields.label, 30) ?? textProblem(fields.emoji, 16));
+      : fields.create && taken.has(fields.id)
+        ? '이미 있는 카탈로그 ID예요. 다른 ID를 입력해 주세요'
+        : (textProblem(fields.label, 30) ?? textProblem(fields.emoji, 16));
     if (issue) return setProblem(issue);
     setSending(true);
     const ok = await onSubmit(fields);
@@ -115,11 +122,13 @@ function ImportForm({ character, onSubmit, onCancel }: ImportFormProps) {
 function CharacterCard({
   character,
   running,
+  taken,
   onImport,
   onPreview,
 }: {
   character: FactoryCharacter;
   running: CatalogImport | undefined;
+  taken: ReadonlySet<string>;
   onImport: (character: FactoryCharacter, fields: ImportFields) => Promise<boolean>;
   onPreview: (target: PreviewTarget) => void;
 }) {
@@ -158,6 +167,7 @@ function CharacterCard({
       ) : form ? (
         <ImportForm
           character={character}
+          taken={taken}
           onCancel={() => setForm(false)}
           onSubmit={async (fields) => {
             const ok = await onImport(character, fields);
@@ -202,6 +212,7 @@ export function PipelineBoard({ characters, factoryProblem, items, itemsProblem,
   const shown = filterCharacters(characters ?? [], filter, query);
   const drafts = (items ?? []).filter((item) => item.status === 'draft');
   const published = (items ?? []).filter((item) => item.status === 'published');
+  const taken = new Set((items ?? []).map((item) => item.id));
   const preview = (item: AdminCatalogItem) => onPreview({ title: item.label, url: item.modelUrl });
 
   return (
@@ -240,6 +251,7 @@ export function PipelineBoard({ characters, factoryProblem, items, itemsProblem,
             key={character.jobId}
             character={character}
             running={activeImportFor(imports, { jobId: character.jobId, characterId: character.characterId, itemId: character.imported?.id })}
+            taken={taken}
             onImport={onImport}
             onPreview={onPreview}
           />

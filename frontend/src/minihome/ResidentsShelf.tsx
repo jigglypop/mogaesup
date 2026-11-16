@@ -4,7 +4,7 @@ import type { CatalogItem } from '../api/types';
 import { Icon } from '../ui/icons';
 import { groundHeightAt } from './edit/objects';
 import type { EditSession } from './edit/session';
-import { GREETING_MAX, MAX_RESIDENTS, NAME_MAX, residentSpot, type Resident, type ResidentStore } from './residents';
+import { GREETING_MAX, MAX_RESIDENTS, NAME_MAX, residentSpot, residentText, type Resident, type ResidentStore } from './residents';
 import { SPAWN } from './village';
 
 /** Typing in the drawer stays out of the decorating keys (WASD, Delete, shortcuts). */
@@ -29,12 +29,12 @@ function ResidentRow({ resident, item, session, residents }: { resident: Residen
   useEffect(() => setName(resident.name), [resident.name]);
   useEffect(() => setGreeting(resident.greeting), [resident.greeting]);
   const commitName = () => {
-    const next = name.trim();
+    const next = residentText(name, NAME_MAX);
     if (next && next !== resident.name) residents.update(resident.id, { name: next });
     else setName(resident.name);
   };
   const commitGreeting = () => {
-    const next = greeting.trim();
+    const next = residentText(greeting, GREETING_MAX);
     if (next !== resident.greeting) residents.update(resident.id, { greeting: next });
   };
   const others = () => residents.getState().filter((other) => other.id !== resident.id);
@@ -108,8 +108,8 @@ export function ResidentsShelf({ session, residents, items, query }: { session: 
     if (!item || full) return;
     const added = residents.add({
       npc: item.id,
-      name: (name.trim() || item.label).slice(0, NAME_MAX),
-      greeting: greeting.trim(),
+      name: residentText(name, NAME_MAX) || residentText(item.label, NAME_MAX),
+      greeting: residentText(greeting, GREETING_MAX),
       position: spotAtView(session, placed),
       rotation: 0,
     });

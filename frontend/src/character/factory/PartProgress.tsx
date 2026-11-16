@@ -12,7 +12,7 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
   const refitLock = useRef(false), retryLock = useRef(false);
   // The saved refit is read from storage on every render; a refit that settles it draws the screen again.
   const [, settled] = useState(0);
-  const gone = useSavedRequests();
+  useSavedRequests();
   async function retry(slot: string, view: string, failureId: string) {
     if (retryLock.current) return;
     retryLock.current = true; setRetrying(true); setRetryError('');
@@ -27,15 +27,15 @@ export function PartProgress({ job, busy, retryImage }: { job: FactoryJob; busy:
     const version = job.assembly_version;
     if (refitLock.current || (!resume && !version)) return;
     refitLock.current = true; setRefitting(slot); setRefitError('');
-    try { await (resume ? factoryApi.resumeRefit(job.id, pending?.key) : factoryApi.refitPart(job.id, version!, slot, undefined, method)); }
-    catch (error) { if (!gone(error)) setRefitError((error as Error).message); }
+    try { await (resume ? factoryApi.resumeRefit(job.id, pending) : factoryApi.refitPart(job.id, version!, slot, undefined, method)); }
+    catch (error) { setRefitError((error as Error).message); }
     finally { refitLock.current = false; setRefitting(''); settled(value => value + 1); }
   }
   const parts = job.parts || [];
   const imageStates = parts.flatMap(p => Object.values(p.views || {}).length ? Object.values(p.views!) : [{status: p.image_status}]);
   const images = imageStates.filter(image => ['received', 'succeeded', 'qc_failed'].includes(image.status)).length;
   const models = parts.filter(p => p.model_status === 'ready').length;
-  const imageNames: Record<string, string> = { pending: '대기', not_sent: '연결 실패', submitting: '응답 대기', received: '수신 · 저장 중', succeeded: '수신 완료', submission_uncertain: '연결 끊김', rejected: '요청 거부', failed: '처리 실패', qc_failed: '수신 · 처리 대기' };
+  const imageNames: Record<string, string> = { pending: '대기', not_sent: '연결 실패', submitting: '응답 대기', received: '수신 · 저장 중', succeeded: '수신 완료', submission_uncertain: '연결 끊김', rejected: '요청 거부', failed: '처리 실패', qc_failed: '수신 · 처리 대기', answer_invalid: '응답 이미지 오류' };
   const modelNames: Record<string, string> = { pending: '대기', PENDING: '접수됨', IN_PROGRESS: '생성 중', SUCCEEDED: '다운로드 중', ready: '파일 수신 완료', submission_uncertain: '응답 확인 필요', submission_rejected: '요청 거부', submission_not_sent: '전송 실패', FAILED: '실패', CANCELED: '취소됨' };
   const assemblyNames = { pending: '대기', running: '진행 중', failed: '중단', complete: '완료' };
   return <section className="character-progress" aria-label="파츠 수신 현황">

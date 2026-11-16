@@ -353,6 +353,143 @@ async fn 일촌을_맺으면_일촌_공개_홈을_볼_수_있다() {
     app.cleanup().await;
 }
 
+#[tokio::test]
+async fn 사주_집은_주인만_짓고_마을에는_이웃의_집과_공개된_집이_함께_선다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_s", "호스트").await;
+    let friend = app.register("friend_s", "친구").await;
+    let stranger = app.register("stranger_s", "낯선이").await;
+    let host_id = app.user_id("host_s").await;
+    let friend_id = app.user_id("friend_s").await;
+    let birth = json!({"calendar": "solar", "year": 1989, "month": 2, "day": 23, "leapMonth": false, "time": "22:10", "gender": "female"});
+    let save =
+        |owner: uuid::Uuid, name: &str, birth: Value| json!({"expectedOwnerId": owner, "name": name, "birth": birth});
+
+    let empty = app.call("GET", "/api/homes/host_s/saju", None, None).await;
+    assert_eq!(empty.status, StatusCode::OK);
+    assert_eq!(empty.body, json!({"saju": null, "village": []}));
+    let path = "/api/homes/me/saju";
+    assert_eq!(
+        app.call("PUT", path, Some(save(host_id, "솔", birth.clone())), None).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    // A page loaded for another account, or one that does not say whose it is, saves nothing.
+    let other = app.call("PUT", path, Some(save(friend_id, "솔", birth.clone())), Some(&host)).await;
+    assert_eq!(other.body["code"], "owner_changed");
+    let unsigned = app.call("PUT", path, Some(json!({"name": "솔", "birth": birth})), Some(&host)).await;
+    assert_eq!(unsigned.body["code"], "owner_changed");
+    let mut wrong = birth.clone();
+    wrong["month"] = json!(13);
+    let refused = app.call("PUT", path, Some(save(host_id, "솔", wrong)), Some(&host)).await;
+    assert_eq!(refused.body["code"], "invalid_birth");
+    for name in ["  ", "열세글자가넘는아주긴이름이에요"] {
+        let refused = app.call("PUT", path, Some(save(host_id, name, birth.clone())), Some(&host)).await;
+        assert_eq!(refused.body["code"], "invalid_name", "{name}");
+    }
+    // The name a village shows may not read as the site's staff, as a display name may not.
+    for name in ["운영자", " 관 리 자 ", "ＡＤＭＩＮ"] {
+        let refused = app.call("PUT", path, Some(save(host_id, name, birth.clone())), Some(&host)).await;
+        assert_eq!(refused.body["code"], "reserved_name", "{name}");
+    }
+
+    let built = app.call("PUT", path, Some(save(host_id, "  솔  ", birth.clone())), Some(&host)).await;
+    assert_eq!(built.status, StatusCode::OK, "{:?}", built.body);
+    assert_eq!(built.body["saju"], json!({"name": "솔", "birth": birth}));
+    // Built again from a corrected birth: the hour is not known after all.
+    let mut corrected = birth.clone();
+    corrected["time"] = Value::Null;
+    let rebuilt = app.call("PUT", path, Some(save(host_id, "솔", corrected.clone())), Some(&host)).await;
+    assert_eq!(rebuilt.body["saju"]["birth"], corrected);
+    assert_eq!(app.call("GET", "/api/homes/host_s/saju", None, None).await.body["saju"]["birth"], corrected);
+
+    let lunar = json!({"calendar": "lunar", "year": 1988, "month": 8, "day": 21, "leapMonth": false, "time": null, "gender": "male"});
+    let friends = app.call("PUT", path, Some(save(friend_id, "보리", lunar.clone())), Some(&friend)).await;
+    assert_eq!(friends.status, StatusCode::OK);
+    // A public home stands in the village of someone who is no 이웃 of its owner, without a bridge.
+    let village = app.call("GET", "/api/homes/host_s/saju", None, None).await.body;
+    assert_eq!(village["village"].as_array().unwrap().len(), 1);
+    assert_eq!(village["village"][0]["user"]["username"], "friend_s");
+    assert_eq!(village["village"][0]["neighbour"], false);
+
+    let ask = json!({"name": "옆집", "theirName": "앞집"});
+    app.call("POST", "/api/ilchon/host_s/request", Some(ask), Some(&friend)).await;
+    let requests = app.call("GET", "/api/ilchon-requests", None, Some(&host)).await;
+    let id = requests.body["received"][0]["id"].as_str().unwrap().to_owned();
+    app.call("POST", &format!("/api/ilchon-requests/{id}/accept"), Some(json!({})), Some(&host)).await;
+    let village = app.call("GET", "/api/homes/host_s/saju", None, None).await.body;
+    assert_eq!(village["village"].as_array().unwrap().len(), 1);
+    assert_eq!(village["village"][0]["saju"], json!({"name": "보리", "birth": lunar}));
+    assert_eq!(village["village"][0]["neighbour"], true);
+    let back = app.call("GET", "/api/homes/friend_s/saju", None, None).await.body;
+    assert_eq!(back["village"][0]["user"]["username"], "host_s");
+    assert_eq!(back["village"][0]["neighbour"], true);
+
+    // A home kept to 이웃 stands in a village only for those who may see the home itself.
+    app.call("PATCH", "/api/homes/me", Some(json!({"visibility": "ilchon"})), Some(&friend)).await;
+    let seen = |cookie: Option<String>| {
+        let app = &app;
+        async move {
+            let village = app.call("GET", "/api/homes/host_s/saju", None, cookie.as_deref()).await.body;
+            village["village"].as_array().unwrap().len()
+        }
+    };
+    assert_eq!(seen(None).await, 0);
+    assert_eq!(seen(Some(stranger.clone())).await, 0);
+    assert_eq!(seen(Some(host.clone())).await, 1);
+    assert_eq!(seen(Some(friend.clone())).await, 1);
+    let closed = app.call("GET", "/api/homes/friend_s/saju", None, Some(&stranger)).await;
+    assert_eq!(closed.status, StatusCode::FORBIDDEN);
+
+    let removal = json!({"expectedOwnerId": host_id});
+    assert_eq!(app.call("DELETE", path, Some(json!({})), Some(&host)).await.body["code"], "owner_changed");
+    assert_eq!(app.call("DELETE", path, Some(removal), Some(&host)).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(app.call("GET", "/api/homes/host_s/saju", None, Some(&host)).await.body["saju"], Value::Null);
+    // The host's home is gone from the friend's village too; the two are 이웃 still.
+    assert_eq!(app.call("GET", "/api/homes/friend_s/saju", None, Some(&friend)).await.body["village"], json!([]));
+    assert_eq!(app.call("GET", "/api/ilchon/host_s", None, Some(&friend)).await.body["relation"], "ilchon");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 마을은_여덟_집까지_이웃을_앞세워_최근에_지은_공개된_집으로_채운다() {
+    let app = TestApp::new(None).await;
+    let host = app.register("host_v", "호스트").await;
+    let birth = json!({"calendar": "solar", "year": 1990, "month": 5, "day": 5, "leapMonth": false, "time": null, "gender": "male"});
+    let mut cookies = Vec::new();
+    for index in 0..10 {
+        let name = format!("villager_{index}");
+        let cookie = app.register(&name, "주민").await;
+        let body = json!({"expectedOwnerId": app.user_id(&name).await, "name": format!("집{index}"), "birth": birth});
+        assert_eq!(app.call("PUT", "/api/homes/me/saju", Some(body), Some(&cookie)).await.status, StatusCode::OK);
+        cookies.push(cookie);
+    }
+    let names = |village: &Value| -> Vec<String> {
+        village["village"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|home| home["user"]["username"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Nobody's 이웃 yet: the eight built last, the newest first.
+    let village = app.call("GET", "/api/homes/host_v/saju", None, Some(&host)).await.body;
+    assert_eq!(names(&village), (2..10).rev().map(|index| format!("villager_{index}")).collect::<Vec<_>>());
+    // The first to build becomes an 이웃 and takes the first place; the village stays eight homes.
+    let ask = json!({"name": "옆집", "theirName": "앞집"});
+    app.call("POST", "/api/ilchon/host_v/request", Some(ask), Some(&cookies[0])).await;
+    let requests = app.call("GET", "/api/ilchon-requests", None, Some(&host)).await;
+    let id = requests.body["received"][0]["id"].as_str().unwrap().to_owned();
+    app.call("POST", &format!("/api/ilchon-requests/{id}/accept"), Some(json!({})), Some(&host)).await;
+    let village = app.call("GET", "/api/homes/host_v/saju", None, Some(&host)).await.body;
+    let listed = names(&village);
+    assert_eq!(listed.len(), 8);
+    assert_eq!(listed[0], "villager_0");
+    assert_eq!(village["village"][0]["neighbour"], true);
+    assert_eq!(village["village"][1]["neighbour"], false);
+    assert!(!listed.contains(&"host_v".to_owned()));
+    app.cleanup().await;
+}
+
 /// Rigged, with the clips the character server's Meshy delivery names; `name` makes each copy's bytes its own.
 fn character_glb(name: &str) -> Vec<u8> {
     let (mut json, bin) = test_glb::document(&["idle", "walk", "run", "sit"]);
@@ -370,7 +507,7 @@ fn textured_glb() -> Vec<u8> {
     let mut picture = std::io::Cursor::new(Vec::new());
     image::RgbImage::new(1100, 1100).write_to(&mut picture, image::ImageFormat::Png).unwrap();
     let picture = picture.into_inner();
-    let (mut json, mut bin) = test_glb::document(&["Armature|Idle", "Walking"]);
+    let (mut json, mut bin) = test_glb::document(&["Idle", "Walking"]);
     let image_view = json["bufferViews"].as_array().unwrap().len();
     json["bufferViews"]
         .as_array_mut()
@@ -385,11 +522,36 @@ fn textured_glb() -> Vec<u8> {
     glb::join(&json, &bin)
 }
 
+/// A rigged figure with 3000 images of one small picture and 1000 takes besides idle and walk.
+fn crowded_glb() -> Vec<u8> {
+    let picture = png(4, 4);
+    let (mut json, mut bin) = test_glb::document(&["Idle", "Walking"]);
+    let take = json["animations"][0].clone();
+    let takes = (0..1000).map(|at| {
+        let mut extra = take.clone();
+        extra["name"] = format!("take_{at}").into();
+        extra
+    });
+    json["animations"].as_array_mut().unwrap().extend(takes);
+    let image_view = json["bufferViews"].as_array().unwrap().len();
+    json["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer": 0, "byteOffset": bin.len(), "byteLength": picture.len()}));
+    bin.extend(picture);
+    json["buffers"][0]["byteLength"] = bin.len().into();
+    json["images"] = json!(vec![json!({"bufferView": image_view, "mimeType": "image/png"}); 3000]);
+    glb::join(&json, &bin)
+}
+
 /// What the fake character server serves for a job and chosen face.
 fn served_model(job: &str, face: Option<&str>) -> Vec<u8> {
     match job {
         "statue" => statue_glb(),
         "textured" => textured_glb(),
+        // Idle and walk as the island's visitors find them, but not as their owner's own player does.
+        "prefixed" => test_glb::character(&["Armature|Idle", "Armature|Walking"]),
+        "crowded" => crowded_glb(),
         _ => character_glb(&format!("{job}/{}", face.unwrap_or("plain"))),
     }
 }
@@ -609,7 +771,7 @@ async fn 관리자는_캐릭터_서버의_완성_캐릭터를_골라_저장소�
     let seen = Seen::default();
     let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_f", "회원").await;
-    let admin = app.register("operator_f", "스튜디오 담당").await;
+    let admin = app.register("operator_f", "대장").await;
     app.make_admin("operator_f").await;
     assert_eq!(
         app.call("GET", "/api/catalog/items?kind=minime", None, None).await.body["items"].as_array().unwrap().len(),
@@ -735,7 +897,7 @@ async fn 다시_가져와도_공개_상태와_이름을_지키고_버전을_되�
     let studio = Studio::standard();
     studio.slow("job_1", Duration::from_millis(400));
     let app = factory_app(&seen, studio.clone()).await;
-    let admin = app.register("operator_v", "스튜디오 담당").await;
+    let admin = app.register("operator_v", "대장").await;
     app.make_admin("operator_v").await;
 
     let queued = app.call("POST", IMPORT, Some(import_body("job_1", "hero", "영웅")), Some(&admin)).await;
@@ -826,12 +988,68 @@ async fn 다시_가져와도_공개_상태와_이름을_지키고_버전을_되�
 }
 
 #[tokio::test]
+async fn 새_항목으로_가져오면_이미_있는_항목을_덮어쓰지_않는다() {
+    let seen = Seen::default();
+    let studio = Studio::standard();
+    studio.add(factory_job("job_2", "c_job_2", "2026-09-04T00:00:00Z"));
+    let app = factory_app(&seen, studio.clone()).await;
+    let admin = app.register("operator_n", "대장").await;
+    app.make_admin("operator_n").await;
+    let new_item = |job: &str, id: &str, label: &str| {
+        let mut body = import_body(job, id, label);
+        body["create"] = json!(true);
+        body
+    };
+
+    let fox = import(&app, &admin, new_item("job_1", "fox", "여우")).await;
+    assert_eq!((fox["status"].as_str(), fox["replaces"].as_bool()), (Some("done"), Some(false)), "{fox}");
+    app.call("PATCH", "/api/catalog/admin/items/fox", Some(json!({"status": "published"})), Some(&admin)).await;
+    // Another character asked for as a new item under a taken id is refused before anything is queued.
+    let taken = app.call("POST", IMPORT, Some(new_item("job_2", "fox", "여우2")), Some(&admin)).await;
+    assert_eq!((taken.status, taken.body["code"].as_str()), (StatusCode::CONFLICT, Some("item_exists")));
+    let item = admin_item(&app, &admin, "fox").await;
+    assert_eq!(
+        (item["label"].as_str(), item["status"].as_str(), item["characterId"].as_str()),
+        (Some("여우"), Some("published"), Some("c_job_1"))
+    );
+    assert_eq!(item["versionCount"], 1);
+    // Without `create` an id that is taken is still an update, as the form's update and older pages send it.
+    let again = import(&app, &admin, import_body("job_1", "fox", "여우")).await;
+    assert_eq!((again["status"].as_str(), again["replaces"].as_bool()), (Some("done"), Some(true)), "{again}");
+
+    // Queued as new, an import whose id an item took meanwhile ends failed and leaves that item as it is.
+    studio.slow("job_2", Duration::from_millis(1500));
+    let queued = app.call("POST", IMPORT, Some(new_item("job_2", "wolf", "늑대")), Some(&admin)).await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
+    sqlx::query(
+        "INSERT INTO catalog_items (id, kind, label, emoji, model_url, source, status)
+         VALUES ('wolf', 'minime', '먼저 온 늑대', '🐺', '/models/first.glb', 'factory', 'published')",
+    )
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    let late = finished(&app, &admin, queued.body["id"].as_str().unwrap()).await;
+    assert_eq!(
+        (late["status"].as_str(), late["step"].as_str(), late["errorCode"].as_str()),
+        (Some("failed"), Some("save"), Some("item_exists")),
+        "{late}"
+    );
+    let wolf = admin_item(&app, &admin, "wolf").await;
+    assert_eq!(
+        (wolf["label"].as_str(), wolf["modelUrl"].as_str(), wolf["characterId"].as_str()),
+        (Some("먼저 온 늑대"), Some("/models/first.glb"), None)
+    );
+    assert_eq!(wolf["versionCount"], 0);
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변화를_알린다() {
     let seen = Seen::default();
     let studio = Studio::with(vec![factory_job("textured", "c_tex", "2026-09-05T00:00:00Z")]);
     studio.stage("textured", "expressions");
     let app = factory_app(&seen, studio.clone()).await;
-    let admin = app.register("operator_r", "스튜디오 담당").await;
+    let admin = app.register("operator_r", "대장").await;
     app.make_admin("operator_r").await;
 
     let done = import(&app, &admin, import_body("textured", "tex", "텍스처")).await;
@@ -870,13 +1088,65 @@ async fn 가져오기_보고서는_모든_검사와_크기를_담고_단계_변�
 }
 
 #[tokio::test]
+async fn 접두어가_붙은_idle_walk뿐인_미니미는_이름을_고치라며_가져오지_않는다() {
+    let seen = Seen::default();
+    let studio = Studio::with(vec![factory_job("prefixed", "c_prefixed", "2026-09-06T00:00:00Z")]);
+    let app = factory_app(&seen, studio).await;
+    let admin = app.register("operator_p", "대장").await;
+    app.make_admin("operator_p").await;
+
+    let failed = import(&app, &admin, import_body("prefixed", "prefixed", "접두어")).await;
+    assert_eq!((failed["status"].as_str(), failed["errorCode"].as_str()), (Some("failed"), Some("not_playable")));
+    assert_eq!(failed["step"], "verify");
+    assert_eq!(failed["errorMessage"], "미니미로 쓰려면 애니메이션 이름이 idle·walk여야 합니다.");
+    let report = &failed["report"];
+    assert_eq!(check(report, "clips")["level"], "ok");
+    assert_eq!(check(report, "clip_names")["level"], "error");
+    assert_eq!(
+        check(report, "clip_names")["message"],
+        "애니메이션 이름을 idle·walk로 내보내야 합니다: Armature|Idle, Armature|Walking"
+    );
+    assert_eq!(admin_item(&app, &admin, "prefixed").await, Value::Null);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 텍스처와_애니메이션이_많아도_가져오기_보고서는_앞쪽_64개와_개수만_담는다() {
+    let seen = Seen::default();
+    let studio = Studio::with(vec![factory_job("crowded", "c_crowded", "2026-09-07T00:00:00Z")]);
+    let app = factory_app(&seen, studio).await;
+    let admin = app.register("operator_c", "대장").await;
+    app.make_admin("operator_c").await;
+
+    let done = import(&app, &admin, import_body("crowded", "crowded", "많은 모델")).await;
+    assert_eq!(done["status"], "done", "{done}");
+    // What the admin page polls carries every report, so each stays small whatever the model holds.
+    let recent = app.call("GET", "/api/catalog/admin/imports", None, Some(&admin)).await;
+    assert!(recent.bytes.len() < 32 * 1024, "{}", recent.bytes.len());
+    let report = &recent.body["imports"][0]["report"];
+    let model = &report["model"];
+    assert_eq!((model["textureCount"].as_u64(), model["animationCount"].as_u64()), (Some(3000), Some(1002)));
+    let listed = |list: &Value| list.as_array().unwrap().len();
+    assert_eq!(
+        (listed(&model["textures"]), listed(&report["webTextures"]), listed(&model["animations"])),
+        (64, 64, 64)
+    );
+    assert_eq!(model["animations"][63], "take_61");
+    assert_eq!(check(report, "textures")["message"], "텍스처 3000장 · 가장 큰 변 4px");
+    assert!(check(report, "unused_clips")["message"].as_str().unwrap().ends_with("take_63 외 936개"));
+    let versions = app.call("GET", "/api/catalog/admin/items/crowded/versions", None, Some(&admin)).await;
+    assert_eq!(&versions.body["versions"][0]["report"], report);
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_쓰지_않는다() {
     let seen = Seen::default();
     let studio = Studio::standard();
     // Long enough that the sweep below lands while the model is still downloading, even on a slow runner.
     studio.slow("job_1", Duration::from_millis(3000));
     let app = factory_app(&seen, studio).await;
-    let admin = app.register("operator_z", "스튜디오 담당").await;
+    let admin = app.register("operator_z", "대장").await;
     app.make_admin("operator_z").await;
     let queued = app.call("POST", IMPORT, Some(import_body("job_1", "late", "늦은 영웅")), Some(&admin)).await;
     assert_eq!(queued.status, StatusCode::ACCEPTED, "{:?}", queued.body);
@@ -935,7 +1205,7 @@ async fn 멈춘_것으로_처리된_가져오기는_끝까지_가도_항목을_�
 #[tokio::test]
 async fn 서버가_다시_뜨면_멈춘_가져오기를_실패로_적는다() {
     let app = TestApp::new(None).await;
-    let admin = app.register("operator_i", "스튜디오 담당").await;
+    let admin = app.register("operator_i", "대장").await;
     app.make_admin("operator_i").await;
     for (item, status) in [("a1", "running"), ("a2", "queued"), ("a3", "done")] {
         sqlx::query(
@@ -1020,7 +1290,7 @@ async fn 버전을_두기_전에_가져온_항목은_지금_모델이_첫_버전
 async fn 미니미는_공개된_카탈로그나_기본_미니미만_고른다() {
     let app = TestApp::new(None).await;
     let member = app.register("member_m", "회원").await;
-    let admin = app.register("operator_m", "스튜디오 담당").await;
+    let admin = app.register("operator_m", "대장").await;
     app.make_admin("operator_m").await;
     sqlx::query(
         "INSERT INTO catalog_items (id, kind, label, emoji, model_url, source, status) VALUES
@@ -1076,7 +1346,7 @@ async fn 캐릭터_서버_프록시는_관리자만_운영자_토큰으로_통�
     let seen = Seen::default();
     let app = factory_app(&seen, Studio::standard()).await;
     let member = app.register("member_g", "회원").await;
-    let admin = app.register("operator_g", "스튜디오 담당").await;
+    let admin = app.register("operator_g", "대장").await;
     app.make_admin("operator_g").await;
     let path = "/api/factory/avatar-factory/capabilities?probe=1";
     assert_eq!(app.call("GET", path, None, None).await.status, StatusCode::UNAUTHORIZED);
@@ -1101,7 +1371,7 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     let seen = Seen::default();
     let app = studio_app(&seen, FactoryAccess::Read, 0).await;
     let member = app.register("member_s", "회원").await;
-    let admin = app.register("operator_s", "스튜디오 담당").await;
+    let admin = app.register("operator_s", "대장").await;
     app.make_admin("operator_s").await;
 
     let wardrobe = "/api/avatar-factory/wardrobe/bodies";
@@ -1124,7 +1394,7 @@ async fn 스튜디오_경로는_회원에게_옷장만_열고_쓰기와_유료_�
     app.cleanup().await;
 
     let app = studio_app(&seen, FactoryAccess::Paid, 1).await;
-    let admin = app.register("operator_p", "스튜디오 담당").await;
+    let admin = app.register("operator_p", "대장").await;
     app.make_admin("operator_p").await;
     let select = "/api/avatar-factory/jobs/job_1/native-parts/select";
     assert_eq!(app.call("POST", select, Some(json!({})), Some(&admin)).await.status, StatusCode::OK);

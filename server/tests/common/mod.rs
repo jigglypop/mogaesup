@@ -8,7 +8,7 @@ use axum::{
 use http_body_util::BodyExt;
 use mogaesup_server::{
     AppState, MIGRATOR,
-    config::{Config, Factory, FactoryToken},
+    config::{Config, Factory, FactoryToken, OpenAi},
     models::Models,
     rebac, router,
 };
@@ -20,7 +20,8 @@ use tower::ServiceExt;
 pub const ORIGIN: &str = "http://test.local";
 pub const TICKET_SECRET: &[u8] = b"test-realtime-ticket-secret-of-32-bytes";
 
-/// Operator token settings for a fake character server: members' wardrobe reads go out only with one.
+/// Operator token settings for a fake character server: with them, a member's wardrobe read carries a `MEMBER` token
+/// as well as its `x-studio-scope` mark.
 pub fn factory_token() -> Option<FactoryToken> {
     Some(FactoryToken { key: vec![7; 32], issuer: "mogaesup".into(), audience: "mogaesup-client".into(), owner_id: 1 })
 }
@@ -72,12 +73,21 @@ pub struct Reply {
 
 impl TestApp {
     pub async fn new(factory: Option<Factory>) -> Self {
-        Self::tuned(factory, |_| {}).await
+        Self::with(factory, OpenAi::default(), |_| {}).await
     }
 
     /// The server with `tune` applied to its state before its router is made: shorter waits or fewer places, so a
     /// test sees them run out in moments.
     pub async fn tuned(factory: Option<Factory>, tune: impl FnOnce(&mut AppState)) -> Self {
+        Self::with(factory, OpenAi::default(), tune).await
+    }
+
+    /// The server with `openai` as its OpenAI API settings (a stand-in served in the test, see tests/saju_made.rs).
+    pub async fn with_openai(openai: OpenAi) -> Self {
+        Self::with(None, openai, |_| {}).await
+    }
+
+    async fn with(factory: Option<Factory>, openai: OpenAi, tune: impl FnOnce(&mut AppState)) -> Self {
         let db = TestDb::create().await;
         MIGRATOR.run(&db.pool).await.unwrap();
         let model_dir = std::env::temp_dir().join(&db.name);
@@ -88,6 +98,7 @@ impl TestApp {
             models: Models::open(model_dir.to_str().unwrap()).unwrap(),
             model_sweep: false,
             factory,
+            openai,
         };
         let mut state = AppState::new(db.pool.clone(), config);
         tune(&mut state);

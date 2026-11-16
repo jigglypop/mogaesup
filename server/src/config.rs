@@ -1,7 +1,73 @@
 use anyhow::{Context, bail};
-use std::env;
+use std::{env, time::Duration};
 
 use crate::models::Models;
+
+/// The OpenAI API, which writes a 사주 home's reading and draws its island again (`saju_made`).
+#[derive(Clone)]
+pub struct OpenAi {
+    /// `OPENAI_API_KEY`. Without it neither is made: their requests answer `reading_unavailable` and
+    /// `picture_unavailable`.
+    pub api_key: Option<String>,
+    /// `OPENAI_BASE_URL` without a trailing slash, `https://api.openai.com/v1` unless set.
+    pub base_url: String,
+    /// `OPENAI_READING_MODEL`: the Responses API model a reading is written with.
+    pub reading_model: String,
+    /// `OPENAI_PICTURE_MODEL`: the image model an island is drawn again with, on `/images/edits`.
+    pub picture_model: String,
+    /// Paid calls of each kind allowed per calendar month (UTC) across all members: `READINGS_MONTHLY`,
+    /// `PICTURES_MONTHLY`.
+    pub readings_monthly: i64,
+    pub pictures_monthly: i64,
+    /// How long one call may take before it is given up. Not read from the environment: a call must end well inside
+    /// the ten minutes after which a pending reading or picture reads as interrupted.
+    pub reading_timeout: Duration,
+    pub picture_timeout: Duration,
+}
+
+impl Default for OpenAi {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: "https://api.openai.com/v1".into(),
+            reading_model: "gpt-6.1-terra".into(),
+            picture_model: "gpt-image-2.6-sunburst".into(),
+            readings_monthly: 3000,
+            pictures_monthly: 500,
+            reading_timeout: Duration::from_secs(6 * 60),
+            picture_timeout: Duration::from_secs(6 * 60),
+        }
+    }
+}
+
+impl OpenAi {
+    fn from_env() -> anyhow::Result<Self> {
+        let defaults = Self::default();
+        let model = |name: &str, default: String| -> anyhow::Result<String> {
+            let Some(model) = var(name) else { return Ok(default) };
+            if model.len() > 64 || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_:".contains(&b)) {
+                bail!("{name} must be a model name, not {model}");
+            }
+            Ok(model)
+        };
+        let monthly = |name: &str, default: i64| -> anyhow::Result<i64> {
+            let monthly = var(name).map_or(Ok(default), |n| n.parse()).with_context(|| name.to_owned())?;
+            if monthly < 0 {
+                bail!("{name} must not be negative");
+            }
+            Ok(monthly)
+        };
+        Ok(Self {
+            api_key: var("OPENAI_API_KEY"),
+            base_url: var("OPENAI_BASE_URL").map_or(Ok(defaults.base_url), |url| openai_url(&url))?,
+            reading_model: model("OPENAI_READING_MODEL", defaults.reading_model)?,
+            picture_model: model("OPENAI_PICTURE_MODEL", defaults.picture_model)?,
+            readings_monthly: monthly("READINGS_MONTHLY", defaults.readings_monthly)?,
+            pictures_monthly: monthly("PICTURES_MONTHLY", defaults.pictures_monthly)?,
+            ..defaults
+        })
+    }
+}
 
 /// Where the character server (backend/) listens, and how this server signs in to it as the operator.
 #[derive(Clone)]
@@ -9,8 +75,8 @@ pub struct Factory {
     pub url: String,
     pub api_key: Option<String>,
     /// `FACTORY_JWT_SECRET` and the claims around it. Without it requests go without a token, with the server's keys
-    /// alone, members' wardrobe reads too: only the token can narrow those to what members may see
-    /// (`factory::member_scoped`), so the server warns as it starts.
+    /// alone: the studio's nginx signs them in as its owner, and a member's wardrobe read is narrowed by the
+    /// `x-studio-scope` mark it carries either way (`factory::signed_as`).
     pub token: Option<FactoryToken>,
     /// What the studio screens may do through this server: `FACTORY_ACCESS`, read unless set.
     pub access: FactoryAccess,
@@ -116,6 +182,7 @@ pub struct Config {
     /// on: a sweep judges by its own database, so one run against another's store would delete what that one uses.
     pub model_sweep: bool,
     pub factory: Option<Factory>,
+    pub openai: OpenAi,
 }
 
 fn var(name: &str) -> Option<String> {
@@ -151,6 +218,24 @@ fn factory_url(raw: &str) -> anyhow::Result<String> {
         "http" if local => {}
         "http" => bail!("FACTORY_URL must use https unless the character server runs on this machine, not {raw}"),
         other => bail!("FACTORY_URL must be an http(s) URL, not {other}"),
+    }
+    Ok(raw.trim_end_matches('/').to_owned())
+}
+
+/// `OPENAI_BASE_URL` without a trailing slash. Plain http only reaches this machine (a stand-in in tests): the API key
+/// travels in every request's headers.
+fn openai_url(raw: &str) -> anyhow::Result<String> {
+    let url = reqwest::Url::parse(raw).context("OPENAI_BASE_URL is not a URL")?;
+    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let local =
+        host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    match url.scheme() {
+        "https" if !host.is_empty() => {}
+        "http" if local => {}
+        _ => bail!("OPENAI_BASE_URL must be an https URL, or http on this machine, not {raw}"),
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("OPENAI_BASE_URL must be a base URL without a query, not {raw}");
     }
     Ok(raw.trim_end_matches('/').to_owned())
 }
@@ -207,6 +292,7 @@ impl Config {
             models: Models::open(&model_store(var("MODEL_STORE"), cookie_secure)?).context("MODEL_STORE")?,
             model_sweep: model_sweep(var("MODEL_SWEEP").as_deref())?,
             factory,
+            openai: OpenAi::from_env()?,
         })
     }
 }
@@ -254,6 +340,15 @@ mod tests {
         assert!(model_sweep(Some("on")).unwrap());
         for unclear in ["true", "1", "ON", "yes"] {
             assert!(model_sweep(Some(unclear)).is_err(), "{unclear}");
+        }
+    }
+
+    #[test]
+    fn the_openai_api_is_reached_over_https_unless_a_stand_in_runs_here() {
+        assert_eq!(openai_url("https://api.openai.com/v1/").unwrap(), "https://api.openai.com/v1");
+        assert_eq!(openai_url("http://127.0.0.1:9100/v1").unwrap(), "http://127.0.0.1:9100/v1");
+        for refused in ["http://api.openai.com/v1", "ftp://127.0.0.1/v1", "https://api.openai.com/v1?key=1", "openai"] {
+            assert!(openai_url(refused).is_err(), "{refused}");
         }
     }
 

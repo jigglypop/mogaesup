@@ -12,6 +12,9 @@ import subprocess
 
 ACTIVE = {"PENDING", "IN_PROGRESS"}
 FAILED = {"FAILED", "CANCELED", "CANCELLED", "submission_rejected"}
+# Attempts Meshy refused, never received or has ended: sending the stage again cannot duplicate a task. An uncertain
+# submission is never sent again (character_jobs.RETRYABLE without it).
+RETRY = {"FAILED", "CANCELED", "submission_rejected", "submission_not_sent"}
 
 
 def _read(path: Path) -> dict:
@@ -131,12 +134,17 @@ def inspect_character(character: dict, root: Path) -> dict:
         item.update(next_action="download_rigging",
                     command=_command("uv", "run", "python", "-m", "src.character_cli",
                                      "--run", character["run"], "download", "--stage", "rigging"))
-    elif status in FAILED:
+    elif status in FAILED or status in RETRY:
         setup = _latest_local_setup(run)
+        generated = (run / "generated.glb").is_file()
+        # Rigging is sent again for the generation it was made from, whose model is downloaded.
+        resendable = stage == "generation" or (stage == "rigging" and generated and state.get("generation_task_id"))
         if stage == "rigging" and setup:
             item.update(state="review_required", next_action="review_local_fallback",
                         local_setup=str(setup))
-        elif stage == "rigging" and (run / "generated.glb").is_file():
+        elif status in RETRY and resendable:
+            item.update(state="blocked", next_action="retry_" + stage, requires_external_mutation=True)
+        elif stage == "rigging" and generated:
             item.update(state="blocked", next_action="choose_new_run_or_local_fallback")
         else:
             item.update(state="blocked", next_action="inspect_provider_failure")

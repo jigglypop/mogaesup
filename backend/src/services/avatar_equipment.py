@@ -56,10 +56,30 @@ def equipment_layer(slot, order):
             'background': 'border-gray', 'status': 'needs_image', 'description': ''}
 
 
+def head_bounds(spec):
+    """The head the glasses sit on: the body reference's measurement or, before one, the head that assembly measured
+    the hair target around (that box less its clearance), from the neck to the crown; None without either. Never the
+    whole body."""
+    if spec.get('measured_head_bounds_m'):
+        return spec['measured_head_bounds_m']
+    hair = spec['fitting']['bounds'].get('hair')
+    neck, crown = spec['anchors'].get('neck'), spec['anchors'].get('crown')
+    if not hair or not neck or not crown:
+        return None
+    clearance = spec['fitting'].get('hair_clearance_m', .025)
+    return [[hair[0][0]+clearance, neck[1], hair[0][2]+clearance],
+            [hair[1][0]-clearance, crown[1], hair[1][2]-clearance]]
+
+
 def equipment_spec(spec):
     anchors = spec['anchors']
     height = spec['body_height_m']
-    head = spec.get('measured_head_bounds_m', spec['fitting']['bounds']['body'])
+    head = head_bounds(spec)
+    if head is None:
+        raise ValueError('The spec has no measured head for the glasses socket')
+    # A hand socket sits on the body's measured wrist joint when its profile has one: the authored anchor can be
+    # centimetres off the hand of a saved body.
+    joints = (spec.get('body_profile') or {}).get('landmarks') or {}
     neck, crown = anchors['neck'][1], anchors['crown'][1]
     sockets = {}
     for slot, bone in NATIVE_EQUIPMENT.items():
@@ -69,7 +89,8 @@ def equipment_spec(spec):
             socket = [anchors['crown'][0], head[0][1]+(head[1][1]-head[0][1])*.40, head[1][2]+.008]
             pivot = [.5, .5, 1.0]
         else:
-            socket = anchors['wrist_right' if slot == 'weapon' else 'wrist_left'][:]
+            wrist = 'wrist_right' if slot == 'weapon' else 'wrist_left'
+            socket = (joints.get(wrist) or anchors[wrist])[:]
             size = [height*.12, height*(.42 if slot == 'weapon' else .28), height*.08]
             pivot = [.5, .2, .5]
         box = [[socket[i]-size[i]*pivot[i] for i in range(3)],

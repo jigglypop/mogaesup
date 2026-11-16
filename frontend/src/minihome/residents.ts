@@ -41,9 +41,11 @@ export type Resident = {
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const CATALOG_ID = /^[a-z0-9][a-z0-9_-]{1,63}$/;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+/** Half of a character written in two UTF-16 units, left by cutting between them; the server cannot read one. */
+const HALF = /\p{Cs}/u;
 
 const isText = (value: unknown, min: number, max: number): value is string =>
-  typeof value === 'string' && [...value].length <= max && value.trim().length >= min && !CONTROL.test(value);
+  typeof value === 'string' && [...value].length <= max && value.trim().length >= min && !CONTROL.test(value) && !HALF.test(value);
 const isCoordinate = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= COORDINATE_MAX;
 
@@ -73,6 +75,13 @@ export function parseResidents(data: unknown): Resident[] {
   return residents as Resident[];
 }
 
+/**
+ * A name or greeting as the server takes it: control characters (a pasted tab) as spaces, halves of characters dropped,
+ * trimmed and cut to `max` characters as the server counts them.
+ */
+export const residentText = (value: string, max: number) =>
+  [...value.replace(/\p{Cc}+/gu, ' ').replace(/\p{Cs}/gu, '').trim()].slice(0, max).join('').trim();
+
 export type ResidentChanges = Partial<Pick<Resident, 'name' | 'greeting' | 'position' | 'rotation'>>;
 
 export type ResidentStore = {
@@ -81,15 +90,19 @@ export type ResidentStore = {
   /** Advances with every change, for the island's save. */
   revision: () => number;
   replace: (next: readonly Resident[]) => void;
-  /** The new resident, or null when the island is full. */
+  /** The new resident, or null when the island is full or the server would refuse it. */
   add: (resident: Omit<Resident, 'id'>) => Resident | null;
+  /** A change the server would refuse leaves the resident as it is. */
   update: (id: string, changes: ResidentChanges) => void;
   remove: (id: string) => void;
 };
 
 const newId = () => `r${randomId().replace(/-/g, '').slice(0, 16)}`;
 
-/** One island's residents. Entries are replaced, never changed in place, so each one's identity marks a change. */
+/**
+ * One island's residents. Entries are replaced, never changed in place, so each one's identity marks a change. A resident
+ * or a change the server would refuse is not taken: it would keep the whole island from saving.
+ */
 export function createResidentStore(initial: readonly Resident[] = []): ResidentStore {
   let residents: readonly Resident[] = initial;
   let revision = 0;
@@ -109,13 +122,14 @@ export function createResidentStore(initial: readonly Resident[] = []): Resident
     replace: (next) => set([...next]),
     add(resident) {
       if (residents.length >= MAX_RESIDENTS) return null;
-      const added = { ...resident, id: newId() };
-      set([...residents, added]);
+      const added = readResident({ ...resident, id: newId() });
+      if (added) set([...residents, added]);
       return added;
     },
     update(id, changes) {
-      if (!residents.some((resident) => resident.id === id)) return;
-      set(residents.map((resident) => (resident.id === id ? { ...resident, ...changes } : resident)));
+      const current = residents.find((resident) => resident.id === id);
+      const next = current && readResident({ ...current, ...changes });
+      if (next) set(residents.map((resident) => (resident === current ? next : resident)));
     },
     remove(id) {
       if (residents.some((resident) => resident.id === id)) set(residents.filter((resident) => resident.id !== id));

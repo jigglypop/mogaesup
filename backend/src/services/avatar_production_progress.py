@@ -33,7 +33,8 @@ def production_progress(directory, job):
     direct_import = job.get('input_kind') == 'glb' and job.get('input', {}).get('import_mode') == 'register'
     image_done = sum(i.get('status') == 'succeeded' for i in images)
     image_received = sum(i.get('status') in ('received', 'succeeded', 'qc_failed') for i in images)
-    image_failed = any(i.get('status') in ('not_sent', 'rejected', 'failed', 'submission_uncertain') for i in images)
+    image_failed = any(i.get('status') in ('not_sent', 'rejected', 'failed', 'submission_uncertain',
+                                           'answer_invalid') for i in images)
     models_done = sum(p.get('model_status') == 'ready' for p in parts)
     # Provider 100% means generation finished; local download still has to succeed.
     model_fraction = sum(1 if p.get('model_status') == 'ready' else max(0, min(99, p.get('progress') or 0))/100 for p in parts)
@@ -85,7 +86,7 @@ def production_progress(directory, job):
         reference_views = list(reference.get('views', {}).values()) or [reference]
         add('reference', '공통 규격 원본', sum(view.get('status') == 'succeeded' for view in reference_views), len(reference_views),
             active=flow.get('busy') and flow.get('stage') in ('reference', 'queued'),
-            failed=reference_status in ('not_sent', 'rejected', 'failed', 'submission_uncertain'))
+            failed=reference_status in ('not_sent', 'rejected', 'failed', 'submission_uncertain', 'answer_invalid'))
     view_count = len(job.get('production_spec', {}).get('generated_views', []))
     image_label = ('정면·후면·좌우면' if view_count == 4 else
                    '정면·측면·후면' if view_count == 3 else '정면·측면' if frozen else '이미지')

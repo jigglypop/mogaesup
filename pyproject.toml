@@ -12,6 +12,8 @@ blender = ["asset-3d-api[blender]"]
 
 [tool.uv]
 package = false
+# botocore pulls urllib3 in; versions before 2.8.0 have published advisories.
+constraint-dependencies = ["urllib3>=2.8.0"]
 
 [tool.uv.workspace]
 members = ["backend"]

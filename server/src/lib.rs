@@ -12,12 +12,16 @@ pub mod imports;
 pub mod look_bake;
 pub mod looks;
 pub mod models;
+mod openai;
 pub mod permissions;
 pub mod pets;
 pub mod rebac;
 pub mod residents;
 pub mod rooms;
 pub mod runtime;
+pub mod saju;
+pub mod saju_made;
+mod saju_reading;
 pub mod security;
 pub mod share;
 pub mod slim;
@@ -60,8 +64,8 @@ use crate::{
 /// Password hashes running at once; argon2 is deliberately heavy.
 const HASHING_SLOTS: usize = 2;
 /// How long an API request may take until its answer starts, its body read included: a request whose body stops
-/// coming, or that waits on something stuck, lets go of what it holds. It ends before CloudFront stops waiting for an
-/// answer to start (30 seconds, frontend/infra/aws-static.yaml), so a request is answered from here, and stops holding
+/// coming, or that waits on something stuck, lets go of what it holds. It ends well before CloudFront stops waiting for
+/// an answer to start (a minute, frontend/infra/aws-static.yaml), so a request is answered from here, and stops holding
 /// anything, before its client is told it timed out; every wait a route has inside it is shorter. The studio's routes
 /// keep their own limits (their uploads and downloads run for minutes; a member's wardrobe read has its own, as short),
 /// and the realtime sockets are routes of their own.
@@ -99,6 +103,8 @@ pub struct AppState {
     pub wardrobe: factory::Wardrobe,
     /// [`REQUEST_DEADLINE`], unless a test needs a shorter one.
     pub request_deadline: Duration,
+    /// Readings and pictures of 사주 homes being made with a paid model.
+    pub made: saju_made::Slots,
 }
 
 impl AppState {
@@ -119,6 +125,7 @@ impl AppState {
             homes: homes::Homes::default(),
             wardrobe: factory::Wardrobe::default(),
             request_deadline: REQUEST_DEADLINE,
+            made: saju_made::Slots::default(),
         }
     }
 }
@@ -159,6 +166,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .merge(homes::router().layer(small()))
         .merge(social::router().layer(small()))
+        .merge(saju::router().layer(small()))
+        // The reading route keeps a body limit of its own, and the picture route reads its body itself.
+        .merge(saju_made::router())
         .merge(catalog::router())
         .merge(factory::router())
         .merge(looks::router())

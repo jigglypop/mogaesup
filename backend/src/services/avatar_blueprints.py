@@ -83,12 +83,19 @@ class AvatarBlueprints:
             if owner != 1:
                 raise PipelineError('not_found', '이미지 파츠를 찾을 수 없습니다.', 404)
             return BACKEND_ROOT/'assets/avatars/image-design/A-atlas-v1.png'
+        self.asset_bytes(owner, asset_id)
+        return self.root/str(int(owner))/'assets'/f'{asset_id}.png'
+
+    def asset_bytes(self, owner, asset_id):
+        """An uploaded image's bytes, read once and checked against its ID; asset() checks the same read but returns
+        the path, which a caller that needs the bytes would read and hash again."""
         if not re.fullmatch(r'[a-f0-9]{64}', asset_id):
             raise PipelineError('not_found', '이미지 파츠를 찾을 수 없습니다.', 404)
         path = self.root/str(int(owner))/'assets'/f'{asset_id}.png'
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != asset_id:
+        content = path.read_bytes() if path.is_file() else None
+        if content is None or hashlib.sha256(content).hexdigest() != asset_id:
             raise PipelineError('not_found', '이미지 파츠를 찾을 수 없습니다.', 404)
-        return path
+        return content
 
     def upload(self, owner, content):
         require_bucket()

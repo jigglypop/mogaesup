@@ -1,4 +1,4 @@
-/* The frame around every screen: top bar, rail and the page panel. World screens float the same pieces over the canvas. */
+/* The frame around every screen: the top bar and the page panel. World screens float the same bar over the canvas. */
 .mg-app { position: relative; min-height: 100%; }
 
 .mg-topbar {
@@ -78,6 +78,8 @@
 .mg-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; color: var(--mg-ink); -webkit-appearance: none; appearance: none; }
 .mg-search input::placeholder { color: var(--mg-muted); }
 .mg-search:focus-within { border-color: var(--mg-primary); }
+/* A phone's: the button the box folds into, and the one that folds it again (see the phone's rules). */
+.mg-search-open, .mg-search-close { display: none; }
 
 .mg-anchor { position: relative; }
 .mg-me {
@@ -136,11 +138,10 @@
 .mg-menu-row > span { font-size: 12px; font-weight: 800; color: var(--mg-muted); }
 .mg-menu-row .mg-tabs > button { height: 32px; font-size: 12px; }
 
-/* A modal dialog from the menus (비밀번호 바꾸기), over the page or the island. */
+/* A modal dialog from the menus (비밀번호 바꾸기, 다른 기기에서 모두 로그아웃), over the page or the island. */
 .mg-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: var(--mg-edge); background: var(--mg-scrim); }
 .mg-modal { width: min(400px, 100%); display: grid; gap: 14px; padding: 22px; background: var(--mg-glass-strong); }
 .mg-modal-form { display: grid; gap: 12px; }
-.mg-menu-status { padding: 4px 10px 6px; font-size: 13px; color: var(--mg-muted); }
 
 .mg-requests { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .mg-requests li { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: center; padding: 8px; border-radius: 14px; }
@@ -152,6 +153,7 @@
 .mg-requests li > span { grid-column: 2; display: flex; gap: 6px; }
 .mg-requests .mg-avatar { text-decoration: none; }
 
+/* The walking island's rail (see Rail): the screens have none. */
 .mg-rail {
   position: absolute;
   z-index: 19;
@@ -181,8 +183,6 @@
 }
 .mg-rail a:active { background: var(--mg-tint); }
 .mg-rail a[aria-current='page'] { background: var(--mg-primary-soft); color: var(--mg-primary); }
-.mg-rail a.is-divided { margin-top: 8px; position: relative; }
-.mg-rail a.is-divided::before { content: ''; position: absolute; top: -8px; left: 14px; right: 14px; height: 1px; background: var(--mg-hair-strong); }
 
 /* Pages */
 .mg-app.is-page { min-height: 100vh; min-height: 100dvh; isolation: isolate; }
@@ -212,11 +212,11 @@
   opacity: 0.55;
 }
 :root[data-theme='dark'] .mg-app.is-page::before { opacity: 0.22; }
-.mg-app.is-page .mg-topbar, .mg-app.is-page .mg-rail { position: fixed; }
+.mg-app.is-page .mg-topbar { position: fixed; }
 .mg-page-main {
   position: relative;
   margin: 0 auto;
-  padding: calc(var(--mg-edge) + 72px) var(--mg-edge) var(--mg-edge) calc(var(--mg-edge) * 2 + var(--mg-rail));
+  padding: calc(var(--mg-edge) + 72px) var(--mg-edge) var(--mg-edge);
   max-width: 1440px;
 }
 .mg-page-main.is-wide { max-width: none; }
@@ -230,7 +230,12 @@
 
 @media (max-width: 720px) {
   :root { --mg-edge: 12px; }
-  .mg-topbar-right .mg-search { display: none; }
+  /* The search folds into a button. Pressed, the box lies over the whole bar, a button at its end to fold it again. */
+  .mg-topbar-right .mg-search:not(.is-open) { display: none; }
+  .mg-search-open { display: inline-grid; }
+  .mg-search-open[aria-expanded='true'] { visibility: hidden; }
+  .mg-topbar-right .mg-search.is-open { position: absolute; z-index: 1; top: 0; left: 0; right: 0; width: auto; height: 46px; padding-right: 0; background: var(--mg-glass-strong); }
+  .mg-search.is-open .mg-search-close { display: inline-grid; width: 44px; height: 44px; }
   .mg-brand { width: 46px; height: 46px; padding: 0; justify-content: center; }
   .mg-brand b { display: none; }
   .mg-pill { height: 46px; padding: 0 14px; }
@@ -255,24 +260,22 @@
     border-radius: 22px;
   }
   .mg-rail a { flex: 1; padding: 7px 0 6px; }
-  .mg-rail a.is-divided { margin-top: 0; }
-  .mg-rail a.is-divided::before { display: none; }
-  .mg-page-main { padding: calc(var(--mg-edge) + 60px) var(--mg-edge) 96px; }
+  .mg-page-main { padding: calc(var(--mg-edge) + 60px) var(--mg-edge) var(--mg-edge); }
   .mg-panel { padding: 18px; }
 }
 
-/* A phone on its side: the rail stays at the side, and the bars get as slim as on a phone. */
+/* A phone on its side: the bars get as slim as on a phone (and the island's rail stays at the side). */
 @media (max-height: 500px) and (min-width: 721px) {
   :root { --mg-edge: 12px; }
   .mg-brand, .mg-pill { height: 46px; }
   .mg-rail { top: calc(var(--mg-edge) + 58px); gap: 2px; padding: 6px; border-radius: 22px; }
   .mg-rail a { padding: 6px 0 5px; gap: 2px; }
-  .mg-rail a.is-divided { margin-top: 4px; }
-  .mg-rail a.is-divided::before { top: -4px; }
   .mg-page-main { padding-top: calc(var(--mg-edge) + 58px); }
 }
 
+/* A touch screen: what is pressed in the bars, the menus and the dialogs is a fingertip (44px) high. */
 @media (pointer: coarse) {
-  .mg-menu-row .mg-tabs > button { height: 38px; }
+  .mg-menu-row .mg-tabs > button { height: 44px; }
   .mg-menu > a, .mg-menu > button, .mg-menu-items > a, .mg-menu-items > button { height: 44px; }
+  .mg-topbar .mg-btn, .mg-popover .mg-btn.is-small, .mg-modal .mg-btn, .mg-modal .mg-field { height: 44px; }
 }

@@ -1,7 +1,7 @@
 import { request, savedRequest, type Pending } from '../api';
 import type { FactoryJob } from '../factory/api';
 import { variantSlots } from '../factory/parts';
-import type { BodyGlbAsset } from './glb-bodies-api';
+import { uploadGlb, type BodyGlbAsset } from './glb-bodies-api';
 
 export const glbAssetSlots = ['body', ...variantSlots, 'prop'] as const;
 export type GlbAssetSlot = typeof glbAssetSlots[number];
@@ -31,11 +31,8 @@ const post = <R>(url: string) => (pending: Pending<unknown>) => request<R>(url, 
 
 export const glbAssetsApi = {
   list: (signal?: AbortSignal) => request<{ items: GlbAssetRecord[] }>(root, { signal }),
-  upload: (file: File) => request<BodyGlbAsset>(`${root}/upload`, { method: 'POST', headers: { 'Content-Type': 'model/gltf-binary' }, body: file, timeoutMs: 120000 }),
-  create: (input: GlbAssetInput) => registration.send(input, post<GlbAssetRecord>(root)),
-  /** Sends the saved registration or preparation under `key` again as itself; nothing when it is no longer saved
-   * (SavedRequestGone). */
-  recoverCreate: (key: string) => registration.resume(key, post<GlbAssetRecord>(root)),
-  prepare: (id: string, input: GlbAssetPreparation) => preparation(id).send(input, post<FactoryJob>(`${root}/${encodeURIComponent(id)}/prepare`)),
-  recoverPrepare: (id: string, key: string) => preparation(id).resume(key, post<FactoryJob>(`${root}/${encodeURIComponent(id)}/prepare`)),
+  upload: (file: File) => uploadGlb(`${root}/upload`, file),
+  /** `key`: the saved request's key, when the screen resumes it; storage may have forgotten it since. */
+  create: (input: GlbAssetInput, key?: string) => registration.send(input, post<GlbAssetRecord>(root), key ? { key } : {}),
+  prepare: (id: string, input: GlbAssetPreparation, key?: string) => preparation(id).send(input, post<FactoryJob>(`${root}/${encodeURIComponent(id)}/prepare`), key ? { key } : {}),
 };

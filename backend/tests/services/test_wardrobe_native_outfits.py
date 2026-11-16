@@ -1,3 +1,6 @@
+import io
+
+from PIL import Image
 import pytest
 
 from native_assembly_fixture import JOB, VERSION, seed_native_assembly
@@ -5,7 +8,7 @@ from src.api.avatar_factory import SinglePartVariantInput
 from src.services import avatar_native_outfits
 from src.services.avatar_native_outfits import AvatarNativeOutfits
 from src.services.avatar_native_parts import AvatarNativeParts
-from src.services.avatar_worn_images import BRIEF_MAX, build_prompt
+from src.services.avatar_worn_images import BRIEF_MAX, build_prompt, ensure_alpha
 from src.services.character_pipeline import PipelineError, read_json
 
 
@@ -42,3 +45,24 @@ def test_the_whole_design_brief_the_api_accepts_reaches_the_image_prompt():
     assert prompt.endswith('Design brief: ' + brief)
     # Only what the API would not have accepted is cut.
     assert build_prompt('top', 'front', key_name='magenta', notes=brief + 'extra').endswith('Design brief: ' + brief)
+
+
+def png(image):
+    content = io.BytesIO()
+    image.save(content, format='PNG')
+    return content.getvalue()
+
+
+def test_a_near_opaque_answer_loses_its_white_border_and_provider_alpha_is_kept():
+    # Alpha 252 everywhere is no provider alpha: the white around the figure is its background.
+    image = Image.new('RGBA', (64, 64), (255, 255, 255, 252))
+    image.paste((200, 40, 40, 252), (16, 16, 48, 48))
+    cleaned, report = ensure_alpha(png(image))
+    assert report['background'] == 'border_removed' and report['removed_pixels'] == 64*64 - 32*32
+    with Image.open(io.BytesIO(cleaned)) as result:
+        assert result.getchannel('A').getpixel((0, 0)) == 0 and result.getchannel('A').getpixel((32, 32)) == 255
+    # Alpha the provider drew is kept as it came.
+    image.putalpha(0)
+    image.paste((200, 40, 40, 255), (16, 16, 48, 48))
+    drawn = png(image)
+    assert ensure_alpha(drawn) == (drawn, {'background': 'provider_alpha'})

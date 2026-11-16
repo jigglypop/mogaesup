@@ -1,5 +1,7 @@
 # The engine's working clone; the app takes gaesup-world from npm.
 /gaesup-world/
+# The 사주 library's working clone; the app takes jamiblossom from frontend/vendor.
+/jamiblossom/
 
 node_modules/
 dist/
