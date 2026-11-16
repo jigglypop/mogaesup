@@ -34,6 +34,10 @@ import type {
   Registration,
   ReadingChart,
   SajuBirth,
+  DecorFlag,
+  DecorItem,
+  FlagDesign,
+  SajuDecor,
   SajuHome,
   SajuPictureState,
   SajuReadingState,
@@ -177,6 +181,14 @@ export const sajuApi = {
    */
   draw: (body: { expectedOwnerId: string; image: string; again?: boolean }) =>
     api<SajuPictureState>('/homes/me/saju/picture', { method: 'POST', body, timeoutMs: 60_000 }),
+  /** What is placed on a 섬, and the flags given to it. */
+  decor: (username: string) => api<SajuDecor>(`/homes/${segment(username)}/saju/decor`),
+  /** Places what the caller's 섬 shows (at most 24 things); refused 409 `no_home` before the home is built. */
+  placeDecor: (body: { expectedOwnerId: string; items: DecorItem[] }) => api<SajuDecor>('/homes/me/saju/decor', { method: 'PUT', body }),
+  /** Gives a member's 섬 the caller's flag: once a day for each 섬 (409 `already_given`), not one's own (400 `own_home`). */
+  giveFlag: (username: string, design: FlagDesign) => api<DecorFlag>(`/homes/${segment(username)}/saju/flags`, { method: 'POST', body: { design } }),
+  /** Takes down a flag given to the caller's 섬, and wherever it was placed. */
+  dropFlag: (id: string) => api<void>(`/homes/me/saju/flags/${segment(id)}`, { method: 'DELETE' }),
 };
 
 /** The public lists change only when an admin publishes, so an island opened soon after another reuses them. */

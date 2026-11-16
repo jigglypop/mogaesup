@@ -23,13 +23,15 @@ import {
   SphereGeometry,
   Vector3,
   type Group,
+  type OrthographicCamera,
   type PointLight,
+  type Scene,
 } from 'three';
 import { abs, attribute, cameraProjectionMatrix, cos, dot, exp, float, Fn, fract, max, mix, modelViewMatrix, positionGeometry, sin, smoothstep, step, vec2, vec3, vec4 } from 'three/tsl';
 import { MeshBasicNodeMaterial, type Node } from 'three/webgpu';
 
 import type { Build, Lamp, Life } from './build';
-import { grassMeshes } from './grass';
+import { lawnMeshes } from './lawn';
 import { WATER_LEVEL } from './mood';
 import { hash } from './noise';
 import { useAnimation } from './parts';
@@ -368,6 +370,44 @@ function Beam({ life }: { life: Extract<Life, { kind: 'beam' }> }) {
 const corner = new Vector3();
 const span = new Box3();
 
+/** Leaves drawn into the sun's shadows, against those drawn in the picture: a crown's shadow is as soft with fewer. */
+const SHADOW_LEAVES = 0.45;
+/**
+ * The share of a crown's leaves drawn for a camera that shows `perMetre` pixels to a metre: all of them close up, a few
+ * less far off, where a leaf is a pixel or two and the crown reads as one mass.
+ */
+const leavesFor = (perMetre: number) => Math.min(1, Math.max(0.8, 0.8 + ((perMetre - 25) / 30) * 0.2));
+
+/** Scatterings whose copies are already in no order (see inNoOrder): the same numbers are handed to every island using them. */
+const shuffled = new WeakSet<Float32Array>();
+
+/**
+ * Puts a scattering's copies (`count` of them, their matrices, colours and ways out) in no order, the same way each
+ * time, so that the first of them, however many, are spread over every crown: a share of them can be drawn.
+ */
+function inNoOrder(count: number, matrices: Float32Array, colors: Float32Array, outs: Float32Array): void {
+  if (shuffled.has(matrices)) return;
+  shuffled.add(matrices);
+  let state = count * 2654435761;
+  const random = () => {
+    state = (Math.imul(state ^ (state >>> 15), 2246822519) + 3266489917) >>> 0;
+    return state / 4294967296;
+  };
+  const swap = (array: Float32Array, size: number, a: number, b: number) => {
+    for (let k = 0; k < size; k++) {
+      const kept = array[a * size + k]!;
+      array[a * size + k] = array[b * size + k]!;
+      array[b * size + k] = kept;
+    }
+  };
+  for (let at = count - 1; at > 0; at--) {
+    const other = Math.floor(random() * (at + 1));
+    swap(matrices, 16, at, other);
+    swap(colors, 3, at, other);
+    swap(outs, 3, at, other);
+  }
+}
+
 /** A sphere about every copy of `shape` that `matrices` place (`count` of them): what the camera's view is tested against. */
 function copiesSphere(shape: BufferGeometry, matrices: Float32Array, count: number): Sphere {
   if (!shape.boundingSphere) shape.computeBoundingSphere();
@@ -397,13 +437,15 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
   const made = useMemo(() => {
     const scattered = build.sprigs.flatMap((sprigs): Mesh[] => {
       const { kind, count, matrices, colors, outs } = sprigs;
-      // The lawn's tufts grow as reed-like clumps that the wind bends (see grass).
+      // The lawn's tufts grow as turf that the wind sways (see lawn).
       if (kind === 'blade') {
-        const lawn = grassMeshes(sprigs);
+        const lawn = lawnMeshes(sprigs);
         for (const mesh of lawn) mesh.layers.set(GRASS_LAYER);
         return lawn;
       }
       const base = sprigGeometry(kind);
+      const leafy = kind === 'leaf' || kind === 'needle';
+      if (leafy) inNoOrder(count, matrices, colors, outs);
       const geometry = new InstancedBufferGeometry();
       // Its own copy of the shape: a geometry let go takes its buffers with it, while the village's other copies draw on.
       geometry.index = base.index && base.index.clone();
@@ -417,9 +459,17 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
       geometry.boundingSphere = copiesSphere(base, matrices, count);
       const mesh = new Mesh(geometry, sprigMaterial(kind));
       // Only what is big enough to shade something throws a shadow, and the lake does not mirror what lies low.
-      mesh.castShadow = kind === 'leaf' || kind === 'needle' || kind === 'puff';
+      mesh.castShadow = leafy || kind === 'puff';
       mesh.receiveShadow = true;
       if (kind === 'bloom') mesh.layers.set(GRASS_LAYER);
+      // A crown's leaves: fewer of them in the sun's shadows, and a few less in a picture seen from far off.
+      if (leafy) {
+        mesh.onBeforeRender = (_renderer, scene, camera) => {
+          const shadow = ((scene as Scene).overrideMaterial as { isShadowPassMaterial?: boolean } | null)?.isShadowPassMaterial === true;
+          const zoom = (camera as OrthographicCamera).isOrthographicCamera ? (camera as OrthographicCamera).zoom : 60;
+          geometry.instanceCount = Math.max(1, Math.round(count * (shadow ? SHADOW_LEAVES : leavesFor(zoom))));
+        };
+      }
       return [mesh];
     });
     const { glow, soft } = motesOf(build);
@@ -428,7 +478,10 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
   useEffect(
     () => () => {
       for (const { geometry } of build.meshes) geometry.dispose();
-      for (const mesh of made.scattered) mesh.geometry.dispose();
+      for (const mesh of made.scattered) {
+        mesh.geometry.dispose();
+        (mesh.userData['letGo'] as (() => void) | undefined)?.();
+      }
       for (const mesh of made.motes) mesh.geometry.dispose();
     },
     [build, made],

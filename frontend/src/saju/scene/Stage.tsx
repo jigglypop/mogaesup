@@ -530,6 +530,13 @@ type StageProps = {
   onVisit?: (id: string) => void;
   /** Labels over the islands: elements carrying `data-pin` with a home's id. */
   pins?: ReactNode;
+  /** What its owner has placed on the island at the village's middle (see Decor), in its own measure. */
+  decor?: ReactNode;
+  /**
+   * Told of a press on the island at the village's middle, where on its ground, while something is being placed on it:
+   * a press then places, and visits nothing.
+   */
+  onPlace?: ((spot: Spot) => void) | undefined;
 };
 
 /** The page's own island stands at the village's middle; every other home's is a neighbour's. */
@@ -562,13 +569,14 @@ function groundAt(camera: Camera | null, box: DOMRect, x: number, y: number, hei
 }
 
 /**
- * The village's canvas. It draws while it is on screen, and holds still for a viewer who asked for less motion. A drag
- * turns the camera about what it shows all the way round and tilts it between a low look across the water and one
- * nearly straight down; a drag with the right button or with shift held, or two fingers, moves what it looks at about
- * the village. The wheel (toward the pointer), two fingers pinching, or the page's own buttons (through `ref`) zoom it
- * in and out, and a double press on the water puts it back where it began.
+ * The village's canvas. It draws while it is on screen, and holds still for a viewer who asked for less motion. A drag,
+ * or a finger, moves what the camera looks at about the village, as a map is moved; a drag with the right button or
+ * with shift held turns the camera about what it shows all the way round and tilts it between a low look across the
+ * water and one nearly straight down, as two fingers turning about each other turn it. The wheel (toward the pointer),
+ * two fingers pinching, or the page's own buttons (through `ref`) zoom it in and out, and a double press on the water
+ * puts it back where it began.
  */
-export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins }: StageProps) {
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const gaze = useRef<Gaze>({ ...UNMOVED, pan: { ...UNMOVED.pan } });
@@ -645,13 +653,15 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     }),
     [],
   );
-  const drag = useRef<{ pointer: number; x: number; y: number; fromX: number; fromY: number; kept: boolean; pan: boolean } | null>(null);
+  const drag = useRef<{ pointer: number; x: number; y: number; fromX: number; fromY: number; kept: boolean; turn: boolean } | null>(null);
   /** When the viewer's hand was last on the picture: the canvas draws at its moving pace from then (see Cadence). */
   const touched = useRef(0);
   /** Fingers on the picture, by pointer; two of them pinch and move, and how far apart they were and where their middle was is what the next move compares with. */
   const touches = useRef(new Map<number, { x: number; y: number }>());
   const spread = useRef(0);
   const middle = useRef<{ x: number; y: number } | null>(null);
+  /** The way from one finger to the other: two fingers turning about each other turn the camera as far. */
+  const twist = useRef<number | null>(null);
   /** The last press that was not a drag, for a double press. */
   const tapped = useRef<{ at: number; x: number; y: number } | null>(null);
   const apart = () => {
@@ -661,6 +671,10 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   const centreOf = () => {
     const [a, b] = [...touches.current.values()];
     return a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : null;
+  };
+  const angleOf = () => {
+    const [a, b] = [...touches.current.values()];
+    return a && b ? Math.atan2(b.y - a.y, b.x - a.x) : null;
   };
   // The wheel zooms. Heard as the page's own listener, not React's passive one: a pinch on a trackpad arrives as a
   // wheel with ctrl held, which the browser would otherwise take to zoom the whole page.
@@ -684,7 +698,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       if (event.type === 'gesturechange' && touches.current.size === 0) zoomAt(scale / last, clientX, clientY);
       last = scale;
     };
-    // A drag with the right button moves the picture: the canvas keeps the menu that button would open.
+    // A drag with the right button turns the picture: the canvas keeps the menu that button would open.
     const menu = (event: MouseEvent) => {
       if (event.target instanceof HTMLCanvasElement) event.preventDefault();
     };
@@ -706,6 +720,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       touches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
       spread.current = apart();
       middle.current = centreOf();
+      twist.current = angleOf();
       // A second finger makes it a pinch: the first one's drag ends, as letting go ends it.
       if (touches.current.size > 1) {
         drag.current = null;
@@ -716,18 +731,27 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     }
     const right = event.pointerType === 'mouse' && event.button === 2;
     if (event.pointerType === 'mouse' && event.button !== 0 && !right) return;
-    drag.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, fromX: event.clientX, fromY: event.clientY, kept: false, pan: right || event.shiftKey };
+    drag.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, fromX: event.clientX, fromY: event.clientY, kept: false, turn: right || event.shiftKey };
   };
   const release = (event: PointerEvent<HTMLDivElement>) => {
     touches.current.delete(event.pointerId);
     spread.current = apart();
     middle.current = centreOf();
+    twist.current = angleOf();
     const held = drag.current;
     if (held?.pointer !== event.pointerId) return;
     drag.current = null;
     delete event.currentTarget.dataset['turning'];
     // A press that stayed a press, on the picture itself: two of them close together on the water undo the viewer's moves.
-    if (held.kept || held.pan || event.type !== 'pointerup' || !(event.target instanceof HTMLCanvasElement)) return;
+    if (held.kept || held.turn || event.type !== 'pointerup' || !(event.target instanceof HTMLCanvasElement)) return;
+    // Placing something: a press on the home's island puts it there.
+    if (onPlace) {
+      const element = box.current;
+      const home = islands[0];
+      const spot = element && groundAt(eye.current, element.getBoundingClientRect(), event.clientX, event.clientY, 0);
+      if (spot && home && over(home, spot)) onPlace({ x: spot.x - home.x, z: spot.z - home.z });
+      return;
+    }
     const now = performance.now();
     const before = tapped.current;
     tapped.current = { at: now, x: event.clientX, y: event.clientY };
@@ -749,10 +773,17 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       finger.x = event.clientX;
       finger.y = event.clientY;
       if (touches.current.size > 1) {
-        // Two fingers zoom by how far apart they move, toward their middle, and move the picture as their middle moves.
+        // Two fingers zoom by how far apart they move, toward their middle, move the picture as their middle moves, and
+        // turn it as they turn about each other.
         const now = apart();
         const centre = centreOf();
         const was = middle.current;
+        const angle = angleOf();
+        if (angle !== null && twist.current !== null) {
+          const turned = Math.atan2(Math.sin(angle - twist.current), Math.cos(angle - twist.current));
+          gaze.current.turn += turned;
+        }
+        twist.current = angle;
         if (centre && was) {
           const { azimuth, tilt } = bearing();
           const zoom = eye.current && 'zoom' in eye.current ? (eye.current.zoom as number) : 0;
@@ -773,13 +804,13 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     const down = event.clientY - held.y;
     held.x = event.clientX;
     held.y = event.clientY;
-    if (held.pan) {
+    if (held.turn) {
+      gaze.current.turn -= right * TURN_PER_PIXEL;
+      gaze.current.tilt = clampTilt(gaze.current.tilt + down * TILT_PER_PIXEL);
+    } else {
       const { azimuth, tilt } = bearing();
       const zoom = eye.current && 'zoom' in eye.current ? (eye.current.zoom as number) : 0;
       if (zoom > 0) moveBy(dragShift(right, down, zoom, azimuth, tilt));
-    } else {
-      gaze.current.turn -= right * TURN_PER_PIXEL;
-      gaze.current.tilt = clampTilt(gaze.current.tilt + down * TILT_PER_PIXEL);
     }
     // Past a drag's length the picture keeps the pointer: it goes on moving outside the canvas, and letting go is no
     // click on an island or a label.
@@ -847,7 +878,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   }, [glimpse, drawn]);
   useEffect(() => (picture ? () => URL.revokeObjectURL(picture.url) : undefined), [picture]);
   return (
-    <div className="mg-saju-canvas" ref={box} data-drawn={drawn ? village : undefined} onPointerDown={press} onPointerMove={pull} onPointerUp={release} onPointerCancel={release} onLostPointerCapture={lost}>
+    <div className="mg-saju-canvas" ref={box} data-drawn={drawn ? village : undefined} data-placing={onPlace ? '' : undefined} onPointerDown={press} onPointerMove={pull} onPointerUp={release} onPointerCancel={release} onLostPointerCapture={lost}>
       {picture && picture.key === glimpse && <img className="mg-saju-glimpse" src={picture.url} alt="" draggable={false} />}
       {/* What the canvas shows is said in words beside it; the labels over it are the page's own links. */}
       <Failsafe fallback={<p className="mg-saju-canvas-failed">이 브라우저에서는 마을을 그릴 수 없어요</p>}>
@@ -878,6 +909,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
               <Bridge key={`${bridge.to.id}:${bridge.colors.join()}`} from={[bridge.from.x, bridge.from.z]} to={[bridge.to.x, bridge.to.z]} colors={bridge.colors} tone={bridge.compat.tone} />
             ))}
             {flag && <FlagIsland flag={flag} lush={lush} turn={homes.length} />}
+            {decor}
             <Cadence running={inView && warm} still={still} touched={touched} />
             {!slow && <Pace onSlow={() => setSlow(true)} />}
             <Meter bar={meter} village={village} />

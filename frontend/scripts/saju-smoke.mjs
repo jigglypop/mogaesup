@@ -1,6 +1,6 @@
 // Walks the 사주 village in Chrome against the running server, as two new members: the app's menus (no 운영, 캐릭터 or
 // 둘러보기, and no rail), the card that builds a home (a lunar birth) and its guardian dog, the home filling the window,
-// its island drawn again as a picture once, a drag that turns the picture, the buttons and the wheel that zoom it, the
+// its island drawn again as a picture once, a drag that moves the picture, the buttons and the wheel that zoom it, the
 // story panel folding away, its saved picture, 사주보기 with the reading asked for once and 자미두수 with its part,
 // the village, a visit (the visitor sees the picture and the reading), the guestbook, 이웃 and the bridge between them,
 // 파도타기, a click on the map, entering the 사주 again and taking the home down.
@@ -262,7 +262,7 @@ async function steady(page) {
 }
 /** Whether the picture is far from `from`: well past what it changes by when left alone. */
 const movedFrom = async (page, { picture, idle }) => (await difference(picture, await canvasOf(page))) >= Math.max(2, idle * 8);
-await step('a drag to the side turns the picture and visits nothing', async () => {
+await step('a drag to the side moves the picture and visits nothing', async () => {
   await gaon.emulateMedia({ reducedMotion: 'reduce' });
   await gaon.reload();
   await settled(gaon);
@@ -277,9 +277,9 @@ await step('a drag to the side turns the picture and visits nothing', async () =
   }
   await gaon.mouse.up();
   await gaon.waitForTimeout(800);
-  if (!(await movedFrom(gaon, still))) throw new Error('the picture did not turn');
+  if (!(await movedFrom(gaon, still))) throw new Error('the picture did not move');
   if (!gaon.url().endsWith(`/@${gaonName}`)) throw new Error(`the drag went to ${gaon.url()}`);
-  await shot(gaon, '3-turned');
+  await shot(gaon, '3-moved');
 });
 await step('the buttons and the wheel zoom the picture in and out', async () => {
   try {

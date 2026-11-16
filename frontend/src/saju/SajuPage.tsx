@@ -14,16 +14,19 @@ import { Brand, PageShell, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
 import { compatOf } from './compat';
 import type { Birth } from './engine';
+import { flagDesignOf, itemId, useDecor } from './decor';
 import { forgetLegacyHome, readLegacyHome, useMinihome, type Minihome } from './minihome';
 import { profileOf, type Profile } from './profile';
 import type { Resident } from './residents';
 import { chartPath, editPath, homePath, routeOf, villagePath, waveOf, ziweiPath } from './routes';
 import type { StageFlag } from './scene/Flag';
-import { frameOf, NO_INSET, type Inset } from './scene/frames';
+import { DecorLayer } from './scene/Decor';
+import { frameOf, NO_INSET, type Inset, type Spot } from './scene/frames';
 import { Stage, type StageBridge, type StageHandle, type StageHome } from './scene/Stage';
 import { ChartPanel } from './ui/ChartPanel';
 import { HomePanel, type Bridge } from './ui/HomePanel';
 import { Onboarding } from './ui/Onboarding';
+import { DecorCard, GiveFlagCard, type Placing } from './ui/DecorCard';
 import { PictureCard, usePicture } from './ui/Picture';
 import { PixelIcon } from './ui/PixelIcon';
 import { ReadingCard, useReading } from './ui/Reading';
@@ -273,6 +276,24 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   }, [homes, wide, together, visitorHome, flag]);
 
   const visit = useCallback((id: string) => navigate(homePath(id)), [navigate]);
+  // What the owner has placed on the 섬 (see decor): their flag flies from the owner's chart, whoever looks. A visitor
+  // with a home of their own can give the 섬 theirs. While the owner picks a place for something, a press on the
+  // island places it and visits nothing.
+  const decor = useDecor(username, view.isOwner ? view.profile.ownerId : null);
+  const ownFlag = useMemo(() => (host ? flagDesignOf(host.resident.birth) : null), [host]);
+  const giftFlag = useMemo(() => (!view.isOwner && viewer && mine ? flagDesignOf(mine.birth) : null), [view.isOwner, viewer, mine]);
+  const [placingFor, setPlacingFor] = useState<{ of: string; placing: Placing | null }>({ of: username, placing: null });
+  const placing = placingFor.of === username ? placingFor.placing : null;
+  const setPlacing = useCallback((next: Placing | null) => setPlacingFor({ of: username, placing: next }), [username]);
+  const placeAt = useCallback(
+    (spot: Spot) => {
+      if (!placing || !decor.decor) return;
+      const round = (value: number) => Math.round(value * 100) / 100;
+      decor.place([...decor.decor.items, { id: itemId(), kind: placing.kind, ref: placing.ref, x: round(spot.x), z: round(spot.z), turn: 0 }]);
+      setPlacing(null);
+    },
+    [placing, decor, setPlacing],
+  );
   // What this browser kept from the village's first days, for a member who has not built their home here yet.
   const legacy = useMemo(() => (view.isOwner && !owner ? readLegacyHome() : null), [username, view.isOwner, owner]);
   const buildHome = useCallback(
@@ -385,7 +406,13 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           inset={cover}
           flag={flag}
           focus={wide ? null : username}
-          onVisit={visit}
+          onVisit={placing ? undefined : visit}
+          onPlace={placing ? placeAt : undefined}
+          decor={
+            decor.decor && (
+              <DecorLayer items={decor.decor.items} flags={decor.decor.flags} own={ownFlag} character={decor.decor.character?.modelUrl ?? null} />
+            )
+          }
           pins={
             wide &&
             homes.map((home) => {
@@ -503,6 +530,14 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                 host && (
                   <PictureCard name={host.resident.name} state={picture} drawing={picture.drawing} owner={view.isOwner} onDraw={picture.draw} onReload={picture.reload} />
                 )
+              }
+              decor={
+                host &&
+                (view.isOwner ? (
+                  <DecorCard state={decor} own={ownFlag} placing={placing} onPlacing={setPlacing} />
+                ) : (
+                  giftFlag && <GiveFlagCard key={username} own={giftFlag} onGive={decor.give} />
+                ))
               }
               neighbors={neighbors}
               bridge={{ compat, canShow: !!visitorHome, shown: together, onShow: setBridgeShown }}

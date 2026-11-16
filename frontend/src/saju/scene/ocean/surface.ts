@@ -9,6 +9,7 @@ import {
   Fn,
   fract,
   fwidth,
+  If,
   length,
   log2,
   Loop,
@@ -427,16 +428,26 @@ export class Surface {
       const at = mirrored.xy.div(mirrored.w).add(lean.mul(this.bend));
       // Up the mirror's picture is down its rows.
       const up = vec2(0, this.smear.negate());
-      const image =
-        parts.mirrorTaps === 4
-          ? texture(mirror, at)
-              .bias(float(0.6))
-              .mul(0.4)
-              .add(texture(mirror, at.add(up)).bias(float(1.4)).mul(0.25))
-              .add(texture(mirror, at.sub(up)).bias(float(1.4)).mul(0.15))
-              .add(texture(mirror, at.add(up.mul(2.4))).bias(float(2.2)).mul(0.2))
-          : texture(mirror, at).bias(float(0.8));
-      const reflection = mix(sky, image.rgb, saturate(image.a).mul(0.92).mul(this.mirrorShare));
+      // Read only while the mirror shows at all: from the village's own slant it does not (see Ocean), and its taps
+      // would be read for every pixel of the lake for nothing.
+      const showing = this.mirrorShare;
+      const image = Fn(() => {
+        const seen = vec4(0).toVar();
+        If(showing.greaterThan(0), () => {
+          seen.assign(
+            parts.mirrorTaps === 4
+              ? texture(mirror, at)
+                  .bias(float(0.6))
+                  .mul(0.4)
+                  .add(texture(mirror, at.add(up)).bias(float(1.4)).mul(0.25))
+                  .add(texture(mirror, at.sub(up)).bias(float(1.4)).mul(0.15))
+                  .add(texture(mirror, at.add(up.mul(2.4))).bias(float(2.2)).mul(0.2))
+              : texture(mirror, at).bias(float(0.8)),
+          );
+        });
+        return seen;
+      })();
+      const reflection = mix(sky, image.rgb, saturate(image.a).mul(0.92).mul(showing));
 
       const L = this.toSun;
       const sunLight = this.sunLight;

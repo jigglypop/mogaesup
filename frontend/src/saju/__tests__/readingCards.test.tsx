@@ -21,6 +21,10 @@ const { api, shots } = vi.hoisted(() => ({
     read: vi.fn(),
     picture: vi.fn(),
     draw: vi.fn(),
+    decor: vi.fn(),
+    placeDecor: vi.fn(),
+    giveFlag: vi.fn(),
+    dropFlag: vi.fn(),
     ilchons: vi.fn(),
     requests: vi.fn(),
     status: vi.fn(),
@@ -68,7 +72,7 @@ vi.mock('../../shell/Shell', () => ({
 vi.mock('../../minihome/Guestbook', () => ({ Guestbook: () => <p className="guestbook" /> }));
 vi.mock('../../api/endpoints', () => ({
   homeApi: { mine: api.mine, get: api.get, visit: api.visit },
-  sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw },
+  sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw, decor: api.decor, placeDecor: api.placeDecor, giveFlag: api.giveFlag, dropFlag: api.dropFlag },
   socialApi: { ilchons: api.ilchons, requests: api.requests, status: api.status },
 }));
 let auth: { status: 'anonymous' | 'signedIn'; user: User | null } = { status: 'anonymous', user: null };
@@ -125,6 +129,7 @@ const card = (container: HTMLElement, label: string) => container.querySelector<
 const texts = (root: ParentNode | null, selector: string) => (root ? [...root.querySelectorAll(selector)].map((element) => element.textContent?.trim()) : []);
 
 beforeEach(() => {
+  api.decor.mockResolvedValue({ items: [], flags: [], character: null });
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
   vi.setSystemTime(new Date('2026-11-15T12:00:00+09:00'));
   localStorage.clear();
@@ -341,8 +346,8 @@ describe('섬 그림 카드', () => {
     await wait(1_500);
     expect(shots.count).toBe(1);
     expect(api.draw).toHaveBeenCalledExactlyOnceWith({ expectedOwnerId: 'u-sol', image: 'data:image/webp;base64,AAAA' });
-    // 오행 밸런스 위, 사주 요약 아래에 선다.
-    expect([...container.querySelectorAll('.mg-saju-side > section')].map((section) => section.getAttribute('aria-label')).slice(0, 3)).toEqual(['사주 요약', '섬 그림', '오행 밸런스']);
+    // 사주 요약 아래, 꾸미기와 오행 밸런스 위에 선다.
+    expect([...container.querySelectorAll('.mg-saju-side > section')].map((section) => section.getAttribute('aria-label')).slice(0, 4)).toEqual(['사주 요약', '섬 그림', '꾸미기', '오행 밸런스']);
     const drawing = card(container, '섬 그림')!;
     expect(drawing.getAttribute('aria-busy')).toBe('true');
     expect(texts(drawing, '[role=status]')).toEqual(['그림을 그리고 있어요']);

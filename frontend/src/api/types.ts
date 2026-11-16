@@ -163,6 +163,18 @@ export type SajuVillage = {
 /** The five elements as the chart names them, in the order each gives rise to the next. */
 export type ReadingElement = 'wood' | 'fire' | 'earth' | 'metal' | 'water';
 
+/** What its owner has placed on a 섬: a flag (`ref` "mine", or a given flag's id), a prop (by name) or their character ("me"). */
+export type DecorItem = { id: string; kind: 'flag' | 'prop' | 'character'; ref: string; x: number; z: number; turn: number };
+/** A flag's look: the main star of its giver's 자미두수 명궁 (공궁 for none) and the element of their 오행국. */
+export type FlagDesign = { star: string; element: ReadingElement };
+/** A flag a member gave to a 섬. */
+export type DecorFlag = { id: string; giver: { username: string; name: string }; design: FlagDesign; givenAt: string };
+/**
+ * `GET /api/homes/{username}/saju/decor`: what is placed on the 섬, the flags given to it (all of them for its owner, the
+ * placed ones for others) and its owner's character model (for the owner when it is ready, for others when placed).
+ */
+export type SajuDecor = { items: DecorItem[]; flags: DecorFlag[]; character: { modelUrl: string } | null };
+
 /**
  * What a reading is written from: the chart as the browser calculated it from the home's stored birth (jamiblossom runs
  * in the browser only). `birth` must equal the birth the server keeps for the home, or the request is refused as stale.

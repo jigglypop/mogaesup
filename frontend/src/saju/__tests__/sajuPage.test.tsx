@@ -26,6 +26,10 @@ const { stage, api } = vi.hoisted(() => ({
     read: vi.fn(),
     picture: vi.fn(),
     draw: vi.fn(),
+    decor: vi.fn(),
+    placeDecor: vi.fn(),
+    giveFlag: vi.fn(),
+    dropFlag: vi.fn(),
     ilchons: vi.fn(),
     requests: vi.fn(),
     status: vi.fn(),
@@ -52,7 +56,7 @@ vi.mock('../../shell/Shell', () => ({
 vi.mock('../../minihome/Guestbook', () => ({ Guestbook: ({ username }: { username: string }) => <p className="guestbook">{username}</p> }));
 vi.mock('../../api/endpoints', () => ({
   homeApi: { mine: api.mine, get: api.get, visit: api.visit },
-  sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw },
+  sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw, decor: api.decor, placeDecor: api.placeDecor, giveFlag: api.giveFlag, dropFlag: api.dropFlag },
   socialApi: { ilchons: api.ilchons, requests: api.requests, status: api.status },
 }));
 let auth: { status: 'anonymous' | 'signedIn'; user: User | null } = { status: 'anonymous', user: null };
@@ -97,6 +101,7 @@ describe('섬 화면', () => {
     localStorage.clear();
     stage.props = null;
     stage.zooms = [];
+    api.decor.mockResolvedValue({ items: [], flags: [], character: null });
     auth = { status: 'signedIn', user: sol };
     villages = { sol: { saju: home('sol'), village: [around('noeul', true), around('bori', false)] }, noeul: { saju: home('noeul'), village: [around('sol', true)] } };
     api.mine.mockImplementation(async () => view(true));

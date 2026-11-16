@@ -112,13 +112,15 @@ function Doors({ visibility, onChange }: { visibility: HomeVisibility; onChange:
  * of its island, the balance of elements, the bridge to it and its guestbook. A home not built yet has its bridge and
  * guestbook all the same: a visitor finds them under the empty plot, the owner under the card that builds the home.
  */
-export function HomePanel({ view, viewer, profile, picture, neighbors, bridge, onVisibility }: {
+export function HomePanel({ view, viewer, profile, picture, decor, neighbors, bridge, onVisibility }: {
   view: HomeView;
   viewer: User | null;
   /** The home's chart, once its owner has built it. */
   profile: Profile | null;
   /** The card with the picture of the built home's island. */
   picture?: ReactNode;
+  /** The card that decorates the built home's island (its owner's), or gives it a flag (a visitor's). */
+  decor?: ReactNode;
   neighbors: Neighbors;
   bridge: Bridge;
   /** Changes who may see the home: its owner's. */
@@ -154,6 +156,7 @@ export function HomePanel({ view, viewer, profile, picture, neighbors, bridge, o
             </div>
           </section>
           {picture}
+          {decor}
           <section className="mg-saju-card" aria-label="오행 밸런스">
             <h2 className="mg-heading">오행 밸런스</h2>
             <Gauge balance={profile.balance} />

@@ -57,31 +57,31 @@ describe('캔버스가 듣는 손짓', () => {
   });
   afterEach(() => page.unmount());
 
-  it('끌면 카메라가 돌고, 놓으면 끝난다', async () => {
-    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 300 });
-    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: 340 });
+  it('오른쪽 버튼으로 끌면 카메라가 돌고, 놓으면 끝난다', async () => {
+    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2, buttons: 2, clientX: 300 });
+    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 2, clientX: 340 });
     expect(gaze().turn).toBeCloseTo(-40 * 0.0026, 10);
     expect(box.dataset['turning']).toBe('');
     await point('pointerup', { pointerId: 1, pointerType: 'mouse', clientX: 340 });
     expect(box.dataset['turning']).toBeUndefined();
   });
 
-  it('옆으로 끌면 끝없이 돌아간다', async () => {
-    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 100 });
-    for (let x = 400; x <= 4000; x += 300) await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: x });
+  it('오른쪽 버튼으로 옆으로 끌면 끝없이 돌아간다', async () => {
+    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2, buttons: 2, clientX: 100 });
+    for (let x = 400; x <= 4000; x += 300) await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 2, clientX: x });
     expect(gaze().turn).toBeCloseTo(-3900 * 0.0026, 10);
     expect(Math.abs(gaze().turn)).toBeGreaterThan(Math.PI * 2);
   });
 
-  it('위아래로 끌면 기울고, 20도에서 70도 사이에서 멈춘다', async () => {
-    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 300, clientY: 300 });
-    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: 300, clientY: 340 });
+  it('shift를 누르고 위아래로 끌면 기울고, 20도에서 70도 사이에서 멈춘다', async () => {
+    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, shiftKey: true, clientX: 300, clientY: 300 });
+    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, shiftKey: true, clientX: 300, clientY: 340 });
     // 아래로 끌면 위에서 내려다보는 쪽으로 선다.
     expect(gaze().tilt).toBeCloseTo(ELEVATION + 40 * 0.0026, 10);
     expect(gaze().turn).toBe(0);
-    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: 300, clientY: 1300 });
+    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, shiftKey: true, clientX: 300, clientY: 1300 });
     expect(gaze().tilt).toBe(TILT_RANGE.max);
-    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: 300, clientY: -1300 });
+    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, shiftKey: true, clientX: 300, clientY: -1300 });
     expect(gaze().tilt).toBe(TILT_RANGE.min);
   });
 
@@ -112,14 +112,14 @@ describe('캔버스가 듣는 손짓', () => {
 
   it.each(['mouse', 'pen'])('%s: 다른 데서 뗀 뒤 누르지 않고 지나가기만 해서는 카메라가 돌지 않는다', async (pointerType) => {
     // 그림에서 누르고, 뗀 것은 이 상자가 듣지 못했다.
-    await point('pointerdown', { pointerId: 5, pointerType, button: 0, buttons: 1, clientX: 300 });
-    await point('pointermove', { pointerId: 5, pointerType, buttons: 0, clientX: 380 });
-    await point('pointermove', { pointerId: 5, pointerType, buttons: 0, clientX: 460 });
+    await point('pointerdown', { pointerId: 5, pointerType, button: 0, buttons: 1, shiftKey: true, clientX: 300 });
+    await point('pointermove', { pointerId: 5, pointerType, buttons: 0, shiftKey: true, clientX: 380 });
+    await point('pointermove', { pointerId: 5, pointerType, buttons: 0, shiftKey: true, clientX: 460 });
     expect(gaze().turn).toBe(0);
     expect(box.dataset['turning']).toBeUndefined();
     // 다시 눌러 끌면 돈다.
-    await point('pointerdown', { pointerId: 5, pointerType, button: 0, buttons: 1, clientX: 300 });
-    await point('pointermove', { pointerId: 5, pointerType, buttons: 1, clientX: 320 });
+    await point('pointerdown', { pointerId: 5, pointerType, button: 0, buttons: 1, shiftKey: true, clientX: 300 });
+    await point('pointermove', { pointerId: 5, pointerType, buttons: 1, shiftKey: true, clientX: 320 });
     expect(gaze().turn).toBeCloseTo(-20 * 0.0026, 10);
   });
 
@@ -197,8 +197,8 @@ describe('카메라를 옮기는 손짓', () => {
   afterEach(() => page.unmount());
 
   it.each([
-    ['오른쪽 버튼으로', { button: 2, buttons: 2 }],
-    ['shift를 누르고', { button: 0, buttons: 1, shiftKey: true }],
+    ['마우스로', { button: 0, buttons: 1 }],
+    ['펜으로', { button: 0, buttons: 1 }],
   ])('%s 끌면 손 밑의 땅이 손을 따라 옮겨 가고, 카메라는 돌지 않는다', async (_, held) => {
     await point('pointerdown', { pointerId: 1, pointerType: 'mouse', clientX: 700, clientY: 450, ...held });
     await point('pointermove', { pointerId: 1, pointerType: 'mouse', clientX: 760, clientY: 420, ...held });
@@ -211,8 +211,8 @@ describe('카메라를 옮기는 손짓', () => {
   });
 
   it('마을의 섬들 밖으로는 옮겨 가지 않는다', async () => {
-    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2, buttons: 2, clientX: 700, clientY: 450 });
-    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 2, clientX: -9000, clientY: -9000 });
+    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 700, clientY: 450 });
+    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: -9000, clientY: -9000 });
     const [x, , z] = frame.target;
     expect(x + gaze().pan.x).toBeLessThanOrEqual(R + ISLANDS.neighbour.half + 1e-9);
     expect(x + gaze().pan.x).toBeGreaterThanOrEqual(-ISLANDS.home.half - 1e-9);
@@ -249,8 +249,8 @@ describe('카메라를 옮기는 손짓', () => {
   });
 
   it('물 위를 두 번 누르면 처음으로 돌아가고, 섬 위에서는 그대로다', async () => {
-    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, clientX: 300, clientY: 300 });
-    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: 2700, clientY: 340 });
+    await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 2, buttons: 2, clientX: 300, clientY: 300 });
+    await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 2, clientX: 2700, clientY: 340 });
     await point('pointerup', { pointerId: 1, pointerType: 'mouse', clientX: 2700, clientY: 340 });
     await act(async () => void box.querySelector('canvas')!.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -200, clientX: 700, clientY: 450 })));
     const moved = { ...gaze(), pan: { ...gaze().pan } };
