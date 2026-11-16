@@ -168,7 +168,7 @@ def test_a_release_invalidates_only_the_names_without_a_content_hash(pwsh, site,
 def test_a_release_put_back_invalidates_the_same_names_once_more(pwsh, site, tmp_path):
     done = deploy(pwsh, site, tmp_path, '-SkipBuild', '-SkipProvision', api=True)
     assert done.code != 0
-    assert 'putting the previous index.html and WebAssembly back' in done.out + done.err
+    assert 'putting the previous files without a hash, WebAssembly and index.html back' in done.out + done.err
     [(released, first), (restored, second)] = invalidations(done.calls)
     assert released == restored == RELEASED and first != second
 
