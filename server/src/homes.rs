@@ -86,8 +86,8 @@ const VISITS_PER_MEMBER: u32 = 300;
 /// Island pages read in the rate window (ten minutes): by anonymous visitors per address, by a member per member.
 const VIEWS_PER_ADDRESS: u32 = 600;
 const VIEWS_PER_MEMBER: u32 = 600;
-/// The Seoul day, which visits count by.
-const TODAY: &str = "(now() AT TIME ZONE 'Asia/Seoul')::date";
+/// The Seoul day, which visits count by, and the flags given to 사주 homes (`saju_decor`).
+pub(crate) const TODAY: &str = "(now() AT TIME ZONE 'Asia/Seoul')::date";
 /// Island loads by anonymous visitors counted in the rate window (ten minutes), per address.
 const WORLD_READS_PER_ADDRESS: u32 = 600;
 /// Searches of the island listing counted in the rate window (ten minutes), per address; each one scans the islands.
