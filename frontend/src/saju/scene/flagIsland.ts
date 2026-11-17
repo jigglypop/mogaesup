@@ -5,7 +5,7 @@ import { boat, jetty, lantern, pot } from './arch';
 import { Builder, type Build, type Finish, type V3 } from './build';
 import { WATER_LEVEL } from './mood';
 import { hash, noise2 } from './noise';
-import { bush, flowerBed, lawn, lilies, pine, rock, steppingStones, toned, type Palette } from './plants';
+import { bush, flowerBed, lilies, pine, rock, steppingStones, toned, type Palette } from './plants';
 import { dressShore, ground, Site, type GroundLook, type IslandShape } from './terrain';
 
 // 깃발 섬: the island a village raises its flag on once its owner has ten 이웃. A small round island in the lake past
@@ -26,13 +26,10 @@ const GOLD = '#f2c55c';
 const STONES: Palette = ['#d8d4ca', '#cfcbc1', '#c2beb4'];
 const GREENS: Palette = ['#3f7a3c', '#4d8a45', '#366b36', '#5b9650'];
 const LOOK: GroundLook = { lawn: ['#6a9a48', '#80ad55', '#9bbb66'], dirt: '#85694a', bank: '#a59b88', rocks: ['#9b968a', '#aca79a', '#88847b'] };
-const GRASS: Palette = ['#6f9c46', '#85ae54', '#5f8b3c', '#9cbc62'];
 
 const SEED = 97;
 /** How thickly the island is planted for a device that would labour over a full one, as the homes are. */
 const THIN = 0.62;
-/** Tufts of grass tried over the island: as many to the square metre as over a home's. */
-const LAWN_TUFTS = 1900;
 /** From the island's middle to its shoreline, before the line wanders: six and a half metres of firm ground across. */
 const SHORE = 3.3;
 /** The island's ground as the lake meets it (see terrain's IslandShape): its shore is round, and its bank falls as a home's does. */
@@ -194,8 +191,6 @@ export function buildFlagIsland(lush = true): Build {
   // The shore is a home's in little: its stones are thinned to the shorter line, and the landing is left clear.
   const sparse = (x: number, z: number) => hash(Math.round(x * 50), Math.round(z * 50), SEED) < 0.45;
   dressShore(b, site, LOOK, (x, z) => landing(x, z) || sparse(x, z));
-  const open = (x: number, z: number) => site.open(x, z) && Math.hypot(x, z) > COURT + 0.12 && !landing(x, z);
-  lawn(b, open, LAWN_TUFTS, GRASS, { half: 3.8 });
   return b.finish();
 }
 

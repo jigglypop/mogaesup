@@ -131,164 +131,136 @@ export function gableRoof(b: Builder, at: V3, look: RoofLook, turn = 0): void {
   );
 }
 
-export type ThatchLook = {
-  /** Half the eaves' length (x) and depth (z) about the roof's middle, and how far its ridge runs to either side of it. */
+export type GiwaLook = {
+  /** Half the eaves' length (x) and depth (z) about the roof's middle. */
   half: [number, number];
-  ridge: number;
-  /** How high the thatch rises over its eaves, and how thick it is cut at them. */
+  /** How high the ridge stands over the eaves. */
   rise: number;
-  thick: number;
   /** Half the walls' length and depth: the underside of the eaves comes in to meet them. */
   walls: [number, number];
-  /** Straw as it lies on the roof, as it is cut at the eaves, and the braided cap over the ridge; the ropes. */
-  straw: string;
-  cut: string;
-  cap: string;
-  rope: string;
+  /** The tiles, the ridges' tiles, the gables' plaster and the timber under the eaves. */
+  tiles: string;
+  ridge: string;
+  plaster: string;
+  timber: string;
 };
 
-/** How square a 초가지붕's plan is at its rounded ends: 2 an oval, more a squarer one. */
-const THATCH_SQUARE = 2.8;
-/** How its slope falls from the ridge to the eaves: a full, rounded back, steepest at the eaves. */
-const THATCH_FALL = 2;
-const THATCH_ROUND = 0.62;
+/** How far down the ends' slopes the gables (합각) stand, as a share of the way from the ridge's height to the eaves. */
+const GABLE = 0.52;
+/** How the slopes fall: steep at the ridge, flatter toward the eaves (a 기와지붕's 물매). */
+const SAG = 1.35;
+/** How far the eaves' corners lift (처마의 앙곡), and how thick the eaves are where the tiles end. */
+const CORNER_LIFT = 0.34;
+const EAVE = 0.15;
 
 /**
- * A 초가지붕 whose eaves' top is at `at`: straw heaped thick over the rafters in a long, rounded mound, its ridge along
- * x, falling on all four sides to eaves cut square and thick; a braided cap (용마름) along the ridge, its edges in
- * points, and a net of rope (새끼줄) over it all, tied down at the eaves. Gives back the height of its top at (x, z)
- * about `at`, for what rests on it (gourds ripening).
+ * A 팔작지붕 of 기와 whose eaves' top is at `at`: four slopes falling from the ridge to eaves that sweep up at the
+ * corners, the ends hipped below and gabled above (합각, plastered white); tiles in columns down every slope, the eaves
+ * cut square with the round tiles' ends showing, rafters under them, and ridges of stacked tiles along the top (용마루,
+ * its ends turned up), down the gables' edges (내림마루) and down the hips to the corners (추녀마루).
  */
-export function thatchRoof(b: Builder, at: V3, look: ThatchLook): (x: number, z: number) => number {
-  const { half: [long, deep], ridge, rise, thick, walls, straw, cut, cap, rope } = look;
-  const end = long - ridge;
-  /** How far from the ridge (0) to the eaves (1) the point (x, z) lies: the roof's contours are its rings. */
-  const reachOf = (x: number, z: number) => (Math.max(0, Math.abs(x) - ridge) / end) ** THATCH_SQUARE + (Math.abs(z) / deep) ** THATCH_SQUARE;
-  const heightAt = (ring: number) => rise * Math.max(0, 1 - Math.min(1, ring) ** THATCH_FALL) ** THATCH_ROUND;
-  const over = (x: number, z: number) => at[1] + heightAt(reachOf(x, z) ** (1 / THATCH_SQUARE));
-
-  // The way round the eaves, anticlockwise seen from above from the front's middle: the front straight, the east end
-  // rounded, the back, the west end. Each point is where the contour `ring` of the way from the ridge passes, and the
-  // way out of the roof there.
-  type Round = { side: number; x: number; angle: number };
-  const round: Round[] = [];
-  const straight = Math.max(2, Math.round((ridge * 2) / 0.28));
-  const curve = 26;
-  for (let step = 0; step < straight; step++) round.push({ side: 1, x: -ridge + (2 * ridge * step) / straight, angle: QUARTER });
-  for (let step = 0; step < curve; step++) round.push({ side: 0, x: ridge, angle: QUARTER - (Math.PI * step) / curve });
-  for (let step = 0; step < straight; step++) round.push({ side: -1, x: ridge - (2 * ridge * step) / straight, angle: -QUARTER });
-  for (let step = 0; step < curve; step++) round.push({ side: 0, x: -ridge, angle: -QUARTER - (Math.PI * step) / curve });
-  const power = (value: number) => Math.sign(value) * Math.abs(value) ** (2 / THATCH_SQUARE);
-  /** Where the contour `ring` passes at `point` of the way round, and the way out of the roof there (on the ground). */
-  const placeOf = ({ side, x, angle }: Round, ring: number): { x: number; z: number; out: [number, number] } => {
-    if (side !== 0) return { x, z: side * ring * deep, out: [0, side] };
-    const [cos, sin] = [power(Math.cos(angle)), power(Math.sin(angle))];
-    const gx = (THATCH_SQUARE * Math.sign(cos) * Math.abs(cos) ** (THATCH_SQUARE - 1)) / end;
-    const gz = (THATCH_SQUARE * Math.sign(sin) * Math.abs(sin) ** (THATCH_SQUARE - 1)) / deep;
-    const length = Math.hypot(gx, gz) || 1;
-    return { x: x + Math.sign(x) * Math.abs(cos) * ring * end, z: sin * ring * deep, out: [gx / length, gz / length] };
+export function giwaRoof(b: Builder, at: V3, look: GiwaLook): void {
+  const { half: [long, deep], rise, walls, tiles, ridge, plaster, timber } = look;
+  // The ends' slopes rise from the eaves as the long ones do, to the gables' foot.
+  const gableX = long - deep * GABLE;
+  const gableZ = deep * (1 - GABLE);
+  const fall = (share: number) => rise * Math.max(0, Math.min(1, share)) ** SAG;
+  /** The roof's height over its eaves' top at (x, z), and the corners' lift. */
+  const heightAt = (x: number, z: number) => {
+    const ax = Math.abs(x);
+    const az = Math.abs(z);
+    const front = fall(1 - az / deep);
+    const height = ax <= gableX ? front : Math.min(front, fall((long - ax) / deep));
+    const toCorner = Math.max(ax / long, az / deep);
+    const low = 1 - height / rise;
+    return height + CORNER_LIFT * toCorner ** 3 * low * low;
   };
+  const point = (x: number, z: number, proud = 0): V3 => [at[0] + x, at[1] + heightAt(x, z) + proud, at[2] + z];
+  const tileFinish = { surface: 'giwa' as const, rough: 0.62 };
 
-  // The straw: rings from the ridge down to the eaves, closer together where it falls steeply, then over the eave's
-  // rounded lip to the cut.
-  const rings = 16;
-  const lip: [number, number][] = [
-    [0.035, -0.025],
-    [0.06, -0.07],
-  ];
-  const weather = round.map(() => 0.92 + b.random() * 0.12);
-  const top: V3[][] = [];
-  for (let row = 0; row <= rings; row++) {
-    const ring = 1 - (1 - row / rings) ** 1.5;
-    top.push(round.map((point) => {
-      const place = placeOf(point, ring);
-      return [at[0] + place.x, at[1] + heightAt(ring), at[2] + place.z];
-    }));
-  }
-  for (const [outward, down] of lip) {
-    top.push(round.map((point) => {
-      const place = placeOf(point, 1);
-      return [at[0] + place.x + place.out[0] * outward, at[1] + down, at[2] + place.z + place.out[1] * outward];
-    }));
-  }
-  // Darker toward the eaves, where rain and smoke weather it, and in streaks down the slope.
-  b.sheet(top, straw, { surface: 'straw', rough: 1 }, true, (row, column) => (1 - 0.16 * Math.min(1, row / rings) ** 2) * weather[column]!);
-
-  // The cut: the eave's face straight down, its straw's ends, then its underside back in to the top of the walls.
-  const inner = Math.min(walls[1] / deep, (walls[0] - ridge) / end) * 0.94;
-  const face: V3[][] = [
-    [0.06, -0.07],
-    [0.05, -thick * 0.55],
-    [0.02, -thick],
-    [-0.1, -thick - 0.02],
-  ].map(([outward, down]) =>
-    round.map((point) => {
-      const place = placeOf(point, 1);
-      return [at[0] + place.x + place.out[0] * outward!, at[1] + down!, at[2] + place.z + place.out[1] * outward!] as V3;
-    }),
-  );
-  face.push(round.map((point) => {
-    const place = placeOf(point, inner);
-    return [at[0] + place.x, at[1] - thick * 0.25, at[2] + place.z];
-  }));
-  b.sheet(face, cut, { surface: 'thatch', rough: 1 }, true, (row, column) => (row >= 3 ? 0.55 : 1) * weather[column]!);
-
-  // The ropes: rings round the roof, and ropes from the ridge down over the eaves every half metre or so of them.
-  const ropeFinish = { sides: 5, rough: 1, surface: 'thatch' as const };
-  const lifted = (x: number, z: number, by: number): V3 => [at[0] + x, over(x, z) + by, at[2] + z];
-  for (const ring of [0.3, 0.52, 0.7, 0.84, 0.95]) {
-    const points = round.map((point) => {
-      const place = placeOf(point, ring);
-      return lifted(place.x, place.z, 0.018);
+  // The long slopes, front and back: rows from the ridge to the eaves, each as long as the slope is there.
+  const columns = 40;
+  const rowsDown = 16;
+  const longRows = (side: 1 | -1) =>
+    Array.from({ length: rowsDown + 1 }, (_, row) => {
+      const z = deep * (row / rowsDown) ** 0.85;
+      const end = Math.max(gableX, long - deep + z);
+      return Array.from({ length: columns + 1 }, (_, column) => point(side * end * (-1 + (2 * column) / columns), side * z));
     });
-    b.limb([...points, points[0]!], [0.016], rope, ropeFinish);
+  b.sheet(longRows(1), tiles, tileFinish, false, undefined, (spot) => spot[0] - at[0]);
+  b.sheet(longRows(-1), tiles, tileFinish, false, undefined, (spot) => at[0] - spot[0]);
+  // The ends' slopes, from the gables' foot down to the eaves.
+  const endColumns = 24;
+  const endRows = (side: 1 | -1) =>
+    Array.from({ length: 9 }, (_, row) => {
+      const x = gableX + (long - gableX) * (row / 8) ** 0.85;
+      const width = x - long + deep;
+      return Array.from({ length: endColumns + 1 }, (_, column) => point(side * x, side * width * (1 - (2 * column) / endColumns)));
+    });
+  b.sheet(endRows(1), tiles, tileFinish, false, undefined, (spot) => at[2] - spot[2]);
+  b.sheet(endRows(-1), tiles, tileFinish, false, undefined, (spot) => spot[2] - at[2]);
+
+  // The eaves all round: their cut face down, then their underside back in to the top of the walls, the round tiles'
+  // ends (막새) along the face.
+  const outline: [number, number][] = [];
+  for (let column = 0; column < columns; column++) outline.push([long * (-1 + (2 * column) / columns), deep]);
+  for (let column = 0; column < endColumns; column++) outline.push([long, deep * (1 - (2 * column) / endColumns)]);
+  for (let column = 0; column < columns; column++) outline.push([long * (1 - (2 * column) / columns), -deep]);
+  for (let column = 0; column < endColumns; column++) outline.push([-long, -deep * (1 - (2 * column) / endColumns)]);
+  const rim = [
+    outline.map(([x, z]) => point(x, z)),
+    outline.map(([x, z]) => point(x, z, -EAVE)),
+    outline.map(([x, z]): V3 => [at[0] + (x * walls[0]) / long, at[1] - 0.02, at[2] + (z * walls[1]) / deep]),
+  ];
+  b.sheet(rim, timber, { surface: 'wood', rough: 0.85 }, true, (row) => (row === 2 ? 0.6 : 1));
+  for (const [x, z] of outline) {
+    if (Math.abs(x) > long - 0.05 && Math.abs(z) > deep - 0.05) continue;
+    const out: V3 = Math.abs(z) > deep - 0.01 ? [0, 0, Math.sign(z) * 0.02] : [Math.sign(x) * 0.02, 0, 0];
+    const [px, py, pz] = point(x, z, -EAVE * 0.45);
+    b.cyl(0.055, 0.04, [px + out[0], py, pz + out[2]], ridge, { sides: 10, surface: 'clay', rough: 0.6 }, Math.abs(z) > deep - 0.01 ? [Math.PI / 2, 0, 0] : [0, 0, Math.PI / 2]);
   }
-  let since = Infinity;
-  for (let column = 0; column < round.length; column++) {
-    const here = placeOf(round[column]!, 1);
-    const before = placeOf(round[(column + round.length - 1) % round.length]!, 1);
-    since += Math.hypot(here.x - before.x, here.z - before.z);
-    if (since < 0.48) continue;
-    since = 0;
-    const points: V3[] = [];
-    for (let row = 1; row <= rings; row++) {
-      const ring = 0.12 + 0.88 * (row / rings);
-      const place = placeOf(round[column]!, ring);
-      points.push(lifted(place.x, place.z, 0.018));
+  // Rafters (서까래) under the long eaves.
+  for (const side of [1, -1]) {
+    for (let x = -walls[0]; x <= walls[0] + 0.01; x += 0.3) {
+      const z = side * (walls[1] + (deep - walls[1]) * 0.55);
+      b.cyl(0.035, deep - walls[1], [at[0] + x, at[1] - 0.08, at[2] + z], timber, { sides: 7, surface: 'wood' }, [side * (Math.PI / 2 - 0.18), 0, 0]);
     }
-    const edge = placeOf(round[column]!, 1);
-    points.push([at[0] + edge.x + edge.out[0] * 0.075, at[1] - 0.06, at[2] + edge.z + edge.out[1] * 0.075]);
-    points.push([at[0] + edge.x + edge.out[0] * 0.07, at[1] - thick * 0.6, at[2] + edge.z + edge.out[1] * 0.07]);
-    b.limb(points, [0.016], rope, ropeFinish);
   }
 
-  // 용마름: the braided cap along the ridge and down over its ends, its edges cut in points.
-  const capLength = ridge + end * 0.3;
-  const capSteps = Math.max(8, Math.round((capLength * 2) / 0.09));
-  const across = [-0.5, -0.3, -0.12, 0, 0.12, 0.3, 0.5];
-  const capRows = across.map((offset, row) => {
-    const edge = row === 0 || row === across.length - 1;
-    const points: V3[] = [];
-    for (let step = 0; step <= capSteps; step++) {
-      const x = -capLength + (2 * capLength * step) / capSteps;
-      // The points along its edges, a hand apart; its ends tucked in.
-      const tooth = edge ? (step % 2 === 0 ? 0 : 0.11) : 0;
-      const taper = Math.min(1, (capLength - Math.abs(x)) / 0.5 + 0.35);
-      const z = (offset + Math.sign(offset) * tooth) * taper;
-      const proud = 0.03 + (0.13 - Math.abs(offset) * 0.2) * taper;
-      points.push(lifted(x, z, proud));
-    }
-    return points;
-  });
-  b.sheet(capRows, cap, { surface: 'thatch', rough: 1 }, false, (row) => (row === 0 || row === across.length - 1 ? 0.82 : 1));
-  // Its spine, twisted tight.
-  const spine: V3[] = [];
-  for (let step = 0; step <= 16; step++) {
-    const x = -capLength * 0.92 + (capLength * 1.84 * step) / 16;
-    spine.push(lifted(x, 0, 0.17 - Math.max(0, Math.abs(x) - ridge) * 0.15));
+  // The gables, plastered, a bargeboard along their top.
+  for (const side of [1, -1] as const) {
+    const x = side * (gableX - 0.04);
+    const across = Array.from({ length: 13 }, (_, index) => -side * gableZ * (-1 + index / 6));
+    const top = across.map((z): V3 => [at[0] + x, at[1] + heightAt(side * gableX, z) - 0.02, at[2] + z]);
+    // Its foot is where the end's slope meets it, a little below so no seam shows.
+    const foot = across.map((z): V3 => [at[0] + x, at[1] + heightAt(side * (gableX + 0.001), z) - 0.04, at[2] + z]);
+    b.sheet([top, foot], plaster, { surface: 'plaster', rough: 0.9 }, false);
+    b.limb(across.map((z): V3 => [at[0] + side * gableX, at[1] + heightAt(side * gableX, z) + 0.01, at[2] + z]), [0.035], timber, { sides: 6, surface: 'wood' });
   }
-  b.limb(spine, [0.05], cap, { sides: 7, rough: 1, surface: 'thatch' });
-  return (x, z) => over(x - at[0], z - at[2]);
+
+  // The ridges: the main one along the top, white-banded, its ends turned up; down the gables' edges; down the hips.
+  const top = at[1] + rise;
+  b.box([gableX * 2 + 0.2, 0.08, 0.3], [at[0], top + 0.05, at[2]], '#ebe6da', { surface: 'plaster' });
+  b.box([gableX * 2 + 0.2, 0.16, 0.24], [at[0], top + 0.17, at[2]], ridge, { surface: 'clay', rough: 0.6 });
+  for (const end of [-1, 1]) b.box([0.16, 0.38, 0.26], [at[0] + end * (gableX + 0.12), top + 0.26, at[2]], ridge, { surface: 'clay', rough: 0.6 }, [0, 0, end * -0.32]);
+  const ridgeFinish = { sides: 8, surface: 'clay' as const, rough: 0.6 };
+  for (const side of [1, -1]) {
+    for (const way of [1, -1]) {
+      const down = Array.from({ length: 7 }, (_, index) => {
+        const z = way * gableZ * (index / 6);
+        return point(side * gableX, z, 0.07);
+      });
+      b.limb(down, [0.075], ridge, ridgeFinish);
+      // The hip from the gable's foot to the eave's corner, its tip turned up past it.
+      const hip = Array.from({ length: 9 }, (_, index) => {
+        const x = gableX + (long - gableX) * (index / 8);
+        return point(side * x, way * (x - long + deep), 0.08);
+      });
+      const [cx, cy, cz] = hip[hip.length - 1]!;
+      hip.push([cx + side * 0.16, cy + 0.16, cz + way * 0.16]);
+      b.limb(hip, [0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.08, 0.07, 0.05], ridge, ridgeFinish);
+    }
+  }
 }
 
 export type WindowLook = {

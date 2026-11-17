@@ -69,7 +69,7 @@ export type House = {
 export const HOUSE_NAME: Record<Element, string> = {
   wood: '숲속 오두막',
   fire: '붉은 벽돌집',
-  earth: '황토 초가집',
+  earth: '황토 기와집',
   metal: '은빛 기와집',
   water: '푸른 지붕 연못집',
 };

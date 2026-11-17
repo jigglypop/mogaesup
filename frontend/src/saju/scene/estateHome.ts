@@ -3,16 +3,13 @@ import { Color } from 'three';
 import type { Element } from '../elements';
 import type { Reading } from '../engine';
 import type { Season } from '../mulsang';
-import { Builder, type Build } from './build';
 import { BRIDGE_FOOT, Coast, LANDINGS, type Jetty, type Landing } from './estate/coast';
 import { seasonPaint } from './estate/draw';
 import type { GroundPaint } from './estate/ground';
 import { estateOf, type Estate, type EstatePath, type Placement } from './estate/layout';
 import { lengthOf, nearestOn, pointAlong, type V2 } from './estate/lines';
-import { EstateSite } from './estate/site';
-import { grassOf, groundOf } from './homes';
+import { groundOf } from './homes';
 import { noise2 } from './noise';
-import type { Palette } from './plants';
 import { ISLANDS, shoreAt, type IslandShape } from './terrain';
 
 // The page's own island as an estate (see estate/): four neighbours' islands across each way, laid out from the
@@ -206,60 +203,14 @@ export function pathLamps(paths: readonly EstatePath[], stream: Estate['stream']
  */
 const KEEP_GREEN: Record<Season['key'], number> = { spring: 0.3, summer: 0.25, autumn: 0.82, winter: 0.7 };
 
-/**
- * The estate's ground in its month's season and its grass's blades, kept as green as the house's own lawn and grass
- * (see {@link KEEP_GREEN}).
- */
-export function lawnOf(estate: Estate, style: Element): { paint: GroundPaint; blades: Palette } {
+/** The estate's ground in its month's season, kept as green as the house's own lawn (see {@link KEEP_GREEN}). */
+export function lawnOf(estate: Estate, style: Element): GroundPaint {
   const season = seasonPaint(estate);
   const share = KEEP_GREEN[estate.plan.season.key];
   const keep = (hex: string, green: string) => `#${new Color(hex).lerp(new Color(green), share).getHexString()}`;
   const lawn = groundOf(style).lawn;
   const [body, patches, flecks] = season.lawn;
-  const grass = estate.plan.season.grass;
-  return {
-    paint: { ...season, lawn: [keep(body, lawn[0]), keep(patches, lawn[1]), keep(flecks, lawn[2])] },
-    blades: grassOf(style).map((green, index) => keep(grass[index % grass.length]!, green)),
-  };
-}
-
-/** Tufts of grass tried to the square metre of an estate's lawn: as thickly as on a home's island of old. */
-const TUFTS_PER_METRE = 30;
-/** How thickly the lawn is sown for a device that would labour over a full one (as plants' lawn sows it). */
-const THIN_LAWN = 0.45;
-/** Into how many strips, south to north, the lawn is sown: each strip is one build, a frame apart from the next. */
-export const LAWN_STRIPS = 4;
-
-/** One build of the estate beside the estate's own parts: a strip of its lawn. */
-export type LawnStrip = { key: string; make: () => Build };
-
-/**
- * The estate's lawn as tufts of grass in `colors`, sown in {@link LAWN_STRIPS} strips each built on its own: on the
- * firm ground only, off the stream and the ponds, the yard and the paths, and out from under the house.
- */
-export function lawnStrips(estate: Estate, colors: Palette, lush = true): LawnStrip[] {
-  const site = new EstateSite(estate);
-  const reach = Math.ceil(estate.coast.farthest);
-  const span = (2 * reach) / LAWN_STRIPS;
-  const { at, footprint } = estate.house;
-  const under = (x: number, z: number) => x > at[0] - footprint.left && x < at[0] + footprint.right && z > at[1] - footprint.back && z < at[1] + footprint.front;
-  return Array.from({ length: LAWN_STRIPS }, (_, strip) => ({
-    key: `lawn:${strip}`,
-    make: () => {
-      const b = new Builder(estate.seed * 31 + strip);
-      const share = lush ? 1 : THIN_LAWN;
-      const from = -reach + strip * span;
-      const tries = Math.round(2 * reach * span * TUFTS_PER_METRE * share);
-      for (let index = 0; index < tries; index++) {
-        const x = b.between(-reach, reach);
-        const z = b.between(from, from + span);
-        if (!site.open(x, z) || under(x, z) || site.path(x, z).share > 0.15) continue;
-        const wide = b.between(0.15, 0.27);
-        b.sprig('blade', [x, 0, z], [wide, wide * b.between(0.7, 1.5), wide], b.pick(colors), [0, 1, 0], b.between(0, TAU), [0, 1, 0], b.between(0.8, 1.08));
-      }
-      return b.finish();
-    },
-  }));
+  return { ...season, lawn: [keep(body, lawn[0]), keep(patches, lawn[1]), keep(flecks, lawn[2])] };
 }
 
 /**

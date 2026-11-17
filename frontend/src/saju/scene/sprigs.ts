@@ -83,30 +83,6 @@ function needleSpray(): BufferGeometry {
   return finished(into);
 }
 
-/**
- * A tuft of grass: blades leaning out from one root, dark at the foot and light at the tip. The lawn's tufts are drawn
- * as reed-like clumps the wind bends (see grass); this shape stands for one in what a build is reckoned to cost.
- */
-function grassTuft(): BufferGeometry {
-  const random = rng(17);
-  const into = sheet();
-  for (let index = 0; index < 6; index++) {
-    const turn = (index / 6) * Math.PI * 2 + random() * 0.7;
-    const out = new Vector3(Math.cos(turn), 0, Math.sin(turn));
-    const side = new Vector3(-out.z, 0, out.x).multiplyScalar(0.05);
-    const height = 0.6 + random() * 0.4;
-    const lean = 0.12 + random() * 0.3;
-    const foot = out.clone().multiplyScalar(0.05 + random() * 0.08);
-    const knee = foot.clone().addScaledVector(out, lean * 0.45).setY(height * 0.6);
-    const tip = foot.clone().addScaledVector(out, lean).setY(height);
-    const narrow = side.clone().multiplyScalar(0.55);
-    // Two triangles a blade: the lower one up to its bend, the upper one from the bend to its tip.
-    triangle(into, foot.clone().sub(side), foot.clone().add(side), knee, 0.66);
-    triangle(into, knee.clone().sub(narrow).setY(height * 0.45), knee.clone().add(narrow).setY(height * 0.45), tip, 1.1);
-  }
-  return finished(into);
-}
-
 /** A flower seen from above: petals about a yellow heart, cupped a little. */
 function blossom(): BufferGeometry {
   const into = sheet();
@@ -198,7 +174,7 @@ function stone(detail: number): BufferGeometry {
   return geometry;
 }
 
-const SHAPES: Record<SprigKind, () => BufferGeometry> = { leaf: leafSpray, needle: needleSpray, blade: grassTuft, bloom: blossom, frond, pad: lilyPad, puff, rock: () => stone(2), pebble: () => stone(1) };
+const SHAPES: Record<SprigKind, () => BufferGeometry> = { leaf: leafSpray, needle: needleSpray, bloom: blossom, frond, pad: lilyPad, puff, rock: () => stone(2), pebble: () => stone(1) };
 /**
  * How far the wind moves the top of a copy of each, in metres at the size it is scattered at; how much it takes the light
  * as its crown does (1) or as itself (0).
@@ -206,7 +182,6 @@ const SHAPES: Record<SprigKind, () => BufferGeometry> = { leaf: leafSpray, needl
 const MANNER: Record<Exclude<SprigKind, 'rock' | 'pebble'>, { sway: number; soft: number; rough: number }> = {
   leaf: { sway: 0.016, soft: 0.72, rough: 0.72 },
   needle: { sway: 0.012, soft: 0.6, rough: 0.8 },
-  blade: { sway: 0.022, soft: 0.9, rough: 0.85 },
   bloom: { sway: 0.006, soft: 0.6, rough: 0.7 },
   frond: { sway: 0.032, soft: 0.5, rough: 0.7 },
   pad: { sway: 0, soft: 0, rough: 0.35 },

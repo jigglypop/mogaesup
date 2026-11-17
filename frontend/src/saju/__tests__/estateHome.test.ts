@@ -6,7 +6,7 @@ import { profileOfReading } from '../profile';
 import { BRIDGE_FOOT, ESTATE_HALF, LANDINGS } from '../scene/estate/coast';
 import { estateOf } from '../scene/estate/layout';
 import { nearestOn, pointAlong } from '../scene/estate/lines';
-import { estateHomeOf, LAWN_STRIPS, landingsOf, lawnOf, lawnStrips, onSquare, SquareCoast } from '../scene/estateHome';
+import { estateHomeOf, landingsOf, lawnOf, onSquare, SquareCoast } from '../scene/estateHome';
 import { ISLANDS, shoreAt } from '../scene/terrain';
 import { plotsOf } from '../village';
 import { PEOPLE } from './people';
@@ -140,32 +140,10 @@ describe('미니홈피 주인의 섬: 호수가 아는 둥근 네모 위의 영�
   });
 });
 
-describe('영지의 잔디', () => {
+describe('영지의 잔디밭', () => {
   const estate = homes[0]!;
   const { house } = profileOfReading(readingOf(BIRTHS[0]!));
-  const { paint, blades } = lawnOf(estate, house.style);
-  /** Every tuft's foot, from the strips' builds. */
-  const tufts = (lush: boolean) =>
-    lawnStrips(estate, blades, lush).flatMap((strip) => {
-      const build = strip.make();
-      const grass = build.sprigs.find((sprigs) => sprigs.kind === 'blade');
-      return grass ? Array.from({ length: grass.count }, (_, index) => [grass.matrices[index * 16 + 12]!, grass.matrices[index * 16 + 14]!] as const) : [];
-    });
-
-  it('여러 조각으로 나뉘어 지어지고, 단단한 땅에만, 길과 집 밖에만 난다', () => {
-    expect(lawnStrips(estate, blades)).toHaveLength(LAWN_STRIPS);
-    const lush = tufts(true);
-    expect(lush.length).toBeGreaterThan(20000);
-    const { at, footprint } = estate.house;
-    for (const [x, z] of lush) {
-      expect(estate.coast.inside(x, z)).toBeGreaterThan(0.5);
-      expect(x > at[0] - footprint.left && x < at[0] + footprint.right && z > at[1] - footprint.back && z < at[1] + footprint.front).toBe(false);
-    }
-    // 휴대폰에는 반쯤만 심는다.
-    const thin = tufts(false);
-    expect(thin.length / lush.length).toBeGreaterThan(0.35);
-    expect(thin.length / lush.length).toBeLessThan(0.55);
-  });
+  const paint = lawnOf(estate, house.style);
 
   it('가을이나 겨울의 풀빛도 멀리서 맨땅으로 보이지 않게 집의 잔디만큼 푸르다', () => {
     const season = estate.plan.season;
@@ -176,7 +154,6 @@ describe('영지의 잔디', () => {
     const own = green(season.grass[0]!);
     expect(green(paint.lawn[0])).toBeGreaterThanOrEqual(own - 1e-9);
     if (season.key === 'autumn' || season.key === 'winter') expect(green(paint.lawn[0])).toBeGreaterThan(own);
-    expect(blades.length).toBeGreaterThanOrEqual(3);
   });
 });
 

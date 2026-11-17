@@ -570,7 +570,7 @@ function standingAt(world: World, camera: Camera, point: Vector2): Vector3 | nul
   const solid: Object3D[] = [];
   world.traverseVisible((object) => {
     const mesh = object as Mesh<BufferGeometry>;
-    if (!mesh.isMesh || mesh.name === 'lake' || mesh.name === 'turf' || mesh.name === 'blades') return;
+    if (!mesh.isMesh || mesh.name === 'lake') return;
     if ((mesh.geometry as InstancedBufferGeometry).isInstancedBufferGeometry) return;
     solid.push(mesh);
   });

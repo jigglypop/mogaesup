@@ -153,12 +153,11 @@ describe('짓는 이', () => {
 });
 
 describe('다섯 집', () => {
-  it.each(ELEMENTS)('%s의 집이 지어진다: 굴뚝 연기와 등불, 나무와 잔디가 있다', (style) => {
+  it.each(ELEMENTS)('%s의 집이 지어진다: 굴뚝 연기와 등불, 나무가 있다', (style) => {
     const build = buildHome({ style, accent: null, symbol: 'tree' });
     expect(build.meshes.length).toBeGreaterThan(4);
     expect(build.meshes.every((mesh) => mesh.geometry.index!.count > 0)).toBe(true);
     const kinds = new Map(build.sprigs.map((sprigs) => [sprigs.kind, sprigs.count]));
-    expect(kinds.get('blade')).toBeGreaterThan(500);
     expect(kinds.get('leaf')).toBeGreaterThan(500);
     expect(build.lamps.length).toBeGreaterThanOrEqual(3);
     expect(build.lives.some((life) => life.kind === 'smoke')).toBe(true);
@@ -194,10 +193,9 @@ describe('다섯 집', () => {
     expect(count(false)).toBeLessThan(count(true) * 0.75);
   }, 30_000);
 
-  it('빈 터에도 섬과 풀이 있다', () => {
+  it('빈 터에도 섬이 있다', () => {
     const lot = buildLot();
     expect(lot.meshes.length).toBeGreaterThan(1);
-    expect(lot.sprigs.some((sprigs) => sprigs.kind === 'blade')).toBe(true);
     expect(lot.lamps).toHaveLength(0);
   }, 30_000);
 
@@ -278,17 +276,16 @@ describe('주인의 섬과 이웃의 섬', () => {
   it.each(ELEMENTS)('%s: 이웃의 섬은 집과 땅, 물가와 나무 몇 그루뿐이라 훨씬 가볍다', (style) => {
     const { home, neighbour } = builds.get(style)!;
     const kinds = new Set(neighbour.sprigs.map((sprigs) => sprigs.kind));
-    // 풀잎도 수련 잎도 없고, 움직이는 것도 켜 둔 등불도 없다.
-    expect(kinds.has('blade')).toBe(false);
+    // 수련 잎도 없고, 움직이는 것도 켜 둔 등불도 없다.
     expect(kinds.has('pad')).toBe(false);
     expect(neighbour.lives).toEqual([]);
     expect(neighbour.lamps).toEqual([]);
     // 나무와 덤불의 잎은 있다.
     expect(kinds.has('leaf') || kinds.has('needle')).toBe(true);
-    expect(trianglesOf(neighbour)).toBeLessThan(trianglesOf(home) * 0.55);
+    expect(trianglesOf(neighbour)).toBeLessThan(trianglesOf(home) * 0.65);
     expect(trianglesOf(neighbour)).toBeLessThan(100_000);
     const instances = (build: Build) => build.sprigs.reduce((sum, sprigs) => sum + sprigs.count, 0);
-    expect(instances(neighbour)).toBeLessThan(instances(home) * 0.45);
+    expect(instances(neighbour)).toBeLessThan(instances(home) * 0.75);
   }, 30_000);
 
   it.each(ELEMENTS)('%s: 다리가 닿는 자리(변의 가운데와 네 모서리) 바깥으로는 아무것도 나와 있지 않다', (style) => {
@@ -311,10 +308,8 @@ describe('주인의 섬과 이웃의 섬', () => {
     }
   }, 30_000);
 
-  it('빈 터도 두 가지로 지어진다: 이웃의 것에는 풀이 없다', () => {
+  it('빈 터도 두 가지로 지어진다: 이웃의 것은 훨씬 가볍다', () => {
     const [home, neighbour] = KINDS.map((kind) => buildLot(true, kind));
-    expect(home!.sprigs.some((sprigs) => sprigs.kind === 'blade')).toBe(true);
-    expect(neighbour!.sprigs.some((sprigs) => sprigs.kind === 'blade')).toBe(false);
     expect(trianglesOf(neighbour!)).toBeLessThan(trianglesOf(home!) * 0.5);
   }, 30_000);
 });

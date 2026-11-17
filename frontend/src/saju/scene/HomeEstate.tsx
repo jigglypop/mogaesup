@@ -7,7 +7,7 @@ import { fromShelf, nameOf, shelving, toShelf } from './shelf';
 import { Built } from './Built';
 import { loadDogModel, type DogModel } from './dogModel';
 import { estateParts } from './estate/draw';
-import { estateHomeOf, lawnOf, lawnStrips } from './estateHome';
+import { estateHomeOf, lawnOf } from './estateHome';
 import { Guardian } from './Guardian';
 import { buildHouse, buildLot } from './homes';
 import { countWork, useBuild, WorksContext } from './works';
@@ -19,9 +19,8 @@ import { countWork, useBuild, WorksContext } from './works';
 /** The guardian stands a little smaller than it was drawn, beside a house whose door is a metre high (as Stage's Diorama). */
 const GUARDIAN_SCALE = 0.8;
 
-/** One build of the island: an estate's part, or a strip of its lawn, mounted at `at` about the island's middle. */
+/** One build of the island: an estate's part, mounted at `at` about the island's middle. */
 type Piece = { key: string; at: V3; make: () => Build };
-const MIDDLE: V3 = [0, 0, 0];
 
 /**
  * The pieces built one a task (the page can answer between them) and laid down together as one build (see
@@ -184,9 +183,7 @@ function Estate({
   const estate = useMemo(() => estateHomeOf(reading, landings === null ? undefined : landings.split(',').filter(Boolean).map(Number)), [reading, landings]);
   const style = house.style;
   const parts = useMemo<Piece[]>(() => {
-    const { paint, blades } = lawnOf(estate, style);
-    const lawn = lawnStrips(estate, blades, lush).map((strip) => ({ ...strip, at: MIDDLE }));
-    return [...estateParts(estate, { lush, paint, house: () => buildHouse({ style }, lush) }), ...lawn];
+    return estateParts(estate, { lush, paint: lawnOf(estate, style), house: () => buildHouse({ style }, lush) });
   }, [estate, lush, style]);
   const build = useParts(parts, turn, reading, `${landings ?? ''}|${lush}|${style}`);
   const dog = useDog(guardian.dog);

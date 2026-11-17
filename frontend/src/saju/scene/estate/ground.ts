@@ -46,7 +46,7 @@ type Corner = { height: number; tint: [number, number, number]; lawn: boolean };
 
 /**
  * The ground's colour at (x, z) of height `height`, as light (linear, not paint), into `color`: what the ground mesh's
- * corners are painted, and what the lawn's blades grow out of.
+ * corners are painted.
  */
 export function groundColor(site: EstateSite, paint: GroundPaint): (x: number, z: number, height: number, color: Color) => Color {
   const [lawnA, lawnB, lawnC] = paint.lawn.map((hex) => new Color(hex)) as [Color, Color, Color];

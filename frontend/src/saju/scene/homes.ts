@@ -1,9 +1,9 @@
 import type { Element } from '../elements';
 import type { House } from '../profile';
-import { barrel, bench, boat, chimney, clothesline, doorAt, fence, gableRoof, hanging, jar, jetty, jige, lantern, parasol, pot, railing, sawhorse, slope, stack, steps, stoneWall, tableSet, thatchRoof, well, windowAt, woodpile, type Cover } from './arch';
+import { barrel, bench, boat, chimney, clothesline, doorAt, fence, gableRoof, giwaRoof, hanging, jar, jetty, jige, lantern, parasol, pot, railing, sawhorse, slope, stack, steps, stoneWall, tableSet, well, windowAt, woodpile, type Cover } from './arch';
 import { Builder, type Build, type Finish, type V3 } from './build';
 import { WATER_LEVEL } from './mood';
-import { bamboo, birch, bush, conifer, flowerBed, lawn, lilies, pine, reeds, rock, steppingStones, tree, vine, willow, type Palette } from './plants';
+import { bamboo, birch, bush, conifer, flowerBed, lilies, pine, reeds, rock, steppingStones, tree, vine, willow, type Palette } from './plants';
 import { dressPond, dressShore, ground, GROUND_STEP, ISLANDS, shoreAt, Site, type GroundLook, type IslandKind, type IslandShape, type Pond } from './terrain';
 import { emblem, keepsake } from './yard';
 
@@ -68,8 +68,8 @@ const landing =
     }
     return false;
   };
-/** How far to either side of a bridge's line the lawn, the shore's stones and its reeds are kept back. */
-const BRIDGE_WAY = { lawn: 0.85, stones: 1.1, reeds: 1.45 } as const;
+/** How far to either side of a bridge's line the shore's stones and its reeds are kept back. */
+const BRIDGE_WAY = { stones: 1.1, reeds: 1.45 } as const;
 
 /** What a plan is drawn for: the island's kind, and a spot for each kind of island (a neighbour's, the page's own). */
 type Yard = { kind: IslandKind; at: (neighbour: [number, number], home: [number, number]) => V3 };
@@ -77,7 +77,6 @@ const yardOf = (kind: IslandKind): Yard => ({ kind, at: (neighbour, home) => (ki
 
 type Plan = {
   ground: GroundLook;
-  grass: Palette;
   ponds?: Record<IslandKind, Pond[]>;
   /** Yards kept bare of grass: ovals `rx` by `rz` about (x, z). */
   bare?: Record<IslandKind, [number, number, number, number][]>;
@@ -137,7 +136,6 @@ const BIRCH: Palette = ['#9fc25a', '#b3cf68', '#8ab04d'];
 /** 목: a cabin of logs under wooden shakes, deep among firs. */
 const wood: Plan = {
   ground: { lawn: ['#4c7c38', '#5f8f3f', '#77a04a'], dirt: '#6b5138', bank: '#8f8674', rocks: ['#7f7b70', '#8f8b7e', '#6c6a60'] },
-  grass: ['#5a8a3c', '#6f9d48', '#4b7834', '#86ab54'],
   house: (b, full) => {
     const logs: Palette = ['#8a5f3d', '#946843', '#7c5435', '#9f744c'];
     const dark = '#4a3324';
@@ -251,7 +249,6 @@ const ROSES: Palette = ['#c8283a', '#d93a4a', '#b01f33', '#e8566a'];
 /** 화: red brick under clay tiles, roses up its walls, a fire burning in the garden. */
 const fire: Plan = {
   ground: { lawn: ['#739a40', '#8db04e', '#a6bf60'], dirt: '#8b6b4b', bank: '#b09679', rocks: ['#a39788', '#b7ab9b', '#8e8377'] },
-  grass: ['#7fa046', '#95b556', '#6d8f3a', '#aac264'],
   house: (b, full) => {
     const brick: Finish = { surface: 'brick', rough: 0.9 };
     const trim = '#5a3a2a';
@@ -387,10 +384,9 @@ const fire: Plan = {
   },
 };
 
-/** 토: 초가집, its walls of yellow earth, the yard swept bare, jars on their stand and a wall of stones behind. */
+/** 토: 황토 기와집, its walls of yellow earth under a 팔작지붕, the yard swept bare, jars on their stand and a wall of stones behind. */
 const earth: Plan = {
   ground: { lawn: ['#7a9848', '#8fa955', '#a6b865'], dirt: '#9a7a52', bank: '#b29a78', yard: '#cbb38a', rocks: ['#b0a48f', '#9d927f', '#c0b49e'] },
-  grass: ['#7f9c47', '#95ae55', '#6e8b3c', '#a8bb62'],
   bare: {
     neighbour: [[-0.3, 2.35, 3.9, 2.0], [-1.3, -1.3, 3.3, 2.6]],
     home: [[-0.3, 2.6, 4.4, 2.3], [-1.3, -1.7, 3.7, 3.3]],
@@ -438,9 +434,9 @@ const earth: Plan = {
     b.box([0.04, 0.5, 0.66], [-2.27, 1.62, 0.55], '#3a2c22', WOOD);
     for (let bar = 0; bar < 7; bar++) b.box([0.05, 0.5, 0.045], [-2.3, 1.62, 0.28 + bar * 0.09], timber, WOOD);
 
-    // 초가지붕: straw heaped in a long, round mound over the eaves, roped down against the wind.
-    const over = thatchRoof(b, [0, 2.36, 0], { half: [2.95, 2.1], ridge: 1.2, rise: 1.45, thick: 0.34, walls: [2.25, 1.4], straw: '#c9a45e', cut: '#8f7446', cap: '#dcb96a', rope: '#a48448' });
-    // 굴뚝, low as a 초가's is, out from the back wall: stones and clay, a pot for its cap.
+    // 기와지붕: a 팔작지붕, its eaves sweeping up to the corners.
+    giwaRoof(b, [0, 2.36, 0], { half: [2.95, 2.15], rise: 1.7, walls: [2.25, 1.4], tiles: '#5d6168', ridge: '#43474e', plaster: '#efe8da', timber: '#5a3f2c' });
+    // 굴뚝, low behind the house, out from the back wall: stones and clay, a pot for its cap.
     b.cyl(0.25, 1.3, [1.9, 0.65, -2.32], '#b8976a', { top: 0.19, surface: 'plaster', sides: 12 });
     for (let stone = 0; stone < 7; stone++) {
       const turn = (stone / 7) * TAU;
@@ -452,20 +448,10 @@ const earth: Plan = {
     b.life({ kind: 'smoke', at: [1.9, 1.55, -2.32], scale: 0.8 });
     // 고무신 on the 섬돌.
     for (const x of [-0.1, 0.1]) b.ball(0.04, [DOOR_X + x, 0.51, 2.2], '#f6f2ea', { scale: [0.8, 0.5, 1.7], rough: 0.5, detail: 8 });
-    // 박: a vine up the west corner and over the thatch, gourds ripening on it.
-    const vine: V3[] = [[-2.62, 0, 1.75], [-2.5, 0.9, 1.9], [-2.45, 1.9, 2.05], [-2.3, over(-2.3, 1.95), 1.95], [-1.9, over(-1.9, 1.6) + 0.02, 1.6], [-1.4, over(-1.4, 1.2) + 0.02, 1.2], [-0.9, over(-0.9, 0.9) + 0.02, 0.9]];
-    b.limb(vine, [0.018, 0.016, 0.014, 0.012], '#5d7a3a', { sides: 5, rough: 0.9 });
-    for (let leaf = 0; leaf < 16; leaf++) {
-      const [from, to] = [vine[Math.min(vine.length - 2, Math.floor(leaf / 2.6))]!, vine[Math.min(vine.length - 1, Math.floor(leaf / 2.6) + 1)]!];
-      const t = b.random();
-      const at: V3 = [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t + 0.03, from[2] + (to[2] - from[2]) * t];
-      b.sprig('leaf', at, 0.3, b.pick(GREENS), [b.between(-0.5, 0.5), 1, b.between(0.2, 0.8)], leaf);
-    }
-    for (const [x, z, size] of [[-1.55, 1.3, 0.34], [-1.0, 0.95, 0.27], [-2.05, 1.7, 0.22]] as const) b.sprig('puff', [x, over(x, z) + size * 0.32, z], size, '#e4ecc8');
     // Paper lanterns under the front eaves, at the posts.
     for (const x of [-0.75, 2.25]) {
-      b.cyl(0.004, 0.22, [x, 1.93, 1.86], '#3a3331', { sides: 4 });
-      lantern(b, [x, 1.72, 1.86], { kind: 'paper', light: '#ffb86a' });
+      b.cyl(0.004, 0.3, [x, 2.05, 1.86], '#3a3331', { sides: 4 });
+      lantern(b, [x, 1.78, 1.86], { kind: 'paper', light: '#ffb86a' });
     }
     // Chillies and garlic hung from the plate by the kitchen; behind, firewood stacked under the eaves and a jar; the
     // 지게 left against the west end.
@@ -544,7 +530,6 @@ const earth: Plan = {
 /** 금: 기와집, white walls between dark posts under grey tiles, a court of raked gravel and a pine. */
 const metal: Plan = {
   ground: { lawn: ['#6a9658', '#80a866', '#98b878'], dirt: '#8a7d6a', bank: '#a9a59c', yard: '#d8d5cb', rocks: ['#b9b6ad', '#a5a39b', '#cac7be'] },
-  grass: ['#6f9b5a', '#84ad68', '#5f8a4e', '#9aba78'],
   bare: { neighbour: [], home: [[-2.9, 3.6, 2.1, 1.8]] },
   house: (b, full) => {
     const timber = '#4a372d';
@@ -649,7 +634,6 @@ const WISTERIA: Palette = ['#b79cf0', '#c9b2f7', '#9f84e0'];
 /** 수: white walls under a roof of blue tiles, a garden room of glass, and a pond with its bridge. */
 const water: Plan = {
   ground: { lawn: ['#5c984d', '#72aa5a', '#8aba6a'], dirt: '#7d6a52', bank: '#9aa0a0', rocks: ['#8f979c', '#a3aaae', '#7c858b'] },
-  grass: ['#629d50', '#78b05e', '#528a44', '#90be6e'],
   ponds: { neighbour: [{ x: -2.75, z: 2.95, rx: 1.6, rz: 1.25 }], home: [{ x: -3.2, z: 3.4, rx: 1.6, rz: 1.25 }] },
   house: (b, full) => {
     const white = '#f4efe6';
@@ -791,18 +775,10 @@ const water: Plan = {
 
 const PLANS: Record<Element, Plan> = { wood, fire, earth, metal, water };
 
-/** The ground about a house of `style`: its lawn's greens, its earth, its bank and stones; and its grass's blades. */
+/** The ground about a house of `style`: its lawn's greens, its earth, its bank and stones. */
 export const groundOf = (style: Element): GroundLook => PLANS[style].ground;
-export const grassOf = (style: Element): Palette => PLANS[style].grass;
-/** Tufts of grass tried over a neighbour-sized island; a larger one has as many to the square metre. */
-const LAWN_TUFTS = 5200;
 /** How thickly a garden is planted for a device that would labour over a full one (a phone). */
 const THIN = 0.62;
-
-/** Grass tried over an island of `shape`, as thickly to the square metre as over a neighbour-sized one. */
-const tufts = (shape: IslandShape) => Math.round(LAWN_TUFTS * ((shape.half + 0.7) / (ISLANDS.neighbour.half + 0.7)) ** 2);
-/** At most this much grass is tried over a plot not yet built on, however large: an estate's breadth of lawn is sown lighter. */
-const LOT_TUFTS = 24000;
 
 /**
  * A home's island with its house built, every side of it. With its whole garden (`home`) the chart's symbol and
@@ -827,8 +803,6 @@ export function buildHome(house: Pick<House, 'style' | 'accent' | 'symbol'>, lus
     if (house.accent) keepsake(b, house.accent, KEEPSAKE_AT);
   }
   dressShore(b, site, plan.ground, landing(shape, BRIDGE_WAY.stones), { ...(full ? {} : LIGHT_SHORE), reedless: landing(shape, BRIDGE_WAY.reeds) });
-  const way = landing(shape, BRIDGE_WAY.lawn);
-  if (full) lawn(b, (x, z) => site.open(x, z) && !way(x, z), tufts(shape), plan.grass, { half: shape.half + 0.7 });
   return b.finish();
 }
 
@@ -878,8 +852,6 @@ export function buildLot(lush = true, kind: IslandKind = 'home'): Build {
     flowerBed(b, [4.3, 3.9], [0.7, 0.5], 18, ['#ffd95a', '#ffffff', '#ff8fa3']);
     for (const [x, z, size] of [[-4.4, -4.6, 0.5], [3.9, -4.9, 0.36], [-5.1, 0.9, 0.3]] as const) rock(b, [x, 0, z], size, b.pick(LOT.rocks), 0.7);
     site.keep(0, 0.2, 0.6);
-    const way = landing(shape, BRIDGE_WAY.lawn);
-    lawn(b, (x, z) => site.open(x, z) && !way(x, z), Math.min(LOT_TUFTS, tufts(shape)), ['#7fa046', '#95b556', '#6d8f3a', '#aac264'], { half: shape.half + 0.7 });
   }
   dressShore(b, site, LOT, landing(shape, BRIDGE_WAY.stones), { ...(kind === 'home' ? {} : LIGHT_SHORE), reedless: landing(shape, BRIDGE_WAY.reeds) });
   return b.finish();

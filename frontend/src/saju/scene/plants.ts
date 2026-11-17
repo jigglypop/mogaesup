@@ -4,7 +4,7 @@ import type { Builder, SprigKind, V3 } from './build';
 import { noise3 } from './noise';
 
 // What grows: trees with their limbs and crowns of leaves, pines, willows, bamboo, shrubs in flower, beds, lawns, reeds
-// and the stones among them. Each is handed to a Builder as limbs (real geometry) and sprigs (leaves, blades and
+// and the stones among them. Each is handed to a Builder as limbs (real geometry) and sprigs (leaves, fronds and
 // flowers scattered by the hundred).
 
 export type Palette = readonly string[];
@@ -297,19 +297,6 @@ export function flowerBed(
     for (let head = 0; head < heads; head++) {
       b.sprig(kind, [x + b.between(-0.07, 0.07), y + tall * b.between(0.85, 1.1), z + b.between(-0.07, 0.07)], size * b.between(0.8, 1.3), b.pick(blooms), unit(b.between(-0.3, 0.3), 1, b.between(-0.3, 0.3)), b.between(0, TAU), [0, 1, 0]);
     }
-  }
-}
-
-/** Grass over whatever ground `open` allows, `count` tufts tried over a square `half` to each side. */
-export function lawn(b: Builder, open: (x: number, z: number) => boolean, count: number, colors: Palette, look: { half?: number; size?: [number, number] } = {}): void {
-  const { half = 6.2, size = [0.15, 0.27] } = look;
-  const tufts = Math.round(count * (b.density < 1 ? 0.45 : 1));
-  for (let index = 0; index < tufts; index++) {
-    const x = b.between(-half, half);
-    const z = b.between(-half, half);
-    if (!open(x, z)) continue;
-    const wide = b.between(size[0], size[1]);
-    b.sprig('blade', [x, 0, z], [wide, wide * b.between(0.7, 1.5), wide], b.pick(colors), [0, 1, 0], b.between(0, TAU), [0, 1, 0], b.between(0.8, 1.08));
   }
 }
 

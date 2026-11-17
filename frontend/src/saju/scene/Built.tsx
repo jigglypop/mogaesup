@@ -31,7 +31,6 @@ import { abs, attribute, cameraProjectionMatrix, cos, dot, exp, float, Fn, fract
 import { MeshBasicNodeMaterial, type Node } from 'three/webgpu';
 
 import type { Build, Lamp, Life } from './build';
-import { lawnMeshes } from './lawn';
 import { WATER_LEVEL } from './mood';
 import { hash } from './noise';
 import { useAnimation } from './parts';
@@ -41,7 +40,7 @@ import { MOVING } from './Static';
 // A built home in the canvas: its piled meshes, its scatterings of leaves and stones, what moves about it (smoke, a
 // fire, petals, fish) and the lamps it lends the village's pool of lights.
 
-/** The layer grass and flowers are drawn on: the camera sees it, the lake's mirror does not look for it. */
+/** The layer flowers are drawn on: the camera sees it, the lake's mirror does not look for it. */
 export const GRASS_LAYER = 1;
 
 /** Turns the wind's clock; held still, every leaf and mote stops where a chosen moment left it. */
@@ -437,12 +436,6 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
   const made = useMemo(() => {
     const scattered = build.sprigs.flatMap((sprigs): Mesh[] => {
       const { kind, count, matrices, colors, outs } = sprigs;
-      // The lawn's tufts grow as turf that the wind sways (see lawn).
-      if (kind === 'blade') {
-        const lawn = lawnMeshes(sprigs);
-        for (const mesh of lawn) mesh.layers.set(GRASS_LAYER);
-        return lawn;
-      }
       const base = sprigGeometry(kind);
       const leafy = kind === 'leaf' || kind === 'needle';
       if (leafy) inNoOrder(count, matrices, colors, outs);

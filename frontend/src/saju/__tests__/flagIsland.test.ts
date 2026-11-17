@@ -84,20 +84,16 @@ describe('깃발 섬', () => {
   // A scattered thing reaches a little past the spot it is put on: a boulder, a reed.
   const all = [...corners, ...moving, ...scattered.flatMap(([x, y, z]): Point[] => [[x - 0.6, y, z - 0.6], [x + 0.6, y + 1.2, z + 0.6]])];
 
-  it('지어진다: 땅과 돌, 풀과 꽃, 솔과 등불이 있다', () => {
+  it('지어진다: 땅과 돌, 꽃, 솔과 등불이 있다', () => {
     expect(build.meshes.length).toBeGreaterThan(4);
     expect(build.meshes.every((mesh) => mesh.geometry.index!.count > 0)).toBe(true);
     const kinds = new Map(build.sprigs.map((sprigs) => [sprigs.kind, sprigs.count]));
-    for (const kind of ['blade', 'bloom', 'leaf', 'needle', 'pebble', 'pad'] as const) expect(kinds.get(kind)).toBeGreaterThan(5);
+    for (const kind of ['bloom', 'leaf', 'needle', 'pebble', 'pad'] as const) expect(kinds.get(kind)).toBeGreaterThan(5);
     expect(build.lives.some((life) => life.kind === 'fireflies')).toBe(true);
     for (const [x, y, z] of all) expect(Number.isFinite(x + y + z)).toBe(true);
   });
 
   it('집의 섬보다 뚜렷이 작다', () => {
-    const grass = build.sprigs.find((sprigs) => sprigs.kind === 'blade')!;
-    const lawn = Array.from({ length: grass.count }, (_, index) => Math.hypot(grass.matrices[index * 16 + 12]!, grass.matrices[index * 16 + 14]!));
-    expect(Math.max(...lawn)).toBeGreaterThan(2.4);
-    expect(Math.max(...lawn)).toBeLessThan(ISLAND * 0.35);
     // 물 위로 드러난 것은 가운데에서 다섯 미터 안쪽에 있다: 집의 섬은 기슭까지 여섯 미터가 넘는다.
     expect(Math.max(...corners.filter(([, y]) => y > 0).map(([x, , z]) => Math.hypot(x, z)))).toBeLessThan(5);
   });

@@ -63,12 +63,23 @@ const BREAKER_PERIODS = [6.3, 8.9] as const;
 const SURGE = 0.07;
 /**
  * How much of each cascade's slope the surface is shaded with. The middle one holds the ripples a few pixels long at
- * the village's zooms: drawn a third stronger, they catch the sky in crisp glints, as imjin's sea does, and keep the
- * water lively by night, when the sky they give back is dim.
+ * the village's zooms: drawn a little stronger, they catch the sky, as imjin's sea does, and keep the water lively by
+ * night, when the sky they give back is dim.
  */
-const CASCADE_SHARE = [1, 1.3, 1] as const;
+const CASCADE_SHARE = [1, 1.1, 1] as const;
 /** How much of the swell's own folding is taken off before whitecaps are drawn where the surface folds. */
 const SWELL_FOLD = 0.65;
+/**
+ * The low sun's glitter on the lake: how much of it is drawn, and how bright it may be at most (1 is a sunlit white
+ * wall). At its full strength every ripple facing the sun was a point many times brighter than white, which the lens
+ * spread into discs and the glow into halos: the far water fizzed with them as the waves ran.
+ */
+const GLITTER = { share: 0.3, most: 1.15 } as const;
+/**
+ * Whitecaps out on the open lake: how much of the crests' folding whitens, and how much of the water a cap's lace
+ * covers. In full they flecked the whole lake white, and the lens spread every fleck into a bright disc.
+ */
+const WHITECAPS = { share: 0.35, lace: 0.55 } as const;
 
 const smoothRange = (from: number, to: number, value: Float) => smoothstep(from, to, value);
 
@@ -457,12 +468,12 @@ export class Surface {
       const NoH = saturate(dot(N, H));
       const NoL = saturate(dot(N, L));
       const VoH = saturate(dot(V, H));
-      const roughSpec = float(0.06).add(lost.mul(0.8)).min(0.5);
+      const roughSpec = float(0.09).add(lost.mul(0.8)).min(0.5);
       const a2 = roughSpec.mul(roughSpec).mul(roughSpec).mul(roughSpec).add(lost).min(0.5);
       const dDen = NoH.mul(NoH).mul(a2.sub(1)).add(1);
       const D = a2.div(dDen.mul(dDen).mul(Math.PI));
       const Fs = float(0.02).add(float(0.98).mul(pow(float(1).sub(VoH), 5)));
-      const glitter = sunLight.mul(D.mul(Fs).mul(NoL).div(max(NoV, 0.12).mul(4))).min(vec3(14));
+      const glitter = sunLight.mul(D.mul(Fs).mul(NoL).div(max(NoV, 0.12).mul(4))).mul(GLITTER.share).min(vec3(GLITTER.most));
 
       // The water's own colour: the sky's and the sun's light taken in and given back up out of the deep, teal and dark,
       // brighter on the faces of the swell turned to the sun and darker on those turned from it; light through the thin
@@ -498,11 +509,11 @@ export class Surface {
       // Without the cascades the swell alone never folds that far: the ripple tile's highest crests riding high on the
       // swell whiten instead, now and then.
       const caps = fft ? folded : max(folded, smoothstep(0.8, 0.96, ripple).mul(smoothstep(0.55, 0.95, crest)).mul(0.55));
-      const whitecap = caps.mul(this.whitecaps).mul(mix(float(0.4), float(1.6), gust)).mul(share);
+      const whitecap = caps.mul(WHITECAPS.share).mul(this.whitecaps).mul(mix(float(0.4), float(1.6), gust)).mul(share);
       const surf = breakers(fromWater.add(vPlace.w), vFields.w, vPicks.z);
       // Foam is lace, not paint: a soft edge into the lattice of the pattern, and bubbles that let the water show through.
       // A whitecap's lace is broad; the churn a breaker leaves is finer and more broken, and its breaking line nearly whole.
-      const capsLace = saturate(whitecap.mul(0.95).mul(mix(pattern, streaks, 0.55).add(0.25)).sub(float(1).sub(pattern)).mul(1.25));
+      const capsLace = saturate(whitecap.mul(0.95).mul(mix(pattern, streaks, 0.55).add(0.25)).sub(float(1).sub(pattern)).mul(1.25)).mul(WHITECAPS.lace);
       const surfPattern = fine.mul(0.55).add(bubbles.mul(0.45));
       const churnLace = saturate(surf.churn.sub(float(1.15).sub(surfPattern)).mul(2.4));
       // The wash is thinner still: a scatter of lace over the shallows, holes and all.

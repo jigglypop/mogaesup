@@ -49,7 +49,7 @@ export type Finish = {
 };
 
 /** What is scattered by the thousand, drawn as copies of one small shape (see flora). */
-export type SprigKind = 'leaf' | 'needle' | 'blade' | 'bloom' | 'frond' | 'pad' | 'puff' | 'rock' | 'pebble';
+export type SprigKind = 'leaf' | 'needle' | 'bloom' | 'frond' | 'pad' | 'puff' | 'rock' | 'pebble';
 
 /** A light that shines on what is near it: a lantern, a window, a fire. */
 export type Lamp = { at: V3; color: string; power: number; reach: number; flicker?: boolean };
@@ -584,16 +584,17 @@ export class Builder {
    * Its texture runs along each row (across) and from row to row (down), in metres; its normals are worked out from
    * each point's neighbours, facing the side from which the rows run left to right and the grid runs down (a roof's
    * rows round it anticlockwise seen from above, top row first, face up). `closed` joins each row's last point to its
-   * first. `tone` lightens or darkens the colour point by point (weathering at an eave).
+   * first. `tone` lightens or darkens the colour point by point (weathering at an eave). `across` gives the texture's
+   * place across a point in metres in place of how far along its row it lies (a roof's tiles in straight columns).
    */
-  sheet(rows: readonly (readonly V3[])[], color: string, finish: Finish = {}, closed = false, tone?: (row: number, column: number) => number): this {
+  sheet(rows: readonly (readonly V3[])[], color: string, finish: Finish = {}, closed = false, tone?: (row: number, column: number) => number, across?: (point: V3) => number): this {
     const pile = this.pile(finish);
     const paint = colorOf(color);
     const base = pile.positions.length / 3;
     const count = rows[0]?.length ?? 0;
     // A closed sheet's first column is drawn again at its end, where its texture has come all the way round.
     const drawn = closed ? count + 1 : count;
-    const across = new Vector3();
+    const sideways = new Vector3();
     const down = new Vector3();
     const here = new Vector3();
     this.normal.getNormalMatrix(this.matrix);
@@ -612,9 +613,9 @@ export class Builder {
         // How far along its row and down its column the point lies, for the texture.
         if (column > 0) run += apart(point, pointOf(row, column - 1));
         if (row > 0) fallen[column] = fallen[column]! + apart(point, pointOf(row - 1, column));
-        towards(across, pointOf(row, column - 1), pointOf(row, column + 1));
+        towards(sideways, pointOf(row, column - 1), pointOf(row, column + 1));
         towards(down, pointOf(row - 1, column), pointOf(row + 1, column));
-        here.crossVectors(down, across);
+        here.crossVectors(down, sideways);
         // A row drawn to a point (a ridge's ends) has no way across: up is the best guess there.
         if (here.lengthSq() < 1e-12) here.set(0, 1, 0);
         here.normalize();
@@ -622,7 +623,7 @@ export class Builder {
         pile.positions.push(this.point.x, this.point.y, this.point.z);
         here.applyMatrix3(this.normal).normalize();
         pile.normals.push(here.x, here.y, here.z);
-        pile.uvs.push(run / pile.tile, fallen[column]! / pile.tile);
+        pile.uvs.push((across ? across(point) : run) / pile.tile, fallen[column]! / pile.tile);
         const shade = tone ? tone(row, column % count) : 1;
         pile.colors.push(paint.r * shade, paint.g * shade, paint.b * shade);
       }
