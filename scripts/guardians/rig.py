@@ -148,6 +148,15 @@ HOODIE = (' Dress it in a cute, soft, slightly oversized hoodie sweatshirt with 
           'sleeves cover its arms to the paws and the hoodie reaches its hips; its legs and feet show below. Keep the '
           'look sweet and round, like a plush toy.')
 
+# The drawing's own proportions, held to: its head the most of it, its body and limbs small under it.
+CHIBI = (' Hold to the proportions of the original picture exactly; this matters more than anything else. Measure '
+         'it: from the top of the head to the bottom of the face and cheeks is seven tenths of the height of the whole '
+         'figure, and everything below the face (body, hoodie, legs and feet together) is only three tenths. The body '
+         'is wide and round like a little cushion, no taller than half the width of the face, partly hidden under the '
+         'cheeks. The arms are tiny round nubs sticking out sideways just under the cheeks. The legs are two tiny round '
+         'feet right under the body with nothing between, as in the original. The hoodie is cropped to fit that tiny '
+         'body. A body as tall as in an ordinary chibi figure is wrong: here the head is almost all of it.')
+
 LOOK = ('Render it as a smooth matte 3D figure, like a soft vinyl toy painted in the flat colours of the drawing, '
         'softly and evenly lit: no black outlines, no cast shadow, no ground, no text, a plain pure white background. '
         'The whole figure in frame with a margin around it, centred, seen straight on by an orthographic camera at '
@@ -160,9 +169,39 @@ def same(pose: str) -> str:
             f'with {arms} and both feet flat on the ground')
 
 
-def prompt_of(item: str, view: str, pose: str = 't-pose', longer: bool = False, hoodie: bool = False) -> str:
+# The hooded figure, made by editing the original picture itself so its size and proportions cannot drift: the same
+# head and the same tiny body, a costume hood pulled up over the head, its arms out for the rig.
+HOODED = ('Edit this picture of {looks}. Keep the character exactly as it is in this picture: the same size and place in '
+          'the frame, the same face, eyes, blush and expression, the same big head, and the same small body and short '
+          'legs, with exactly the same proportion of head to body; do not make the body, arms or legs bigger, taller or '
+          'longer. Change only these things. First, it wears a soft costume hood pulled up over its head and framing its '
+          'face, like a kigurumi hood: the hood is shaped like its own head and ears, in its own fur colours and markings, '
+          'its ears sewn on the hood, and the hood belongs to a tiny matching hoodie on its small body{keep}. Second, it '
+          'holds nothing{held}, and its two little arms stick straight out sideways at shoulder height in a T-pose, as '
+          'short as they are in the picture. Third, it stands on its two little feet, seen straight from the front. '
+          '{look}')
+
+
+# What a dog's hooded figure keeps or leaves out beyond the rest, every view.
+HOODED_EXTRA = {
+    '04': (' Its hood is the green dinosaur costume hood it already wears, with the row of yellow spikes over the head and '
+           'down the back, and its tiny hoodie is the same green with a yellow belly and a little green dinosaur tail; '
+           'it is not a dog-coloured hood.'),
+    '08': (' It has no beard: the white fluff under its mouth is gone and its chin is plain and round. It has only one '
+           'pair of eyebrows, white and bushy, on its face just above its eyes; the hood has no eyebrows on it.'),
+}
+
+
+def prompt_of(item: str, view: str, pose: str = 't-pose', longer: bool = False, hoodie: bool = False,
+              chibi: bool = False, hooded: bool = False) -> str:
     """What the image model is asked for, for one view of one dog."""
     looks, wears, holds = DOGS[item]
+    if hooded and view == 'front':
+        if item == '08':
+            looks = looks.replace(', a white beard', '')
+        return HOODED.format(looks=looks, keep=f'; it keeps {wears}' if wears else '',
+                             held=f' ({holds}, which it holds in the picture, is left out)' if holds else '',
+                             look=(HOODED_EXTRA[item].strip() + ' ' + LOOK) if item in HOODED_EXTRA else LOOK)
     named, arms, _, _, near = POSES[pose]
     keep = f', and what it wears: {wears}' if wears else ''
     empty = (f'It holds nothing: {holds}, which it holds in the drawing, is left out and its paws are open and empty.'
@@ -175,7 +214,7 @@ def prompt_of(item: str, view: str, pose: str = 't-pose', longer: bool = False, 
                 f'little apart, both feet flat on the ground. Keep its chibi proportions, the same big round head and '
                 f'small body as drawn, with the limbs clearly shaped: two arms reaching out from the shoulders below '
                 f'the head, two short legs with feet, apart from each other and from the body.{LONGER if longer else ""}'
-                f'{HOODIE if hoodie else ""} {LOOK}')
+                f'{HOODIE if hoodie else ""}{CHIBI if chibi else ""} {LOOK}')
     references = ('The first image is the original drawing, the second the front view already made; any further '
                   'images are other views already made. ')
     if view == 'back':
@@ -218,12 +257,14 @@ def archive(folder: Path, view: str) -> None:
 
 
 def draw(client: httpx.Client, out: Path, item: str, picture: Path, view: str, pose: str = 't-pose',
-         longer: bool = False, hoodie: bool = False) -> Path:
+         longer: bool = False, hoodie: bool = False, chibi: bool = False, hooded: bool = False) -> Path:
     """One view of the dog: the one already drawn, or a new one from the picture and the views before it."""
     folder = out / item / 'tpose'
     receipt = folder / f'{view}.json'
     image = folder / f'{view}.png'
-    prompt = prompt_of(item, view, pose, longer, hoodie)
+    prompt = prompt_of(item, view, pose, longer, hoodie, chibi, hooded)
+    if hooded and view != 'front':
+        prompt += HOODED_EXTRA.get(item, '')
     if receipt.exists():
         task = json.loads(receipt.read_text(encoding='utf-8'))
         if task.get('status') == 'done' and image.exists() and digest(image) == task.get('image_sha256'):
@@ -423,9 +464,15 @@ def main() -> int:
                         help='the pose the views are drawn and modelled in (an A-pose for a dog the rig cannot read)')
     parser.add_argument('--longer', action='store_true', help='draw the arms and legs a third longer than drawn')
     parser.add_argument('--hoodie', action='store_true', help='dress the dog in a hoodie of its own colours')
+    parser.add_argument('--hooded', action='store_true',
+                        help='edit the original picture itself: its proportions kept, a costume hood up, arms out')
+    parser.add_argument('--chibi', action='store_true', help='hold to the big head and small body of the drawing')
     parser.add_argument('--reanimate', action='store_true',
                         help='animate a rigged dog again with every action now listed (the old clips are kept aside)')
     args = parser.parse_args()
+    if args.hooded:
+        # The picture is square: the views are drawn square, so nothing is reframed or stretched.
+        DRAWING['size'] = '1024x1024'
     keys = dotenv_values(ROOT / 'backend/.env')
     meshy_key = (keys.get('MESHY_API_KEY') or '').strip()
     openai_key = (keys.get('OPENAI_API_KEY') or '').strip()
@@ -471,11 +518,11 @@ def main() -> int:
                     for view in args.redraw:
                         archive(args.out / item / 'tpose', view)
                     for view in args.redraw:
-                        draw(openai, args.out, item, picture, view, args.pose, args.longer, args.hoodie)
+                        draw(openai, args.out, item, picture, view, args.pose, args.longer, args.hoodie, args.chibi, args.hooded)
                     return f'ok   {item}: redrew {", ".join(args.redraw)}'
                 if args.draw:
                     for view in VIEWS:
-                        draw(openai, args.out, item, picture, view, args.pose, args.longer, args.hoodie)
+                        draw(openai, args.out, item, picture, view, args.pose, args.longer, args.hoodie, args.chibi, args.hooded)
                     return f'ok   {item}: views drawn'
                 if args.reanimate:
                     folder = args.out / item
