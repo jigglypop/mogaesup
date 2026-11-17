@@ -1,5 +1,56 @@
 {
-  "views": ["04", "06", "07", "12", "15", "16", "20"],
+  "views": [
+    "04",
+    "06",
+    "07",
+    "12",
+    "15",
+    "16",
+    "20"
+  ],
   "yaw": {},
-  "rigged": []
+  "rigged": [
+    "01",
+    "02",
+    "03",
+    "04",
+    "05",
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20"
+  ],
+  "folders": {
+    "01": "out-hoodie",
+    "02": "out-hoodie",
+    "03": "out-hoodie",
+    "04": "out-hoodie",
+    "05": "out-hoodie",
+    "06": "out-hoodie",
+    "07": "out-hoodie",
+    "08": "out-hoodie",
+    "09": "out-hoodie",
+    "10": "out-hoodie",
+    "11": "out-hoodie",
+    "12": "out-hoodie",
+    "13": "out-hoodie",
+    "14": "out-hoodie",
+    "15": "out-hoodie",
+    "16": "out-hoodie",
+    "17": "out-hoodie",
+    "18": "out-hoodie",
+    "19": "out-hoodie",
+    "20": "out-hoodie"
+  }
 }
