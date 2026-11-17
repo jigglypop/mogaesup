@@ -13,7 +13,7 @@ import { ISLANDS, type IslandKind } from './terrain';
 export const AZIMUTH = Math.PI / 4;
 export const ELEVATION = (33 * Math.PI) / 180;
 /** How low and how high the viewer may tilt it: from a look across the water to one nearly straight down. */
-export const TILT_RANGE = { min: (20 * Math.PI) / 180, max: (70 * Math.PI) / 180 } as const;
+export const TILT_RANGE = { min: (15 * Math.PI) / 180, max: (80 * Math.PI) / 180 } as const;
 export const clampTilt = (tilt: number) => Math.min(TILT_RANGE.max, Math.max(TILT_RANGE.min, tilt));
 
 export type Frame = {
@@ -147,7 +147,7 @@ export function openArea(width: number, height: number, inset: Inset): { x: numb
 }
 
 /** How far in and out a viewer may zoom, as a multiple of the size at which the frame just fits. */
-export const ZOOM_RANGE = { min: 0.6, max: 3.2 } as const;
+export const ZOOM_RANGE = { min: 0.5, max: 7 } as const;
 export const clampZoom = (zoom: number) => Math.min(ZOOM_RANGE.max, Math.max(ZOOM_RANGE.min, zoom));
 
 /** How much a wheel's step zooms, per pixel it would have scrolled; a trackpad's pinch sends finer steps and counts for more. */

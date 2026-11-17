@@ -7,7 +7,7 @@ import { fbm, hash, tileNoise, worley } from './noise';
 // is plaster in any paint); brick and masonry bring their own colours. Painted off the main thread (see painter); this
 // file is what the painter runs, and has nothing of the graphics card in it.
 
-export type Surface = 'plain' | 'plaster' | 'brick' | 'masonry' | 'stone' | 'rock' | 'wood' | 'bark' | 'thatch' | 'gravel' | 'soil' | 'ground' | 'clay';
+export type Surface = 'plain' | 'plaster' | 'brick' | 'masonry' | 'stone' | 'rock' | 'wood' | 'bark' | 'thatch' | 'straw' | 'gravel' | 'soil' | 'ground' | 'clay';
 
 type Texel = { r: number; g: number; b: number; h: number };
 type Recipe = {
@@ -159,6 +159,19 @@ const RECIPES: Record<Exclude<Surface, 'plain'>, Recipe> = {
       out.b -= 0.03;
     },
   },
+  /** 이엉 on a 초가: long straws combed down the slope, the edges of its layers barely showing, tufts lighter or darker. */
+  straw: {
+    size: 1.6,
+    bump: 1.6,
+    paint: (u, v, out) => {
+      const strand = tileNoise(u * 96, v * 3, 96, 91) * 0.55 + tileNoise(u * 190, v * 6, 190, 93) * 0.45;
+      const tuft = tileNoise(u * 7, v * 2, 7, 95);
+      const layer = fract(v * 2 + tileNoise(u * 3, 0, 3, 97) * 0.3);
+      const lap = 0.5 + smooth(0, 0.16, layer) * 0.5;
+      shade(out, (0.7 + strand * 0.3) * (0.84 + tuft * 0.16) * (0.9 + lap * 0.1), strand * 0.75 + lap * 0.25);
+      out.b -= 0.04;
+    },
+  },
   /** Pebbles: a path, a court. */
   gravel: {
     size: 1,
@@ -209,7 +222,7 @@ const RECIPES: Record<Exclude<Surface, 'plain'>, Recipe> = {
 export const surfaceSize = (surface: Exclude<Surface, 'plain'>): number => RECIPES[surface].size;
 
 /** Every surface with a tile, most worn first: the order the painter paints them in. */
-export const SURFACES: readonly Exclude<Surface, 'plain'>[] = ['ground', 'rock', 'wood', 'plaster', 'thatch', 'stone', 'soil', 'gravel', 'bark', 'clay', 'brick', 'masonry'];
+export const SURFACES: readonly Exclude<Surface, 'plain'>[] = ['ground', 'rock', 'wood', 'plaster', 'thatch', 'straw', 'stone', 'soil', 'gravel', 'bark', 'clay', 'brick', 'masonry'];
 
 /** A surface's colour tile (as paint, sRGB) and its relief as a normal map, each TILE square, four bytes a texel. */
 export function paintSurface(surface: Exclude<Surface, 'plain'>): { colors: Uint8Array; normals: Uint8Array } {

@@ -1,6 +1,6 @@
 import type { Element } from '../elements';
 import type { House } from '../profile';
-import { barrel, bench, boat, chimney, clothesline, doorAt, fence, gableRoof, hanging, jar, jetty, jige, lantern, parasol, pot, railing, sawhorse, slope, stack, steps, stoneWall, tableSet, well, windowAt, woodpile, type Cover } from './arch';
+import { barrel, bench, boat, chimney, clothesline, doorAt, fence, gableRoof, hanging, jar, jetty, jige, lantern, parasol, pot, railing, sawhorse, slope, stack, steps, stoneWall, tableSet, thatchRoof, well, windowAt, woodpile, type Cover } from './arch';
 import { Builder, type Build, type Finish, type V3 } from './build';
 import { WATER_LEVEL } from './mood';
 import { bamboo, birch, bush, conifer, flowerBed, lawn, lilies, pine, reeds, rock, steppingStones, tree, vine, willow, type Palette } from './plants';
@@ -396,70 +396,85 @@ const earth: Plan = {
     home: [[-0.3, 2.6, 4.4, 2.3], [-1.3, -1.7, 3.7, 3.3]],
   },
   house: (b, full) => {
-    const timber = '#5a3f2c';
-    const mud = '#d2a66c';
-    b.box([5.0, 0.26, 4.2], [0, 0.13, 0], '#ffffff', MASONRY);
-    b.box([4.3, 1.55, 3.3], [0, 1.03, 0], mud, { surface: 'plaster', rough: 0.95 });
-    // The frame: posts on their stones at the corners and the middle of every wall, a sill below and a plate above.
-    for (const [x, z] of [[-2.15, 1.65], [0, 1.65], [2.15, 1.65], [2.15, 0], [2.15, -1.65], [0, -1.65], [-2.15, -1.65], [-2.15, 0]] as const) b.box([0.16, 1.62, 0.16], [x, 1.07, z], timber, WOOD);
-    b.box([4.5, 0.15, 3.5], [0, 1.88, 0], timber, WOOD);
-    b.box([4.4, 0.1, 3.4], [0, 0.31, 0], timber, WOOD);
-    paper(b, [DOOR_X, 0.93, 1.66], [1.0, 1.1], timber, 0, 2);
-    paper(b, [-1.1, 1.15, 1.66], [0.85, 0.62], timber, 0, 2);
-    paper(b, [2.16, 1.15, 0.8], [0.7, 0.6], timber, QUARTER);
-    b.box([0.05, 1.05, 0.6], [2.17, 0.9, -0.85], '#7a5639', WOOD);
-    // The back: a door of paper onto the yard behind and a small window; the west, another.
-    paper(b, [0.95, 0.93, -1.66], [0.9, 1.1], timber, BACK, 2);
-    paper(b, [-1.15, 1.2, -1.66], [0.55, 0.45], timber, BACK);
-    paper(b, [-2.16, 1.15, -0.55], [0.7, 0.6], timber, WEST);
-    // 툇마루, and the stones to step up from, before and behind.
-    b.box([3.7, 0.07, 0.78], [0.1, 0.5, 2.06], '#a67c52', { ...WOOD, vary: 0.05 });
-    for (const x of [-1.6, 0.1, 1.8]) b.box([0.1, 0.24, 0.1], [x, 0.38, 2.38], timber, WOOD);
-    b.box([0.85, 0.14, 0.42], [DOOR_X, 0.07, 2.78], '#b9b3a6', STONE);
-    b.box([0.7, 0.12, 0.36], [0.95, 0.06, -2.32], '#b9b3a6', STONE);
+    const timber = '#5e4330';
+    const mud = '#d4a76a';
+    const plank = '#6e4e36';
+    // 기단 of stone, deeper in front where the 섬돌 sits; the house's three 칸 on it: 부엌 (west), 안방, 윗방.
+    b.box([5.3, 0.36, 4.2], [0, 0.18, 0.3], '#ffffff', MASONRY);
+    b.box([0.9, 0.16, 0.44], [DOOR_X, 0.08, 2.66], '#b9b3a6', STONE);
+    b.box([0.78, 0.12, 0.38], [DOOR_X, 0.42, 2.18], '#c4beb0', STONE);
+    // 황토 walls between the posts, the kitchen's front darkened by its fire's smoke.
+    b.box([4.5, 1.88, 2.8], [0, 1.3, 0], mud, { surface: 'plaster', rough: 0.95 });
+    b.box([1.36, 1.5, 0.02], [-1.5, 1.2, 1.405], '#a7835a', { surface: 'plaster', rough: 0.95 });
+    // The frame: posts on their stones at the corners, between the 칸 and in the middle of the ends; a sill, a rail
+    // across the middle of the walls and the plate on top.
+    const posts: [number, number][] = [];
+    for (const x of [-2.25, -0.75, 0.75, 2.25]) for (const z of [1.4, -1.4]) posts.push([x, z]);
+    posts.push([-2.25, 0], [2.25, 0]);
+    for (const [x, z] of posts) {
+      b.cyl(0.15, 0.08, [x, 0.4, z], '#b4ab9a', { ...STONE, top: 0.12, sides: 9 });
+      b.box([0.17, 1.9, 0.17], [x, 1.39, z], timber, { ...WOOD, vary: 0.06 });
+    }
+    for (const [y, tall] of [[0.5, 0.12], [1.22, 0.09], [2.26, 0.17]] as const) {
+      for (const z of [1.4, -1.4]) b.box([4.64, tall, 0.2], [0, y, z], timber, WOOD);
+      for (const x of [2.25, -2.25]) b.box([0.2, tall, 2.94], [x, y, 0], timber, WOOD);
+    }
 
-    // 초가지붕: thatch in a mound, its eaves thick, roped down against the wind.
-    const top = 1.95;
-    const reach: V3 = [2.95, 1.5, 2.5];
-    b.ball(1, [0, top - 0.04, 0], '#6b5536', { scale: [3.02, 0.06, 2.57], rough: 1, detail: 20 });
-    b.dome([3.08, 0.4, 2.63], [0, top - 0.02, 0], '#a88a4a', { surface: 'thatch', rough: 1 });
-    b.dome(reach, [0, top + 0.05, 0], '#d2b060', { surface: 'thatch', rough: 1, detail: 32 });
-    const over = (x: number, z: number) => top + 0.07 + reach[1] * Math.sqrt(Math.max(0, 1 - (x / reach[0]) ** 2 - (z / reach[2]) ** 2));
-    for (let rope = -2; rope <= 2; rope++) {
-      const z = rope * 0.9;
-      const span = reach[0] * Math.sqrt(1 - (z / reach[2]) ** 2);
-      b.limb(Array.from({ length: 13 }, (_, index): V3 => [(-1 + index / 6) * span, over((-1 + index / 6) * span * 0.999, z), z]), [0.014], '#b08f4a', { sides: 5, rough: 1, surface: 'thatch' });
+    // The front: the kitchen's plank doors, the 안방's paper door and the 윗방's pair, a 툇마루 before the two rooms.
+    for (const side of [-1, 1]) b.box([0.5, 1.42, 0.05], [-1.5 + side * 0.26, 1.13, 1.43], plank, { ...WOOD, vary: 0.08 });
+    for (const y of [0.62, 1.62]) b.box([1.08, 0.06, 0.07], [-1.5, y, 1.47], timber, WOOD);
+    b.ball(0.03, [-1.44, 1.13, 1.47], '#2e2a26', { ...IRON, detail: 8 });
+    paper(b, [0, 1.27, 1.405], [0.74, 1.18], timber, 0, 2);
+    paper(b, [1.5, 1.27, 1.405], [1.0, 1.18], timber, 0, 2);
+    b.box([3.0, 0.07, 0.64], [0.75, 0.62, 1.74], '#a67c52', { ...WOOD, vary: 0.05 });
+    b.box([3.0, 0.1, 0.07], [0.75, 0.54, 2.03], timber, WOOD);
+    for (const x of [-0.7, 0.75, 2.2]) b.box([0.09, 0.2, 0.09], [x, 0.46, 1.98], timber, WOOD);
+    // The back: the kitchen's door out to the yard behind and a window of each room; the ends, a window each, the
+    // kitchen's of bars.
+    b.box([0.8, 1.42, 0.05], [-1.5, 1.13, -1.43], plank, { ...WOOD, vary: 0.08 });
+    paper(b, [0, 1.42, -1.405], [0.55, 0.46], timber, BACK);
+    paper(b, [1.5, 1.42, -1.405], [0.62, 0.5], timber, BACK, 2);
+    paper(b, [2.255, 1.42, 0.4], [0.7, 0.56], timber, QUARTER, 2);
+    b.box([0.04, 0.5, 0.66], [-2.27, 1.62, 0.55], '#3a2c22', WOOD);
+    for (let bar = 0; bar < 7; bar++) b.box([0.05, 0.5, 0.045], [-2.3, 1.62, 0.28 + bar * 0.09], timber, WOOD);
+
+    // 초가지붕: straw heaped in a long, round mound over the eaves, roped down against the wind.
+    const over = thatchRoof(b, [0, 2.36, 0], { half: [2.95, 2.1], ridge: 1.2, rise: 1.45, thick: 0.34, walls: [2.25, 1.4], straw: '#c9a45e', cut: '#8f7446', cap: '#dcb96a', rope: '#a48448' });
+    // 굴뚝, low as a 초가's is, out from the back wall: stones and clay, a pot for its cap.
+    b.cyl(0.25, 1.3, [1.9, 0.65, -2.32], '#b8976a', { top: 0.19, surface: 'plaster', sides: 12 });
+    for (let stone = 0; stone < 7; stone++) {
+      const turn = (stone / 7) * TAU;
+      b.ball(0.11, [1.9 + Math.cos(turn) * 0.24, 0.08, -2.32 + Math.sin(turn) * 0.24], '#a39988', { ...STONE, scale: [1.2, 0.7, 1], detail: 8 }, turn);
     }
-    for (let rope = -3; rope <= 3; rope++) {
-      const x = rope * 0.8;
-      const span = reach[2] * Math.sqrt(1 - (x / reach[0]) ** 2);
-      b.limb(Array.from({ length: 11 }, (_, index): V3 => [x, over(x, (-1 + index / 5) * span * 0.999), (-1 + index / 5) * span]), [0.014], '#b08f4a', { sides: 5, rough: 1, surface: 'thatch' });
-    }
-    b.limb(Array.from({ length: 13 }, (_, index): V3 => [(-1 + index / 6) * 2.35, over((-1 + index / 6) * 2.35, 0) + 0.03, 0]), [0.03, 0.07, 0.085, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.085, 0.07, 0.03], '#c4a45a', { surface: 'thatch', rough: 1, sides: 8 });
-    // 굴뚝.
-    b.cyl(0.2, 1.5, [2.8, 0.75, -1.25], '#c9ab7e', { top: 0.16, surface: 'plaster', sides: 14 });
-    b.cyl(0.21, 0.07, [2.8, 1.53, -1.25], timber, { sides: 14 });
+    b.cyl(0.17, 0.2, [1.9, 1.4, -2.32], '#5b3d2c', { top: 0.12, sides: 12, rough: 0.7 });
     if (!full) return;
 
-    b.life({ kind: 'smoke', at: [2.8, 1.65, -1.25], scale: 0.8 });
-    for (const x of [-0.1, 0.1]) b.ball(0.04, [DOOR_X + x, 0.16, 2.78], '#f6f2ea', { scale: [0.8, 0.5, 1.7], rough: 0.5, detail: 8 });
-    // Gourds ripening on the thatch.
-    for (const [x, z, size] of [[-1.3, 1.25, 0.34], [-0.85, 1.0, 0.26], [-1.75, 0.9, 0.22]] as const) {
-      b.sprig('puff', [x, over(x, z) + size * 0.3, z], size, '#dfe9c4');
-      for (let leaf = 0; leaf < 4; leaf++) b.sprig('leaf', [x + b.between(-0.25, 0.25), over(x, z) + 0.05, z + b.between(-0.25, 0.25)], 0.3, b.pick(GREENS), [0, 1, 0.3], leaf);
+    b.life({ kind: 'smoke', at: [1.9, 1.55, -2.32], scale: 0.8 });
+    // 고무신 on the 섬돌.
+    for (const x of [-0.1, 0.1]) b.ball(0.04, [DOOR_X + x, 0.51, 2.2], '#f6f2ea', { scale: [0.8, 0.5, 1.7], rough: 0.5, detail: 8 });
+    // 박: a vine up the west corner and over the thatch, gourds ripening on it.
+    const vine: V3[] = [[-2.62, 0, 1.75], [-2.5, 0.9, 1.9], [-2.45, 1.9, 2.05], [-2.3, over(-2.3, 1.95), 1.95], [-1.9, over(-1.9, 1.6) + 0.02, 1.6], [-1.4, over(-1.4, 1.2) + 0.02, 1.2], [-0.9, over(-0.9, 0.9) + 0.02, 0.9]];
+    b.limb(vine, [0.018, 0.016, 0.014, 0.012], '#5d7a3a', { sides: 5, rough: 0.9 });
+    for (let leaf = 0; leaf < 16; leaf++) {
+      const [from, to] = [vine[Math.min(vine.length - 2, Math.floor(leaf / 2.6))]!, vine[Math.min(vine.length - 1, Math.floor(leaf / 2.6) + 1)]!];
+      const t = b.random();
+      const at: V3 = [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t + 0.03, from[2] + (to[2] - from[2]) * t];
+      b.sprig('leaf', at, 0.3, b.pick(GREENS), [b.between(-0.5, 0.5), 1, b.between(0.2, 0.8)], leaf);
     }
-    for (const x of [-1.95, 2.2]) {
-      b.cyl(0.004, 0.2, [x, 1.78, 2.42], '#3a3331', { sides: 4 });
-      lantern(b, [x, 1.6, 2.42], { kind: 'paper', light: '#ffb86a' });
+    for (const [x, z, size] of [[-1.55, 1.3, 0.34], [-1.0, 0.95, 0.27], [-2.05, 1.7, 0.22]] as const) b.sprig('puff', [x, over(x, z) + size * 0.32, z], size, '#e4ecc8');
+    // Paper lanterns under the front eaves, at the posts.
+    for (const x of [-0.75, 2.25]) {
+      b.cyl(0.004, 0.22, [x, 1.93, 1.86], '#3a3331', { sides: 4 });
+      lantern(b, [x, 1.72, 1.86], { kind: 'paper', light: '#ffb86a' });
     }
-    // Behind: firewood stacked under the eaves, peppers and garlic hung from the plate to dry; the 지게 left against
-    // the west wall.
-    stack(b, [-1.25, 0, -2.42], 1.6, 0.8, 0, 0.36);
-    for (const x of [-2.0, -1.78]) hanging(b, [x, 1.8, -1.8], 0.72, 'pepper');
-    hanging(b, [-0.5, 1.8, -1.8], 0.5, 'garlic');
-    for (const z of [-1.0, 0.95]) hanging(b, [-2.3, 1.8, z], 0.62, 'pepper');
-    jige(b, [-2.42, 0.26, 0.6], WEST);
-    jar(b, [1.7, 0, -2.4], 0.8, '#6b4a35');
+    // Chillies and garlic hung from the plate by the kitchen; behind, firewood stacked under the eaves and a jar; the
+    // 지게 left against the west end.
+    hanging(b, [-2.08, 2.17, 1.55], 0.7, 'pepper');
+    hanging(b, [-0.92, 2.17, 1.55], 0.62, 'pepper');
+    hanging(b, [-0.55, 2.17, 1.55], 0.48, 'garlic');
+    stack(b, [-0.9, 0, -2.25], 2.0, 0.85, 0, 0.36);
+    jar(b, [0.85, 0, -2.2], 0.8, '#6b4a35');
+    jige(b, [-2.48, 0.36, -0.55], WEST);
   },
   trees: (b, yard) => {
     tree(b, yard.at([4.3, -2.3], [5.4, -2.9]), { height: 4.2, spread: 3.3, bark: '#4f4036', leaves: ['#8fae4f', '#a8b85a', '#c9a84a', '#7a9c45'], lobes: 5, density: 0.8, fruit: '#f08a2a' });

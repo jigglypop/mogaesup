@@ -580,6 +580,64 @@ export class Builder {
   }
 
   /**
+   * A curved surface through a grid of points: `rows` of as many points each, in the space of the group it is drawn in.
+   * Its texture runs along each row (across) and from row to row (down), in metres; its normals are worked out from
+   * each point's neighbours, facing the side from which the rows run left to right and the grid runs down (a roof's
+   * rows round it anticlockwise seen from above, top row first, face up). `closed` joins each row's last point to its
+   * first. `tone` lightens or darkens the colour point by point (weathering at an eave).
+   */
+  sheet(rows: readonly (readonly V3[])[], color: string, finish: Finish = {}, closed = false, tone?: (row: number, column: number) => number): this {
+    const pile = this.pile(finish);
+    const paint = colorOf(color);
+    const base = pile.positions.length / 3;
+    const count = rows[0]?.length ?? 0;
+    // A closed sheet's first column is drawn again at its end, where its texture has come all the way round.
+    const drawn = closed ? count + 1 : count;
+    const across = new Vector3();
+    const down = new Vector3();
+    const here = new Vector3();
+    this.normal.getNormalMatrix(this.matrix);
+    const pointOf = (row: number, column: number): V3 => {
+      const cells = rows[Math.min(rows.length - 1, Math.max(0, row))]!;
+      if (closed) return cells[((column % count) + count) % count]!;
+      return cells[Math.min(count - 1, Math.max(0, column))]!;
+    };
+    const towards = (into: Vector3, from: V3, to: V3) => into.set(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+    const apart = (one: V3, other: V3) => Math.hypot(one[0] - other[0], one[1] - other[1], one[2] - other[2]);
+    const fallen = new Float32Array(drawn);
+    for (let row = 0; row < rows.length; row++) {
+      let run = 0;
+      for (let column = 0; column < drawn; column++) {
+        const point = pointOf(row, column);
+        // How far along its row and down its column the point lies, for the texture.
+        if (column > 0) run += apart(point, pointOf(row, column - 1));
+        if (row > 0) fallen[column] = fallen[column]! + apart(point, pointOf(row - 1, column));
+        towards(across, pointOf(row, column - 1), pointOf(row, column + 1));
+        towards(down, pointOf(row - 1, column), pointOf(row + 1, column));
+        here.crossVectors(down, across);
+        // A row drawn to a point (a ridge's ends) has no way across: up is the best guess there.
+        if (here.lengthSq() < 1e-12) here.set(0, 1, 0);
+        here.normalize();
+        this.point.set(point[0], point[1], point[2]).applyMatrix4(this.matrix);
+        pile.positions.push(this.point.x, this.point.y, this.point.z);
+        here.applyMatrix3(this.normal).normalize();
+        pile.normals.push(here.x, here.y, here.z);
+        pile.uvs.push(run / pile.tile, fallen[column]! / pile.tile);
+        const shade = tone ? tone(row, column % count) : 1;
+        pile.colors.push(paint.r * shade, paint.g * shade, paint.b * shade);
+      }
+    }
+    for (let row = 0; row < rows.length - 1; row++) {
+      for (let column = 0; column < drawn - 1; column++) {
+        const a = base + row * drawn + column;
+        const c = a + drawn;
+        pile.indices.push(a, c, a + 1, a + 1, c, c + 1);
+      }
+    }
+    return this;
+  }
+
+  /**
    * Geometry worked out elsewhere (the island's ground), in this build's own space: positions, normals and colours
    * three numbers a corner, textures two.
    */

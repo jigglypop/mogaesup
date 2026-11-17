@@ -1,7 +1,7 @@
 import { Component, memo, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode, type Ref, type RefObject } from 'react';
 
 import { Canvas, useFrame, useThree, type Renderer } from '@react-three/fiber';
-import { AdditiveBlending, CylinderGeometry, Matrix4, MeshBasicMaterial, PCFShadowMap, Plane, Raycaster, RingGeometry, Vector2, Vector3, type Camera } from 'three';
+import { AdditiveBlending, CylinderGeometry, Matrix4, MeshBasicMaterial, PCFShadowMap, Plane, Raycaster, RingGeometry, Vector2, Vector3, type BufferGeometry, type Camera, type InstancedBufferGeometry, type Mesh, type Object3D, type Scene as World } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 
 import { Icon } from '../../ui/icons';
@@ -50,6 +50,51 @@ const DRAG_PIXELS = 6;
 const DOUBLE_MS = 350;
 const DOUBLE_PIXELS = 24;
 const TAU = Math.PI * 2;
+/**
+ * The keys: how far they move the camera over the ground, in pixels of the picture a second, and how fast they turn it
+ * and raise or lower it (radians a second); what one press of + or - zooms by.
+ */
+const KEY_MOVE = 560;
+const KEY_TURN = 1.5;
+const KEY_TILT = 0.9;
+const KEY_ZOOM = 1.25;
+/**
+ * A press on something in the picture brings the camera to it and in at least this close (as a multiple of the
+ * frame's own size), or by this much closer again when it is that close already.
+ */
+const CLOSE_IN = 2.6;
+const CLOSER = 1.5;
+/** A pressed point this far above the ground (metres) is something standing on it, not the lawn. */
+const STANDING = 0.14;
+
+/** What the keys do, by the key (its place on the keyboard, whatever it writes). */
+type Move = 'forward' | 'back' | 'left' | 'right' | 'turnLeft' | 'turnRight' | 'up' | 'down';
+const KEYS: Readonly<Record<string, Move>> = {
+  KeyW: 'forward',
+  ArrowUp: 'forward',
+  KeyS: 'back',
+  ArrowDown: 'back',
+  KeyA: 'left',
+  ArrowLeft: 'left',
+  KeyD: 'right',
+  ArrowRight: 'right',
+  KeyQ: 'turnLeft',
+  KeyE: 'turnRight',
+  KeyR: 'up',
+  PageUp: 'up',
+  KeyF: 'down',
+  PageDown: 'down',
+};
+const ZOOM_KEYS: Readonly<Record<string, number>> = { Equal: KEY_ZOOM, NumpadAdd: KEY_ZOOM, Minus: 1 / KEY_ZOOM, NumpadSubtract: 1 / KEY_ZOOM };
+
+/**
+ * Whether a key pressed in `target` is the page's own to use: typing, or moving within a panel, its tabs or a choice.
+ * Elsewhere (nothing focused, the picture) the keys move the camera.
+ */
+function keptByPage(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return !!target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], main, [role="dialog"], [role="tablist"], [role="radiogroup"], [role="menu"], [role="listbox"]');
+}
 
 /** Says nothing of a device that was let go on purpose: R3F lets the renderer go with its canvas. */
 const SILENT = () => undefined;
@@ -516,6 +561,23 @@ export type StageHandle = {
   zoomBy: (factor: number) => void;
 };
 
+/**
+ * What a press at `point` on the canvas (a ray through it, as `camera` sees) meets first in `world` that stands above
+ * the ground: what is drawn as scattered copies (leaves, grass) and the lake are passed through, and what is hidden.
+ */
+function standingAt(world: World, camera: Camera, point: Vector2): Vector3 | null {
+  ray.setFromCamera(point, camera);
+  const solid: Object3D[] = [];
+  world.traverseVisible((object) => {
+    const mesh = object as Mesh<BufferGeometry>;
+    if (!mesh.isMesh || mesh.name === 'lake' || mesh.name === 'turf' || mesh.name === 'blades') return;
+    if ((mesh.geometry as InstancedBufferGeometry).isInstancedBufferGeometry) return;
+    solid.push(mesh);
+  });
+  const first = ray.intersectObjects(solid, false)[0];
+  return first && first.point.y > STANDING ? first.point.clone() : null;
+}
+
 type StageProps = {
   ref?: Ref<StageHandle>;
   homes: readonly StageHome[];
@@ -572,9 +634,12 @@ function groundAt(camera: Camera | null, box: DOMRect, x: number, y: number, hei
  * The village's canvas. It draws while it is on screen, and holds still for a viewer who asked for less motion. A drag,
  * or a finger, moves what the camera looks at about the village, as a map is moved; a drag with the right button or
  * with shift held turns the camera about what it shows all the way round and tilts it between a low look across the
- * water and one nearly straight down, as two fingers turning about each other turn it. The wheel (toward the pointer),
- * two fingers pinching, or the page's own buttons (through `ref`) zoom it in and out, and a double press on the water
- * puts it back where it began.
+ * water and one nearly straight down, as two fingers turning about each other turn it and two fingers moved up or down
+ * together tilt it. The wheel (toward the pointer), two fingers pinching, or the page's own buttons (through `ref`) zoom
+ * it in and out. The keys move it too: W A S D or the arrows forward, back and to either side as it faces, Q and E turn
+ * it, R and F (or Page Up and Page Down) raise and lower it, + and - zoom, Home puts it back. A press on something
+ * standing on the island in view brings the camera to it and in close; a double press on the water puts it back where
+ * it began.
  */
 export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
@@ -590,6 +655,8 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   cover.current = inset;
   /** The camera, once the canvas has made it: what lies under the pointer is found through it. */
   const eye = useRef<Camera | null>(null);
+  /** The scene, once the canvas has made it: what a press lands on is found in it. */
+  const world = useRef<World | null>(null);
   // The islands, and how far the point the camera looks at may be moved: over the village, no further than its islands go.
   // Where the bridges land on the page's own island: its estate lays a way to each.
   const landings = useMemo(() => landingsOf(bridges.map((bridge) => bridge.to)), [bridges]);
@@ -642,6 +709,20 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   const reset = () => {
     const now = gaze.current;
     gaze.current = { turn: Math.round(now.turn / TAU) * TAU, tilt: ELEVATION, pan: { x: 0, z: 0 }, zoom: 1 };
+  };
+  /**
+   * Brings the camera to `point` and in close: the point it looks at becomes the one at its own height straight in front
+   * of `point` as the camera will face, so that `point` is in the middle of the view.
+   */
+  const closeIn = (point: Vector3) => {
+    const want = gaze.current;
+    const azimuth = AZIMUTH + want.turn;
+    const [tx, ty, tz] = aim.current;
+    const back = (point.y - ty) / Math.sin(want.tilt);
+    const x = point.x - Math.cos(want.tilt) * Math.sin(azimuth) * back;
+    const z = point.z - Math.cos(want.tilt) * Math.cos(azimuth) * back;
+    moveBy({ x: x - (tx + want.pan.x), z: z - (tz + want.pan.z) });
+    want.zoom = clampZoom(want.zoom >= CLOSE_IN * 0.98 ? want.zoom * CLOSER : CLOSE_IN);
   };
   useImperativeHandle(
     ref,
@@ -714,6 +795,68 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     };
     // What the first render's handlers read, they read through refs.
   }, []);
+  // The keys move, turn, raise and zoom the camera while they are held (a frame at a time), wherever the page leaves
+  // them to it (see keptByPage).
+  const pressed = useRef(new Set<Move>());
+  useEffect(() => {
+    let frame = 0;
+    let last = 0;
+    const step = (now: number) => {
+      const moves = pressed.current;
+      if (moves.size === 0) {
+        frame = 0;
+        return;
+      }
+      const elapsed = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      touched.current = now;
+      const along = (moves.has('forward') ? 1 : 0) - (moves.has('back') ? 1 : 0);
+      const across = (moves.has('right') ? 1 : 0) - (moves.has('left') ? 1 : 0);
+      const zoom = eye.current && 'zoom' in eye.current ? (eye.current.zoom as number) : 0;
+      if ((along || across) && zoom > 0) {
+        const { azimuth } = bearing();
+        const metres = (KEY_MOVE * elapsed) / zoom / Math.hypot(along, across);
+        // Forward is the way the camera faces, over the ground; right is across it.
+        moveBy({ x: (-Math.sin(azimuth) * along + Math.cos(azimuth) * across) * metres, z: (-Math.cos(azimuth) * along - Math.sin(azimuth) * across) * metres });
+      }
+      const turn = (moves.has('turnLeft') ? 1 : 0) - (moves.has('turnRight') ? 1 : 0);
+      if (turn) gaze.current.turn += turn * KEY_TURN * elapsed;
+      const rise = (moves.has('up') ? 1 : 0) - (moves.has('down') ? 1 : 0);
+      if (rise) gaze.current.tilt = clampTilt(gaze.current.tilt + rise * KEY_TILT * elapsed);
+      frame = requestAnimationFrame(step);
+    };
+    const down = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || keptByPage(event.target)) return;
+      const move = KEYS[event.code];
+      const factor = ZOOM_KEYS[event.code];
+      if (!move && !factor && event.code !== 'Home') return;
+      event.preventDefault();
+      touched.current = performance.now();
+      if (event.code === 'Home') return reset();
+      if (factor) return void zoomAt(factor);
+      pressed.current.add(move!);
+      if (!frame) {
+        last = performance.now();
+        frame = requestAnimationFrame(step);
+      }
+    };
+    const up = (event: KeyboardEvent) => {
+      const move = KEYS[event.code];
+      if (move) pressed.current.delete(move);
+    };
+    // Keys let go while the window was elsewhere are never heard: whatever was held is let go with it.
+    const away = () => pressed.current.clear();
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', away);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', away);
+      cancelAnimationFrame(frame);
+    };
+    // What the first render's handlers read, they read through refs.
+  }, []);
   const press = (event: PointerEvent<HTMLDivElement>) => {
     touched.current = performance.now();
     if (event.pointerType === 'touch') {
@@ -755,11 +898,23 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     const now = performance.now();
     const before = tapped.current;
     tapped.current = { at: now, x: event.clientX, y: event.clientY };
-    if (!before || now - before.at > DOUBLE_MS || Math.hypot(event.clientX - before.x, event.clientY - before.y) > DOUBLE_PIXELS) return;
-    tapped.current = null;
     const element = box.current;
-    const spot = element && groundAt(eye.current, element.getBoundingClientRect(), event.clientX, event.clientY, WATER_LEVEL);
-    if (!spot || !islands.some((island) => over(island, spot))) reset();
+    const camera = eye.current;
+    if (before && now - before.at <= DOUBLE_MS && Math.hypot(event.clientX - before.x, event.clientY - before.y) <= DOUBLE_PIXELS) {
+      tapped.current = null;
+      const spot = element && groundAt(camera, element.getBoundingClientRect(), event.clientX, event.clientY, WATER_LEVEL);
+      if (!spot || !islands.some((island) => over(island, spot))) return reset();
+    }
+    // Something standing on an island the press does not visit (a neighbour's is visited: see Plot): the camera goes to it.
+    if (!element || !camera || !world.current) return;
+    const area = element.getBoundingClientRect();
+    if (area.width <= 0 || area.height <= 0) return;
+    pointer.set(((event.clientX - area.left) / area.width) * 2 - 1, -((event.clientY - area.top) / area.height) * 2 + 1);
+    const hit = standingAt(world.current, camera, pointer);
+    if (!hit) return;
+    const visited = homes.findIndex((home, index) => !!onVisit && home.id !== focus && over(islands[index]!, { x: hit.x, z: hit.z }));
+    if (visited >= 0) return;
+    closeIn(hit);
   };
   // The box's own capture ending ends the drag. One that bubbles up from the canvas or a label only says the pointer
   // has come over to the box.
@@ -787,7 +942,11 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
         if (centre && was) {
           const { azimuth, tilt } = bearing();
           const zoom = eye.current && 'zoom' in eye.current ? (eye.current.zoom as number) : 0;
-          if (zoom > 0) moveBy(dragShift(centre.x - was.x, centre.y - was.y, zoom, azimuth, tilt));
+          const [right, down] = [centre.x - was.x, centre.y - was.y];
+          // Moved up or down together, as far apart as they were: the camera is raised or lowered, as a drag with
+          // shift does. Any other way, the picture moves with them.
+          if (Math.abs(down) > Math.abs(right) * 1.5 && Math.abs(now - spread.current) < Math.abs(down) * 0.5) gaze.current.tilt = clampTilt(gaze.current.tilt + down * TILT_PER_PIXEL);
+          else if (zoom > 0) moveBy(dragShift(right, down, zoom, azimuth, tilt));
         }
         if (spread.current > 0 && now > 0) zoomAt(now / spread.current, centre?.x, centre?.y);
         spread.current = now;
@@ -892,8 +1051,9 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
           frameloop="never"
           gl={createRenderer}
           camera={{ near: 1, far: 400, position: [60, 60, 60] }}
-          onCreated={({ gl, camera }) => {
+          onCreated={({ gl, camera, scene }) => {
             eye.current = camera;
+            world.current = scene ?? null;
             (gl as unknown as WebGPURenderer).onDeviceLost = () => {
               setWarm(false);
               setDrawnFor(null);

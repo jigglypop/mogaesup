@@ -131,6 +131,166 @@ export function gableRoof(b: Builder, at: V3, look: RoofLook, turn = 0): void {
   );
 }
 
+export type ThatchLook = {
+  /** Half the eaves' length (x) and depth (z) about the roof's middle, and how far its ridge runs to either side of it. */
+  half: [number, number];
+  ridge: number;
+  /** How high the thatch rises over its eaves, and how thick it is cut at them. */
+  rise: number;
+  thick: number;
+  /** Half the walls' length and depth: the underside of the eaves comes in to meet them. */
+  walls: [number, number];
+  /** Straw as it lies on the roof, as it is cut at the eaves, and the braided cap over the ridge; the ropes. */
+  straw: string;
+  cut: string;
+  cap: string;
+  rope: string;
+};
+
+/** How square a 초가지붕's plan is at its rounded ends: 2 an oval, more a squarer one. */
+const THATCH_SQUARE = 2.8;
+/** How its slope falls from the ridge to the eaves: a full, rounded back, steepest at the eaves. */
+const THATCH_FALL = 2;
+const THATCH_ROUND = 0.62;
+
+/**
+ * A 초가지붕 whose eaves' top is at `at`: straw heaped thick over the rafters in a long, rounded mound, its ridge along
+ * x, falling on all four sides to eaves cut square and thick; a braided cap (용마름) along the ridge, its edges in
+ * points, and a net of rope (새끼줄) over it all, tied down at the eaves. Gives back the height of its top at (x, z)
+ * about `at`, for what rests on it (gourds ripening).
+ */
+export function thatchRoof(b: Builder, at: V3, look: ThatchLook): (x: number, z: number) => number {
+  const { half: [long, deep], ridge, rise, thick, walls, straw, cut, cap, rope } = look;
+  const end = long - ridge;
+  /** How far from the ridge (0) to the eaves (1) the point (x, z) lies: the roof's contours are its rings. */
+  const reachOf = (x: number, z: number) => (Math.max(0, Math.abs(x) - ridge) / end) ** THATCH_SQUARE + (Math.abs(z) / deep) ** THATCH_SQUARE;
+  const heightAt = (ring: number) => rise * Math.max(0, 1 - Math.min(1, ring) ** THATCH_FALL) ** THATCH_ROUND;
+  const over = (x: number, z: number) => at[1] + heightAt(reachOf(x, z) ** (1 / THATCH_SQUARE));
+
+  // The way round the eaves, anticlockwise seen from above from the front's middle: the front straight, the east end
+  // rounded, the back, the west end. Each point is where the contour `ring` of the way from the ridge passes, and the
+  // way out of the roof there.
+  type Round = { side: number; x: number; angle: number };
+  const round: Round[] = [];
+  const straight = Math.max(2, Math.round((ridge * 2) / 0.28));
+  const curve = 26;
+  for (let step = 0; step < straight; step++) round.push({ side: 1, x: -ridge + (2 * ridge * step) / straight, angle: QUARTER });
+  for (let step = 0; step < curve; step++) round.push({ side: 0, x: ridge, angle: QUARTER - (Math.PI * step) / curve });
+  for (let step = 0; step < straight; step++) round.push({ side: -1, x: ridge - (2 * ridge * step) / straight, angle: -QUARTER });
+  for (let step = 0; step < curve; step++) round.push({ side: 0, x: -ridge, angle: -QUARTER - (Math.PI * step) / curve });
+  const power = (value: number) => Math.sign(value) * Math.abs(value) ** (2 / THATCH_SQUARE);
+  /** Where the contour `ring` passes at `point` of the way round, and the way out of the roof there (on the ground). */
+  const placeOf = ({ side, x, angle }: Round, ring: number): { x: number; z: number; out: [number, number] } => {
+    if (side !== 0) return { x, z: side * ring * deep, out: [0, side] };
+    const [cos, sin] = [power(Math.cos(angle)), power(Math.sin(angle))];
+    const gx = (THATCH_SQUARE * Math.sign(cos) * Math.abs(cos) ** (THATCH_SQUARE - 1)) / end;
+    const gz = (THATCH_SQUARE * Math.sign(sin) * Math.abs(sin) ** (THATCH_SQUARE - 1)) / deep;
+    const length = Math.hypot(gx, gz) || 1;
+    return { x: x + Math.sign(x) * Math.abs(cos) * ring * end, z: sin * ring * deep, out: [gx / length, gz / length] };
+  };
+
+  // The straw: rings from the ridge down to the eaves, closer together where it falls steeply, then over the eave's
+  // rounded lip to the cut.
+  const rings = 16;
+  const lip: [number, number][] = [
+    [0.035, -0.025],
+    [0.06, -0.07],
+  ];
+  const weather = round.map(() => 0.92 + b.random() * 0.12);
+  const top: V3[][] = [];
+  for (let row = 0; row <= rings; row++) {
+    const ring = 1 - (1 - row / rings) ** 1.5;
+    top.push(round.map((point) => {
+      const place = placeOf(point, ring);
+      return [at[0] + place.x, at[1] + heightAt(ring), at[2] + place.z];
+    }));
+  }
+  for (const [outward, down] of lip) {
+    top.push(round.map((point) => {
+      const place = placeOf(point, 1);
+      return [at[0] + place.x + place.out[0] * outward, at[1] + down, at[2] + place.z + place.out[1] * outward];
+    }));
+  }
+  // Darker toward the eaves, where rain and smoke weather it, and in streaks down the slope.
+  b.sheet(top, straw, { surface: 'straw', rough: 1 }, true, (row, column) => (1 - 0.16 * Math.min(1, row / rings) ** 2) * weather[column]!);
+
+  // The cut: the eave's face straight down, its straw's ends, then its underside back in to the top of the walls.
+  const inner = Math.min(walls[1] / deep, (walls[0] - ridge) / end) * 0.94;
+  const face: V3[][] = [
+    [0.06, -0.07],
+    [0.05, -thick * 0.55],
+    [0.02, -thick],
+    [-0.1, -thick - 0.02],
+  ].map(([outward, down]) =>
+    round.map((point) => {
+      const place = placeOf(point, 1);
+      return [at[0] + place.x + place.out[0] * outward!, at[1] + down!, at[2] + place.z + place.out[1] * outward!] as V3;
+    }),
+  );
+  face.push(round.map((point) => {
+    const place = placeOf(point, inner);
+    return [at[0] + place.x, at[1] - thick * 0.25, at[2] + place.z];
+  }));
+  b.sheet(face, cut, { surface: 'thatch', rough: 1 }, true, (row, column) => (row >= 3 ? 0.55 : 1) * weather[column]!);
+
+  // The ropes: rings round the roof, and ropes from the ridge down over the eaves every half metre or so of them.
+  const ropeFinish = { sides: 5, rough: 1, surface: 'thatch' as const };
+  const lifted = (x: number, z: number, by: number): V3 => [at[0] + x, over(x, z) + by, at[2] + z];
+  for (const ring of [0.3, 0.52, 0.7, 0.84, 0.95]) {
+    const points = round.map((point) => {
+      const place = placeOf(point, ring);
+      return lifted(place.x, place.z, 0.018);
+    });
+    b.limb([...points, points[0]!], [0.016], rope, ropeFinish);
+  }
+  let since = Infinity;
+  for (let column = 0; column < round.length; column++) {
+    const here = placeOf(round[column]!, 1);
+    const before = placeOf(round[(column + round.length - 1) % round.length]!, 1);
+    since += Math.hypot(here.x - before.x, here.z - before.z);
+    if (since < 0.48) continue;
+    since = 0;
+    const points: V3[] = [];
+    for (let row = 1; row <= rings; row++) {
+      const ring = 0.12 + 0.88 * (row / rings);
+      const place = placeOf(round[column]!, ring);
+      points.push(lifted(place.x, place.z, 0.018));
+    }
+    const edge = placeOf(round[column]!, 1);
+    points.push([at[0] + edge.x + edge.out[0] * 0.075, at[1] - 0.06, at[2] + edge.z + edge.out[1] * 0.075]);
+    points.push([at[0] + edge.x + edge.out[0] * 0.07, at[1] - thick * 0.6, at[2] + edge.z + edge.out[1] * 0.07]);
+    b.limb(points, [0.016], rope, ropeFinish);
+  }
+
+  // 용마름: the braided cap along the ridge and down over its ends, its edges cut in points.
+  const capLength = ridge + end * 0.3;
+  const capSteps = Math.max(8, Math.round((capLength * 2) / 0.09));
+  const across = [-0.5, -0.3, -0.12, 0, 0.12, 0.3, 0.5];
+  const capRows = across.map((offset, row) => {
+    const edge = row === 0 || row === across.length - 1;
+    const points: V3[] = [];
+    for (let step = 0; step <= capSteps; step++) {
+      const x = -capLength + (2 * capLength * step) / capSteps;
+      // The points along its edges, a hand apart; its ends tucked in.
+      const tooth = edge ? (step % 2 === 0 ? 0 : 0.11) : 0;
+      const taper = Math.min(1, (capLength - Math.abs(x)) / 0.5 + 0.35);
+      const z = (offset + Math.sign(offset) * tooth) * taper;
+      const proud = 0.03 + (0.13 - Math.abs(offset) * 0.2) * taper;
+      points.push(lifted(x, z, proud));
+    }
+    return points;
+  });
+  b.sheet(capRows, cap, { surface: 'thatch', rough: 1 }, false, (row) => (row === 0 || row === across.length - 1 ? 0.82 : 1));
+  // Its spine, twisted tight.
+  const spine: V3[] = [];
+  for (let step = 0; step <= 16; step++) {
+    const x = -capLength * 0.92 + (capLength * 1.84 * step) / 16;
+    spine.push(lifted(x, 0, 0.17 - Math.max(0, Math.abs(x) - ridge) * 0.15));
+  }
+  b.limb(spine, [0.05], cap, { sides: 7, rough: 1, surface: 'thatch' });
+  return (x, z) => over(x - at[0], z - at[2]);
+}
+
 export type WindowLook = {
   size: [number, number];
   frame: string;

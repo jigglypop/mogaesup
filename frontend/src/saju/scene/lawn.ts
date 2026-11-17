@@ -1,5 +1,5 @@
 import { BufferAttribute, BufferGeometry, DataTexture, DoubleSide, FrontSide, InstancedBufferAttribute, InstancedBufferGeometry, LinearFilter, Mesh, RepeatWrapping, RedFormat, RGBAFormat, Sphere, SRGBColorSpace, Vector3, type Camera, type OrthographicCamera } from 'three';
-import { attribute, Break, cos, dot, float, floor, Fn, fract, hash, If, int, length, Loop, max, min, mix, modelWorldMatrix, normalize, positionGeometry, screenCoordinate, sin, smoothstep, texture, transformNormalToView, uniform, vec2, vec3, vec4, vertexStage } from 'three/tsl';
+import { attribute, Break, cos, dot, float, floor, Fn, fract, fwidth, hash, If, int, length, Loop, max, min, mix, modelWorldMatrix, normalize, positionGeometry, sin, smoothstep, texture, transformNormalToView, uniform, vec2, vec3, vec4, vertexStage } from 'three/tsl';
 import { MeshStandardNodeMaterial, type Node } from 'three/webgpu';
 
 import type { BuiltSprigs } from './build';
@@ -16,7 +16,8 @@ import { wind } from './sprigs';
 // camera does not see is not drawn), fewer of them drawn the farther the camera stands. Where grass grows, and in what
 // greens, comes from the lawn's tufts as the builders sow them (Builder's 'blade' sprigs), laid into a small picture of
 // the lawn. The wind leans the blades downwind, more where a gust passes over (a moving pattern, so a gust is seen as a
-// lighter wave going over the grass); the light the grass takes turns with it.
+// lighter wave going over the grass); the light the grass takes turns with it. Neighbouring blades move together, as
+// grass does in the wind, never each on its own: blades a pixel wide that each sway their own way crawl.
 
 /** How high the turf stands, in metres, and how far apart its blades grow. */
 const HEIGHT = 0.07;
@@ -35,9 +36,14 @@ const BLADE_TILE = 14;
  * Pixels a metre of the picture shows (the camera's zoom) at which a share of the blades is drawn, and at which all of
  * them; below the first, a quarter. A far look draws fewer blades, each still seen; the turf beneath keeps the lawn full.
  */
-const FEW_AT = 20;
-const ALL_AT = 80;
+const FEW_AT = 30;
+const ALL_AT = 110;
 const FEWEST = 0.25;
+/**
+ * The narrowest a blade is drawn, in the canvas's pixels: one narrower comes and goes between pixels as it sways. A
+ * blade drawn wider than it is stands for the ones left out (see shareFor).
+ */
+const THINNEST = 1.3;
 /** Tufts sown to the square metre below which a lawn counts as sown thin (estateHome sows 30, thin 0.45 of that). */
 const THIN_SOWING = 20;
 /** Metres of lawn a texel of its picture covers, at most that many texels across; how far a tuft's green spreads. */
@@ -48,15 +54,17 @@ const SPREAD = 0.34;
 /** The wind the sea is blown by, as the lawn lies: the way it blows and the way across it. */
 const BLOW = vec2(Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE));
 const ACROSS = vec2(-Math.sin(WIND_ANGLE), Math.cos(WIND_ANGLE));
-/** How far a blade's tip leans downwind in the breeze, and further in a gust; its own flutter across the wind (metres). */
+/** How far the turf's blades lean downwind in the breeze, and further in a gust: the way its light turns (metres). */
 const BREEZE = 0.025;
 const GUST = 0.07;
-const FLUTTER = 0.012;
-/** How fast a gust runs over the ground (metres a second), how long and wide one is (metres); how fast blades flutter. */
-const GUST_SPEED = 2.6;
+/** How fast a gust runs over the ground (metres a second), how long and wide one is (metres). */
+const GUST_SPEED = 2.2;
 const GUST_LENGTH = 11;
 const GUST_WIDTH = 19;
-const FLUTTER_RATE = 4.6;
+/** A blade's sway between gusts: how far (as a share of its bend), how often (radians a second), how long a wave of it is. */
+const SWAY = 0.1;
+const SWAY_RATE = 1.7;
+const SWAY_LENGTH = 2.4;
 
 /** Gusts and calm, a pattern repeating every 64 texels; also, read still and large, where the turf grows a little taller. */
 let gusts: DataTexture | null = null;
@@ -224,6 +232,9 @@ const cellHash = (cell: Node<'vec2'>, salt: number) => hash(cell.x.add(20011).mu
  */
 const looking = uniform(new Vector3(0, -1, 0));
 
+/** Metres of the lawn a pixel of the canvas covers, set before the blades are drawn (see lawnMeshes). */
+const bladePixel = uniform(0.01);
+
 /**
  * The turf's material for one lawn's picture (`turf`), `stand` metres high, followed down in `steps`: the line of sight
  * through a pixel is followed from the turf's top to the ground, and the first blade it meets gives the pixel its
@@ -245,18 +256,22 @@ function turfMaterial(turf: Turf, steps: number, stand: number): MeshStandardNod
   // flutter across it, as far as a blade's tip leans; a blade bends more the higher up it is.
   const along = dot(world, BLOW);
   const gust = texture(map, vec2(along.sub(wind.mul(GUST_SPEED)).div(GUST_LENGTH), dot(world, ACROSS).div(GUST_WIDTH))).r;
-  const flutter = sin(wind.mul(FLUTTER_RATE).add(along.mul(1.7)).add(dot(world, ACROSS).mul(0.9))).mul(FLUTTER);
-  const lean = BLOW.mul(gust.mul(GUST).add(BREEZE)).add(ACROSS.mul(flutter));
+  const lean = BLOW.mul(gust.mul(GUST).add(BREEZE));
   const swell = texture(map, ground.div(3.7)).r.mul(0.35).add(0.82).mul(smoothstep(0.08, 0.6, lawn.a));
   // Down the line of sight: across the ground by this much for each metre it falls.
   const slant = looking.xz.div(looking.y.min(-0.05));
+  // How much of the turf's blades a pixel holds: where a pixel covers a blade's cell or more, what it found among them
+  // would change from pixel to pixel and from frame to frame as the camera moves, a fizz; it shows what they are on
+  // the whole there instead. The blades themselves stand still: the wind turns their light, not where they are.
+  const pixel = max(fwidth(ground.x), fwidth(ground.y));
+  const blur = smoothstep(CELL * 0.3, CELL * 0.85, pixel);
 
   const found = Fn(() => {
     const hit = float(0).toVar();
     const shadeOf = float(0.5).toVar();
     Loop({ start: int(0), end: int(steps), condition: '<' }, ({ i }) => {
       const height = float(1).sub(i.toFloat().add(0.5).div(steps));
-      const spot = ground.add(slant.mul(height.mul(stand))).sub(lean.mul(height.mul(height))).div(CELL);
+      const spot = ground.add(slant.mul(height.mul(stand))).div(CELL);
       const cell = floor(spot);
       const seed = cellHash(cell, 0);
       const tall = mix(float(0.55), float(1), seed).mul(swell);
@@ -271,17 +286,18 @@ function turfMaterial(turf: Turf, steps: number, stand: number): MeshStandardNod
     });
     return vec2(hit, shadeOf);
   })();
-  const height = found.x;
+  const height = mix(found.x, float(0.72), blur);
+  const own = mix(found.y, float(0.5), blur);
 
   // Dark at the foot, where the light does not reach, light and a little warm at the tip; each blade its own shade; a
   // gust lays the blades over and the lawn shows lighter where it passes.
-  const shade = mix(float(0.5), float(1.06), height).mul(found.y.sub(0.5).mul(0.14).add(1));
+  const shade = mix(float(0.5), float(1.06), height).mul(own.sub(0.5).mul(0.14).add(1));
   const warm = mix(vec3(1), vec3(1.04, 1.04, 0.9), height.mul(height).mul(0.5));
   material.colorNode = lawn.rgb.mul(shade).mul(warm).mul(gust.mul(height).mul(0.22).add(1));
   // Lit as the lawn is, its blades leaning with the wind; past the lawn's edge, the ground beneath shows (in a fine
-  // scatter, so the edge is not a line).
+  // scatter laid on the ground, so the edge is not a line and holds still as the camera moves).
   material.normalNode = transformNormalToView(normalize(vec3(lean.x.mul(5), 1, lean.y.mul(5))));
-  material.maskNode = lawn.a.greaterThan(hash(screenCoordinate.x.add(screenCoordinate.y.mul(4099))).mul(0.6).add(0.2));
+  material.maskNode = lawn.a.greaterThan(cellHash(floor(ground.div(0.03)), 3).mul(0.6).add(0.2));
   return material;
 }
 
@@ -306,24 +322,28 @@ function bladeMaterial(turf: Turf): MeshStandardNodeMaterial {
 
   const world = modelWorldMatrix.mul(vec4(x, base, z, 1)).xz;
   const along = dot(world, BLOW);
-  const gust = texture(gustMap(), vec2(along.sub(wind.mul(GUST_SPEED)).div(GUST_LENGTH), dot(world, ACROSS).div(GUST_WIDTH))).level(float(0)).r;
-  const flutter = sin(wind.mul(FLUTTER_RATE * 1.3).add(seed.mul(40)).add(along.mul(1.7))).mul(0.09);
-  const bend = facing.mul(own).add(BLOW.mul(gust.mul(0.85).add(0.28))).add(ACROSS.mul(flutter));
+  const across = dot(world, ACROSS);
+  const gust = texture(gustMap(), vec2(along.sub(wind.mul(GUST_SPEED)).div(GUST_LENGTH), across.div(GUST_WIDTH))).level(float(0)).r;
+  // The wind's push where the blade stands, the same for its neighbours: a breeze, a gust going over, a slow sway in
+  // waves downwind. A blade gives to it a little more or less than the next (its own stiffness), never at its own time.
+  const sway = sin(wind.mul(SWAY_RATE).sub(along.div(SWAY_LENGTH)).add(sin(across.mul(0.37)).mul(1.3))).mul(SWAY);
+  const give = mix(float(0.8), float(1.2), fract(seed.mul(53.1)));
+  const bend = facing.mul(own).add(BLOW.mul(gust.mul(0.7).add(0.26).add(sway).mul(give)));
   const amount = min(max(length(bend), float(0.001)), float(1.25));
   const toward = bend.div(length(bend).max(0.001));
   const angle = amount.mul(t);
   const reach = tall.mul(float(1).sub(cos(angle))).div(amount);
   const rise = tall.mul(sin(angle)).div(amount);
   const wide = vec2(toward.y.negate(), toward.x);
-  const half = float(1).sub(t).pow(0.85).mul(BLADE_WIDTH * 0.5).mul(size);
+  const half = float(1).sub(t).pow(0.85).mul(max(float(BLADE_WIDTH * 0.5).mul(size), bladePixel.mul(THINNEST * 0.5)));
   material.positionNode = vec3(x.add(toward.x.mul(reach)).add(wide.x.mul(half).mul(side)), base.add(rise), z.add(toward.y.mul(reach)).add(wide.y.mul(half).mul(side)));
 
   // The blade's face turns with its bend, rounded across its width.
   const tangent = vec3(toward.x.mul(sin(angle)), cos(angle), toward.y.mul(sin(angle)));
-  const across = vec3(wide.x, 0, wide.y);
-  const face = across.cross(tangent);
+  const flat = vec3(wide.x, 0, wide.y);
+  const face = flat.cross(tangent);
   const upward = face.y.lessThan(0).select(face.negate(), face);
-  material.normalNode = normalize(vertexStage(transformNormalToView(normalize(upward.add(across.mul(side.mul(0.55))).add(vec3(0, 0.35, 0))))));
+  material.normalNode = normalize(vertexStage(transformNormalToView(normalize(upward.add(flat.mul(side.mul(0.55))).add(vec3(0, 0.35, 0))))));
 
   const at = vec2(x, z).sub(vec2(turf.min[0], turf.min[1])).div(vec2(turf.size[0], turf.size[1]));
   const green = texture(turf.texture, at).level(float(0)).rgb;
@@ -333,8 +353,15 @@ function bladeMaterial(turf: Turf): MeshStandardNodeMaterial {
   return material;
 }
 
-/** The share of a tile's blades drawn for a camera that shows `perMetre` pixels to a metre (see FEW_AT). */
-const shareFor = (perMetre: number) => Math.min(1, Math.max(FEWEST, FEWEST + ((perMetre - FEW_AT) / (ALL_AT - FEW_AT)) * (1 - FEWEST)));
+/**
+ * The share of a tile's blades drawn for a camera that shows `perMetre` pixels of the page to a metre, `ratio` of the
+ * canvas's own to each of those (see FEW_AT): fewer still where the blades are drawn wider than they are (THINNEST).
+ */
+const shareFor = (perMetre: number, ratio: number) => {
+  const share = Math.min(1, Math.max(FEWEST, FEWEST + ((perMetre - FEW_AT) / (ALL_AT - FEW_AT)) * (1 - FEWEST)));
+  const widened = THINNEST / (perMetre * ratio) / (BLADE_WIDTH * 0.8);
+  return share / Math.max(1, widened);
+};
 
 const centre = new Vector3();
 
@@ -385,9 +412,11 @@ export function lawnMeshes(sprigs: BuiltSprigs): Mesh[] {
       mesh.receiveShadow = true;
       mesh.renderOrder = 1;
       // As many of the tile's blades as the camera's distance calls for (see FEW_AT).
-      mesh.onBeforeRender = (_renderer, _scene, camera: Camera) => {
+      mesh.onBeforeRender = (renderer, _scene, camera: Camera) => {
         const zoom = (camera as OrthographicCamera).isOrthographicCamera ? (camera as OrthographicCamera).zoom : ALL_AT;
-        blades.instanceCount = Math.max(1, Math.round(all * shareFor(zoom)));
+        const ratio = renderer.getPixelRatio();
+        bladePixel.value = 1 / (zoom * ratio);
+        blades.instanceCount = Math.max(1, Math.round(all * shareFor(zoom, ratio)));
       };
       meshes.push(mesh);
     }

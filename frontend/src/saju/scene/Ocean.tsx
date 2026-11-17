@@ -175,5 +175,5 @@ export function Ocean({ mood, sky, islands, quality }: { mood: Mood; sky: Textur
     surface.mirrorMatrix.value.copy(mirror.matrix);
   }, PRIORITY);
 
-  return <mesh ref={lake} geometry={geometry} material={made.surface.material} frustumCulled={false} renderOrder={-1} />;
+  return <mesh ref={lake} name="lake" geometry={geometry} material={made.surface.material} frustumCulled={false} renderOrder={-1} />;
 }

@@ -390,11 +390,12 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
     if (moving && works) works.activeAt = now;
     if (!light) return;
     // A low sun throws long shadows: what stands outside the view still shades what is in it. The view holds the
-    // ground about the point it looks at as far as the frame reaches, foreshortened by the tilt, and zoomed out that
-    // much more (a home's neighbours come into it); the shadows are cast over all of it as it lies to the sun: the
-    // light's square holds as much across the sun's way, and along it as much as the sun's height foreshortens.
-    const wide = extent.halfWidth / Math.min(1, at.zoom);
-    const deep = extent.halfHeight / Math.sin(at.tilt) / Math.min(1, at.zoom);
+    // ground about the point it looks at as far as the frame reaches, foreshortened by the tilt, as much more zoomed out
+    // (a home's neighbours come into it) and as much less zoomed in (the shadows of what is close are drawn as finely);
+    // the shadows are cast over all of it as it lies to the sun: the light's square holds as much across the sun's way,
+    // and along it as much as the sun's height foreshortens.
+    const wide = extent.halfWidth / at.zoom;
+    const deep = extent.halfHeight / Math.sin(at.tilt) / at.zoom;
     const facing = azimuth - Math.atan2(mood.toSun.x, mood.toSun.z);
     const across = wide * Math.abs(Math.cos(facing)) + deep * Math.abs(Math.sin(facing));
     const along = wide * Math.abs(Math.sin(facing)) + deep * Math.abs(Math.cos(facing));

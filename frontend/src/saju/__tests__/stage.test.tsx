@@ -1,6 +1,6 @@
 import { act, useCallback, type ReactElement, type ReactNode, type RefObject } from 'react';
 
-import { OrthographicCamera, Vector3 } from 'three';
+import { BoxGeometry, Mesh, OrthographicCamera, Raycaster, Scene, Vector2, Vector3 } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { mount } from '../../__tests__/mount';
@@ -12,7 +12,7 @@ import { ISLANDS } from '../scene/terrain';
 import { newWorks, useBuild, WorksContext, type Works } from '../scene/works';
 import { PLOT_REACH } from '../village';
 
-type Created = (state: { gl: object; camera: OrthographicCamera }) => void;
+type Created = (state: { gl: object; camera: OrthographicCamera; scene?: Scene }) => void;
 const { canvas } = vi.hoisted(() => ({ canvas: { children: null as ReactNode, created: null as Created | null } }));
 // The canvas needs a graphics card. What is looked at here is what the box around it hears of the pointer, the wheel
 // and the fingers, and what it tells the scene: how far the camera is turned, tilted, moved and zoomed.
@@ -73,7 +73,7 @@ describe('캔버스가 듣는 손짓', () => {
     expect(Math.abs(gaze().turn)).toBeGreaterThan(Math.PI * 2);
   });
 
-  it('shift를 누르고 위아래로 끌면 기울고, 20도에서 70도 사이에서 멈춘다', async () => {
+  it('shift를 누르고 위아래로 끌면 기울고, 15도에서 80도 사이에서 멈춘다', async () => {
     await point('pointerdown', { pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, shiftKey: true, clientX: 300, clientY: 300 });
     await point('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 1, shiftKey: true, clientX: 300, clientY: 340 });
     // 아래로 끌면 위에서 내려다보는 쪽으로 선다.
@@ -263,6 +263,120 @@ describe('카메라를 옮기는 손짓', () => {
     await tap({ clientX: 60, clientY: 60 });
     await tap({ clientX: 64, clientY: 62 });
     expect(gaze()).toEqual({ turn: -Math.PI * 2, tilt: ELEVATION, pan: { x: 0, z: 0 }, zoom: 1 });
+  });
+
+  it('두 손가락을 함께 위아래로 옮기면 카메라가 오르내리고, 보는 곳은 그대로다', async () => {
+    await point('pointerdown', { pointerId: 1, pointerType: 'touch', buttons: 1, clientX: 620, clientY: 450 });
+    await point('pointerdown', { pointerId: 2, pointerType: 'touch', buttons: 1, clientX: 820, clientY: 450 });
+    await point('pointermove', { pointerId: 1, pointerType: 'touch', buttons: 1, clientX: 620, clientY: 490 });
+    await point('pointermove', { pointerId: 2, pointerType: 'touch', buttons: 1, clientX: 820, clientY: 490 });
+    expect(gaze().tilt).toBeGreaterThan(ELEVATION + 0.04);
+    // 손가락 사이가 잠깐 벌어졌다 돌아온 만큼만 (당기고 놓으며) 옮겨 갔다.
+    expect(Math.hypot(gaze().pan.x, gaze().pan.z)).toBeLessThan(0.1);
+    expect(gaze().zoom).toBeCloseTo(1, 6);
+    expect(gaze().turn).toBe(0);
+  });
+
+  it('섬 위에 선 것을 누르면 카메라가 그리로 가서 다가가고, 한 번 더 누르면 더 다가간다', async () => {
+    // 동쪽 섬에 선 상자 하나.
+    const world = new Scene();
+    const thing = new Mesh(new BoxGeometry(1, 2, 1));
+    thing.position.set(R, 1, 0);
+    world.add(thing);
+    world.updateMatrixWorld();
+    await act(async () => canvas.created?.({ gl: {}, camera, scene: world }));
+    const top = new Vector3(R, 1.6, 0.2).project(camera);
+    const at = { clientX: (top.x * 0.5 + 0.5) * 1440, clientY: (-top.y * 0.5 + 0.5) * 900 };
+    await tap(at);
+    expect(gaze().zoom).toBeCloseTo(2.6, 9);
+    // 누른 곳이 그림 한가운데에 온다.
+    const ray = new Raycaster();
+    ray.setFromCamera(new Vector2(top.x, top.y), camera);
+    const pressed = ray.intersectObject(thing, false)[0]!.point;
+    const [x, y, z] = frame.target;
+    const after = camera.clone();
+    stand(after, [x + gaze().pan.x, y, z + gaze().pan.z], AZIMUTH, 120);
+    const middle = pressed.clone().project(after);
+    expect(Math.abs(middle.x)).toBeLessThan(1e-6);
+    expect(Math.abs(middle.y)).toBeLessThan(1e-6);
+    await tap(at);
+    expect(gaze().zoom).toBeCloseTo(2.6 * 1.5, 9);
+    // 풀밭(선 것이 없는 곳)을 누르면 그대로다.
+    const before = { ...gaze(), pan: { ...gaze().pan } };
+    await tap(pixel(0, -R / 2));
+    expect(gaze()).toEqual(before);
+  });
+
+  it('이웃의 섬에 선 것은 누르면 놀러 가고, 카메라는 다가가지 않는다', async () => {
+    await page.unmount();
+    page = await mount(<Stage homes={homes} bridges={[]} frame={frame} focus="sol" onVisit={() => undefined} />);
+    box = page.container.querySelector<HTMLElement>('.mg-saju-canvas')!;
+    box.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1440, bottom: 900, width: 1440, height: 900, x: 0, y: 0, toJSON: () => ({}) });
+    const world = new Scene();
+    const thing = new Mesh(new BoxGeometry(1, 2, 1));
+    thing.position.set(R, 1, 0);
+    world.add(thing);
+    world.updateMatrixWorld();
+    await act(async () => canvas.created?.({ gl: {}, camera, scene: world }));
+    const top = new Vector3(R, 1.6, 0.2).project(camera);
+    await tap({ clientX: (top.x * 0.5 + 0.5) * 1440, clientY: (-top.y * 0.5 + 0.5) * 900 });
+    expect(gaze().zoom).toBe(1);
+    expect(gaze().pan).toEqual({ x: 0, z: 0 });
+  });
+
+  describe('키보드', () => {
+    beforeEach(() => void vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance'] }));
+    afterEach(() => void vi.useRealTimers());
+    const key = (type: 'keydown' | 'keyup', code: string, target: EventTarget = document.body) =>
+      act(async () => void target.dispatchEvent(new KeyboardEvent(type, { code, bubbles: true, cancelable: true })));
+    const hold = async (code: string, ms: number) => {
+      await key('keydown', code);
+      await act(async () => void vi.advanceTimersByTime(ms));
+      await key('keyup', code);
+    };
+
+    it('W는 카메라가 보는 쪽으로, D는 그 오른쪽으로 옮기고, 떼면 멈춘다', async () => {
+      await hold('KeyW', 100);
+      const forward = { ...gaze().pan };
+      // 남동쪽에서 보는 카메라의 앞은 북서쪽이다.
+      expect(forward.x).toBeLessThan(-0.5);
+      expect(forward.z).toBeCloseTo(forward.x, 6);
+      await act(async () => void vi.advanceTimersByTime(200));
+      expect(gaze().pan).toEqual(forward);
+      await hold('KeyD', 100);
+      // 오른쪽은 북동쪽이다.
+      expect(gaze().pan.x - forward.x).toBeGreaterThan(0.5);
+      expect(gaze().pan.z - forward.z).toBeCloseTo(-(gaze().pan.x - forward.x), 6);
+    });
+
+    it('Q와 E는 돌리고, R과 F는 올리고 내리고, +와 -는 당기고, Home은 처음으로 돌린다', async () => {
+      await hold('KeyQ', 200);
+      expect(gaze().turn).toBeGreaterThan(0.2);
+      await hold('KeyR', 200);
+      expect(gaze().tilt).toBeGreaterThan(ELEVATION + 0.1);
+      await hold('KeyF', 2000);
+      expect(gaze().tilt).toBe(TILT_RANGE.min);
+      await key('keydown', 'Equal');
+      expect(gaze().zoom).toBeCloseTo(1.25, 9);
+      await key('keydown', 'Minus');
+      await key('keydown', 'Minus');
+      expect(gaze().zoom).toBeCloseTo(0.8, 9);
+      await key('keydown', 'Home');
+      expect(gaze()).toEqual({ turn: 0, tilt: ELEVATION, pan: { x: 0, z: 0 }, zoom: 1 });
+    });
+
+    it('글을 쓰는 칸과 패널 안에서 누른 키는 카메라를 움직이지 않는다', async () => {
+      const input = document.createElement('input');
+      const panel = document.createElement('main');
+      const button = panel.appendChild(document.createElement('button'));
+      document.body.append(input, panel);
+      await key('keydown', 'KeyW', input);
+      await key('keydown', 'ArrowUp', button);
+      await act(async () => void vi.advanceTimersByTime(200));
+      expect(gaze().pan).toEqual({ x: 0, z: 0 });
+      input.remove();
+      panel.remove();
+    });
   });
 
   it('끌고 난 뒤의 누름은 두 번 누름으로 세지 않는다', async () => {

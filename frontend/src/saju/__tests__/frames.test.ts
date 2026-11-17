@@ -123,12 +123,12 @@ describe('카메라의 틀', () => {
     expect(onScreen({ x: R, z: 0 }, TILT_RANGE.max).up).toBeLessThan(onScreen({ x: R, z: 0 }).up);
   });
 
-  it('기울기는 20도에서 70도 사이다', () => {
+  it('기울기는 15도에서 80도 사이다', () => {
     expect(clampTilt(0)).toBe(TILT_RANGE.min);
     expect(clampTilt(Math.PI / 2)).toBe(TILT_RANGE.max);
     expect(clampTilt(ELEVATION)).toBe(ELEVATION);
-    expect((TILT_RANGE.min * 180) / Math.PI).toBeCloseTo(20, 9);
-    expect((TILT_RANGE.max * 180) / Math.PI).toBeCloseTo(70, 9);
+    expect((TILT_RANGE.min * 180) / Math.PI).toBeCloseTo(15, 9);
+    expect((TILT_RANGE.max * 180) / Math.PI).toBeCloseTo(80, 9);
   });
 
   it('화면에 맞는 배율은 좁은 쪽이 정한다', () => {
