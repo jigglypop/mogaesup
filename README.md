@@ -151,3 +151,4 @@ CloudFront(mogaesup.com, www는 경로와 쿼리 그대로 apex로 이동)가 �
   aws cloudformation deploy --region ap-northeast-2 --stack-name mogaesup-github-deploy --template-file .github/aws/deploy-role.yaml --capabilities CAPABILITY_NAMED_IAM --tags application=mogaesup
   ```
   서버·스튜디오 인스턴스가 교체되거나 웹 배포(CloudFront) ID가 바뀌면 템플릿의 파라미터를 갱신해 다시 배포한다.
+# kakaoimo
