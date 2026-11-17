@@ -26,11 +26,11 @@
   position: fixed;
   inset: 0;
   z-index: -1;
-  background: url('/backdrop/island.webp') center / cover no-repeat;
-  filter: blur(6px) saturate(1.15);
+  background: url('/backdrop/forest.webp') center / cover no-repeat;
+  filter: blur(2px) saturate(1.05);
   transform: scale(1.04);
 }
-:root[data-theme='dark'] .mg-auth::before { filter: blur(6px) brightness(0.45) saturate(1.1); }
+:root[data-theme='dark'] .mg-auth::before { filter: blur(2px) brightness(0.5) saturate(1.05); }
 .mg-auth-card { width: min(400px, 100%); display: grid; gap: 18px; padding: 30px; }
 .mg-auth-brand { display: flex; align-items: center; gap: 12px; font-size: 26px; font-weight: 850; letter-spacing: -0.04em; }
 .mg-auth-brand .mg-brand-mark { width: 40px; height: 40px; border-radius: 13px; }

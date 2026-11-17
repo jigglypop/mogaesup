@@ -206,7 +206,7 @@
   position: fixed;
   inset: 0;
   z-index: -1;
-  background: url('/backdrop/island.webp') center / cover no-repeat;
+  background: url('/backdrop/forest.webp') center / cover no-repeat;
   filter: blur(26px) saturate(1.25);
   transform: scale(1.08);
   opacity: 0.55;
