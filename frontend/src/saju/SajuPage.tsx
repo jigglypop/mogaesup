@@ -25,6 +25,8 @@ import { DecorLayer } from './scene/Decor';
 import { frameOf, NO_INSET, type Inset, type Spot } from './scene/frames';
 import type { GuestNote } from './scene/GuestPlaques';
 import { Stage, type StageBridge, type StageHandle, type StageHome } from './scene/Stage';
+import { Walkers } from './scene/Walkers';
+import { useVillageRoom } from './live';
 import { ChartPanel } from './ui/ChartPanel';
 import { HomePanel, type Bridge } from './ui/HomePanel';
 import { Onboarding } from './ui/Onboarding';
@@ -331,6 +333,22 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // shown: the reading on its tabs, the picture on the home's (and for the PDF on the reading's).
   const tab = route.kind === 'home' && host ? route.tab : 'home';
 
+  // The home's room: everyone signed in here walks its island as their own guardian dog, and what they say shows over
+  // them. The viewer's dog walks where they press the island's ground.
+  const walking = !!viewer && !wide && !placing;
+  const myDog = myProfile?.guardian.dog ?? '02';
+  const start = useMemo<[number, number, number]>(() => {
+    const seed = [...(viewer?.id ?? '')].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+    return [0.5 + ((seed % 7) - 3) * 0.45, 0, 3.6 + ((seed % 5) - 2) * 0.3];
+  }, [viewer?.id]);
+  const room = useVillageRoom(username, walking ? (viewer?.id ?? null) : null, myDog, start);
+  const goal = useRef<[number, number, number] | null>(null);
+  const walkTo = useCallback((spot: Spot) => {
+    goal.current = [spot.x, 0, spot.z];
+  }, []);
+  const talkLayer = useRef<HTMLDivElement>(null);
+  const [line, setLine] = useState('');
+
   // The guestbook's lines, hung as plaques on the island's 기념 방명록: read with the 섬, and again when one is left or
   // taken away. Pressing the frame opens the guestbook, to leave one.
   const [notesRead, setNotesRead] = useState(0);
@@ -438,10 +456,13 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           onPlace={placing ? placeAt : undefined}
           notes={notes.of === username ? notes.list : NO_NOTES}
           onBoard={openGuestbook}
+          onWalk={walking ? walkTo : undefined}
+          overlay={<div className="mg-saju-walkers" ref={talkLayer} />}
           decor={
-            decor.decor && (
-              <DecorLayer items={decor.decor.items} flags={decor.decor.flags} own={ownFlag} character={decor.decor.character?.modelUrl ?? null} />
-            )
+            <>
+              {decor.decor && <DecorLayer items={decor.decor.items} flags={decor.decor.flags} own={ownFlag} character={decor.decor.character?.modelUrl ?? null} />}
+              {walking && <Walkers room={room} own={myDog} name={viewer?.displayName ?? ''} start={start} goal={goal} layer={talkLayer} />}
+            </>
           }
           pins={
             wide &&
@@ -464,6 +485,20 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
         </p>
       )}
       <div className="mg-saju-dock">
+        {walking && room.connected && (
+          <form
+            className="mg-saju-talk mg-glass"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (room.say(line)) setLine('');
+            }}
+          >
+            <input value={line} maxLength={200} onChange={(event) => setLine(event.target.value)} aria-label="말하기" placeholder="말하기" />
+            <button className="mg-icon-btn is-quiet" aria-label="보내기" disabled={!line.trim()}>
+              <Icon name="send" />
+            </button>
+          </form>
+        )}
         {host && !wide && view.isOwner && <SavePicture name={host.resident.name} profile={host.profile} />}
         <div className="mg-saju-zoom mg-glass" role="group" aria-label="확대와 축소">
           <button className="mg-icon-btn is-quiet" aria-label="축소" onClick={() => stage.current?.zoomBy(1 / ZOOM_STEP)}>

@@ -603,6 +603,10 @@ type StageProps = {
   /** The guestbook's lines, hung on the page's own island's 기념 방명록; pressing it is told to `onBoard`. */
   notes?: readonly GuestNote[];
   onBoard?: (() => void) | undefined;
+  /** Told of a press on the bare ground of the island at the village's middle, where (the viewer's dog walks there). */
+  onWalk?: ((spot: Spot) => void) | undefined;
+  /** Laid over the picture, under the labels: what the scene places over it (the walkers' names and clouds). */
+  overlay?: ReactNode;
 };
 
 /** The page's own island stands at the village's middle; every other home's is a neighbour's. */
@@ -645,7 +649,7 @@ function groundAt(camera: Camera | null, box: DOMRect, x: number, y: number, hei
  * standing on the island in view brings the camera to it and in close; a double press on the water puts it back where
  * it began.
  */
-export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace, notes, onBoard }: StageProps) {
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace, notes, onBoard, onWalk, overlay }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const gaze = useRef<Gaze>({ ...UNMOVED, pan: { ...UNMOVED.pan } });
@@ -915,7 +919,13 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     if (area.width <= 0 || area.height <= 0) return;
     pointer.set(((event.clientX - area.left) / area.width) * 2 - 1, -((event.clientY - area.top) / area.height) * 2 + 1);
     const hit = standingAt(world.current, camera, pointer);
-    if (!hit) return;
+    if (!hit) {
+      // The bare ground of the page's own island: the viewer's dog walks there.
+      const ground = groundAt(camera, area, event.clientX, event.clientY, 0);
+      const home = islands[0];
+      if (onWalk && ground && home && over(home, ground)) onWalk(ground);
+      return;
+    }
     const visited = homes.findIndex((home, index) => !!onVisit && home.id !== focus && over(islands[index]!, { x: hit.x, z: hit.z }));
     if (visited >= 0) return;
     closeIn(hit);
@@ -1082,6 +1092,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
           <Pins homes={homes} layer={layer} />
         </Canvas>
       </Failsafe>
+      {overlay}
       <div className="mg-saju-pins" ref={layer}>
         {pins}
       </div>

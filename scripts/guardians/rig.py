@@ -1,6 +1,6 @@
 """Rig the 사주 village's guardian dogs: T-pose views drawn with OpenAI, then modelled, rigged and animated with Meshy.
 
-Paid, per dog: four OpenAI gpt-image-2 edits (portrait, high quality), one Meshy multi-image-to-3D task (30 credits),
+Paid, per dog: four OpenAI gpt-image-2.6-sunburst edits (portrait, high quality), one Meshy multi-image-to-3D task (30 credits),
 one rigging task (5) and one animation task holding four actions (3 each). The keys come from backend/.env
 (OPENAI_API_KEY, MESHY_API_KEY), are read here and never printed. Run it from the repo root:
 
@@ -69,7 +69,7 @@ ANIMATION_ENDPOINT = '/openapi/v1/animations'
 PARALLEL = 6
 
 VIEWS = ('front', 'left', 'back', 'right')
-DRAWING = {'model': 'gpt-image-2', 'size': '1024x1536', 'quality': 'high', 'output_format': 'png'}
+DRAWING = {'model': 'gpt-image-2.6-sunburst', 'size': '1024x1536', 'quality': 'high', 'output_format': 'png'}
 # The views already show a figure in the round, in the pose the rig wants, so Meshy takes them as they are. A rig
 # moves every vertex each frame, nine dogs at a time: the mesh stays light.
 MODEL_SETTINGS = {'ai_model': 'latest', 'pose_mode': 't-pose', 'should_texture': True, 'enable_pbr': False,
@@ -140,6 +140,13 @@ POSES = {
 LONGER = (' Make its arms and legs a third longer than drawn, so that they stand clear of the head and the body; the head, '
           'face and costume stay exactly as drawn.')
 
+# The style the village's dogs are dressed in since 2026-11-17: each in a soft hoodie of its own colours.
+HOODIE = (' Dress it in a cute, soft, slightly oversized hoodie sweatshirt with a kangaroo pocket and drawstrings, in '
+          'pastel colours taken from the character itself; where the character already wears a costume hood, that hood '
+          'is the hood of the hoodie, worn up; otherwise the hood is down behind its neck and its ears are free. Its '
+          'sleeves cover its arms to the paws and the hoodie reaches its hips; its legs and feet show below. Keep the '
+          'look sweet and round, like a plush toy.')
+
 LOOK = ('Render it as a smooth matte 3D figure, like a soft vinyl toy painted in the flat colours of the drawing, '
         'softly and evenly lit: no black outlines, no cast shadow, no ground, no text, a plain pure white background. '
         'The whole figure in frame with a margin around it, centred, seen straight on by an orthographic camera at '
@@ -152,7 +159,7 @@ def same(pose: str) -> str:
             f'with {arms} and both feet flat on the ground')
 
 
-def prompt_of(item: str, view: str, pose: str = 't-pose', longer: bool = False) -> str:
+def prompt_of(item: str, view: str, pose: str = 't-pose', longer: bool = False, hoodie: bool = False) -> str:
     """What the image model is asked for, for one view of one dog."""
     looks, wears, holds = DOGS[item]
     named, arms, _, _, near = POSES[pose]
@@ -166,8 +173,8 @@ def prompt_of(item: str, view: str, pose: str = 't-pose', longer: bool = False) 
                 f'little person, its body and face turned squarely to the camera, {arms}, the legs straight and a '
                 f'little apart, both feet flat on the ground. Keep its chibi proportions, the same big round head and '
                 f'small body as drawn, with the limbs clearly shaped: two arms reaching out from the shoulders below '
-                f'the head, two short legs with feet, apart from each other and from the body.{LONGER if longer else ""} '
-                f'{LOOK}')
+                f'the head, two short legs with feet, apart from each other and from the body.{LONGER if longer else ""}'
+                f'{HOODIE if hoodie else ""} {LOOK}')
     references = ('The first image is the original drawing, the second the front view already made; any further '
                   'images are other views already made. ')
     if view == 'back':
@@ -210,12 +217,12 @@ def archive(folder: Path, view: str) -> None:
 
 
 def draw(client: httpx.Client, out: Path, item: str, picture: Path, view: str, pose: str = 't-pose',
-         longer: bool = False) -> Path:
+         longer: bool = False, hoodie: bool = False) -> Path:
     """One view of the dog: the one already drawn, or a new one from the picture and the views before it."""
     folder = out / item / 'tpose'
     receipt = folder / f'{view}.json'
     image = folder / f'{view}.png'
-    prompt = prompt_of(item, view, pose, longer)
+    prompt = prompt_of(item, view, pose, longer, hoodie)
     if receipt.exists():
         task = json.loads(receipt.read_text(encoding='utf-8'))
         if task.get('status') == 'done' and image.exists() and digest(image) == task.get('image_sha256'):
@@ -414,6 +421,7 @@ def main() -> int:
     parser.add_argument('--pose', choices=tuple(POSES), default='t-pose',
                         help='the pose the views are drawn and modelled in (an A-pose for a dog the rig cannot read)')
     parser.add_argument('--longer', action='store_true', help='draw the arms and legs a third longer than drawn')
+    parser.add_argument('--hoodie', action='store_true', help='dress the dog in a hoodie of its own colours')
     args = parser.parse_args()
     keys = dotenv_values(ROOT / 'backend/.env')
     meshy_key = (keys.get('MESHY_API_KEY') or '').strip()
@@ -460,11 +468,11 @@ def main() -> int:
                     for view in args.redraw:
                         archive(args.out / item / 'tpose', view)
                     for view in args.redraw:
-                        draw(openai, args.out, item, picture, view, args.pose, args.longer)
+                        draw(openai, args.out, item, picture, view, args.pose, args.longer, args.hoodie)
                     return f'ok   {item}: redrew {", ".join(args.redraw)}'
                 if args.draw:
                     for view in VIEWS:
-                        draw(openai, args.out, item, picture, view, args.pose, args.longer)
+                        draw(openai, args.out, item, picture, view, args.pose, args.longer, args.hoodie)
                     return f'ok   {item}: views drawn'
                 made = model(meshy, args.out, item, args.pose)
                 rigged = rig(meshy, args.out, item, made)

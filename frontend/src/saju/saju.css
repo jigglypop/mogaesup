@@ -87,6 +87,31 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 /* The labels' layer cuts what leaves it and never scrolls: a label past its edge that took the keyboard's focus would
    otherwise pull the layer after it, and every label off its island. */
 .mg-saju-pins { position: absolute; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
+/* The people walking the island: a name over each, and what they say in a cloud above it. */
+.mg-saju-walkers { position: absolute; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
+.mg-saju-walker { position: absolute; top: 0; left: 0; display: grid; justify-items: center; gap: 4px; }
+.mg-saju-walker-name { padding: 2px 8px; border-radius: 999px; background: var(--mg-glass-strong); color: var(--mg-ink); font-size: 11px; font-weight: 750; white-space: nowrap; box-shadow: var(--mg-shadow-soft); }
+.mg-saju-said {
+  position: relative;
+  max-width: 220px;
+  margin: 0 0 6px;
+  padding: 8px 12px;
+  border-radius: 18px;
+  background: #fff;
+  color: #2b2724;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  box-shadow: var(--mg-shadow-soft);
+  animation: mg-saju-said-in 0.18s ease-out;
+}
+.mg-saju-said::after { content: ''; position: absolute; left: 50%; bottom: -6px; width: 12px; height: 12px; background: #fff; transform: translateX(-50%) rotate(45deg); border-radius: 2px; }
+.mg-saju-said[hidden] { display: none; }
+@keyframes mg-saju-said-in { from { opacity: 0; transform: translateY(4px) scale(0.96); } to { opacity: 1; transform: none; } }
+.mg-saju-talk { display: flex; align-items: center; gap: 4px; height: 48px; padding: 0 4px 0 14px; border: 1px solid var(--mg-line); border-radius: 999px; background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); flex: 1 1 200px; max-width: 360px; }
+.mg-saju-talk input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--mg-ink); font: inherit; font-size: 14px; outline: none; }
 .mg-saju-pin {
   position: absolute;
   top: 0;
