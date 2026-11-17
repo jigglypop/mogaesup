@@ -9,7 +9,9 @@ import { WATER_LEVEL } from '../mood';
 import { bamboo, birch, bush, conifer, crown, flowerBed, lilies, pine, reeds, rock, steppingStones, toned, tree, willow, type Palette } from '../plants';
 import { surfaceMaps } from '../surfaces';
 import { dressPond } from '../terrain';
+import { guestBoard } from '../guestboard';
 import { emblem, keepsake } from '../yard';
+import { ganjiRow } from '../zodiac';
 import { estateGround, type GroundPaint } from './ground';
 import type { Estate, FruitKind, Placement, Species } from './layout';
 import { pointAlong, type V2 } from './lines';
@@ -759,6 +761,12 @@ function drawPlacements(b: Builder, estate: Estate, options: DrawOptions, keep: 
         break;
       case 'keepsake':
         if (estate.profile.house.accent) keepsake(b, estate.profile.house.accent, at);
+        break;
+      case 'ganji':
+        ganjiRow(b, at, placement.ganji ?? [], placement.facing);
+        break;
+      case 'guestbook':
+        guestBoard(b, at, placement.facing);
         break;
       case 'footbridge':
         footbridge(b, placement, estate);

@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useR
 
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
+import { socialApi } from '../api/endpoints';
 import type { HomeVisibility, User } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
@@ -22,6 +23,7 @@ import { chartPath, editPath, homePath, routeOf, villagePath, waveOf, ziweiPath 
 import type { StageFlag } from './scene/Flag';
 import { DecorLayer } from './scene/Decor';
 import { frameOf, NO_INSET, type Inset, type Spot } from './scene/frames';
+import type { GuestNote } from './scene/GuestPlaques';
 import { Stage, type StageBridge, type StageHandle, type StageHome } from './scene/Stage';
 import { ChartPanel } from './ui/ChartPanel';
 import { HomePanel, type Bridge } from './ui/HomePanel';
@@ -39,6 +41,8 @@ import { FLAG_SPOT, flagRaised, plotsOf } from './village';
 const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 /** How much one press of a zoom button brings the picture closer. */
 const ZOOM_STEP = 1.3;
+/** No lines hung on the 기념 방명록 yet (another 섬's are not this one's). */
+const NO_NOTES: readonly GuestNote[] = [];
 /** On one's own 섬 there is no bridge to show. */
 const NO_BRIDGE: Bridge = { compat: null, canShow: false, shown: false, onShow: () => {} };
 
@@ -326,6 +330,30 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // and the picture of its island. The owner's are asked for here, and looked at again while they are being made and
   // shown: the reading on its tabs, the picture on the home's (and for the PDF on the reading's).
   const tab = route.kind === 'home' && host ? route.tab : 'home';
+
+  // The guestbook's lines, hung as plaques on the island's 기념 방명록: read with the 섬, and again when one is left or
+  // taken away. Pressing the frame opens the guestbook, to leave one.
+  const [notesRead, setNotesRead] = useState(0);
+  const rereadNotes = useCallback(() => setNotesRead((count) => count + 1), []);
+  const [notes, setNotes] = useState<{ of: string; list: GuestNote[] }>({ of: '', list: [] });
+  useEffect(() => {
+    const controller = new AbortController();
+    socialApi.guestbook(username, undefined, controller.signal).then(
+      (page) => setNotes({ of: username, list: page.entries.map((entry) => ({ id: entry.id, key: entry.author.username })) }),
+      () => undefined,
+    );
+    return () => controller.abort();
+  }, [username, notesRead]);
+  const onHome = route.kind === 'home' && tab === 'home';
+  const openGuestbook = useCallback(() => {
+    if (!onHome) navigate(homePath(username));
+    setPanelOpen(true);
+    window.setTimeout(() => {
+      const section = document.querySelector<HTMLElement>('.mg-saju-guestbook');
+      section?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      section?.querySelector<HTMLElement>('textarea, a')?.focus({ preventScroll: true });
+    }, 80);
+  }, [onHome, navigate, username, setPanelOpen]);
   const ownerId = view.isOwner ? view.profile.ownerId : null;
   const birth = host?.resident.birth ?? null;
   const reading = useReading({ username, ownerId, birth, shown: route.kind === 'home' && tab !== 'home' });
@@ -408,6 +436,8 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           focus={wide ? null : username}
           onVisit={placing ? undefined : visit}
           onPlace={placing ? placeAt : undefined}
+          notes={notes.of === username ? notes.list : NO_NOTES}
+          onBoard={openGuestbook}
           decor={
             decor.decor && (
               <DecorLayer items={decor.decor.items} flags={decor.decor.flags} own={ownFlag} character={decor.decor.character?.modelUrl ?? null} />
@@ -542,6 +572,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
               neighbors={neighbors}
               bridge={{ compat, canShow: !!visitorHome, shown: together, onShow: setBridgeShown }}
               onVisibility={onVisibility}
+              onGuestbook={rereadNotes}
             />
           )}
           </Fragment>

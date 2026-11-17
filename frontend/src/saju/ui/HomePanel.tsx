@@ -112,7 +112,7 @@ function Doors({ visibility, onChange }: { visibility: HomeVisibility; onChange:
  * of its island, the balance of elements, the bridge to it and its guestbook. A home not built yet has its bridge and
  * guestbook all the same: a visitor finds them under the empty plot, the owner under the card that builds the home.
  */
-export function HomePanel({ view, viewer, profile, picture, decor, neighbors, bridge, onVisibility }: {
+export function HomePanel({ view, viewer, profile, picture, decor, neighbors, bridge, onVisibility, onGuestbook }: {
   view: HomeView;
   viewer: User | null;
   /** The home's chart, once its owner has built it. */
@@ -125,6 +125,8 @@ export function HomePanel({ view, viewer, profile, picture, decor, neighbors, br
   bridge: Bridge;
   /** Changes who may see the home: its owner's. */
   onVisibility: (visibility: HomeVisibility) => Promise<void>;
+  /** Told when a line is left in the guestbook or taken away (the island's 기념 방명록 hangs them). */
+  onGuestbook?: (() => void) | undefined;
 }) {
   const { username } = view.profile;
   return (
@@ -176,7 +178,7 @@ export function HomePanel({ view, viewer, profile, picture, decor, neighbors, br
       <BridgeCard view={view} viewer={viewer} neighbors={neighbors} bridge={bridge} />
       <section className="mg-saju-guestbook" aria-label="방명록">
         <h2 className="mg-heading">방명록</h2>
-        <Guestbook username={username} viewer={viewer} />
+        <Guestbook username={username} viewer={viewer} onChange={onGuestbook} />
       </section>
     </>
   );

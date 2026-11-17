@@ -15,6 +15,7 @@ import { AZIMUTH, clampTilt, clampZoom, dragShift, ELEVATION, NO_INSET, wheelZoo
 import { loadDogModel, type DogModel } from './dogModel';
 import { landingsOf } from './estateHome';
 import { HomeEstate } from './HomeEstate';
+import type { GuestNote } from './GuestPlaques';
 import { Guardian } from './Guardian';
 import { buildHome, buildLot, GUARDIAN_AT, type IslandKind } from './homes';
 import { BOX } from './kit';
@@ -205,7 +206,7 @@ const DRUM = new CylinderGeometry(1, 1, 1, 48);
  * A home's island in its place. The water about it lights up under the pointer when it can be visited. Memoized: the
  * page around the canvas renders again for every line in a guestbook, and a home is a great deal to go over.
  */
-const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, landings }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; landings?: readonly number[] }) {
+const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, landings, notes, onBoard }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; landings?: readonly number[]; notes?: readonly GuestNote[]; onBoard?: (() => void) | undefined }) {
   const [hovered, setHovered] = useState(false);
   const canvas = useThree((state) => state.gl.domElement);
   const glow = useMemo(() => new MeshBasicMaterial({ color: '#ffe2b0', transparent: true, opacity: 0, depthWrite: false, blending: AdditiveBlending }), []);
@@ -252,7 +253,7 @@ const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, land
       <mesh geometry={HALO} material={glow} position={[0, WATER_LEVEL + 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]} scale={reach / ISLANDS.neighbour.reach} renderOrder={1} />
       {home.profile ? (
         kind === 'home' ? (
-          <HomeEstate profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} bridges={landings} />
+          <HomeEstate profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} />
         ) : (
           <Diorama profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} kind={kind} />
         )
@@ -599,6 +600,9 @@ type StageProps = {
    * a press then places, and visits nothing.
    */
   onPlace?: ((spot: Spot) => void) | undefined;
+  /** The guestbook's lines, hung on the page's own island's 기념 방명록; pressing it is told to `onBoard`. */
+  notes?: readonly GuestNote[];
+  onBoard?: (() => void) | undefined;
 };
 
 /** The page's own island stands at the village's middle; every other home's is a neighbour's. */
@@ -641,7 +645,7 @@ function groundAt(camera: Camera | null, box: DOMRect, x: number, y: number, hei
  * standing on the island in view brings the camera to it and in close; a double press on the water puts it back where
  * it began.
  */
-export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace }: StageProps) {
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace, notes, onBoard }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const gaze = useRef<Gaze>({ ...UNMOVED, pan: { ...UNMOVED.pan } });
@@ -1063,7 +1067,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
         >
           <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed} onReady={shown} village={village}>
             {homes.map((home, index) => (
-              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { landings } : {})} />
+              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { landings, ...(notes ? { notes } : {}), onBoard } : {})} />
             ))}
             {bridges.map((bridge) => (
               <Bridge key={`${bridge.to.id}:${bridge.colors.join()}`} from={[bridge.from.x, bridge.from.z]} to={[bridge.to.x, bridge.to.z]} colors={bridge.colors} tone={bridge.compat.tone} />

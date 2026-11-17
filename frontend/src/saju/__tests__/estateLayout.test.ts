@@ -27,6 +27,16 @@ describe('an estate', () => {
     }
   });
 
+  it('stands the pillars’ figures (a 간지 each, the year first) and the 기념 방명록 on every island', () => {
+    for (const { id, birth, estate } of BIRTHS.map((one, index) => ({ ...one, estate: estates[index]!.estate }))) {
+      const figures = estate.placements.find((placement) => placement.kind === 'ganji');
+      expect(figures, id).toBeDefined();
+      const reading = readingOf(birth);
+      expect(figures!.ganji).toEqual([reading.year, reading.month, reading.day, ...(reading.hour ? [reading.hour] : [])].map((pillar) => pillar.cn));
+      expect(estate.placements.some((placement) => placement.kind === 'guestbook'), id).toBe(true);
+    }
+  });
+
   it('is laid out from the reading’s own plan', () => {
     for (const { birth } of BIRTHS) {
       const reading = readingOf(birth);

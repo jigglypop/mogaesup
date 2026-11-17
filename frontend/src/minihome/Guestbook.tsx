@@ -23,8 +23,8 @@ const when = (at: string) => {
 /** The server no longer takes the session: `api` has signed the member out. */
 const refused = (problem: unknown) => problem instanceof ApiRequestError && problem.status === 401 && problem.code === SESSION_REFUSED;
 
-/** The island's guestbook: a note to leave at the top, then the notes, newest first. */
-export function Guestbook({ username, viewer }: { username: string; viewer: User | null }) {
+/** The island's guestbook: a note to leave at the top, then the notes, newest first. `onChange` hears of a note left or taken away. */
+export function Guestbook({ username, viewer, onChange }: { username: string; viewer: User | null; onChange?: (() => void) | undefined }) {
   const signIn = useSignInPath();
   const [entries, setEntries] = useState<GuestbookEntry[]>([]);
   const [total, setTotal] = useState(0);
@@ -103,6 +103,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
       await socialApi.removeByAuthor(username, entry.author.username);
       if (scope.controller.signal.aborted) return;
       await load();
+      onChange?.();
     });
   };
 
@@ -116,6 +117,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
       setText('');
       setSecret(false);
       await load();
+      onChange?.();
     });
   };
 
@@ -180,6 +182,7 @@ export function Guestbook({ username, viewer }: { username: string; viewer: User
                         await socialApi.remove(entry.id);
                         if (scope.controller.signal.aborted) return;
                         await load();
+                        onChange?.();
                       })
                     }
                   >

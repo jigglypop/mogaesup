@@ -73,7 +73,7 @@ vi.mock('../../minihome/Guestbook', () => ({ Guestbook: () => <p className="gues
 vi.mock('../../api/endpoints', () => ({
   homeApi: { mine: api.mine, get: api.get, visit: api.visit },
   sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw, decor: api.decor, placeDecor: api.placeDecor, giveFlag: api.giveFlag, dropFlag: api.dropFlag },
-  socialApi: { ilchons: api.ilchons, requests: api.requests, status: api.status },
+  socialApi: { ilchons: api.ilchons, requests: api.requests, status: api.status, guestbook: () => Promise.resolve({ entries: [], total: 0, nextBefore: null }) },
 }));
 let auth: { status: 'anonymous' | 'signedIn'; user: User | null } = { status: 'anonymous', user: null };
 vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => auth, useOptionalAuth: () => null }));

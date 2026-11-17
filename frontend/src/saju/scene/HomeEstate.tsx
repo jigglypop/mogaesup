@@ -9,6 +9,7 @@ import { loadDogModel, type DogModel } from './dogModel';
 import { estateParts } from './estate/draw';
 import { estateHomeOf, lawnOf } from './estateHome';
 import { Guardian } from './Guardian';
+import { GuestPlaques, type GuestNote } from './GuestPlaques';
 import { buildHouse, buildLot } from './homes';
 import { countWork, useBuild, WorksContext } from './works';
 
@@ -18,6 +19,7 @@ import { countWork, useBuild, WorksContext } from './works';
 
 /** The guardian stands a little smaller than it was drawn, beside a house whose door is a metre high (as Stage's Diorama). */
 const GUARDIAN_SCALE = 0.8;
+const NO_NOTES: readonly GuestNote[] = [];
 
 /** One build of the island: an estate's part, mounted at `at` about the island's middle. */
 type Piece = { key: string; at: V3; make: () => Build };
@@ -155,6 +157,9 @@ type EstateProps = {
   lush?: boolean;
   turn?: number;
   bridges?: readonly number[];
+  /** The guestbook's lines, hung on the 기념 방명록 as plaques; pressing it is told to `onBoard`. */
+  notes?: readonly GuestNote[];
+  onBoard?: (() => void) | undefined;
 };
 
 /**
@@ -176,6 +181,8 @@ function Estate({
   lush = true,
   turn = 0,
   bridges,
+  notes = NO_NOTES,
+  onBoard,
 }: EstateProps) {
   const { reading, house, guardian } = profile;
   // The landings as a key: a new list of the same landings lays the estate out no differently.
@@ -188,9 +195,11 @@ function Estate({
   const build = useParts(parts, turn, reading, `${landings ?? ''}|${lush}|${style}`);
   const dog = useDog(guardian.dog);
   const charms = guardian.charms.map((item) => item.charm).join('+');
+  const board = estate.placements.find((placement) => placement.kind === 'guestbook');
   return (
     <>
       {build && <Built build={build} origin={origin} />}
+      {build && board && <GuestPlaques at={board.at} facing={board.facing} notes={notes} onPress={onBoard} />}
       {dog && (
         <group key={`${guardian.dog}:${charms}`} position={[estate.guardian.at[0], 0, estate.guardian.at[1]]} scale={GUARDIAN_SCALE}>
           <Guardian guardian={guardian} model={dog} position={[0, 0, 0]} facing={estate.guardian.facing} playful={playful} />

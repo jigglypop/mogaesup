@@ -1,5 +1,5 @@
 import type { Element } from '../../elements';
-import type { PillarKey, Reading } from '../../engine';
+import { pillarsOf, type PillarKey, type Reading } from '../../engine';
 import { MOTIFS, type MotifId } from '../../motifs';
 import { islandPlanOf, STYLE_MOTIFS, type BedKind, type IslandPlan, type Placed, type TreeState } from '../../mulsang';
 import { profileOfReading, type Profile } from '../../profile';
@@ -44,6 +44,10 @@ export type PlacementKind =
   /** The day master's emblem and the second element's keepsake (yard.ts). */
   | 'emblem'
   | 'keepsake'
+  /** The chart's pillars as stone figures in a row, a 간지 each (zodiac.ts). */
+  | 'ganji'
+  /** The 기념 방명록: a frame the guestbook's lines hang from (guestboard.ts). */
+  | 'guestbook'
   /** One of the motifs (motifs.ts): a pillar's, or the house style's own. */
   | 'motif'
   | 'tree'
@@ -97,6 +101,8 @@ export type Placement = {
   bed?: BedKind;
   /** For a motif laid along something long (a wall, the stream): the line it follows. */
   along?: V2[];
+  /** For the pillars' figures: each pillar's 간지 (`甲子`), the year's first. */
+  ganji?: string[];
 };
 
 /** How a path is laid: stepping stones in the house's stone, or earth trodden bare with a stone here and there. */
@@ -458,6 +464,15 @@ export function estateOf(reading: Reading, options: EstateOptions = {}): Estate 
     ground.take(spot[0], spot[1], 1.8);
   }
 
+  // The chart's pillars as stone figures in a row south-west of the yard, facing south; the 기념 방명록 on the open lawn
+  // further west, facing the way the camera first looks from. Placed after the paths and before the yard's other
+  // things, with numbers of their own.
+  const own = rng(seed * 29 + 11);
+  const figuresAt = ground.fit(at(-4.6, 7.8), 2.3, own, 4);
+  if (figuresAt) put({ id: 'day:ganji', kind: 'ganji', part: 'day', by: 'estate', at: figuresAt, reach: 2.3, ganji: pillarsOf(reading).map(({ pillar }) => pillar.cn) });
+  const boardAt = ground.fit(at(-8.2, 9.4), 1.35, own, 4);
+  if (boardAt) put({ id: 'day:guestbook', kind: 'guestbook', part: 'day', by: 'estate', at: boardAt, reach: 1.35, facing: Math.PI / 4 });
+
   // The house style's own things about the yard (mulsang STYLE_MOTIFS, as homes.ts keeps them).
   const ponds: EstatePond[] = [];
   const style = profile.house.style;
@@ -610,7 +625,9 @@ export function estateOf(reading: Reading, options: EstateOptions = {}): Estate 
     const placeAt = ground.fit([garden.at[0] + dx, garden.at[1] + dz], 1.3, random, 1.5);
     if (placeAt) put({ id: `month:tree:${index}`, kind: 'tree', part: 'month', by: 'estate', at: placeAt, reach: 1.3, tree: { species: index === 0 ? 'maple' : 'zelkova', height: 3.6 + random() * 0.6, spread: 2.8 + random() * 0.4 } });
   }
-  put({ id: 'month:bench', kind: 'bench', part: 'month', by: 'estate', at: ground.fit([garden.at[0] + 4.2, garden.at[1] + 3.6], 0.6, random, 1.5) ?? [garden.at[0] + 4.2, garden.at[1] + 3.6], reach: 0.6, facing: -Math.PI * 0.75 });
+  // The garden's bench, where there is room for it.
+  const benchAt = ground.fit([garden.at[0] + 4.2, garden.at[1] + 3.6], 0.6, random, 1.5);
+  if (benchAt) put({ id: 'month:bench', kind: 'bench', part: 'month', by: 'estate', at: benchAt, reach: 0.6, facing: -Math.PI * 0.75 });
 
   // 년: the wood along the far shore, tallest at the back, in rows staggered, gaps where the bridges land. In a wood
   // the crowns touch: each tree keeps only its trunk's ground to itself, and its crown may lean over a path.
