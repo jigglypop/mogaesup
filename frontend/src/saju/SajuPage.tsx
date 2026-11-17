@@ -25,8 +25,9 @@ import { DecorLayer } from './scene/Decor';
 import { frameOf, NO_INSET, type Inset, type Spot } from './scene/frames';
 import type { GuestNote } from './scene/GuestPlaques';
 import { Stage, type StageBridge, type StageHandle, type StageHome } from './scene/Stage';
-import { Walkers } from './scene/Walkers';
-import { useVillageRoom } from './live';
+import { Walkers, type WalkerControl } from './scene/Walkers';
+import { useVillageRoom, type Action } from './live';
+import { TalkBar } from './ui/TalkBar';
 import { ChartPanel } from './ui/ChartPanel';
 import { HomePanel, type Bridge } from './ui/HomePanel';
 import { Onboarding } from './ui/Onboarding';
@@ -342,12 +343,29 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
     return [0.5 + ((seed % 7) - 3) * 0.45, 0, 3.6 + ((seed % 5) - 2) * 0.3];
   }, [viewer?.id]);
   const room = useVillageRoom(username, walking ? (viewer?.id ?? null) : null, myDog, start);
-  const goal = useRef<[number, number, number] | null>(null);
-  const walkTo = useCallback((spot: Spot) => {
-    goal.current = [spot.x, 0, spot.z];
+  // Where the viewer's dog is going (a press on the ground; twice, it runs) and what it was last asked to do.
+  const control = useRef<WalkerControl>({ goal: null, run: false, asked: null });
+  const walkTo = useCallback((spot: Spot, twice: boolean) => {
+    control.current.goal = [spot.x, 0, spot.z];
+    control.current.run = twice;
   }, []);
+  const ask = useCallback((action: Action) => {
+    control.current.asked = { action, at: performance.now() };
+  }, []);
+  // Space jumps, wherever the page leaves the key to it.
+  useEffect(() => {
+    if (!walking) return undefined;
+    const key = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.repeat) return;
+      const target = event.target as Element | null;
+      if (target?.closest('input, textarea, select, button, a, [contenteditable], main')) return;
+      event.preventDefault();
+      ask('jump');
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [walking, ask]);
   const talkLayer = useRef<HTMLDivElement>(null);
-  const [line, setLine] = useState('');
 
   // The guestbook's lines, hung as plaques on the island's 기념 방명록: read with the 섬, and again when one is left or
   // taken away. Pressing the frame opens the guestbook, to leave one.
@@ -457,11 +475,12 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           notes={notes.of === username ? notes.list : NO_NOTES}
           onBoard={openGuestbook}
           onWalk={walking ? walkTo : undefined}
+          guardianAway={walking && view.isOwner}
           overlay={<div className="mg-saju-walkers" ref={talkLayer} />}
           decor={
             <>
               {decor.decor && <DecorLayer items={decor.decor.items} flags={decor.decor.flags} own={ownFlag} character={decor.decor.character?.modelUrl ?? null} />}
-              {walking && <Walkers room={room} own={myDog} name={viewer?.displayName ?? ''} start={start} goal={goal} layer={talkLayer} />}
+              {walking && <Walkers room={room} own={myDog} name={viewer?.displayName ?? ''} start={start} control={control} layer={talkLayer} />}
             </>
           }
           pins={
@@ -485,19 +504,14 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
         </p>
       )}
       <div className="mg-saju-dock">
-        {walking && room.connected && (
-          <form
-            className="mg-saju-talk mg-glass"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (room.say(line)) setLine('');
-            }}
-          >
-            <input value={line} maxLength={200} onChange={(event) => setLine(event.target.value)} aria-label="말하기" placeholder="말하기" />
-            <button className="mg-icon-btn is-quiet" aria-label="보내기" disabled={!line.trim()}>
-              <Icon name="send" />
+        {walking && room.connected && <TalkBar log={room.log} others={room.present.length} onSay={room.say} onMove={ask} />}
+        {walking && room.elsewhere && (
+          <p className="mg-saju-elsewhere mg-glass" role="status">
+            다른 창에서 이 섬에 들어와 있어요
+            <button className="mg-btn is-small" onClick={room.rejoin}>
+              여기서 들어가기
             </button>
-          </form>
+          </p>
         )}
         {host && !wide && view.isOwner && <SavePicture name={host.resident.name} profile={host.profile} />}
         <div className="mg-saju-zoom mg-glass" role="group" aria-label="확대와 축소">

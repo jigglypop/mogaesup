@@ -110,7 +110,40 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 .mg-saju-said::after { content: ''; position: absolute; left: 50%; bottom: -6px; width: 12px; height: 12px; background: #fff; transform: translateX(-50%) rotate(45deg); border-radius: 2px; }
 .mg-saju-said[hidden] { display: none; }
 @keyframes mg-saju-said-in { from { opacity: 0; transform: translateY(4px) scale(0.96); } to { opacity: 1; transform: none; } }
-.mg-saju-talk { display: flex; align-items: center; gap: 4px; height: 48px; padding: 0 4px 0 14px; border: 1px solid var(--mg-line); border-radius: 999px; background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); flex: 1 1 200px; max-width: 360px; }
+.mg-saju-elsewhere { display: flex; align-items: center; gap: 10px; margin: 0; padding: 6px 6px 6px 16px; border: 1px solid var(--mg-line); border-radius: 999px; background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); font-size: 13px; font-weight: 700; color: var(--mg-ink); }
+.mg-saju-talk-box { position: relative; flex: 1 1 260px; max-width: 520px; min-width: 0; }
+.mg-saju-talk { display: flex; align-items: center; gap: 2px; height: 48px; padding: 0 4px; border: 1px solid var(--mg-line); border-radius: 999px; background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); }
+.mg-saju-talk-toggle { position: relative; flex: none; }
+.mg-saju-talk-unread { position: absolute; top: 2px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: var(--mg-accent); color: #fff; font-size: 10px; font-style: normal; font-weight: 800; line-height: 16px; text-align: center; }
+.mg-saju-moves { display: flex; flex: none; }
+.mg-saju-moves .mg-icon-btn { width: 34px; height: 34px; font-size: 17px; line-height: 1; }
+.mg-saju-talk-log {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  max-height: min(300px, 40vh);
+  margin: 0;
+  padding: 10px 12px;
+  list-style: none;
+  overflow-y: auto;
+  border: 1px solid var(--mg-line);
+  border-radius: 20px;
+  background: var(--mg-glass-strong);
+  box-shadow: var(--mg-shadow-soft);
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  font-size: 13px;
+}
+.mg-saju-talk-log li { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: baseline; }
+.mg-saju-talk-log li b { color: var(--mg-primary); font-weight: 800; white-space: nowrap; }
+.mg-saju-talk-log li[data-own] b { color: var(--mg-accent); }
+.mg-saju-talk-log li span { color: var(--mg-ink); overflow-wrap: anywhere; }
+.mg-saju-talk-log li time { color: var(--mg-muted); font-size: 11px; }
+.mg-saju-talk-log li.is-note { display: block; color: var(--mg-muted); font-size: 12px; text-align: center; }
+.mg-saju-walker[data-own] .mg-saju-walker-name { background: var(--mg-primary); color: var(--mg-primary-ink); }
+@media (max-width: 520px) { .mg-saju-moves .mg-icon-btn { width: 30px; } }
 .mg-saju-talk input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--mg-ink); font: inherit; font-size: 14px; outline: none; }
 .mg-saju-pin {
   position: absolute;

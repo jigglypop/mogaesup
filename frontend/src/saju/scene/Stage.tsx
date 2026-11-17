@@ -206,7 +206,7 @@ const DRUM = new CylinderGeometry(1, 1, 1, 48);
  * A home's island in its place. The water about it lights up under the pointer when it can be visited. Memoized: the
  * page around the canvas renders again for every line in a guestbook, and a home is a great deal to go over.
  */
-const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, landings, notes, onBoard }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; landings?: readonly number[]; notes?: readonly GuestNote[]; onBoard?: (() => void) | undefined }) {
+const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, landings, notes, onBoard, guardianAway = false }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; landings?: readonly number[]; notes?: readonly GuestNote[]; onBoard?: (() => void) | undefined; guardianAway?: boolean }) {
   const [hovered, setHovered] = useState(false);
   const canvas = useThree((state) => state.gl.domElement);
   const glow = useMemo(() => new MeshBasicMaterial({ color: '#ffe2b0', transparent: true, opacity: 0, depthWrite: false, blending: AdditiveBlending }), []);
@@ -253,7 +253,7 @@ const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, land
       <mesh geometry={HALO} material={glow} position={[0, WATER_LEVEL + 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]} scale={reach / ISLANDS.neighbour.reach} renderOrder={1} />
       {home.profile ? (
         kind === 'home' ? (
-          <HomeEstate profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} />
+          <HomeEstate profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} guardianAway={guardianAway} />
         ) : (
           <Diorama profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} kind={kind} />
         )
@@ -604,7 +604,9 @@ type StageProps = {
   notes?: readonly GuestNote[];
   onBoard?: (() => void) | undefined;
   /** Told of a press on the bare ground of the island at the village's middle, where (the viewer's dog walks there). */
-  onWalk?: ((spot: Spot) => void) | undefined;
+  onWalk?: ((spot: Spot, twice: boolean) => void) | undefined;
+  /** The page's own island's guardian is away: its owner walks the island as that dog. */
+  guardianAway?: boolean;
   /** Laid over the picture, under the labels: what the scene places over it (the walkers' names and clouds). */
   overlay?: ReactNode;
 };
@@ -649,7 +651,7 @@ function groundAt(camera: Camera | null, box: DOMRect, x: number, y: number, hei
  * standing on the island in view brings the camera to it and in close; a double press on the water puts it back where
  * it began.
  */
-export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace, notes, onBoard, onWalk, overlay }: StageProps) {
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace, notes, onBoard, onWalk, overlay, guardianAway = false }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const gaze = useRef<Gaze>({ ...UNMOVED, pan: { ...UNMOVED.pan } });
@@ -908,7 +910,8 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     tapped.current = { at: now, x: event.clientX, y: event.clientY };
     const element = box.current;
     const camera = eye.current;
-    if (before && now - before.at <= DOUBLE_MS && Math.hypot(event.clientX - before.x, event.clientY - before.y) <= DOUBLE_PIXELS) {
+    const twice = !!before && now - before.at <= DOUBLE_MS && Math.hypot(event.clientX - before.x, event.clientY - before.y) <= DOUBLE_PIXELS;
+    if (twice) {
       tapped.current = null;
       const spot = element && groundAt(camera, element.getBoundingClientRect(), event.clientX, event.clientY, WATER_LEVEL);
       if (!spot || !islands.some((island) => over(island, spot))) return reset();
@@ -923,7 +926,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       // The bare ground of the page's own island: the viewer's dog walks there.
       const ground = groundAt(camera, area, event.clientX, event.clientY, 0);
       const home = islands[0];
-      if (onWalk && ground && home && over(home, ground)) onWalk(ground);
+      if (onWalk && ground && home && over(home, ground)) onWalk(ground, twice);
       return;
     }
     const visited = homes.findIndex((home, index) => !!onVisit && home.id !== focus && over(islands[index]!, { x: hit.x, z: hit.z }));
@@ -1077,7 +1080,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
         >
           <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed} onReady={shown} village={village}>
             {homes.map((home, index) => (
-              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { landings, ...(notes ? { notes } : {}), onBoard } : {})} />
+              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { landings, ...(notes ? { notes } : {}), onBoard, guardianAway } : {})} />
             ))}
             {bridges.map((bridge) => (
               <Bridge key={`${bridge.to.id}:${bridge.colors.join()}`} from={[bridge.from.x, bridge.from.z]} to={[bridge.to.x, bridge.to.z]} colors={bridge.colors} tone={bridge.compat.tone} />

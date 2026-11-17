@@ -75,12 +75,28 @@ describe('섬의 방', () => {
     await act(async () => socket.tell({ type: 'Welcome', client_id: 'me1', room_state: [['p2', { name: '보리', position: [3, 0, 4], rotation: [1, 0, 0, 0], modelUrl: 'http://x/gltf/guardians/16.glb' }]] }));
     expect(hook.result.current.present).toEqual(['p2']);
     expect(hook.result.current.others.get('p2')).toMatchObject({ name: '보리', dog: '16', position: [3, 0, 4] });
-    await act(async () => socket.tell({ type: 'PlayerUpdate', client_id: 'p2', state: { position: [5, 0, 4], animation: 'walk' } }));
-    expect(hook.result.current.others.get('p2')).toMatchObject({ position: [5, 0, 4], walking: true, name: '보리' });
+    await act(async () => socket.tell({ type: 'PlayerUpdate', client_id: 'p2', state: { position: [5, 0, 4], animation: 'jump:2' } }));
+    expect(hook.result.current.others.get('p2')).toMatchObject({ position: [5, 0, 4], action: 'jump', moves: 2, name: '보리' });
     await act(async () => socket.tell({ type: 'Chat', client_id: 'p2', text: '안녕' }));
     expect(hook.result.current.said.get('p2')?.text).toBe('안녕');
+    expect(hook.result.current.log.map((line) => [line.kind, line.name, line.text])).toEqual([['said', '보리', '안녕']]);
     await act(async () => socket.tell({ type: 'PlayerLeft', client_id: 'p2' }));
     expect(hook.result.current.present).toEqual([]);
+    expect(hook.result.current.log.at(-1)).toMatchObject({ kind: 'went', name: '보리' });
+    await hook.unmount();
+  });
+
+  it('같은 계정이 다른 창에서 들어오면 이 창은 기다렸다가, 청하면 다시 들어간다', async () => {
+    const hook = await mountHook(() => useVillageRoom('sol', 'me', '08', [0, 0, 0]));
+    await act(async () => undefined);
+    expect(Socket.made[0]!.url).toContain('once=true');
+    await act(async () => Socket.made[0]!.open());
+    await act(async () => Socket.made[0]!.fire('close', { code: 4410, reason: '' }));
+    expect(hook.result.current.elsewhere).toBe(true);
+    await act(async () => hook.result.current.rejoin());
+    await act(async () => undefined);
+    expect(Socket.made).toHaveLength(2);
+    expect(hook.result.current.elsewhere).toBe(false);
     await hook.unmount();
   });
 

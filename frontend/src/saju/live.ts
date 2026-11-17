@@ -8,7 +8,11 @@ import { dogModelUrl } from './scene/dogModel';
 // (/api/rooms/{username}, the same rooms the islands used), as their own guardian dog. Where each stands and walks,
 // and what each says, goes to the others; what they say shows over their head for a while.
 
-/** Someone in the room, as the page draws them: their dog, where they stand and face, whether they walk. */
+/** What a walker is doing: standing, going (walking or running), or one of the moves played once. */
+export type Action = 'idle' | 'walk' | 'run' | 'jump' | 'wave' | 'cheer' | 'dance';
+const ACTIONS: readonly Action[] = ['idle', 'walk', 'run', 'jump', 'wave', 'cheer', 'dance'];
+
+/** Someone in the room, as the page draws them: their dog, where they stand and face, and what they are doing. */
 export type Walker = {
   id: string;
   name: string;
@@ -16,8 +20,15 @@ export type Walker = {
   position: [number, number, number];
   /** Radians about the vertical: 0 faces +z. */
   facing: number;
-  walking: boolean;
+  action: Action;
+  /** Counts each move begun (a jump, a wave), so the same move twice is played twice. */
+  moves: number;
 };
+
+/** A line in the room's talk: something said, or someone coming or going. */
+export type Line = { key: number; kind: 'said' | 'came' | 'went'; name: string; text: string; own: boolean; at: number };
+/** How many lines the talk keeps. */
+const LOG = 60;
 
 /** Something said, by whom, and when it stops showing. */
 export type Said = { id: string; text: string; until: number };
@@ -33,7 +44,10 @@ const RETRY_MS = 4000;
 const MAX_CHAT = 200;
 
 const urlOf = (username: string, ticket: string) =>
-  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/rooms/${encodeURIComponent(username)}?ticket=${encodeURIComponent(ticket)}`;
+  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/rooms/${encodeURIComponent(username)}?ticket=${encodeURIComponent(ticket)}&once=true`;
+
+/** How the server shuts the socket of a window whose account has come into the same room from another one. */
+const ELSEWHERE = 4410;
 
 /** The dog named in a model's address (`…/gltf/guardians/08.glb`), or a dog for one that names none. */
 export function dogOfUrl(url: unknown): string {
@@ -42,6 +56,14 @@ export function dogOfUrl(url: unknown): string {
 }
 
 type State = { name?: string; position?: number[]; rotation?: number[]; animation?: string; modelUrl?: string };
+
+/** The action an animation label carries (`jump:3`: the third move begun), and its count. */
+function actionOf(label: string | undefined): { action: Action; moves: number } | null {
+  if (!label) return null;
+  const [name, count] = label.split(':');
+  const action = ACTIONS.find((one) => one === name) ?? null;
+  return action ? { action, moves: Number(count) || 0 } : null;
+}
 
 /** A quaternion (w, x, y, z) turned only about the vertical, back to its turn. */
 const facingOf = (rotation: number[] | undefined) => (rotation && rotation.length === 4 ? 2 * Math.atan2(rotation[2]!, rotation[0]!) : 0);
@@ -54,7 +76,8 @@ function walkerOf(id: string, state: State, was?: Walker): Walker {
     dog: state.modelUrl ? dogOfUrl(state.modelUrl) : (was?.dog ?? '02'),
     position,
     facing: state.rotation ? facingOf(state.rotation) : (was?.facing ?? 0),
-    walking: state.animation ? state.animation === 'walk' : (was?.walking ?? false),
+    action: actionOf(state.animation)?.action ?? was?.action ?? 'idle',
+    moves: actionOf(state.animation)?.moves ?? was?.moves ?? 0,
   };
 }
 
@@ -65,10 +88,16 @@ export type VillageRoom = {
   present: string[];
   /** What is being said, the viewer's own included (under `self`). */
   said: Map<string, Said>;
+  /** The talk so far, oldest first: what was said, and who came and went, since the viewer came in. */
+  log: Line[];
   connected: boolean;
   refused: string | null;
-  /** Tells the room where the viewer is and whether they walk. */
-  move: (position: [number, number, number], facing: number, walking: boolean) => void;
+  /** The viewer's account came into this room from another window, which now stands there in this one's place. */
+  elsewhere: boolean;
+  /** Comes back into the room from this window (the other one is let go). */
+  rejoin: () => void;
+  /** Tells the room where the viewer is and what they are doing (`moves` counts the moves begun). */
+  move: (position: [number, number, number], facing: number, action: Action, moves: number) => void;
   say: (text: string) => boolean;
 };
 
@@ -85,9 +114,18 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
   const [present, setPresent] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
   const [refused, setRefused] = useState<string | null>(null);
+  const [elsewhere, setElsewhere] = useState(false);
+  const [joins, setJoins] = useState(0);
   const [, setTalk] = useState(0);
+  const [log, setLog] = useState<Line[]>([]);
+  const lineKey = useRef(0);
+  const write = useCallback((line: Omit<Line, 'key' | 'at'>) => {
+    lineKey.current += 1;
+    const key = lineKey.current;
+    setLog((lines) => [...lines.slice(-(LOG - 1)), { ...line, key, at: Date.now() }]);
+  }, []);
   const socket = useRef<WebSocket | null>(null);
-  const here = useRef({ position: start, facing: 0, walking: false, sentAt: 0, dirty: true });
+  const here = useRef({ position: start, facing: 0, action: 'idle' as Action, moves: 0, sentAt: 0, dirty: true });
   const startKey = start.join(',');
 
   useEffect(() => {
@@ -96,7 +134,9 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
     let retry = 0;
     let ping = 0;
     let send = 0;
-    here.current = { position: start, facing: 0, walking: false, sentAt: 0, dirty: true };
+    here.current = { position: start, facing: 0, action: 'idle', moves: 0, sentAt: 0, dirty: true };
+    setLog([]);
+    setElsewhere(false);
     const roster = () => setPresent([...others.keys()]);
     const open = async () => {
       if (stopped) return;
@@ -138,19 +178,25 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
                 else {
                   others.set(id, next);
                   roster();
+                  if (message.type === 'PlayerJoined') write({ kind: 'came', name: next.name, text: '', own: false });
                 }
               }
               break;
             case 'PlayerLeft':
-              if (id && others.delete(id)) {
-                said.delete(id);
-                roster();
+              if (id) {
+                const gone = others.get(id);
+                if (gone && others.delete(id)) {
+                  said.delete(id);
+                  roster();
+                  write({ kind: 'went', name: gone.name, text: '', own: false });
+                }
               }
               break;
             case 'Chat':
               if (id && typeof message.text === 'string') {
                 said.set(id, { id, text: message.text, until: Date.now() + SAID_MS });
                 setTalk((count) => count + 1);
+                write({ kind: 'said', name: others.get(id)?.name ?? '', text: message.text, own: false });
               }
               break;
             default:
@@ -162,6 +208,11 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
           setConnected(false);
           others.clear();
           roster();
+          // Another window of the account stands here now: this one waits to be asked back.
+          if ((event as CloseEvent).code === ELSEWHERE) {
+            setElsewhere(true);
+            return;
+          }
           const why = noSeat(event);
           if (why) setRefused(why);
           if (!stopped) retry = window.setTimeout(open, why ? 30000 : RETRY_MS);
@@ -179,7 +230,7 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
       const now = Date.now();
       if (!me.dirty && now - me.sentAt < PING_MS) return;
       const half = me.facing / 2;
-      ws.send(JSON.stringify({ type: 'Update', state: { position: me.position, rotation: [Math.cos(half), 0, Math.sin(half), 0], animation: me.walking ? 'walk' : 'idle', t: now } }));
+      ws.send(JSON.stringify({ type: 'Update', state: { position: me.position, rotation: [Math.cos(half), 0, Math.sin(half), 0], animation: `${me.action}:${me.moves}`, t: now } }));
       me.dirty = false;
       me.sentAt = now;
     }, SEND_MS);
@@ -202,15 +253,17 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
       setPresent([]);
     };
     // `start` is read once, when the room is joined (its key stands for it).
-  }, [username, viewerId, dog, startKey, others, said]);
+  }, [username, viewerId, dog, startKey, others, said, write, joins]);
 
-  const move = useCallback((position: [number, number, number], facing: number, walking: boolean) => {
+  const rejoin = useCallback(() => setJoins((count) => count + 1), []);
+
+  const move = useCallback((position: [number, number, number], facing: number, action: Action, moves: number) => {
     const me = here.current;
+    if (action !== me.action || moves !== me.moves || action === 'walk' || action === 'run' || action === 'jump') me.dirty = true;
     me.position = position;
     me.facing = facing;
-    if (walking !== me.walking) me.dirty = true;
-    me.walking = walking;
-    if (walking) me.dirty = true;
+    me.action = action;
+    me.moves = moves;
   }, []);
 
   const say = useCallback(
@@ -221,10 +274,11 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
       ws.send(JSON.stringify({ type: 'Chat', text: line, range: RANGE }));
       said.set(SELF, { id: SELF, text: line, until: Date.now() + SAID_MS });
       setTalk((count) => count + 1);
+      write({ kind: 'said', name: '', text: line, own: true });
       return true;
     },
-    [said],
+    [said, write],
   );
 
-  return { others, present, said, connected, refused, move, say };
+  return { others, present, said, log, connected, refused, elsewhere, rejoin, move, say };
 }

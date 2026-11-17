@@ -1,23 +1,37 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 
 import { useFrame, useThree } from '@react-three/fiber';
-import { AnimationMixer, Vector3, type AnimationAction, type Group, type Object3D } from 'three';
+import { AnimationMixer, DoubleSide, LoopOnce, LoopRepeat, MeshStandardMaterial, Vector3, type AnimationAction, type AnimationClip, type Group, type Object3D } from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
-import { SELF, type VillageRoom } from '../live';
+import { SELF, type Action, type VillageRoom } from '../live';
 import { loadDogModel, type DogModel } from './dogModel';
 
-// The people in a home's room, each as their own guardian dog walking about its island: the viewer's own, which walks
-// where they press the ground, and everyone else's, eased toward where they last said they were. Over each head their
-// name, and what they say in a cloud for a while (a layer of the page's own, placed every frame).
+// The people in a home's room, each as their own guardian dog about its island: the viewer's own, which walks (or, a
+// long way off, runs) where they press the ground, a flag showing where it is going, and jumps, waves, cheers and
+// dances when asked; and everyone else's, eased toward where they last said they were, doing what they said. Over each
+// head their name, and what they say in a cloud for a while (a layer of the page's own, placed every frame).
 
-/** How tall a walker stands, in metres (a home's own dog is 1.44), and how fast one walks. */
+/** How tall a walker stands, in metres (a home's own dog is 1.44); how fast one walks and runs (metres a second). */
 const HEIGHT = 1.3;
-const SPEED = 2.4;
+const WALK = 4.2;
+const RUN = 8.5;
+/** Farther than this, the viewer's dog runs to where they pressed. */
+const RUN_FROM = 5;
+/** A jump: how high, and how long it is in the air (seconds). */
+const JUMP_HEIGHT = 0.9;
+const JUMP_TIME = 0.62;
+/** How long a move played once lasts when its dog has no clip for it (seconds). */
+const MOVE_TIME = 1.6;
 /** How quickly another walker is eased toward where they said they were, and turned. */
-const FOLLOW = 8;
+const FOLLOW = 10;
 /** How high over the ground a walker's name and cloud are. */
 const OVER = HEIGHT + 0.25;
+
+/** What the page can ask of the viewer's own dog. */
+export type WalkerControl = { goal: [number, number, number] | null; run: boolean; asked: { action: Action; at: number } | null };
+const GOING = new Set<Action>(['walk', 'run']);
+const ONCE = new Set<Action>(['jump', 'wave', 'cheer', 'dance']);
 
 const dogs = new Map<string, DogModel>();
 
@@ -45,8 +59,23 @@ function useDogModel(id: string): DogModel | null {
   return model;
 }
 
-/** One dog as a walker: its own copy of the model, walking or standing as `walking()` says. */
-function Figure({ dog, walking, holder }: { dog: string; walking: () => boolean; holder: RefObject<Group | null> }) {
+/** A clip held to its place: its root's way across the ground taken out, so a dog moves only as the page moves it. */
+function inPlace(clip: AnimationClip): AnimationClip {
+  const held = clip.clone();
+  const root = held.tracks.find((track) => track.name.endsWith('.position'));
+  if (root) {
+    const values = root.values;
+    const [x, z] = [values[0]!, values[2]!];
+    for (let at = 0; at < values.length; at += 3) {
+      values[at] = x;
+      values[at + 2] = z;
+    }
+  }
+  return held;
+}
+
+/** One dog as a walker: its own copy of the model, playing what `action()` says (a move once, each time `moves()` counts one). */
+function Figure({ dog, action, moves, holder }: { dog: string; action: () => Action; moves: () => number; holder: RefObject<Group | null> }) {
   const model = useDogModel(dog);
   const made = useMemo(() => {
     if (!model) return null;
@@ -56,27 +85,67 @@ function Figure({ dog, walking, holder }: { dog: string; walking: () => boolean;
       part.frustumCulled = false;
     });
     const mixer = model.clips ? new AnimationMixer(figure) : null;
-    const idle: AnimationAction | null = mixer && model.clips ? mixer.clipAction(model.clips.idle).play() : null;
-    const walk: AnimationAction | null = mixer && model.clips?.walk ? mixer.clipAction(model.clips.walk) : null;
-    return { figure, mixer, idle, walk };
+    const actions = new Map<Action, AnimationAction>();
+    if (mixer && model.clips) {
+      for (const [name, clip] of Object.entries(model.clips) as [Action, AnimationClip | undefined][]) {
+        if (!clip) continue;
+        const played = mixer.clipAction(inPlace(clip));
+        if (ONCE.has(name)) {
+          played.setLoop(LoopOnce, 1);
+          played.clampWhenFinished = true;
+        } else played.setLoop(LoopRepeat, Infinity);
+        actions.set(name, played);
+      }
+      actions.get('idle')?.play();
+    }
+    return { figure, mixer, actions };
   }, [model]);
-  const was = useRef(false);
-  const bob = useRef(0);
-  useFrame((_, delta) => {
+  const state = useRef({ action: 'idle' as Action, moves: -1, playing: null as AnimationAction | null, since: 0, hop: 0 });
+  useFrame((_, elapsed) => {
     if (!made) return;
-    const now = walking();
-    if (now !== was.current && made.walk && made.idle) {
-      const [from, to] = now ? [made.idle, made.walk] : [made.walk, made.idle];
-      to.reset().play();
-      from.crossFadeTo(to, 0.25, false);
+    const delta = Math.min(0.1, elapsed);
+    const now = action();
+    const count = moves();
+    const was = state.current;
+    if (was.moves < 0) was.moves = count;
+    const fresh = ONCE.has(now) && count !== was.moves;
+    if (now !== was.action || fresh) {
+      const next = made.actions.get(now) ?? (now === 'run' ? made.actions.get('walk') : undefined) ?? made.actions.get('idle');
+      if (next && next !== was.playing) {
+        next.reset().play();
+        if (was.playing) was.playing.crossFadeTo(next, now === 'jump' ? 0.08 : 0.2, false);
+        else made.actions.get('idle')?.crossFadeTo(next, 0.2, false);
+      } else if (next && fresh) next.reset().play();
+      if (next) next.timeScale = now === 'run' && !made.actions.has('run') ? 1.8 : 1;
+      was.playing = next ?? null;
+      was.action = now;
+      was.since = 0;
+      if (now === 'jump') was.hop = 0;
     }
-    was.current = now;
-    made.mixer?.update(Math.min(0.1, delta));
-    // A dog without a walk of its own hops as it goes.
-    if (!made.walk) {
-      bob.current = now ? bob.current + delta * 11 : 0;
-      made.figure.position.y = now ? Math.abs(Math.sin(bob.current)) * 0.12 : 0;
+    was.moves = count;
+    was.since += delta;
+    made.mixer?.update(delta);
+    // A move played once goes back to standing when it is over.
+    const done = was.playing && ONCE.has(was.action) && !was.playing.isRunning();
+    if (done || (ONCE.has(was.action) && !was.playing && was.since > MOVE_TIME)) {
+      const idle = made.actions.get('idle');
+      if (idle && was.playing) {
+        idle.reset().play();
+        was.playing.crossFadeTo(idle, 0.25, false);
+      }
+      was.playing = idle ?? null;
+      was.action = 'idle';
     }
+    // In the air while it jumps; a dog without clips hops as it goes.
+    let lift = 0;
+    if (was.action === 'jump' && was.since < JUMP_TIME) {
+      const t = was.since / JUMP_TIME;
+      lift = 4 * JUMP_HEIGHT * t * (1 - t);
+    } else if (!made.mixer && GOING.has(was.action)) {
+      was.hop += delta * (was.action === 'run' ? 18 : 11);
+      lift = Math.abs(Math.sin(was.hop)) * 0.12;
+    }
+    made.figure.position.y = lift / HEIGHT;
   });
   useEffect(() => () => void made?.mixer?.stopAllAction(), [made]);
   if (!made) return null;
@@ -89,16 +158,67 @@ function Figure({ dog, walking, holder }: { dog: string; walking: () => boolean;
   );
 }
 
+const poleMaterial = new MeshStandardMaterial({ color: '#f5efe3', roughness: 0.6 });
+const clothMaterial = new MeshStandardMaterial({ color: '#ff6f61', roughness: 0.7, side: DoubleSide });
+const ringMaterial = new MeshStandardMaterial({ color: '#ffffff', roughness: 0.5, transparent: true, opacity: 0.85, emissive: '#ffffff', emissiveIntensity: 0.3 });
+
+/** The flag where the viewer's dog is going, planted with a little bounce, the ring on the ground pulsing. */
+function GoalFlag({ control }: { control: RefObject<WalkerControl> }) {
+  const flag = useRef<Group>(null);
+  const cloth = useRef<Group>(null);
+  const ring = useRef<Group>(null);
+  const placed = useRef<{ x: number; z: number; at: number } | null>(null);
+  useFrame(() => {
+    const group = flag.current;
+    if (!group) return;
+    const goal = control.current.goal;
+    if (!goal) {
+      group.visible = false;
+      placed.current = null;
+      return;
+    }
+    const now = performance.now() / 1000;
+    if (!placed.current || placed.current.x !== goal[0] || placed.current.z !== goal[2]) placed.current = { x: goal[0], z: goal[2], at: now };
+    const since = now - placed.current.at;
+    group.visible = true;
+    group.position.set(goal[0], 0, goal[2]);
+    // Dropped in: down from a little above, settling with a bounce.
+    const drop = Math.max(0, 1 - since / 0.25);
+    const settle = since < 0.5 ? Math.sin(since * 25) * 0.08 * (1 - since / 0.5) : 0;
+    group.scale.setScalar(1 + settle);
+    group.position.y = drop * drop * 0.6;
+    if (cloth.current) cloth.current.rotation.y = Math.sin(now * 5) * 0.25;
+    if (ring.current) ring.current.scale.setScalar(0.85 + 0.25 * ((now * 1.5) % 1));
+  });
+  return (
+    <group ref={flag} visible={false}>
+      <mesh material={poleMaterial} position={[0, 0.45, 0]} castShadow>
+        <cylinderGeometry args={[0.025, 0.03, 0.9, 8]} />
+      </mesh>
+      <group ref={cloth} position={[0, 0.78, 0]}>
+        <mesh material={clothMaterial} position={[0.17, 0, 0]} castShadow>
+          <boxGeometry args={[0.32, 0.22, 0.015]} />
+        </mesh>
+      </group>
+      <group ref={ring}>
+        <mesh material={ringMaterial} position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.28, 0.36, 32]} />
+        </mesh>
+      </group>
+    </group>
+  );
+}
+
 const point = new Vector3();
 
 /**
- * Everyone in `room` on the island, the viewer's own dog (`own`) walking toward `goal` (set by the page when the
- * ground is pressed) from `start`; names and what they say placed in `layer`.
+ * Everyone in `room` on the island, the viewer's own dog (`own`) from `start`, as `control` asks (where to go, a move
+ * to make); names and what they say placed in `layer`.
  */
-export function Walkers({ room, own, name, start, goal, layer }: { room: VillageRoom; own: string | null; name: string; start: [number, number, number]; goal: RefObject<[number, number, number] | null>; layer: RefObject<HTMLDivElement | null> }) {
+export function Walkers({ room, own, name, start, control, layer }: { room: VillageRoom; own: string | null; name: string; start: [number, number, number]; control: RefObject<WalkerControl>; layer: RefObject<HTMLDivElement | null> }) {
   const camera = useThree((state) => state.camera);
   const size = useThree((state) => state.size);
-  const mine = useRef({ position: [...start] as [number, number, number], facing: 0, walking: false });
+  const mine = useRef({ position: [...start] as [number, number, number], facing: 0, action: 'idle' as Action, moves: 0, asked: 0, busy: 0 });
   const shown = useRef(new Map<string, { position: Vector3; facing: number }>());
   const holders = useRef(new Map<string, RefObject<Group | null>>());
   const holderOf = (id: string) => {
@@ -110,31 +230,42 @@ export function Walkers({ room, own, name, start, goal, layer }: { room: Village
     return holder;
   };
   useEffect(() => {
-    mine.current = { position: [...start] as [number, number, number], facing: 0, walking: false };
+    mine.current = { position: [...start] as [number, number, number], facing: 0, action: 'idle', moves: 0, asked: 0, busy: 0 };
     // `start` is where the viewer stands as they come to an island (its key stands for it).
   }, [start.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useFrame((_, elapsed) => {
     const delta = Math.min(0.1, elapsed);
-    // The viewer's own: toward the ground pressed, turning to face the way.
+    // The viewer's own: a move asked for, else toward the ground pressed, turning to face the way.
     if (own) {
       const me = mine.current;
-      const target = goal.current;
-      let walking = false;
-      if (target) {
+      const ask = control.current;
+      if (ask.asked && ask.asked.at !== me.asked) {
+        me.asked = ask.asked.at;
+        me.action = ask.asked.action;
+        me.moves += 1;
+        me.busy = ask.asked.action === 'jump' ? JUMP_TIME : ask.asked.action === 'dance' ? 4 : MOVE_TIME;
+        // Waving, cheering and dancing stand still; a jump goes on where it was going.
+        if (ask.asked.action !== 'jump') ask.goal = null;
+      }
+      me.busy = Math.max(0, me.busy - delta);
+      const target = ask.goal;
+      let going: Action | null = null;
+      if (target && (me.busy === 0 || me.action === 'jump')) {
         const dx = target[0] - me.position[0];
         const dz = target[2] - me.position[2];
         const away = Math.hypot(dx, dz);
-        if (away < 0.05) goal.current = null;
+        if (away < 0.08) ask.goal = null;
         else {
-          const step = Math.min(away, SPEED * delta);
+          const running = ask.run || away > RUN_FROM || (me.action === 'run' && away > 1);
+          const step = Math.min(away, (running ? RUN : WALK) * delta);
           me.position = [me.position[0] + (dx / away) * step, 0, me.position[2] + (dz / away) * step];
           me.facing = Math.atan2(dx, dz);
-          walking = true;
+          going = running ? 'run' : 'walk';
         }
       }
-      me.walking = walking;
-      room.move(me.position, me.facing, walking);
+      if (me.busy === 0 || (going && me.action !== 'jump')) me.action = going ?? (ONCE.has(me.action) && me.busy > 0 ? me.action : 'idle');
+      room.move(me.position, me.facing, me.action, me.moves);
       const holder = holders.current.get(SELF)?.current;
       if (holder) {
         holder.position.set(me.position[0], me.position[1], me.position[2]);
@@ -187,10 +318,13 @@ export function Walkers({ room, own, name, start, goal, layer }: { room: Village
 
   return (
     <>
-      {own && <Figure key={`self:${own}`} dog={own} walking={() => mine.current.walking} holder={holderOf(SELF)} />}
+      {own && <Figure key={`self:${own}`} dog={own} action={() => mine.current.action} moves={() => mine.current.moves} holder={holderOf(SELF)} />}
+      {own && <GoalFlag control={control} />}
       {room.present.map((id) => {
         const walker = room.others.get(id);
-        return walker ? <Figure key={`${id}:${walker.dog}`} dog={walker.dog} walking={() => room.others.get(id)?.walking ?? false} holder={holderOf(id)} /> : null;
+        return walker ? (
+          <Figure key={`${id}:${walker.dog}`} dog={walker.dog} action={() => room.others.get(id)?.action ?? 'idle'} moves={() => room.others.get(id)?.moves ?? 0} holder={holderOf(id)} />
+        ) : null;
       })}
       <Labels layer={layer} ids={[...(own ? [SELF] : []), ...room.present]} names={(id) => (id === SELF ? name : (room.others.get(id)?.name ?? ''))} />
     </>
@@ -221,6 +355,7 @@ function Labels({ layer, ids, names }: { layer: RefObject<HTMLDivElement | null>
         host.append(element);
       }
       element.querySelector('.mg-saju-walker-name')!.textContent = names(id);
+      if (id === SELF) element.dataset['own'] = '';
     }
   }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => layer.current?.replaceChildren(), [layer]);

@@ -72,7 +72,7 @@ describe('수호 강아지', () => {
     expect(dogOf('?', '?')).toBe(DOGS[0]);
   });
 
-  it('스무 마리 모두 모델이 있고 가볍다: 리깅된 강아지는 뼈대와 네 동작을, 나머지는 만든 그대로의 모습을 갖는다', () => {
+  it('스무 마리 모두 모델이 있고 가볍다: 리깅된 강아지는 뼈대와 일곱 동작(대기·걷기·달리기·점프·손 흔들기·만세·춤)을, 나머지는 만든 그대로의 모습을 갖는다', () => {
     const ids = new Set(DOGS.map((dog) => dog.id));
     for (const id of RIGGED) expect(ids.has(id), `models.json rigged ${id}`).toBe(true);
     for (const { id } of DOGS) {
@@ -85,7 +85,7 @@ describe('수호 강아지', () => {
       const clips = (gltf.animations ?? []).map((clip) => clip.name).sort();
       if (RIGGED.has(id)) {
         expect(gltf.skins, id).toHaveLength(1);
-        expect(clips, id).toEqual(['cheer', 'idle', 'walk', 'wave']);
+        expect(clips, id).toEqual(['cheer', 'dance', 'idle', 'jump', 'run', 'walk', 'wave']);
         expect(trianglesOf(gltf), id).toBeLessThanOrEqual(10_500);
         expect(bytes.length, id).toBeLessThanOrEqual(450_000);
       } else {

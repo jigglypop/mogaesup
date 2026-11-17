@@ -160,6 +160,8 @@ type EstateProps = {
   /** The guestbook's lines, hung on the 기념 방명록 as plaques; pressing it is told to `onBoard`. */
   notes?: readonly GuestNote[];
   onBoard?: (() => void) | undefined;
+  /** The guardian is away from its place: its owner walks the island as it (see Walkers). */
+  guardianAway?: boolean;
 };
 
 /**
@@ -183,6 +185,7 @@ function Estate({
   bridges,
   notes = NO_NOTES,
   onBoard,
+  guardianAway = false,
 }: EstateProps) {
   const { reading, house, guardian } = profile;
   // The landings as a key: a new list of the same landings lays the estate out no differently.
@@ -200,7 +203,7 @@ function Estate({
     <>
       {build && <Built build={build} origin={origin} />}
       {build && board && <GuestPlaques at={board.at} facing={board.facing} notes={notes} onPress={onBoard} />}
-      {dog && (
+      {dog && !guardianAway && (
         <group key={`${guardian.dog}:${charms}`} position={[estate.guardian.at[0], 0, estate.guardian.at[1]]} scale={GUARDIAN_SCALE}>
           <Guardian guardian={guardian} model={dog} position={[0, 0, 0]} facing={estate.guardian.facing} playful={playful} />
         </group>

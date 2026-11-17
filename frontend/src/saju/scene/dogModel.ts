@@ -9,7 +9,7 @@ import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 // the others stand as they were modelled.
 
 /** What a rigged dog does, by the names the normalizer gives its clips. */
-export type Move = 'idle' | 'cheer' | 'wave' | 'walk';
+export type Move = 'idle' | 'cheer' | 'wave' | 'walk' | 'run' | 'jump' | 'dance';
 /** A rigged dog's clips: the idle it stands in, and the others it has. */
 export type DogClips = { idle: AnimationClip } & Partial<Record<Exclude<Move, 'idle'>, AnimationClip>>;
 /** What a tap plays, in turn. The walk is kept for a dog that will one day go somewhere. */
@@ -32,7 +32,7 @@ export function clipsOf(animations: readonly AnimationClip[]): DogClips | null {
   const idle = named.get('idle');
   if (!idle) return null;
   const clips: DogClips = { idle };
-  for (const move of ['cheer', 'wave', 'walk'] as const) {
+  for (const move of ['cheer', 'wave', 'walk', 'run', 'jump', 'dance'] as const) {
     const clip = named.get(move);
     if (clip) clips[move] = clip;
   }

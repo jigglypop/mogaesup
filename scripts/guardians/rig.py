@@ -80,7 +80,8 @@ RIG_SETTINGS = {'height_meters': 1}
 # One clip each, in one file and in this order: the library's id, its key there (which names the clip in the file), and
 # what the village calls it.
 ACTIONS = ((0, 'Idle', 'idle'), (298, 'Cheer_with_Both_Hands_Up', 'cheer'), (290, 'Wave_One_Hand', 'wave'),
-           (30, 'Casual_Walk', 'walk'))
+           (30, 'Casual_Walk', 'walk'), (659, 'run_fast_3_inplace', 'run'), (466, 'Regular_Jump', 'jump'),
+           (405, 'Joyful_Dance_with_Hand_Sway', 'dance'))
 
 # Who each dog is, for the drawings: what it looks like, what it wears (kept) and what it holds (left out).
 DOGS = {
@@ -386,7 +387,7 @@ def spent(out: Path) -> tuple[int, int]:
     for receipt in out.glob('*/tpose/*.json'):
         if receipt.name != 'accepted.json':
             images += json.loads(receipt.read_text(encoding='utf-8')).get('status') in ('done', 'uncertain')
-    for name in ('task-tpose.json', 'rig.json', 'animations.json'):
+    for name in ('task-tpose.json', 'rig.json', 'animations*.json'):
         for receipt in out.glob(f'*/{name}'):
             credits += json.loads(receipt.read_text(encoding='utf-8')).get('credits') or 0
     return images, credits
@@ -422,6 +423,8 @@ def main() -> int:
                         help='the pose the views are drawn and modelled in (an A-pose for a dog the rig cannot read)')
     parser.add_argument('--longer', action='store_true', help='draw the arms and legs a third longer than drawn')
     parser.add_argument('--hoodie', action='store_true', help='dress the dog in a hoodie of its own colours')
+    parser.add_argument('--reanimate', action='store_true',
+                        help='animate a rigged dog again with every action now listed (the old clips are kept aside)')
     args = parser.parse_args()
     keys = dotenv_values(ROOT / 'backend/.env')
     meshy_key = (keys.get('MESHY_API_KEY') or '').strip()
@@ -474,6 +477,19 @@ def main() -> int:
                     for view in VIEWS:
                         draw(openai, args.out, item, picture, view, args.pose, args.longer, args.hoodie)
                     return f'ok   {item}: views drawn'
+                if args.reanimate:
+                    folder = args.out / item
+                    rigged = json.loads((folder / 'rig.json').read_text(encoding='utf-8'))
+                    old = json.loads((folder / 'animations.json').read_text(encoding='utf-8')) if (folder / 'animations.json').exists() else None
+                    if old and len(old.get('actions', [])) < len(ACTIONS):
+                        number = 1
+                        while (folder / f'animations-{number}.json').exists():
+                            number += 1
+                        (folder / 'animations.json').replace(folder / f'animations-{number}.json')
+                        if (folder / 'animated.glb').exists():
+                            (folder / 'animated.glb').replace(folder / f'animated-{number}.glb')
+                    animated = animate(meshy, args.out, item, rigged)
+                    return f'ok   {item}: animations {animated["task_id"]}'
                 made = model(meshy, args.out, item, args.pose)
                 rigged = rig(meshy, args.out, item, made)
                 animated = animate(meshy, args.out, item, rigged)

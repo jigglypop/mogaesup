@@ -86,6 +86,8 @@ pub const HIDDEN_AT: [f64; 3] = [0.0, -500.0, 0.0];
 /// this place has too many sockets open, or the server has. Its reason is a sentence for the page. A refused upgrade
 /// cannot tell the page why, so the socket is opened and closed with this at once.
 pub(crate) const NO_SEAT: u16 = 4409;
+/// The close code of a socket whose account has come into the same room from another window.
+pub(crate) const ELSEWHERE: u16 = 4410;
 /// The longest reason a close frame carries, in bytes.
 const MAX_CLOSE_REASON: usize = 123;
 /// How long a room keeps where a governed account stood once its last socket there closed: one that comes back starts
@@ -1099,6 +1101,25 @@ impl Rooms {
         self.hub().remove(room_key, id);
     }
 
+    /// Takes `account`'s sockets out of `room_key`, each told it was taken from another window ([`ELSEWHERE`]): a page
+    /// that stands in a room once (the 사주 village's) asks for this as it comes in. How many there were.
+    pub(crate) fn evict_account(&self, room_key: &str, account: Uuid) -> usize {
+        let mut hub = self.hub();
+        let earlier: Vec<String> = hub
+            .rooms
+            .get(room_key)
+            .map(|peers| peers.iter().filter(|(_, peer)| peer.user.id == account).map(|(id, _)| id.clone()).collect())
+            .unwrap_or_default();
+        let mut taken = 0;
+        for id in earlier {
+            if let Some(peer) = hub.remove(room_key, &id) {
+                peer.close.send_replace(Some((ELSEWHERE, "다른 창에서 들어왔습니다.")));
+                taken += 1;
+            }
+        }
+        taken
+    }
+
     /// Takes what `room`'s island game asks of it now (see [`Governance`]) in place of what it asked before: players
     /// hidden from someone now are parked for them (see [`parked`]), and players shown again come back as they are.
     pub fn govern(&self, room_key: &str, governance: Governance) {
@@ -1518,6 +1539,9 @@ pub fn router(state: AppState) -> Router {
 #[derive(Deserialize)]
 struct TicketQuery {
     ticket: String,
+    /// The page stands in the room once for its account: the account's sockets already there are let go.
+    #[serde(default)]
+    once: bool,
 }
 
 pub(crate) const BAD_TICKET: ApiError =
@@ -1542,6 +1566,9 @@ async fn upgrade(
     let standing = standing(&state, home.owner_id, visitor.id).await?;
     let display = if visitor.display_name.is_empty() { visitor.username.clone() } else { visitor.display_name.clone() };
     let address = client_address(&headers);
+    if query.once {
+        state.rooms.evict_account(&home.username, visitor.id);
+    }
     let registration = match state.rooms.register(&home.username, visitor, display, claims.session, standing, address) {
         Ok(registration) => registration,
         Err(refused) => return Ok(ws.on_upgrade(move |socket| refuse(socket, refused))),
@@ -1863,6 +1890,21 @@ mod tests {
         drop(held);
         assert_eq!(rooms.count(), 1);
         assert_eq!(rooms.hub().accounts.len(), 1);
+    }
+
+    #[test]
+    fn a_page_that_stands_once_lets_its_accounts_other_window_go() {
+        let rooms = Rooms::default();
+        let (me, other) = (user(), user());
+        let mut first = peer(&me, "sol", &rooms).unwrap();
+        let _elsewhere = peer(&me, "bori", &rooms).unwrap();
+        let _theirs = peer(&other, "sol", &rooms).unwrap();
+        assert_eq!(rooms.evict_account("sol", me.id), 1);
+        // The first window is told why, the other room and the other account stay.
+        assert_eq!(*first.cancelled.borrow_and_update(), Some((ELSEWHERE, "다른 창에서 들어왔습니다.")));
+        assert_eq!(rooms.count(), 2);
+        assert!(peer(&me, "sol", &rooms).is_ok());
+        assert_eq!(rooms.evict_account("nobody", me.id), 0);
     }
 
     #[test]
