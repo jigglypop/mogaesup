@@ -59,7 +59,7 @@ export type Guardian = {
   charms: { charm: Charm; label: string }[];
 };
 
-/** Which of the five houses is built, what the next element adds to its yard, and the day master's symbol. */
+/** The main element selects the house, the day master its roof and yard symbol, and the second element its trim and keepsake. */
 export type House = {
   style: Element;
   accent: Element | null;
@@ -73,6 +73,19 @@ export const HOUSE_NAME: Record<Element, string> = {
   metal: '은빛 기와집',
   water: '푸른 지붕 연못집',
 };
+
+type Roof = 'gables' | 'glasshouse' | 'dome' | 'lantern' | 'ridge';
+
+export const ROOF_BY_SYMBOL: Record<YardSymbol, Roof> = {
+  tree: 'gables', trellis: 'glasshouse', sun: 'dome', candle: 'lantern', mountain: 'gables',
+  field: 'ridge', anvil: 'ridge', gem: 'dome', lighthouse: 'lantern', rain: 'glasshouse',
+};
+
+const ROOF_NAME: Record<Roof, string> = {
+  gables: '쌍박공', glasshouse: '온실 다락', dome: '천문 돔', lantern: '등탑', ridge: '용마루',
+};
+
+export const houseName = (house: House): string => `${HOUSE_NAME[house.style]} · ${ROOF_NAME[ROOF_BY_SYMBOL[house.symbol]]}`;
 
 export type Profile = {
   reading: Reading;

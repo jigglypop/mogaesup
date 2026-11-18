@@ -1,0 +1,33 @@
+{
+  "format": "One three-item inventory strip per element. Join the subjects from left to right with '; ' between the prefix and suffix.",
+  "prefix": "Use case: stylized-concept. Produce ONE production-ready horizontal game sprite strip, exactly THREE individual freestanding props side by side in a single row. Landscape 3:1 aspect if possible. Three equally wide cells with fully transparent background; center each object entirely within its own third, same baseline, at least 12% empty gutter around each. Each object is separate, no overlaps or shared base. Objects in order from left to right: ",
+  "subjects": {
+    "wood": [
+      "a windswept jade pine bonsai in a shallow celadon oval pot",
+      "a bamboo wind wheel on a wooden garden stand",
+      "a miniature red-fruit plum tree flowering in a ceramic planter"
+    ],
+    "fire": [
+      "a warm crimson lotus-shaped stone lantern glowing at its heart",
+      "a copper brazier with three dancing flame tongues",
+      "a little vermilion pavilion lantern hanging from a freestanding carved post"
+    ],
+    "earth": [
+      "a balanced ochre river-stone cairn on a small moss pad",
+      "a round honey-brown earthenware onggi with deep ochre lid and braided rice straw",
+      "a miniature terracotta mountain sculpture with three uneven ochre peaks"
+    ],
+    "metal": [
+      "an open brass arch holding a tiny silver wind bell with a hanging fish clapper",
+      "a sculptural silver crane standing on one foot on a small bronze plinth",
+      "a softly gleaming golden armillary sphere with intersecting rings on a bronze foot"
+    ],
+    "water": [
+      "a shallow midnight-blue round lotus basin with a single white water lily",
+      "a blue celadon bamboo water spout spilling a clear stream into a small dark bowl",
+      "a deep indigo koi-shaped garden fountain, arched fish above a shallow turquoise pool"
+    ]
+  },
+  "suffix": ". Cozy Korean garden miniature aesthetic, orthographic three-quarter view, tactile low-poly painted wood and glazed stoneware, chunky readable silhouettes, crisp faceted form, soft studio daylight from upper left, gentle desaturated material colors. Designed as small props for an isometric island and matching inventory thumbnails. No cast shadow beyond objects, captions, grid, borders, letters, backdrop or people.",
+  "transparent_background": true
+}

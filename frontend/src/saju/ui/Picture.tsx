@@ -6,6 +6,7 @@ import { useFocusTrap } from '../../ui/focus';
 import { Icon } from '../../ui/icons';
 import { keyOf, type Birth } from '../engine';
 import type { Profile } from '../profile';
+import type { IslandDecor } from '../scene/Decor';
 import { Snapshot } from '../scene/Snapshot';
 import { Making, useMade, type MadeState } from './Reading';
 
@@ -61,7 +62,7 @@ export function encodePicture(source: CanvasImageSource): string {
 }
 
 /** Draws the home's island alone off the page, as the saved picture does, and hands it over encoded. */
-function PictureShot({ profile, onImage, onFail }: { profile: Profile; onImage: (image: string) => void; onFail: () => void }) {
+function PictureShot({ profile, decor, onImage, onFail }: { profile: Profile; decor: IslandDecor | null; onImage: (image: string) => void; onFail: () => void }) {
   const done = useRef(false);
   const failed = useRef(onFail);
   failed.current = onFail;
@@ -85,7 +86,8 @@ function PictureShot({ profile, onImage, onFail }: { profile: Profile; onImage: 
     }
     onImage(image);
   };
-  return <Snapshot profile={profile} onShot={shot} />;
+  // This snapshot is sent to the illustration provider. Keep the member's uploaded photo in local exports only.
+  return decor && <Snapshot profile={profile} decor={{ ...decor, photoBoard: null }} onShot={shot} />;
 }
 
 /**
@@ -95,11 +97,12 @@ function PictureShot({ profile, onImage, onFail }: { profile: Profile; onImage: 
  * on the owner's say: `again` for a new one in place of the one drawn. `shot` is what draws the island, to put in the
  * page while it does.
  */
-export function usePicture({ username, ownerId, birth, profile, complete, poll }: {
+export function usePicture({ username, ownerId, birth, profile, decor, complete, poll }: {
   username: string;
   ownerId: string | null;
   birth: Birth | null;
   profile: Profile | null;
+  decor: IslandDecor | null;
   complete: boolean;
   poll: boolean;
 }) {
@@ -136,6 +139,7 @@ export function usePicture({ username, ownerId, birth, profile, complete, poll }
       <PictureShot
         key={`${shooting.key}:${shooting.again}`}
         profile={profile}
+        decor={decor}
         onImage={(image) => {
           setShooting(null);
           ask(() => sajuApi.draw({ expectedOwnerId: ownerId, image, ...(shooting.again ? { again: true } : {}) }));
@@ -150,7 +154,7 @@ export function usePicture({ username, ownerId, birth, profile, complete, poll }
 }
 
 /** The picture over the page, as large as the window lets it be; Escape, 닫기 or a press beside it closes it. */
-function PictureView({ url, alt, onClose }: { url: string; alt: string; onClose: () => void }) {
+export function PictureView({ url, alt, onClose, size }: { url: string; alt: string; onClose: () => void; size?: { width: number; height: number } }) {
   const dialog = useRef<HTMLDivElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   useFocusTrap(dialog, close);
@@ -168,8 +172,8 @@ function PictureView({ url, alt, onClose }: { url: string; alt: string; onClose:
         }
       }}
     >
-      <div ref={dialog} className="mg-saju-picture-view" role="dialog" aria-modal="true" aria-label={alt} tabIndex={-1}>
-        <img src={url} alt={alt} width={PICTURE_SOURCE} height={PICTURE_SOURCE} />
+      <div ref={dialog} className={`mg-saju-picture-view${size ? ' is-photo-board' : ''}`} role="dialog" aria-modal="true" aria-label={alt} tabIndex={-1}>
+        <img src={url} alt={alt} width={size?.width ?? PICTURE_SOURCE} height={size?.height ?? PICTURE_SOURCE} />
         <button ref={close} className="mg-icon-btn mg-saju-picture-close" aria-label="닫기" onClick={onClose}>
           <Icon name="close" />
         </button>

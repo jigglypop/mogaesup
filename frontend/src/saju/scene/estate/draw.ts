@@ -5,6 +5,7 @@ import type { Season, TreeState } from '../../mulsang';
 import { bench, boat, clothesline, fence, jar, jetty, lantern, pot, stoneWall, well, woodpile } from '../arch';
 import { Builder, type Build, type Finish, type V3 } from '../build';
 import { buildHome, HOUSE } from '../homes';
+import { terrainPlant } from './terrainPlants';
 import { WATER_LEVEL } from '../mood';
 import { bamboo, birch, bush, conifer, crown, flowerBed, lilies, pine, reeds, rock, steppingStones, toned, tree, willow, type Palette } from '../plants';
 import { surfaceMaps } from '../surfaces';
@@ -695,7 +696,7 @@ function drawPlacements(b: Builder, estate: Estate, options: DrawOptions, keep: 
   const { season } = estate.plan;
   const lamps: Record<string, 'path' | 'stone' | 'post'> = { wood: 'path', fire: 'post', earth: 'stone', metal: 'stone', water: 'path' };
   for (const placement of estate.placements) {
-    if (!keep(placement)) continue;
+    if (!keep(placement) || terrainPlant(b, options.paint?.surface, placement)) continue;
     const [x, z] = placement.at;
     const at: V3 = [x, 0, z];
     switch (placement.kind) {

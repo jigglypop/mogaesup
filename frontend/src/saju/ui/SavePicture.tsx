@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { Icon } from '../../ui/icons';
 import type { Profile } from '../profile';
+import type { IslandDecor } from '../scene/Decor';
 import { Snapshot } from '../scene/Snapshot';
 import { composePicture, pictureFileName, saveBlob } from '../snapshot';
 
@@ -15,7 +16,7 @@ const token = (name: string) => getComputedStyle(document.documentElement).getPr
  * 내 집 이미지 저장하기: draws the home on its island on a square canvas off the page, puts its name under it, and saves
  * the picture as a PNG.
  */
-export function SavePicture({ name, profile }: { name: string; profile: Profile }) {
+export function SavePicture({ name, profile, decor }: { name: string; profile: Profile; decor: IslandDecor | null }) {
   const [state, setState] = useState<'idle' | 'drawing' | 'saved' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
@@ -55,7 +56,7 @@ export function SavePicture({ name, profile }: { name: string; profile: Profile 
   };
   return (
     <>
-      <button className="mg-btn mg-saju-save" disabled={state === 'drawing'} onClick={start}>
+      <button className="mg-btn mg-saju-save" disabled={state === 'drawing' || !decor} onClick={start}>
         <Icon name="download" /> <span>{state === 'drawing' ? '그리는 중…' : '내 집 이미지 저장하기'}</span>
       </button>
       {state === 'saved' && (
@@ -68,7 +69,7 @@ export function SavePicture({ name, profile }: { name: string; profile: Profile 
           이미지를 만들지 못했어요
         </p>
       )}
-      {state === 'drawing' && <Snapshot profile={profile} onShot={shot} />}
+      {state === 'drawing' && decor && <Snapshot profile={profile} decor={decor} onShot={shot} />}
     </>
   );
 }

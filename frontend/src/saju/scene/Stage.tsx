@@ -4,6 +4,7 @@ import { Canvas, useFrame, useThree, type Renderer } from '@react-three/fiber';
 import { AdditiveBlending, CylinderGeometry, Matrix4, MeshBasicMaterial, PCFShadowMap, Plane, Raycaster, RingGeometry, Vector2, Vector3, type BufferGeometry, type Camera, type InstancedBufferGeometry, type Mesh, type Object3D, type Scene as World } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 
+import type { Terrain } from '../../api/types';
 import { Icon } from '../../ui/icons';
 import type { Compat } from '../compat';
 import type { Profile } from '../profile';
@@ -206,7 +207,7 @@ const DRUM = new CylinderGeometry(1, 1, 1, 48);
  * A home's island in its place. The water about it lights up under the pointer when it can be visited. Memoized: the
  * page around the canvas renders again for every line in a guestbook, and a home is a great deal to go over.
  */
-const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, landings, notes, onBoard, guardianAway = false }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; landings?: readonly number[]; notes?: readonly GuestNote[]; onBoard?: (() => void) | undefined; guardianAway?: boolean }) {
+const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, terrain = 'default', landings, notes, onBoard, guardianAway = false }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; terrain?: Terrain; landings?: readonly number[]; notes?: readonly GuestNote[]; onBoard?: (() => void) | undefined; guardianAway?: boolean }) {
   const [hovered, setHovered] = useState(false);
   const canvas = useThree((state) => state.gl.domElement);
   const glow = useMemo(() => new MeshBasicMaterial({ color: '#ffe2b0', transparent: true, opacity: 0, depthWrite: false, blending: AdditiveBlending }), []);
@@ -253,7 +254,7 @@ const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, land
       <mesh geometry={HALO} material={glow} position={[0, WATER_LEVEL + 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]} scale={reach / ISLANDS.neighbour.reach} renderOrder={1} />
       {home.profile ? (
         kind === 'home' ? (
-          <HomeEstate profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} guardianAway={guardianAway} />
+          <HomeEstate profile={home.profile} origin={origin} terrain={terrain} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} guardianAway={guardianAway} />
         ) : (
           <Diorama profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} kind={kind} />
         )
@@ -449,7 +450,7 @@ function Keepsake({ glimpse, touched }: { glimpse: string; touched: RefObject<nu
   const size = useThree((state) => state.size);
   const works = useContext(WorksContext);
   useFrame(() => {
-    if (!works?.shown || kept.has(glimpse) || document.visibilityState !== 'visible') return;
+    if (!works?.shown || works.pending > 0 || kept.has(glimpse) || document.visibilityState !== 'visible') return;
     if (performance.now() - Math.max(works.activeAt, touched.current ?? 0) < KEEP_STILL_MS) return;
     kept.add(glimpse);
     void takeGlimpse(gl.domElement, size.width, size.height).then((picture) => picture && keepGlimpse(glimpse, picture));
@@ -560,13 +561,14 @@ const calm = () => typeof matchMedia === 'function' && matchMedia('(prefers-redu
 export type StageHandle = {
   /** Zooms in (a factor above 1) or out (below 1), within what the canvas allows. */
   zoomBy: (factor: number) => void;
+  focusItem: (spot: Spot) => void;
 };
 
 /**
- * What a press at `point` on the canvas (a ray through it, as `camera` sees) meets first in `world` that stands above
- * the ground: what is drawn as scattered copies (leaves, grass) and the lake are passed through, and what is hidden.
+ * The first solid mesh under the pointer, including its position and parent object. Shader-scattered leaves and
+ * grass, the lake, and hidden objects are passed through.
  */
-function standingAt(world: World, camera: Camera, point: Vector2): Vector3 | null {
+function standingAt(world: World, camera: Camera, point: Vector2) {
   ray.setFromCamera(point, camera);
   const solid: Object3D[] = [];
   world.traverseVisible((object) => {
@@ -575,8 +577,7 @@ function standingAt(world: World, camera: Camera, point: Vector2): Vector3 | nul
     if ((mesh.geometry as InstancedBufferGeometry).isInstancedBufferGeometry) return;
     solid.push(mesh);
   });
-  const first = ray.intersectObjects(solid, false)[0];
-  return first && first.point.y > STANDING ? first.point.clone() : null;
+  return ray.intersectObjects(solid, false)[0];
 }
 
 type StageProps = {
@@ -595,11 +596,14 @@ type StageProps = {
   pins?: ReactNode;
   /** What its owner has placed on the island at the village's middle (see Decor), in its own measure. */
   decor?: ReactNode;
+  terrain?: Terrain;
   /**
    * Told of a press on the island at the village's middle, where on its ground, while something is being placed on it:
    * a press then places, and visits nothing.
    */
   onPlace?: ((spot: Spot) => void) | undefined;
+  onSelectItem?: (id: string) => void;
+  onOpenPhoto?: (() => void) | undefined;
   /** The guestbook's lines, hung on the page's own island's 기념 방명록; pressing it is told to `onBoard`. */
   notes?: readonly GuestNote[];
   onBoard?: (() => void) | undefined;
@@ -651,7 +655,7 @@ function groundAt(camera: Camera | null, box: DOMRect, x: number, y: number, hei
  * standing on the island in view brings the camera to it and in close; a double press on the water puts it back where
  * it began.
  */
-export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, onPlace, notes, onBoard, onWalk, overlay, guardianAway = false }: StageProps) {
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, terrain = 'default', onPlace, onSelectItem, onOpenPhoto, notes, onBoard, onWalk, overlay, guardianAway = false }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const gaze = useRef<Gaze>({ ...UNMOVED, pan: { ...UNMOVED.pan } });
@@ -724,7 +728,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
    * Brings the camera to `point` and in close: the point it looks at becomes the one at its own height straight in front
    * of `point` as the camera will face, so that `point` is in the middle of the view.
    */
-  const closeIn = (point: Vector3) => {
+  const closeIn = (point: Vector3, zoomAgain = true) => {
     const want = gaze.current;
     const azimuth = AZIMUTH + want.turn;
     const [tx, ty, tz] = aim.current;
@@ -732,7 +736,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     const x = point.x - Math.cos(want.tilt) * Math.sin(azimuth) * back;
     const z = point.z - Math.cos(want.tilt) * Math.cos(azimuth) * back;
     moveBy({ x: x - (tx + want.pan.x), z: z - (tz + want.pan.z) });
-    want.zoom = clampZoom(want.zoom >= CLOSE_IN * 0.98 ? want.zoom * CLOSER : CLOSE_IN);
+    want.zoom = clampZoom(want.zoom >= CLOSE_IN * 0.98 ? want.zoom * (zoomAgain ? CLOSER : 1) : CLOSE_IN);
   };
   useImperativeHandle(
     ref,
@@ -740,6 +744,10 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       zoomBy: (factor) => {
         touched.current = performance.now();
         gaze.current.zoom = clampZoom(gaze.current.zoom * factor);
+      },
+      focusItem: ({ x, z }) => {
+        touched.current = performance.now();
+        closeIn(new Vector3(x, 0.6, z), false);
       },
     }),
     [],
@@ -921,8 +929,16 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     const area = element.getBoundingClientRect();
     if (area.width <= 0 || area.height <= 0) return;
     pointer.set(((event.clientX - area.left) / area.width) * 2 - 1, -((event.clientY - area.top) / area.height) * 2 + 1);
-    const hit = standingAt(world.current, camera, pointer);
-    if (!hit) {
+    const first = standingAt(world.current, camera, pointer);
+    if (onSelectItem || onOpenPhoto) {
+      for (let part: Object3D | null = first?.object ?? null; part; part = part.parent) {
+        if (onOpenPhoto && part.userData['photoBoard']) return onOpenPhoto();
+        const id = part.userData['decorId'];
+        if (onSelectItem && typeof id === 'string') return onSelectItem(id);
+      }
+    }
+    const hit = first?.point;
+    if (!hit || hit.y <= STANDING) {
       // The bare ground of the page's own island: the viewer's dog walks there.
       const ground = groundAt(camera, area, event.clientX, event.clientY, 0);
       const home = islands[0];
@@ -1038,7 +1054,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const glimpse = area && glimpseKey(village, frame, inset, area, mood, quality);
+  const glimpse = area && glimpseKey(`${village}|${terrain}`, frame, inset, area, mood, quality);
   // The picture this browser kept of the village as it is framed now, shown while the canvas makes it ready.
   const [picture, setPicture] = useState<{ key: string; url: string } | null>(null);
   useEffect(() => {
@@ -1080,7 +1096,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
         >
           <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed} onReady={shown} village={village}>
             {homes.map((home, index) => (
-              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { landings, ...(notes ? { notes } : {}), onBoard, guardianAway } : {})} />
+              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { terrain, landings, ...(notes ? { notes } : {}), onBoard, guardianAway } : {})} />
             ))}
             {bridges.map((bridge) => (
               <Bridge key={`${bridge.to.id}:${bridge.colors.join()}`} from={[bridge.from.x, bridge.from.z]} to={[bridge.to.x, bridge.to.z]} colors={bridge.colors} tone={bridge.compat.tone} />

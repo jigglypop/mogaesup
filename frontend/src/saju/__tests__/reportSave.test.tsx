@@ -41,7 +41,7 @@ function deferred<T>() {
 const settle = () => act(async () => {});
 
 async function renderButton(pictureUrl: string | null) {
-  const view = await mount(<SaveReport name={noeul.name} birth={noeul.birth} reading={READING} pictureUrl={pictureUrl} />);
+  const view = await mount(<SaveReport name={noeul.name} birth={noeul.birth} reading={READING} pictureUrl={pictureUrl} decor={{ items: [], flags: [], own: null, character: null }} />);
   const button = () => view.container.querySelector('button')!;
   const press = () => act(async () => button().click());
   return { ...view, button, press };

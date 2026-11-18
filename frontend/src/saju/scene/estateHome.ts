@@ -1,5 +1,6 @@
 import { Color } from 'three';
 
+import type { Terrain } from '../../api/types';
 import type { Element } from '../elements';
 import type { Reading } from '../engine';
 import type { Season } from '../mulsang';
@@ -203,8 +204,24 @@ export function pathLamps(paths: readonly EstatePath[], stream: Estate['stream']
  */
 const KEEP_GREEN: Record<Season['key'], number> = { spring: 0.3, summer: 0.25, autumn: 0.82, winter: 0.7 };
 
+const TILES: Record<Exclude<Terrain, 'default'>, GroundPaint> = {
+  snow: {
+    surface: 'snow', lawn: ['#d6e7f2', '#f1f7fc', '#c6daeb'], dirt: '#abc1cc', yard: '#cdd7d9', path: '#8f9fad',
+    stones: '#9fadc0', bank: '#929ca8', sand: '#d2dce0', bed: '#253e50', cover: 0,
+  },
+  desert: {
+    surface: 'desert', lawn: ['#e4b777', '#f8d49a', '#c8955d'], dirt: '#bf8c55', yard: '#ca945e', path: '#ac7149',
+    stones: '#b28e68', bank: '#bb8d67', sand: '#f2d399', bed: '#4d483c', cover: 0,
+  },
+  moss: {
+    surface: 'moss', lawn: ['#447158', '#729147', '#9dba63'], dirt: '#5e6241', yard: '#979164', path: '#8d8468',
+    stones: '#889382', bank: '#6b756b', sand: '#b9b18e', bed: '#244238', cover: 0,
+  },
+};
+
 /** The estate's ground in its month's season, kept as green as the house's own lawn (see {@link KEEP_GREEN}). */
-export function lawnOf(estate: Estate, style: Element): GroundPaint {
+export function lawnOf(estate: Estate, style: Element, terrain: Terrain = 'default'): GroundPaint {
+  if (terrain !== 'default') return TILES[terrain];
   const season = seasonPaint(estate);
   const share = KEEP_GREEN[estate.plan.season.key];
   const keep = (hex: string, green: string) => `#${new Color(hex).lerp(new Color(green), share).getHexString()}`;

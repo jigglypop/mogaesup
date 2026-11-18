@@ -1,4 +1,4 @@
-import { BufferGeometry, Float32BufferAttribute, Uint32BufferAttribute, Vector3, type Camera } from 'three';
+import { BufferAttribute, BufferGeometry, Vector3, type Camera } from 'three';
 
 import { WATER_LEVEL } from '../mood';
 
@@ -15,33 +15,43 @@ export const COVER_MARGIN = 1.12;
 /** The corners of a ring `index` rings out from the middle: as many as keep them as far apart as the rings are. */
 export const ringCorners = (index: number) => Math.max(8, Math.ceil((2 * Math.PI * index) / 8) * 8);
 
-type Ring = { start: number; count: number; offset: number };
+type Ring = { start: number; count: number; offset: number; radius: number };
 
 /**
  * A disc of `rings` evenly spaced rings about the origin, radius 1 in the xz-plane and facing up, then the skirt. Each
  * corner's position is where it lies on that unit disc; the surface's shader lays the disc on the water (see placeRing).
  */
 export function ringGeometry(rings: number): BufferGeometry {
-  const positions: number[] = [0, 0, 0];
   const all: Ring[] = [];
+  let vertices = 1; // The centre belongs to no ring.
   const add = (radius: number, count: number, offset: number) => {
-    all.push({ start: positions.length / 3, count, offset });
-    for (let corner = 0; corner < count; corner++) {
-      const angle = ((corner + offset) / count) * Math.PI * 2;
-      positions.push(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
-    }
+    all.push({ start: vertices, count, offset, radius });
+    vertices += count;
   };
   for (let index = 1; index <= rings; index++) add(index / rings, ringCorners(index), (index % 2) * 0.5);
   for (const radius of SKIRT) add(radius, ringCorners(rings), 0);
 
-  const indices: number[] = [];
-  // Wound so that each face looks up: counter-clockwise seen from above.
-  const face = (a: number, b: number, c: number) => {
-    const ax = positions[a * 3]!;
-    const az = positions[a * 3 + 2]!;
-    const cross = (positions[b * 3 + 2]! - az) * (positions[c * 3]! - ax) - (positions[b * 3]! - ax) * (positions[c * 3 + 2]! - az);
-    if (cross >= 0) indices.push(a, b, c);
-    else indices.push(a, c, b);
+  const positions = new Float32Array(vertices * 3);
+  const normals = new Float32Array(vertices * 3);
+  normals[1] = 1;
+  for (const { start, radius, count, offset } of all) {
+    for (let corner = 0; corner < count; corner++) {
+      const angle = ((corner + offset) / count) * Math.PI * 2;
+      const xyz = (start + corner) * 3;
+      positions[xyz] = Math.cos(angle) * radius;
+      positions[xyz + 2] = Math.sin(angle) * radius;
+      normals[xyz + 1] = 1;
+    }
+  }
+
+  // One face per edge of the centre fan; each strip then needs one per edge of both rings.
+  const faces = (vertices - 1) * 2 - all[all.length - 1]!.count;
+  const indices = vertices <= 65535 ? new Uint16Array(faces * 3) : new Uint32Array(faces * 3);
+  let cursor = 0;
+  const face = (inner: number, outer: number, next: number) => {
+    indices[cursor++] = inner;
+    indices[cursor++] = next; // The rings advance clockwise when seen from above.
+    indices[cursor++] = outer;
   };
   const first = all[0]!;
   for (let corner = 0; corner < first.count; corner++) face(0, first.start + corner, first.start + ((corner + 1) % first.count));
@@ -65,12 +75,10 @@ export function ringGeometry(rings: number): BufferGeometry {
       }
     }
   }
-  const normals = new Float32Array(positions.length);
-  for (let index = 1; index < normals.length; index += 3) normals[index] = 1;
   const geometry = new BufferGeometry();
-  geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('normal', new Float32BufferAttribute(normals, 3));
-  geometry.setIndex(new Uint32BufferAttribute(new Uint32Array(indices), 1));
+  geometry.setAttribute('position', new BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new BufferAttribute(normals, 3));
+  geometry.setIndex(new BufferAttribute(indices, 1));
   return geometry;
 }
 

@@ -6,6 +6,7 @@ import type { Birth } from '../engine';
 import { profileOf } from '../profile';
 import { pictureAt, reportFileName, reportOf } from '../report/make';
 import type { Picture } from '../report/pages';
+import type { IslandDecor } from '../scene/Decor';
 import { Snapshot } from '../scene/Snapshot';
 import { saveBlob } from '../snapshot';
 
@@ -16,7 +17,7 @@ const DRAW_WAIT_MS = 15_000;
  * PDF 저장: the home's chart and its reading as a PDF to keep (`<name>-팔자피자.pdf`). Its cover carries the home's
  * 미연시 picture, or, without one, the island drawn alone as the saved picture draws it.
  */
-export function SaveReport({ name, birth, reading, pictureUrl }: { name: string; birth: Birth; reading: SajuReading; pictureUrl: string | null }) {
+export function SaveReport({ name, birth, reading, pictureUrl, decor }: { name: string; birth: Birth; reading: SajuReading; pictureUrl: string | null; decor: IslandDecor | null }) {
   const [state, setState] = useState<'idle' | 'making' | 'failed'>('idle');
   // While the island is drawn for the cover: where its picture goes.
   const [shoot, setShoot] = useState<((picture: Picture | null) => void) | null>(null);
@@ -63,7 +64,7 @@ export function SaveReport({ name, birth, reading, pictureUrl }: { name: string;
           PDF를 만들지 못했어요
         </p>
       )}
-      {shoot && <Snapshot profile={profileOf(birth)} onShot={shoot} />}
+      {shoot && decor && <Snapshot profile={profileOf(birth)} decor={decor} onShot={shoot} />}
     </>
   );
 }

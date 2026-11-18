@@ -14,8 +14,8 @@ import { useStored } from '../minihome/stored';
 import { Brand, PageShell, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
 import { compatOf } from './compat';
-import type { Birth } from './engine';
-import { flagDesignOf, itemId, useDecor } from './decor';
+import { keyOf, type Birth } from './engine';
+import { flagDesignOf, itemId, MOST_ITEMS, useDecor } from './decor';
 import { forgetLegacyHome, readLegacyHome, useMinihome, type Minihome } from './minihome';
 import { profileOf, type Profile } from './profile';
 import type { Resident } from './residents';
@@ -31,8 +31,12 @@ import { TalkBar } from './ui/TalkBar';
 import { ChartPanel } from './ui/ChartPanel';
 import { HomePanel, type Bridge } from './ui/HomePanel';
 import { Onboarding } from './ui/Onboarding';
-import { DecorCard, GiveFlagCard, type Placing } from './ui/DecorCard';
-import { PictureCard, usePicture } from './ui/Picture';
+import { DecorCard, GiveFlagCard, type DecorSection, type Placing } from './ui/DecorCard';
+import { ElementShelf } from './ui/ElementShelf';
+import { CompatGiftCard } from './ui/CompatGiftCard';
+import { PictureCard, PictureView, usePicture } from './ui/Picture';
+import { PhotoBoardCard } from './ui/PhotoBoardCard';
+import { TerrainPicker } from './ui/TerrainPicker';
 import { PixelIcon } from './ui/PixelIcon';
 import { ReadingCard, useReading } from './ui/Reading';
 import { SavePicture } from './ui/SavePicture';
@@ -204,6 +208,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // Folding and opening take the keyboard along: the button pressed goes away with the press, and focus goes to the
   // one that undoes it.
   const panelId = useId();
+  const decorId = useId();
   const folder = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const pressed = useRef(false);
@@ -288,18 +293,62 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // island places it and visits nothing.
   const decor = useDecor(username, view.isOwner ? view.profile.ownerId : null);
   const ownFlag = useMemo(() => (host ? flagDesignOf(host.resident.birth) : null), [host]);
+  const board = decor.decor?.photoBoard;
+  const photoBoard = useMemo(() => board ? { ...board, url: `/api/homes/${encodeURIComponent(username)}/saju/photo-board/${board.version}` } : null, [board, username]);
+  const [openPhoto, setOpenPhoto] = useState<string | null>(null);
+  const showBoard = () => setOpenPhoto(photoBoard?.url ?? null);
+  const islandDecor = useMemo(() => decor.decor && ({
+    items: decor.decor.items, flags: decor.decor.flags, gifts: decor.decor.gifts,
+    terrain: decor.decor.terrain ?? 'default',
+    own: ownFlag, character: decor.decor.character?.modelUrl ?? null, photoBoard,
+  }), [decor.decor, ownFlag, photoBoard]);
   const giftFlag = useMemo(() => (!view.isOwner && viewer && mine ? flagDesignOf(mine.birth) : null), [view.isOwner, viewer, mine]);
   const [placingFor, setPlacingFor] = useState<{ of: string; placing: Placing | null }>({ of: username, placing: null });
-  const placing = placingFor.of === username ? placingFor.placing : null;
-  const setPlacing = useCallback((next: Placing | null) => setPlacingFor({ of: username, placing: next }), [username]);
+  const [decorTab, setDecorTab] = useState<{ of: string; section: DecorSection }>({ of: username, section: 'items' });
+  const decorSection = decorTab.of === username ? decorTab.section : 'items';
+  const canDecorate = view.isOwner && !!host && route.kind === 'home' && route.tab === 'home' && !waiting;
+  const placing = canDecorate && placingFor.of === username ? placingFor.placing : null;
+  const [selectedFor, setSelectedFor] = useState<{ of: string; id: string } | null>(null);
+  const selectedId = canDecorate && selectedFor?.of === username ? selectedFor.id : null;
+  const setPlacing = useCallback((next: Placing | null) => {
+    setPlacingFor({ of: username, placing: next });
+    if (next && !next.itemId) setSelectedFor(null);
+  }, [username]);
+  const selectItem = useCallback((id: string | null) => {
+    setSelectedFor(id ? { of: username, id } : null);
+    setPlacing(null);
+  }, [username, setPlacing]);
+  const selectOnIsland = useCallback((id: string) => {
+    selectItem(id);
+    setDecorTab({ of: username, section: 'items' });
+    setPanelOpen(true);
+    requestAnimationFrame(() => side.current?.querySelector<HTMLElement>('.mg-decor-inspector')?.scrollIntoView?.({ block: 'nearest' }));
+  }, [selectItem, setPanelOpen, username]);
+  const showDecor = () => {
+    setPanelOpen(true);
+    requestAnimationFrame(() => {
+      const editor = document.getElementById(decorId);
+      editor?.scrollIntoView?.({ block: 'start' });
+      editor?.querySelector<HTMLButtonElement>('[role=tab][aria-selected=true]')?.focus({ preventScroll: true });
+    });
+  };
   const placeAt = useCallback(
     (spot: Spot) => {
       if (!placing || !decor.decor) return;
       const round = (value: number) => Math.round(value * 100) / 100;
-      decor.place([...decor.decor.items, { id: itemId(), kind: placing.kind, ref: placing.ref, x: round(spot.x), z: round(spot.z), turn: 0 }]);
-      setPlacing(null);
+      const items = decor.decor.items;
+      const at = { x: round(spot.x), z: round(spot.z) };
+      const id = placing.itemId ?? itemId();
+      if (placing.itemId) {
+        if (!items.some((item) => item.id === id)) return setPlacing(null);
+        decor.place(items.map((item) => item.id === id ? { ...item, ...at } : item));
+      } else {
+        if (items.length >= MOST_ITEMS) return setPlacing(null);
+        decor.place([...items, { id, kind: placing.kind, ref: placing.ref, ...at, turn: 0 }]);
+      }
+      selectOnIsland(id);
     },
-    [placing, decor, setPlacing],
+    [placing, decor, selectOnIsland, setPlacing],
   );
   // What this browser kept from the village's first days, for a member who has not built their home here yet.
   const legacy = useMemo(() => (view.isOwner && !owner ? readLegacyHome() : null), [username, view.isOwner, owner]);
@@ -399,8 +448,9 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
     ownerId,
     birth,
     profile: host?.profile ?? null,
+    decor: islandDecor,
     // The island is complete once it is built and on the canvas, and not while its birth is being entered again.
-    complete: drawn && route.kind !== 'edit',
+    complete: drawn && !!islandDecor && route.kind !== 'edit',
     poll: route.kind === 'home',
   });
 
@@ -422,7 +472,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
         owner={view.isOwner}
         onAsk={reading.ask}
         onReload={reading.reload}
-        report={(written) => <SaveReport name={host.resident.name} birth={host.resident.birth} reading={written} pictureUrl={pictureUrl} />}
+        report={(written) => <SaveReport name={host.resident.name} birth={host.resident.birth} reading={written} pictureUrl={pictureUrl} decor={islandDecor} />}
       />
     );
 
@@ -472,14 +522,17 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           focus={wide ? null : username}
           onVisit={placing ? undefined : visit}
           onPlace={placing ? placeAt : undefined}
+          terrain={islandDecor?.terrain ?? 'default'}
+          onSelectItem={canDecorate ? selectOnIsland : undefined}
+          onOpenPhoto={photoBoard ? showBoard : undefined}
           notes={notes.of === username ? notes.list : NO_NOTES}
-          onBoard={openGuestbook}
+          onBoard={placing ? undefined : openGuestbook}
           onWalk={walking ? walkTo : undefined}
           guardianAway={walking && view.isOwner}
           overlay={<div className="mg-saju-walkers" ref={talkLayer} />}
           decor={
             <>
-              {decor.decor && <DecorLayer items={decor.decor.items} flags={decor.decor.flags} own={ownFlag} character={decor.decor.character?.modelUrl ?? null} />}
+              {islandDecor && <DecorLayer {...islandDecor} selectedId={selectedId} />}
               {walking && <Walkers room={room} own={myDog} name={viewer?.displayName ?? ''} start={start} control={control} layer={talkLayer} />}
             </>
           }
@@ -503,7 +556,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           {compat.headline}
         </p>
       )}
-      <div className="mg-saju-dock">
+      <div className="mg-saju-dock" data-own-decor={canDecorate || undefined}>
         {walking && room.connected && <TalkBar log={room.log} others={room.present.length} onSay={room.say} onMove={ask} />}
         {walking && room.elsewhere && (
           <p className="mg-saju-elsewhere mg-glass" role="status">
@@ -513,7 +566,12 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
             </button>
           </p>
         )}
-        {host && !wide && view.isOwner && <SavePicture name={host.resident.name} profile={host.profile} />}
+        {canDecorate && (
+          <button className="mg-btn mg-saju-edit" type="button" aria-controls={decorId} disabled={!islandDecor} onClick={showDecor}>
+            <Icon name="brush" /> <span>꾸미기</span>
+          </button>
+        )}
+        {host && !wide && view.isOwner && <SavePicture name={host.resident.name} profile={host.profile} decor={islandDecor} />}
         <div className="mg-saju-zoom mg-glass" role="group" aria-label="확대와 축소">
           <button className="mg-icon-btn is-quiet" aria-label="축소" onClick={() => stage.current?.zoomBy(1 / ZOOM_STEP)}>
             <Icon name="minus" />
@@ -532,6 +590,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
 
       {/* The island being drawn off the page, to be drawn again as the home's picture. */}
       {picture.shot}
+      {photoBoard && openPhoto === photoBoard.url && <PictureView url={photoBoard.url} alt="전광판 사진" size={photoBoard} onClose={() => setOpenPhoto(null)} />}
 
       {/* What the 섬 says, beside the picture of it. Folded, the panel stays mounted, keeping what was typed in it. */}
       {/* While the next 섬 is read its panel waits: this one's cannot be used for it. */}
@@ -613,9 +672,36 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
               decor={
                 host &&
                 (view.isOwner ? (
-                  <DecorCard state={decor} own={ownFlag} placing={placing} onPlacing={setPlacing} />
+                  <DecorCard
+                    id={decorId}
+                    section={decorSection}
+                    onSection={(section) => {
+                      setDecorTab({ of: username, section });
+                      if (section !== 'items') selectItem(null);
+                    }}
+                    state={decor}
+                    own={ownFlag}
+                    placing={placing}
+                    onPlacing={setPlacing}
+                    selectedId={selectedId}
+                    onSelect={(id) => {
+                      selectItem(id);
+                      const item = decor.decor?.items.find((one) => one.id === id);
+                      if (item) stage.current?.focusItem({ x: item.x, z: item.z });
+                    }}
+                    terrainPick={<TerrainPicker value={decor.decor?.terrain ?? 'default'} onChange={decor.setTerrain} />}
+                    photoBoard={<PhotoBoardCard photo={photoBoard} onChange={decor.changePhoto} onOpen={showBoard} />}
+                  >
+                    <ElementShelf balance={host.profile.balance} dayMaster={host.profile.dayMaster} placing={placing} onPlacing={setPlacing} full={(decor.decor?.items.length ?? 0) >= MOST_ITEMS} />
+                  </DecorCard>
                 ) : (
-                  giftFlag && <GiveFlagCard key={username} own={giftFlag} onGive={decor.give} />
+                  <>
+                    {photoBoard && <div className="mg-saju-card"><PhotoBoardCard photo={photoBoard} onOpen={showBoard} /></div>}
+                    {viewer && mine && compat && (
+                      <CompatGiftCard key={`${viewer.id}|${username}|${keyOf(mine.birth)}|${keyOf(host.resident.birth)}`} giverId={viewer.id} giver={mine} recipient={host.resident} compat={compat} />
+                    )}
+                    {giftFlag && <GiveFlagCard key={username} own={giftFlag} onGive={decor.give} />}
+                  </>
                 ))
               }
               neighbors={neighbors}

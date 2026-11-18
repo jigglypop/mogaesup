@@ -5,6 +5,9 @@ import { readingOf, type Birth } from '../engine';
 import { profileOfReading } from '../profile';
 import { BRIDGE_FOOT, ESTATE_HALF, LANDINGS } from '../scene/estate/coast';
 import { estateOf } from '../scene/estate/layout';
+import { Builder } from '../scene/build';
+import { estateGround } from '../scene/estate/ground';
+import { EstateSite } from '../scene/estate/site';
 import { nearestOn, pointAlong } from '../scene/estate/lines';
 import { estateHomeOf, landingsOf, lawnOf, onSquare, SquareCoast } from '../scene/estateHome';
 import { ISLANDS, shoreAt } from '../scene/terrain';
@@ -144,6 +147,23 @@ describe('영지의 잔디밭', () => {
   const estate = homes[0]!;
   const { house } = profileOfReading(readingOf(BIRTHS[0]!));
   const paint = lawnOf(estate, house.style);
+
+  it('바닥을 바꾸면 잔디의 재질과 색만 달라지고 지형의 꼭짓점은 유지된다', () => {
+    const site = new EstateSite(estate);
+    const samples = (['default', 'snow', 'desert', 'moss'] as const).map((terrain) => {
+      const b = new Builder(estate.seed);
+      const choice = lawnOf(estate, house.style, terrain);
+      estateGround(b, site, choice, { index: 1, of: 4 });
+      const meshes = b.finish().meshes;
+      const turf = meshes.find(({ look }) => look && 'finish' in look && look.finish.surface === (choice.surface ?? 'ground'))!;
+      return { at: turf.geometry.getAttribute('position').array, tint: turf.geometry.getAttribute('color').array };
+    });
+    for (const sample of samples.slice(1)) {
+      expect(sample.at.length).toBe(samples[0]!.at.length);
+      expect(sample.at.every((n, i) => n === samples[0]!.at[i])).toBe(true);
+      expect(sample.tint.some((n, i) => Math.abs(n - samples[0]!.tint[i]!) > 0.02)).toBe(true);
+    }
+  });
 
   it('가을이나 겨울의 풀빛도 멀리서 맨땅으로 보이지 않게 집의 잔디만큼 푸르다', () => {
     const season = estate.plan.season;

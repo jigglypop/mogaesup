@@ -7,7 +7,7 @@ import { fbm, hash, tileNoise, worley } from './noise';
 // is plaster in any paint); brick and masonry bring their own colours. Painted off the main thread (see painter); this
 // file is what the painter runs, and has nothing of the graphics card in it.
 
-export type Surface = 'plain' | 'plaster' | 'brick' | 'masonry' | 'stone' | 'rock' | 'wood' | 'bark' | 'thatch' | 'giwa' | 'gravel' | 'soil' | 'ground' | 'clay';
+export type Surface = 'plain' | 'plaster' | 'brick' | 'masonry' | 'stone' | 'rock' | 'wood' | 'bark' | 'thatch' | 'giwa' | 'gravel' | 'soil' | 'ground' | 'clay' | 'snow' | 'desert' | 'moss';
 
 type Texel = { r: number; g: number; b: number; h: number };
 type Recipe = {
@@ -214,6 +214,33 @@ const RECIPES: Record<Exclude<Surface, 'plain'>, Recipe> = {
       shade(out, 0.74 + nap * 0.2 + (speck - 0.5) * 0.14 + (patch - 0.5) * 0.08, nap * 0.6 + speck * 0.4);
     },
   },
+  snow: {
+    size: 3.6, bump: 1.1,
+    paint: (u, v, out) => {
+      const drift = fbm(u, v, 3, 3, 121);
+      const crystals = tileNoise(u * 82, v * 82, 82, 123);
+      shade(out, 0.83 + drift * 0.14 + crystals * 0.03, drift * 0.78 + crystals * 0.22);
+    },
+  },
+  desert: {
+    size: 6.5, bump: 1.45,
+    paint: (u, v, out) => {
+      const curl = fbm(u, v, 2, 3, 127);
+      const shelter = fbm(u, v, 3, 3, 128);
+      const ridge = 0.5 + 0.5 * Math.cos(2 * Math.PI * (u * 3 + v * 7 + curl * 2.7));
+      const ripple = ridge * ridge * smooth(0.24, 0.74, shelter);
+      const grain = tileNoise(u * 92, v * 92, 92, 129);
+      shade(out, 0.82 + ripple * 0.08 + shelter * 0.065 + grain * 0.05, ripple * 0.52 + curl * 0.25 + grain * 0.23);
+    },
+  },
+  moss: {
+    size: 2.9, bump: 1.9,
+    paint: (u, v, out) => {
+      const hummock = fbm(u, v, 6, 3, 131);
+      const fibre = fbm(u, v, 45, 2, 133);
+      shade(out, 0.61 + hummock * 0.28 + fibre * 0.14, hummock * 0.8 + fibre * 0.2);
+    },
+  },
   /** Fired clay and glazed tile: even, with the kiln's small differences. */
   clay: {
     size: 0.9,
@@ -230,7 +257,7 @@ const RECIPES: Record<Exclude<Surface, 'plain'>, Recipe> = {
 export const surfaceSize = (surface: Exclude<Surface, 'plain'>): number => RECIPES[surface].size;
 
 /** Every surface with a tile, most worn first: the order the painter paints them in. */
-export const SURFACES: readonly Exclude<Surface, 'plain'>[] = ['ground', 'rock', 'wood', 'plaster', 'thatch', 'giwa', 'stone', 'soil', 'gravel', 'bark', 'clay', 'brick', 'masonry'];
+export const SURFACES: readonly Exclude<Surface, 'plain'>[] = ['ground', 'rock', 'wood', 'plaster', 'thatch', 'giwa', 'stone', 'soil', 'gravel', 'bark', 'clay', 'brick', 'masonry', 'snow', 'desert', 'moss'];
 
 /** A surface's colour tile (as paint, sRGB) and its relief as a normal map, each TILE square, four bytes a texel. */
 export function paintSurface(surface: Exclude<Surface, 'plain'>): { colors: Uint8Array; normals: Uint8Array } {

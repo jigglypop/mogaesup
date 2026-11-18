@@ -117,7 +117,7 @@ export function tree(b: Builder, at: V3, look: TreeLook): void {
 }
 
 /** A fir: boughs in tiers down a straight trunk, widest at the foot. */
-export function conifer(b: Builder, at: V3, look: { height: number; radius: number; bark?: string; needles: Palette; tiers?: number }): void {
+export function conifer(b: Builder, at: V3, look: { height: number; radius: number; bark?: string; needles: Palette; tiers?: number; snow?: Palette }): void {
   const { height, radius, bark = '#5f4332', needles, tiers = 6 } = look;
   b.group(at, () => {
     const girth = height * 0.03;
@@ -134,7 +134,8 @@ export function conifer(b: Builder, at: V3, look: { height: number; radius: numb
       const cos = Math.cos(angle);
       const sin = Math.sin(angle);
       const shade = (0.66 + (1 - tier) * 0.34) * b.between(0.88, 1.08);
-      b.sprig('needle', [cos * ring, foot + (height - foot) * up, sin * ring], b.between(0.3, 0.44), b.pick(needles), unit(cos, -0.2 + up * 0.9, sin), b.between(0, TAU), unit(cos, 0.5, sin), shade);
+      const coat = look.snow && tier < 0.40 + up * 0.38 + cos * 0.1 ? look.snow : needles;
+      b.sprig('needle', [cos * ring, foot + (height - foot) * up, sin * ring], b.between(0.3, 0.44), b.pick(coat), unit(cos, -0.2 + up * 0.9, sin), b.between(0, TAU), unit(cos, 0.5, sin), shade);
     }
   });
 }

@@ -1,6 +1,6 @@
 import { act, useCallback, type ReactElement, type ReactNode, type RefObject } from 'react';
 
-import { BoxGeometry, Mesh, OrthographicCamera, Raycaster, Scene, Vector2, Vector3 } from 'three';
+import { BoxGeometry, Group, Mesh, OrthographicCamera, Raycaster, Scene, Vector2, Vector3 } from 'three';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { mount } from '../../__tests__/mount';
@@ -275,6 +275,43 @@ describe('카메라를 옮기는 손짓', () => {
     expect(Math.hypot(gaze().pan.x, gaze().pan.z)).toBeLessThan(0.1);
     expect(gaze().zoom).toBeCloseTo(1, 6);
     expect(gaze().turn).toBe(0);
+  });
+
+  it('전광판 사진을 누르면 카메라를 옮기지 않고 사진을 한 번 연다', async () => {
+    const open = vi.fn();
+    await page.rerender(<Stage homes={homes} bridges={[]} frame={frame} focus="sol" onOpenPhoto={open} />);
+    const world = new Scene();
+    const board = new Group();
+    board.userData['photoBoard'] = true;
+    board.position.set(-2.8, 2.1, 4.8);
+    board.add(new Mesh(new BoxGeometry(4.9, 3, 0.14)));
+    world.add(board);
+    world.updateMatrixWorld();
+    await act(async () => canvas.created?.({ gl: {}, camera, scene: world }));
+    const at = board.position.clone().project(camera);
+    await tap({ clientX: (at.x * 0.5 + 0.5) * 1440, clientY: (-at.y * 0.5 + 0.5) * 900 });
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(gaze().zoom).toBe(1);
+  });
+
+  it('같은 모델이 둘이어도 누른 메시의 상위 배치 ID를 고른다', async () => {
+    const select = vi.fn();
+    await page.rerender(<Stage homes={homes} bridges={[]} frame={frame} focus="sol" onSelectItem={select} />);
+    const world = new Scene();
+    const geometry = new BoxGeometry(1, 1, 1);
+    for (const [id, x] of [['left', -2], ['right', 2]] as const) {
+      const placed = new Group();
+      placed.position.set(x, 0.5, 0);
+      placed.userData['decorId'] = id;
+      placed.add(new Mesh(geometry));
+      world.add(placed);
+    }
+    world.updateMatrixWorld();
+    await act(async () => canvas.created?.({ gl: {}, camera, scene: world }));
+    const at = new Vector3(2, 0.5, 0).project(camera);
+    await tap({ clientX: (at.x * 0.5 + 0.5) * 1440, clientY: (-at.y * 0.5 + 0.5) * 900 });
+    expect(select).toHaveBeenCalledExactlyOnceWith('right');
+    expect(gaze().zoom).toBe(1);
   });
 
   it('섬 위에 선 것을 누르면 카메라가 그리로 가서 다가가고, 한 번 더 누르면 더 다가간다', async () => {

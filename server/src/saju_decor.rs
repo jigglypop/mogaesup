@@ -39,8 +39,35 @@ const MINE: &str = "mine";
 /// What the character item shows: the owner's own character.
 const ME: &str = "me";
 /// The props the app has models for.
-const PROPS: [&str; 12] =
-    ["lantern", "bench", "jar", "pot", "barrel", "woodpile", "table", "parasol", "well", "bush", "rock", "tree"];
+const PROPS: &[&str] = &[
+    "lantern",
+    "bench",
+    "jar",
+    "pot",
+    "barrel",
+    "woodpile",
+    "table",
+    "parasol",
+    "well",
+    "bush",
+    "rock",
+    "tree",
+    "pine-bonsai",
+    "bamboo-wheel",
+    "plum-planter",
+    "lotus-lamp",
+    "copper-brazier",
+    "vermilion-lamp",
+    "ochre-cairn",
+    "harvest-jar",
+    "clay-peaks",
+    "silver-bell",
+    "silver-crane",
+    "gold-sphere",
+    "lotus-basin",
+    "rain-spout",
+    "koi-fountain",
+];
 /// What a flag may show: the 14 main stars of 자미두수, and 공궁 for a life palace without one.
 const STARS: [&str; 15] = [
     "자미", "천기", "태양", "무곡", "천동", "염정", "천부", "태음", "탐랑", "거문", "천상", "천량", "칠살", "파군",
@@ -80,6 +107,8 @@ pub fn router() -> Router<AppState> {
 enum Kind {
     /// The owner's own flag ([`MINE`]), or one given to them (its id).
     Flag,
+    /// The id of a compatibility keepsake delivered to this owner.
+    Gift,
     /// One of [`PROPS`].
     Prop,
     /// The owner's character ([`ME`]).
@@ -97,6 +126,10 @@ struct Item {
     x: Number,
     z: Number,
     turn: Number,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scale: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
 }
 
 /// The flag given to the owner that a flag item's `ref` names, written as the server writes ids. None for their own
@@ -122,11 +155,16 @@ fn checked(items: Value) -> ApiResult<Vec<Item>> {
             (1..=ID_MAX).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b));
         let shows = match item.kind {
             Kind::Flag => item.reference == MINE || given_flag(&item.reference).is_some(),
+            Kind::Gift => given_flag(&item.reference).is_some(),
             Kind::Prop => PROPS.contains(&item.reference.as_str()),
             Kind::Character => item.reference == ME,
         };
         let placed = within(&item.x, REACH) && within(&item.z, REACH) && within(&item.turn, MAX_TURN);
-        if !named || !ids.insert(id.as_str()) || !shows || !placed {
+        let sized = item.scale.as_ref().is_none_or(|n| n.as_f64().is_some_and(|v| (0.5..=2.0).contains(&v)));
+        let dyed = item.color.as_ref().is_none_or(|color| {
+            color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        });
+        if !named || !ids.insert(id.as_str()) || !shows || !placed || !sized || !dyed {
             return Err(INVALID_DECOR);
         }
     }
@@ -146,12 +184,16 @@ fn flag(row: &PgRow) -> Value {
 /// `owner`'s decor as its owner (`own`) or anyone else reads it: the things placed (`items`); the flags placed, and for
 /// the owner the newest [`OWNER_FLAGS`] given besides, the newest first (`flags`); and the owner's character when their
 /// look is ready with a model (`character`), for anyone else only once it is placed.
-async fn shown(db: &mut PgConnection, owner: Uuid, own: bool) -> Result<Value, sqlx::Error> {
-    let items: Value = sqlx::query_scalar("SELECT items FROM saju_decor WHERE owner_id = $1")
+pub(super) async fn shown(db: &mut PgConnection, owner: Uuid, own: bool) -> Result<Value, sqlx::Error> {
+    let (items, terrain, board): (Value, String, Option<Value>) = sqlx::query_as(
+        "SELECT COALESCE(d.items, '[]'::jsonb), COALESCE(d.terrain, 'default'),
+          CASE WHEN b.version IS NOT NULL THEN jsonb_build_object('version', b.version, 'width', b.width, 'height', b.height) END
+         FROM (SELECT $1::uuid AS owner_id) o LEFT JOIN saju_decor d USING (owner_id)
+         LEFT JOIN saju_photo_boards b USING (owner_id)",
+    )
         .bind(owner)
-        .fetch_optional(&mut *db)
-        .await?
-        .unwrap_or_else(|| json!([]));
+        .fetch_one(&mut *db)
+        .await?;
     let placed = items.as_array().map_or(&[][..], Vec::as_slice);
     let named: Vec<Uuid> = placed
         .iter()
@@ -180,7 +222,24 @@ async fn shown(db: &mut PgConnection, owner: Uuid, own: bool) -> Result<Value, s
     } else {
         None
     };
-    Ok(json!({"items": items, "flags": flags.iter().map(flag).collect::<Vec<_>>(), "character": character}))
+    let gift_ids: Vec<Uuid> = placed
+        .iter()
+        .filter(|item| item["kind"] == "gift")
+        .filter_map(|item| item["ref"].as_str().and_then(given_flag))
+        .collect();
+    let gifts = crate::saju_gifts::inventory(db, owner, own, &gift_ids).await?;
+    let mut decor =
+        json!({"items": items, "flags": flags.iter().map(flag).collect::<Vec<_>>(), "character": character});
+    if terrain != "default" {
+        decor["terrain"] = json!(terrain);
+    }
+    if !gifts.is_empty() {
+        decor["gifts"] = json!(gifts);
+    }
+    if let Some(board) = board {
+        decor["photoBoard"] = board;
+    }
+    Ok(decor)
 }
 
 /// `GET /api/homes/{username}/saju/decor`: the decor of the member's island (see [`shown`]), for whoever may see their
@@ -235,6 +294,19 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
             .await?;
     if given.len() != named.len() {
         return Err(INVALID_DECOR);
+    }
+    let gifts: BTreeSet<_> =
+        items.iter().filter(|item| item.kind == Kind::Gift).filter_map(|item| given_flag(&item.reference)).collect();
+    if !gifts.is_empty() {
+        let wanted = Vec::from_iter(gifts);
+        let owned: i64 = sqlx::query_scalar("SELECT count(*) FROM saju_gifts WHERE owner_id = $1 AND id = ANY($2)")
+            .bind(user.id)
+            .bind(&wanted)
+            .fetch_one(&mut *tx)
+            .await?;
+        if owned != wanted.len() as i64 {
+            return Err(INVALID_DECOR);
+        }
     }
     sqlx::query(
         "INSERT INTO saju_decor (owner_id, items) VALUES ($1, $2)

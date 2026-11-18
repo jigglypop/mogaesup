@@ -533,8 +533,5 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 .mg-saju-decor-pick { display: flex; flex-wrap: wrap; gap: 6px; }
 .mg-saju-decor-pick button[aria-pressed='true'], .mg-saju-decor-pick .mg-chip:has(> button[aria-pressed='true']) { background: var(--mg-primary); border-color: var(--mg-primary); color: var(--mg-primary-ink); }
 .mg-saju-decor-flag { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
-.mg-saju-decor-placed { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.mg-saju-decor-placed li { display: flex; align-items: center; gap: 4px; padding: 2px 4px 2px 10px; border-radius: 10px; background: var(--mg-tint); font-size: 13px; font-weight: 700; }
-.mg-saju-decor-placed li > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Picking a place: the island takes the press, and the canvas says so. */
 .mg-saju-canvas[data-placing], .mg-saju-canvas[data-placing] canvas { cursor: crosshair; }

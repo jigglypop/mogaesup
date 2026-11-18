@@ -9,7 +9,7 @@ import { Guestbook } from '../../minihome/Guestbook';
 import { NeighborActions, type Neighbors } from '../../minihome/Ilchons';
 import { Icon } from '../../ui/icons';
 import type { Compat } from '../compat';
-import { HOUSE_NAME, type Profile } from '../profile';
+import { houseName, type Profile } from '../profile';
 import { editPath } from '../routes';
 import { Gauge } from './Gauge';
 import { PixelIcon } from './PixelIcon';
@@ -140,7 +140,7 @@ export function HomePanel({ view, viewer, profile, picture, decor, neighbors, br
             <div className="mg-saju-who-text">
               <p className="mg-saju-badge">{profile.badge}</p>
               <ul className="mg-saju-notes">
-                <li className="mg-chip is-soft">{HOUSE_NAME[profile.house.style]}</li>
+                <li className="mg-chip is-soft">{houseName(profile.house)}</li>
                 <li className="mg-chip is-soft">
                   {profile.guardian.name} · {profile.guardian.pillar}
                 </li>

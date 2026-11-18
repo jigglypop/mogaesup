@@ -7,6 +7,7 @@ import { ApiRequestError } from '../../api/client';
 import type { HomeView, SajuPictureState, SajuReading, SajuReadingState, SajuVillage, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
 import { readingChartOf } from '../readingChart';
+import type { IslandDecor } from '../scene/Decor';
 import { personOf } from './people';
 
 const { api, shots } = vi.hoisted(() => ({
@@ -30,7 +31,7 @@ const { api, shots } = vi.hoisted(() => ({
     status: vi.fn(),
   },
   /** How many times the island was drawn off the page. */
-  shots: { count: 0 },
+  shots: { count: 0, decor: null as IslandDecor | null, hold: false },
 }));
 
 // The canvas needs a graphics card: here it is one that has drawn its first frames, of the village it was given.
@@ -43,12 +44,13 @@ vi.mock('../scene/Stage', () => ({
 }));
 // The island drawn off the page: a canvas handed over once, as soon as it is mounted.
 vi.mock('../scene/Snapshot', () => ({
-  Snapshot: ({ onShot }: { onShot: (canvas: HTMLCanvasElement) => void }) => {
+  Snapshot: ({ onShot, decor }: { onShot: (canvas: HTMLCanvasElement) => void; decor: IslandDecor }) => {
     const latest = useRef(onShot);
     latest.current = onShot;
     useEffect(() => {
       shots.count += 1;
-      latest.current(document.createElement('canvas'));
+      shots.decor = decor;
+      if (!shots.hold) latest.current(document.createElement('canvas'));
     }, []);
     return null;
   },
@@ -134,6 +136,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date('2026-11-15T12:00:00+09:00'));
   localStorage.clear();
   shots.count = 0;
+  shots.decor = null;
+  shots.hold = false;
   auth = { status: 'signedIn', user: sol };
   api.mine.mockResolvedValue(view(true));
   api.get.mockResolvedValue(view(false));
@@ -338,6 +342,29 @@ describe('사주 풀이 카드', () => {
 });
 
 describe('섬 그림 카드', () => {
+  it('배치를 읽은 뒤 섬 그림 입력과 다운로드 카메라에 같은 아이템을 건넨다', async () => {
+    const items = [{ id: 'my-jar', kind: 'prop', ref: 'jar', x: 3, z: -4, turn: 0.2, color: '#ba254c', scale: 1.75 }];
+    const photoBoard = { version: 'board-version', width: 320, height: 200 };
+    let finish!: () => void;
+    api.decor.mockImplementation(() => new Promise((done) => { finish = () => done({ items, flags: [], gifts: [], character: { modelUrl: '/model.glb' }, photoBoard }); }));
+    const { container, unmount } = await open('/@sol');
+    const download = button(container, '내 집 이미지 저장하기')!;
+    await wait(2_000);
+    expect(download.disabled).toBe(true);
+    expect(shots.count).toBe(0);
+    await act(async () => finish());
+    await wait(1_500);
+    expect(shots.decor).toMatchObject({ items, flags: [], gifts: [], character: '/model.glb', photoBoard: null });
+    expect(shots.decor?.own?.star).toBeTruthy();
+    expect(api.draw).toHaveBeenCalledTimes(1);
+    const sent = shots.decor;
+    shots.hold = true;
+    await act(async () => download.click());
+    expect(shots.count).toBe(2);
+    expect(shots.decor).toEqual({ ...sent, photoBoard: { ...photoBoard, url: '/api/homes/sol/saju/photo-board/board-version' } });
+    await unmount();
+  });
+
   it('주인의 섬이 다 그려지면 섬만 한 번 그려 보내고, 그리는 동안 그렇다고 하다가 그림을 보여 준다', async () => {
     api.picture.mockResolvedValueOnce({ status: 'none' }).mockResolvedValueOnce(pending).mockResolvedValue(drawn('/models/island.webp'));
     const { container, unmount } = await open('/@sol');
@@ -347,7 +374,9 @@ describe('섬 그림 카드', () => {
     expect(shots.count).toBe(1);
     expect(api.draw).toHaveBeenCalledExactlyOnceWith({ expectedOwnerId: 'u-sol', image: 'data:image/webp;base64,AAAA' });
     // 사주 요약 아래, 꾸미기와 오행 밸런스 위에 선다.
-    expect([...container.querySelectorAll('.mg-saju-side > section')].map((section) => section.getAttribute('aria-label')).slice(0, 4)).toEqual(['사주 요약', '섬 그림', '꾸미기', '오행 밸런스']);
+    const titles = [...container.querySelectorAll('.mg-saju-side > section')].slice(0, 4).map((section) =>
+      section.getAttribute('aria-label') ?? document.getElementById(section.getAttribute('aria-labelledby') ?? '')?.textContent);
+    expect(titles).toEqual(['사주 요약', '섬 그림', '꾸미기', '오행 밸런스']);
     const drawing = card(container, '섬 그림')!;
     expect(drawing.getAttribute('aria-busy')).toBe('true');
     expect(texts(drawing, '[role=status]')).toEqual(['그림을 그리고 있어요']);

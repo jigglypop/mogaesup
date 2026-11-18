@@ -14,6 +14,7 @@ import type { EstateSite } from './site';
 
 /** The colours of an estate's ground. */
 export type GroundPaint = {
+  surface?: 'snow' | 'desert' | 'moss';
   /** The lawn's body, its lighter patches, its flecks (the season's grass). */
   lawn: readonly [string, string, string];
   /** Bare earth where the turf thins toward the bank, the yard's packed earth and the paths' trodden earth. */
@@ -190,7 +191,7 @@ export function estateGround(b: Builder, site: EstateSite, paint: GroundPaint, s
     }
   }
   // The ground takes shadows and throws none worth drawing.
-  const lawnFinish: Finish = { surface: 'ground', rough: 0.96, shadowless: true };
+  const lawnFinish: Finish = { surface: paint.surface ?? 'ground', rough: 0.96, shadowless: true };
   const bankFinish: Finish = { surface: 'rock', rough: 0.94, shadowless: true };
   for (const [into, finish] of [[turf, lawnFinish], [banks, bankFinish]] as const) b.raw(finish, into.positions, into.normals, into.uvs, into.tints, into.faces);
   return { corners: (turf.positions.length + banks.positions.length) / 3, triangles: (turf.faces.length + banks.faces.length) / 3 };

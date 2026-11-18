@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 
 import { ELEMENTS } from '../elements';
-import { HOUSE_NAME, type Profile } from '../profile';
+import { houseName, type Profile } from '../profile';
 import type { Resident } from '../residents';
 import { homePath } from '../routes';
 import { FLAG_NEIGHBOURS, flagRaised } from '../village';
@@ -57,7 +57,7 @@ export function VillagePanel({ owner, villagers, viewer }: {
                   </b>
                   <small>{profile.badge}</small>
                   <small>
-                    {HOUSE_NAME[profile.house.style]} · {profile.guardian.name}
+                    {houseName(profile.house)} · {profile.guardian.name}
                   </small>
                   <span className="mg-saju-mix" aria-hidden="true">
                     {ELEMENTS.flatMap((element) => Array.from({ length: balance.counts[element] }, (_, index) => <i key={`${element}${index}`} data-element={element} />))}

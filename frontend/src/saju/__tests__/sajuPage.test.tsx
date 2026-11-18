@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation, useParams } from 'react-route
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError } from '../../api/client';
-import type { HomeView, Ilchon, IlchonStatus, SajuVillage, User } from '../../api/types';
+import type { DecorItem, HomeView, Ilchon, IlchonStatus, SajuVillage, User } from '../../api/types';
 import { mount, type } from '../../__tests__/mount';
 import type { StageFlag } from '../scene/Flag';
 import { frameOf, type Frame, type Inset } from '../scene/frames';
@@ -29,6 +29,7 @@ const { stage, api } = vi.hoisted(() => ({
     decor: vi.fn(),
     placeDecor: vi.fn(),
     giveFlag: vi.fn(),
+    giveGift: vi.fn(),
     dropFlag: vi.fn(),
     ilchons: vi.fn(),
     requests: vi.fn(),
@@ -40,7 +41,7 @@ const { stage, api } = vi.hoisted(() => ({
 vi.mock('../scene/Stage', () => ({
   Stage: (props: StageProps) => {
     stage.props = props;
-    useImperativeHandle(props.ref, () => ({ zoomBy: (factor: number) => void stage.zooms.push(factor) }), []);
+    useImperativeHandle(props.ref, () => ({ zoomBy: (factor: number) => void stage.zooms.push(factor), focusItem: () => undefined }), []);
     return <div className="stage">{props.pins}</div>;
   },
 }));
@@ -56,7 +57,7 @@ vi.mock('../../shell/Shell', () => ({
 vi.mock('../../minihome/Guestbook', () => ({ Guestbook: ({ username }: { username: string }) => <p className="guestbook">{username}</p> }));
 vi.mock('../../api/endpoints', () => ({
   homeApi: { mine: api.mine, get: api.get, visit: api.visit },
-  sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw, decor: api.decor, placeDecor: api.placeDecor, giveFlag: api.giveFlag, dropFlag: api.dropFlag },
+  sajuApi: { village: api.village, save: api.save, remove: api.remove, reading: api.reading, read: api.read, picture: api.picture, draw: api.draw, decor: api.decor, placeDecor: api.placeDecor, giveFlag: api.giveFlag, giveGift: api.giveGift, dropFlag: api.dropFlag },
   socialApi: { ilchons: api.ilchons, requests: api.requests, status: api.status, guestbook: () => Promise.resolve({ entries: [], total: 0, nextBefore: null }) },
 }));
 let auth: { status: 'anonymous' | 'signedIn'; user: User | null } = { status: 'anonymous', user: null };
@@ -145,6 +146,60 @@ describe('섬 화면', () => {
     [...container.querySelectorAll('.mg-saju-menu a')].map((anchor) => `${anchor.textContent}${anchor.getAttribute('aria-current') ? '*' : ''} ${anchor.getAttribute('href')}`);
   const pins = (container: HTMLElement) =>
     [...container.querySelectorAll<HTMLAnchorElement>('.mg-saju-pin')].map((pin) => `${pin.dataset['pin']} ${pin.getAttribute('href')} ${pin.textContent}`);
+
+  it('벤치 두 개 중 섬에서 고른 한 개만 염색하고 크기와 자리를 바꾼 뒤 삭제한다', async () => {
+    const first: DecorItem = { id: 'bench-one', kind: 'prop', ref: 'bench', x: -2, z: 4, turn: 0 };
+    const second = { ...first, id: 'bench-two', x: 2 };
+    let items = [first, second];
+    api.decor.mockImplementation(async () => ({ items, flags: [], character: null }));
+    api.placeDecor.mockImplementation(async (body: { items: DecorItem[] }) => {
+      items = body.items;
+      return { items, flags: [], character: null };
+    });
+    const { container, unmount } = await open('/@sol');
+    const editorStage = () => stage.props as StageProps & { onSelectItem: (id: string) => void; onPlace: (spot: { x: number; z: number }) => void };
+    const tabs = [...container.querySelectorAll<HTMLButtonElement>('.mg-decor-tabs [role=tab]')];
+    await act(async () => tabs[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })));
+    expect(tabs[1]!.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(tabs[1]);
+    await act(async () => editorStage().onSelectItem('bench-two'));
+    expect(tabs[0]!.getAttribute('aria-selected')).toBe('true');
+    expect(container.querySelector('.mg-decor-inspector h3')?.textContent).toBe('벤치 2번');
+    await act(async () => button(container, '와인')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="크기 키우기"]')!.click());
+    await act(async () => button(container, '옮기기')!.click());
+    await act(async () => editorStage().onPlace({ x: 8, z: -1 }));
+    expect(items).toEqual([first, { ...second, x: 8, z: -1, color: '#72253e', scale: 1.25 }]);
+    await act(async () => button(container, '벤치 1번')!.click());
+    expect(container.querySelector('.mg-decor-inspector h3')?.textContent).toBe('벤치 1번');
+    await act(async () => button(container, '벤치 2번')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="벤치 2번 삭제"]')!.click());
+    expect(items).toEqual([first]);
+    await unmount();
+  });
+
+  it('색 저장이 느려도 다음 크기 변경을 순서대로 저장하고 거절된 크기만 되돌린다', async () => {
+    const bench: DecorItem = { id: 'bench', kind: 'prop', ref: 'bench', x: 1, z: 2, turn: 0 };
+    const layout = { items: [bench], flags: [], character: null };
+    api.decor.mockResolvedValue(layout);
+    let finish!: () => void;
+    api.placeDecor.mockImplementationOnce(({ items }: { items: DecorItem[] }) => new Promise((done) => {
+      finish = () => done({ ...layout, items });
+    }));
+    api.placeDecor.mockRejectedValueOnce(new Error('failed'));
+    const { container, unmount } = await open('/@sol');
+    await act(async () => container.querySelector<HTMLButtonElement>('.mg-decor-items button')!.click());
+    await act(async () => button(container, '크림슨')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="크기 키우기"]')!.click());
+    expect(api.placeDecor).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[aria-label="현재 크기"]')?.textContent).toBe('125%');
+    await act(async () => finish());
+    expect(api.placeDecor).toHaveBeenLastCalledWith({ expectedOwnerId: 'u-sol', items: [{ ...bench, color: '#ba254c', scale: 1.25 }] });
+    expect(container.querySelector('[aria-label="현재 크기"]')?.textContent).toBe('100%');
+    expect(button(container, '크림슨')!.getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('.mg-saju-decor [role="alert"]')?.textContent).toBe('저장하지 못했어요');
+    await unmount();
+  });
 
   it('집을 짓기 전의 주인에게는 마을 지도와 집 짓는 카드가 있다', async () => {
     villages['sol'] = { saju: null, village: [around('noeul', false), around('bori', false)] };
@@ -305,6 +360,23 @@ describe('섬 화면', () => {
     expect(button(container, '이웃 신청')).toBeDefined();
     expect(button(container, '다리 보기')).toBeUndefined();
     expect(container.querySelector('.mg-saju-bridge-line')).toBeNull();
+    await unmount();
+  });
+
+  it('두 집의 사주에서 나온 아이템을 미리 보고 집주인에게 보낸다', async () => {
+    auth = { status: 'signedIn', user: noeul };
+    const { container, unmount } = await open('/@sol');
+    const card = container.querySelector<HTMLElement>('[aria-label="궁합 선물"]')!;
+    expect(card.querySelector('strong')?.textContent).toBe('상생의 샘');
+    expect(card.textContent).toContain('목생화');
+    expect(api.giveGift).not.toHaveBeenCalled();
+    await act(async () => button(card, '솔님에게 선물하기')!.click());
+    expect(api.giveGift).toHaveBeenCalledExactlyOnceWith('sol', {
+      expectedGiverId: noeul.id, giverBirth: home('noeul').birth, recipientBirth: home('sol').birth,
+      giverPillars: ['丁卯', '丙午', '丁酉', '甲辰'], recipientPillars: ['己巳', '丙寅', '甲寅', '乙亥'],
+      design: { tone: 'flow', from: 'fire', to: 'wood' },
+    });
+    expect(card.querySelector('[role="status"]')?.textContent).toContain('보냈어요');
     await unmount();
   });
 

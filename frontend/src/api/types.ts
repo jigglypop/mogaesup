@@ -164,16 +164,20 @@ export type SajuVillage = {
 export type ReadingElement = 'wood' | 'fire' | 'earth' | 'metal' | 'water';
 
 /** What its owner has placed on a 섬: a flag (`ref` "mine", or a given flag's id), a prop (by name) or their character ("me"). */
-export type DecorItem = { id: string; kind: 'flag' | 'prop' | 'character'; ref: string; x: number; z: number; turn: number };
+export type DecorItem = { id: string; kind: 'flag' | 'prop' | 'character' | 'gift'; ref: string; x: number; z: number; turn: number; scale?: number; color?: string };
 /** A flag's look: the main star of its giver's 자미두수 명궁 (공궁 for none) and the element of their 오행국. */
 export type FlagDesign = { star: string; element: ReadingElement };
 /** A flag a member gave to a 섬. */
 export type DecorFlag = { id: string; giver: { username: string; name: string }; design: FlagDesign; givenAt: string };
+export type GiftDesign = { tone: 'union' | 'flow' | 'same' | 'spark'; from: ReadingElement; to: ReadingElement };
+export type DecorGift = { id: string; giver: { username: string; name: string }; design: GiftDesign; givenAt: string };
 /**
  * `GET /api/homes/{username}/saju/decor`: what is placed on the 섬, the flags given to it (all of them for its owner, the
  * placed ones for others) and its owner's character model (for the owner when it is ready, for others when placed).
  */
-export type SajuDecor = { items: DecorItem[]; flags: DecorFlag[]; character: { modelUrl: string } | null };
+export type Terrain = 'default' | 'snow' | 'desert' | 'moss';
+export type PhotoBoard = { version: string; width: number; height: number };
+export type SajuDecor = { items: DecorItem[]; flags: DecorFlag[]; gifts?: DecorGift[]; terrain?: Terrain; character: { modelUrl: string } | null; photoBoard?: PhotoBoard | null };
 
 /**
  * What a reading is written from: the chart as the browser calculated it from the home's stored birth (jamiblossom runs

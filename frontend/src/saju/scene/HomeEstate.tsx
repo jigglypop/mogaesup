@@ -1,5 +1,6 @@
 import { Component, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
+import type { Terrain } from '../../api/types';
 import type { Profile } from '../profile';
 import { mergeBuilds, type Build, type V3 } from './build';
 import { keepEstate, keptEstate } from './kept';
@@ -151,6 +152,7 @@ function Found({ origin, lush, turn }: { origin: readonly [number, number, numbe
 }
 
 type EstateProps = {
+  terrain?: Terrain;
   profile: Pick<Profile, 'reading' | 'house' | 'guardian'>;
   origin: readonly [number, number, number];
   playful?: boolean;
@@ -179,6 +181,7 @@ export function HomeEstate(props: EstateProps) {
 function Estate({
   profile,
   origin,
+  terrain = 'default',
   playful = false,
   lush = true,
   turn = 0,
@@ -191,11 +194,10 @@ function Estate({
   // The landings as a key: a new list of the same landings lays the estate out no differently.
   const landings = bridges ? bridges.join() : null;
   const estate = useMemo(() => estateHomeOf(reading, landings === null ? undefined : landings.split(',').filter(Boolean).map(Number)), [reading, landings]);
-  const style = house.style;
   const parts = useMemo<Piece[]>(() => {
-    return estateParts(estate, { lush, paint: lawnOf(estate, style), house: () => buildHouse({ style }, lush) });
-  }, [estate, lush, style]);
-  const build = useParts(parts, turn, reading, `${landings ?? ''}|${lush}|${style}`);
+    return estateParts(estate, { lush, paint: lawnOf(estate, house.style, terrain), house: () => buildHouse(house, lush) });
+  }, [estate, lush, house, terrain]);
+  const build = useParts(parts, turn, reading, `${landings ?? ''}|${lush}|${house.style}|${house.accent}|${house.symbol}|${terrain}`);
   const dog = useDog(guardian.dog);
   const charms = guardian.charms.map((item) => item.charm).join('+');
   const board = estate.placements.find((placement) => placement.kind === 'guestbook');

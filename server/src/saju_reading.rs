@@ -9,15 +9,15 @@ use std::{collections::HashSet, fmt::Write, ops::RangeInclusive};
 
 use crate::{saju::Birth, security::plain_text};
 
-const STEMS: [char; 10] = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
+pub(super) const STEMS: [char; 10] = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
 const STEMS_KO: [char; 10] = ['갑', '을', '병', '정', '무', '기', '경', '신', '임', '계'];
-const BRANCHES: [char; 12] = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
+pub(super) const BRANCHES: [char; 12] = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
 const BRANCHES_KO: [char; 12] = ['자', '축', '인', '묘', '진', '사', '오', '미', '신', '유', '술', '해'];
 /// The five elements in the order each gives rise to the next, as `ReadingChart.saju.elements` names them.
 const ELEMENTS: [&str; 5] = ["목", "화", "토", "금", "수"];
 /// Each stem's and each branch's element, by place in [`ELEMENTS`].
-const STEM_ELEMENTS: [usize; 10] = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4];
-const BRANCH_ELEMENTS: [usize; 12] = [4, 2, 0, 0, 2, 1, 1, 2, 3, 3, 2, 4];
+pub(super) const STEM_ELEMENTS: [usize; 10] = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4];
+pub(super) const BRANCH_ELEMENTS: [usize; 12] = [4, 2, 0, 0, 2, 1, 1, 2, 3, 3, 2, 4];
 /// How bright a star stands: 묘 the brightest … 함 the dimmest, or nothing.
 const BRIGHTNESS: [&str; 8] = ["묘", "왕", "득", "리", "평", "불", "함", ""];
 /// Ages a chart counts to: the 대운 and 대한 of jamiblossom's charts end by 140.

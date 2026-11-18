@@ -80,7 +80,7 @@ describe('집 이야기', () => {
   it('일간 한 줄, 집과 수호 캐릭터, 신살이 준 것을 보여 주고 그 집의 방명록을 연다', async () => {
     const { container, unmount } = await inRouter(panel());
     expect(container.querySelector('.mg-saju-badge')?.textContent).toBe('따뜻한 촛불 같은 정화(丁火) 일간');
-    expect(texts(container, '.mg-saju-who .mg-chip')).toEqual(['붉은 벽돌집', '왕관 강아지 · 정유(丁酉)', '천을귀인의 별', '도화의 꽃', '백호의 목도리']);
+    expect(texts(container, '.mg-saju-who .mg-chip')).toEqual(['붉은 벽돌집 · 등탑', '왕관 강아지 · 정유(丁酉)', '천을귀인의 별', '도화의 꽃', '백호의 목도리']);
     expect(container.querySelector('.guestbook')?.textContent).toBe('noeul:-');
     // 남의 집은 다시 입력할 수 없고, 로그인하지 않으면 다리 칸에는 로그인이 있다.
     expect(container.querySelector('.mg-saju-who-edit')).toBeNull();
@@ -237,7 +237,7 @@ describe('마을 주민', () => {
     expect(cards.map((card) => card.getAttribute('href'))).toEqual(['/@sol', '/@noeul', '/@bori']);
     expect(cards.map((card) => card.dataset['element'])).toEqual(['wood', 'fire', 'earth']);
     expect(texts(container, 'a.mg-saju-villager b')).toEqual(['솔', '노을이웃', '보리내 집']);
-    expect(texts(cards[1]!, 'small')).toEqual(['따뜻한 촛불 같은 정화(丁火) 일간', '붉은 벽돌집 · 왕관 강아지']);
+    expect(texts(cards[1]!, 'small')).toEqual(['따뜻한 촛불 같은 정화(丁火) 일간', '붉은 벽돌집 · 등탑 · 왕관 강아지']);
     // 여덟 글자를 오행 순으로 늘어놓는다.
     expect([...cards[1]!.querySelectorAll<HTMLElement>('.mg-saju-mix i')].map((item) => item.dataset['element'])).toEqual(['wood', 'wood', 'fire', 'fire', 'fire', 'fire', 'earth', 'metal']);
     await unmount();

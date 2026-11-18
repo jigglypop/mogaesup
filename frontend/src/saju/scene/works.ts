@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import type { Build } from './build';
 import { DUSK, GOLDEN, type Mood } from './mood';
@@ -37,6 +37,17 @@ export function countWork(works: Works | null, count: number): void {
   works.total += count;
 }
 export const WorksContext = createContext<Works | null>(null);
+
+/** A photo's shutter waits until every asynchronous decoration has committed its meshes to the scene. */
+export const PhotoAssets = createContext<{ pending: number } | null>(null);
+export function usePhotoAsset(ready: boolean): void {
+  const photo = useContext(PhotoAssets);
+  useLayoutEffect(() => {
+    if (ready || !photo) return;
+    photo.pending += 1;
+    return () => { photo.pending -= 1; };
+  }, [photo, ready]);
+}
 
 /**
  * What `make` builds (or will have, see kept), in a task of its own after mounting: a village is built an island at a

@@ -3,6 +3,7 @@ import type { House } from '../profile';
 import { barrel, bench, boat, chimney, clothesline, doorAt, fence, gableRoof, giwaRoof, hanging, jar, jetty, jige, lantern, parasol, pot, railing, sawhorse, slope, stack, steps, stoneWall, tableSet, well, windowAt, woodpile, type Cover } from './arch';
 import { Builder, type Build, type Finish, type V3 } from './build';
 import { WATER_LEVEL } from './mood';
+import { drawRoofFeature } from './roofFeatures';
 import { bamboo, birch, bush, conifer, flowerBed, lilies, pine, reeds, rock, steppingStones, tree, vine, willow, type Palette } from './plants';
 import { dressPond, dressShore, ground, GROUND_STEP, ISLANDS, shoreAt, Site, type GroundLook, type IslandKind, type IslandShape, type Pond } from './terrain';
 import { emblem, keepsake } from './yard';
@@ -775,6 +776,11 @@ const water: Plan = {
 
 const PLANS: Record<Element, Plan> = { wood, fire, earth, metal, water };
 
+function drawHouse(b: Builder, house: House, full: boolean): void {
+  PLANS[house.style].house(b, full);
+  drawRoofFeature(b, house);
+}
+
 /** The ground about a house of `style`: its lawn's greens, its earth, its bank and stones. */
 export const groundOf = (style: Element): GroundLook => PLANS[style].ground;
 /** How thickly a garden is planted for a device that would labour over a full one (a phone). */
@@ -785,7 +791,7 @@ const THIN = 0.62;
  * keepsake stand in their places about it, on the island of {@link GARDEN}; a neighbour's keeps the house, the ground
  * and shore and a few trees. The page's own island is an estate laid out about the house alone (see buildHouse).
  */
-export function buildHome(house: Pick<House, 'style' | 'accent' | 'symbol'>, lush = true, kind: IslandKind = 'home'): Build {
+export function buildHome(house: House, lush = true, kind: IslandKind = 'home'): Build {
   const plan = PLANS[house.style];
   const full = kind === 'home';
   const shape = GARDENS[kind];
@@ -794,7 +800,7 @@ export function buildHome(house: Pick<House, 'style' | 'accent' | 'symbol'>, lus
   const site = new Site(SEED[house.style], plan.ponds?.[kind] ?? [], shape);
   for (const [x, z, rx, rz] of plan.bare?.[kind] ?? []) site.bare(x, z, rx, rz);
   ground(b, site, plan.ground, GARDEN_STEPS[kind]);
-  b.group(HOUSE, () => plan.house(b, full));
+  b.group(HOUSE, () => drawHouse(b, house, full));
   plan.trees(b, yardOf(kind));
   if (full) {
     plan.garden(b, site);
@@ -810,10 +816,10 @@ export function buildHome(house: Pick<House, 'style' | 'accent' | 'symbol'>, lus
  * The house alone, about its own middle, every side of it and what is small about it (pots, flowers, lamps, smoke):
  * what stands at the heart of the page's own island, whose estate is laid out about it (see Estate).
  */
-export function buildHouse(house: Pick<House, 'style'>, lush = true): Build {
+export function buildHouse(house: House, lush = true): Build {
   const b = new Builder(SEED[house.style]);
   if (!lush) b.density = THIN;
-  PLANS[house.style].house(b, true);
+  drawHouse(b, house, true);
   return b.finish();
 }
 

@@ -5,7 +5,7 @@ import type { Material } from 'three';
 import { ELEMENTS } from '../elements';
 import type { YardSymbol } from '../profile';
 import { Builder, type Build } from '../scene/build';
-import { buildHome, buildLot, EMBLEM_AT, GUARDIAN_AT, KEEPSAKE_AT, type IslandKind } from '../scene/homes';
+import { buildHome, buildHouse, buildLot, EMBLEM_AT, GUARDIAN_AT, KEEPSAKE_AT, type IslandKind } from '../scene/homes';
 import { WATER_LEVEL } from '../scene/mood';
 import { fbm, hash, rng, tileNoise, worley } from '../scene/noise';
 import { sprigGeometry } from '../scene/sprigs';
@@ -172,6 +172,36 @@ describe('다섯 집', () => {
     expect(Array.from(a.sprigs[0]!.matrices.slice(0, 64))).toEqual(Array.from(b.sprigs[0]!.matrices.slice(0, 64)));
     expect(a.lamps).toEqual(b.lamps);
   }, 30_000);
+
+  it('우세 오행이 같은 집도 일간에 따라 다섯 가지 지붕 실루엣이 생긴다', () => {
+    const symbols: YardSymbol[] = ['field', 'tree', 'rain', 'gem', 'candle'];
+    const heights = symbols.map((symbol) => {
+      const { meshes } = buildHouse({ style: 'wood', accent: 'fire', symbol });
+      return Math.max(...meshes.map(({ geometry }) => {
+        geometry.computeBoundingBox();
+        return geometry.boundingBox!.max.y;
+      }));
+    });
+    expect(new Set(heights).size).toBe(5);
+    expect(Math.max(...heights) - Math.min(...heights)).toBeGreaterThan(2);
+  });
+
+  it('같은 지붕의 형태를 유지하면서 둘째 오행의 마감색을 입힌다', () => {
+    const finishOf = (accent: 'fire' | 'water') => buildHouse({ style: 'earth', accent, symbol: 'sun' }).meshes.map(({ geometry }) => {
+      const position = geometry.getAttribute('position');
+      const color = geometry.getAttribute('color');
+      let red = 0;
+      for (let index = 0; index < position.count; index++) {
+        if (position.getY(index) > 5) red += color.getX(index);
+      }
+      return { vertices: position.count, red };
+    });
+    const fire = finishOf('fire');
+    const water = finishOf('water');
+    expect(fire.map(({ vertices }) => vertices)).toEqual(water.map(({ vertices }) => vertices));
+    expect(fire.map(({ red }) => red)).not.toEqual(water.map(({ red }) => red));
+    expect(finishOf('fire')).toEqual(fire);
+  });
 
   it.each(SYMBOLS)('일간의 상징 %s가 제자리에 선다', (symbol) => {
     const plain = buildHome({ style: 'earth', accent: null, symbol: 'tree' });

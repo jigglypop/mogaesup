@@ -187,6 +187,20 @@ describe('물결 원판', () => {
   const position = geometry.getAttribute('position');
   const index = geometry.getIndex()!;
 
+  it('고품질 원판에 16비트 인덱스를 쓰고 더 큰 원판의 끝점도 보존한다', () => {
+    for (const [rings, ArrayType] of [[128, Uint16Array], [160, Uint32Array]] as const) {
+      const disc = ringGeometry(rings);
+      const vertices = disc.getAttribute('position').count;
+      const indices = disc.index!;
+      expect(indices.array).toBeInstanceOf(ArrayType);
+      expect(indices.count).toBe(((vertices - 1) * 2 - ringCorners(rings)) * 3);
+      let largest = 0;
+      for (const value of indices.array) largest = Math.max(largest, value);
+      expect(largest).toBe(vertices - 1);
+      disc.dispose();
+    }
+  });
+
   it('고리는 고르게 놓이고 면은 모두 위를 본다', () => {
     let rings = 0;
     for (let ring = 1; ring <= 48; ring++) rings += ringCorners(ring);

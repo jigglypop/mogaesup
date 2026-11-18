@@ -34,6 +34,7 @@ import type { Build, Lamp, Life } from './build';
 import { WATER_LEVEL } from './mood';
 import { hash } from './noise';
 import { useAnimation } from './parts';
+import { pickBuiltMesh } from './pickMesh';
 import { sprigGeometry, sprigMaterial, wind } from './sprigs';
 import { MOVING } from './Static';
 
@@ -482,7 +483,7 @@ export function Built({ build, origin }: { build: Build; origin: readonly [numbe
   return (
     <>
       {build.meshes.map((mesh, index) => (
-        <mesh key={index} geometry={mesh.geometry} material={mesh.material} castShadow={mesh.cast} receiveShadow />
+        <mesh key={index} geometry={mesh.geometry} material={mesh.material} castShadow={mesh.cast} receiveShadow raycast={pickBuiltMesh} />
       ))}
       {made.scattered.map((mesh, index) => (
         <primitive key={index} object={mesh} />

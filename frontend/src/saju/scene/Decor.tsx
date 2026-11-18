@@ -1,20 +1,25 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { Box3, CanvasTexture, CylinderGeometry, DoubleSide, MeshStandardMaterial, PlaneGeometry, SRGBColorSpace, Vector3, type Object3D } from 'three';
-import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Box3, CanvasTexture, Color, CylinderGeometry, DoubleSide, Mesh, MeshStandardMaterial, PlaneGeometry, SRGBColorSpace, Vector3, type Material, type Object3D } from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { float, positionGeometry, sin, uv, vec3 } from 'three/tsl';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 
-import type { DecorFlag, DecorItem, FlagDesign } from '../../api/types';
+import type { DecorFlag, DecorGift, DecorItem, FlagDesign, Terrain } from '../../api/types';
 import type { PropRef } from '../decor';
+import { elementPiece } from '../elementalDecor';
+import { CompatGiftObject } from './CompatGiftObject';
+import type { BoardPicture } from '../ui/PhotoBoardCard';
+import { PhotoBoard } from './PhotoBoard';
+import { ElementOrnament } from './ElementOrnament';
 import { barrel, bench, jar, lantern, parasol, pot, tableSet, well, woodpile } from './arch';
 import { Builder, type Build } from './build';
 import { Built } from './Built';
+import { loadDecorModel } from './decorModel';
 import { keptBuild } from './kept';
 import { bush, rock, tree } from './plants';
 import { wind } from './sprigs';
+import { usePhotoAsset } from './works';
 
 // What its owner has placed on a 섬 (see ../decor), standing on its lawn: flags on poles waving in the sea's wind, small
 // things for the garden built as the island's own are, and the owner's character from the studio.
@@ -35,27 +40,24 @@ CLOTH.translate(0.39, 0, 0);
 const poleMaterial = new MeshStandardMaterial({ color: '#6b5440', roughness: 0.8 });
 
 /** A flag's cloth: dyed, the star's name on it, waving out from its pole more the farther from it. */
-const cloths = new Map<string, MeshStandardNodeMaterial>();
-function clothOf(design: FlagDesign): MeshStandardNodeMaterial {
-  const key = `${design.star}|${design.element}`;
-  const known = cloths.get(key);
-  if (known) return known;
-  const dye = DYES[design.element];
+function clothOf(star: string, element: FlagDesign['element'], tint?: string): MeshStandardNodeMaterial {
+  const dye = DYES[element];
+  const shade = new Color(tint ?? dye.cloth);
   const canvas = document.createElement('canvas');
   canvas.width = 256;
   canvas.height = 170;
   const context = canvas.getContext('2d');
   if (context) {
-    context.fillStyle = dye.cloth;
+    context.fillStyle = tint ?? dye.cloth;
     context.fillRect(0, 0, canvas.width, canvas.height);
-    context.strokeStyle = dye.ink;
+    context.strokeStyle = tint ? (shade.r * 0.213 + shade.g * 0.715 + shade.b * 0.072 > 0.36 ? '#281d2e' : '#fff7ef') : dye.ink;
     context.lineWidth = 6;
     context.strokeRect(12, 12, canvas.width - 24, canvas.height - 24);
-    context.fillStyle = dye.ink;
+    context.fillStyle = context.strokeStyle;
     context.font = '800 76px sans-serif';
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.fillText(design.star, canvas.width / 2, canvas.height / 2 + 4);
+    context.fillText(star, canvas.width / 2, canvas.height / 2 + 4);
   }
   const picture = new CanvasTexture(canvas);
   picture.colorSpace = SRGBColorSpace;
@@ -63,12 +65,12 @@ function clothOf(design: FlagDesign): MeshStandardNodeMaterial {
   const out = uv().x;
   const wave = sin(wind.mul(4.2).sub(out.mul(5.5))).mul(out).mul(0.09).add(sin(wind.mul(2.3).sub(out.mul(3.1))).mul(out).mul(0.04));
   material.positionNode = positionGeometry.add(vec3(float(0), wave.mul(0.35), wave));
-  cloths.set(key, material);
   return material;
 }
 
-function FlagPole({ design }: { design: FlagDesign }) {
-  const cloth = useMemo(() => clothOf(design), [design]);
+function FlagPole({ design: { star, element }, tint }: { design: FlagDesign; tint?: string }) {
+  const cloth = useMemo(() => clothOf(star, element, tint), [star, element, tint]);
+  useEffect(() => () => { cloth.map?.dispose(); cloth.dispose(); }, [cloth]);
   return (
     <group>
       <mesh geometry={POLE} material={poleMaterial} castShadow receiveShadow />
@@ -78,7 +80,7 @@ function FlagPole({ design }: { design: FlagDesign }) {
 }
 
 /** A small thing for the garden, built as the island's own are (see build), about its middle. */
-function propBuild(ref: PropRef): Build {
+function propBuild(ref: PropRef, tint?: string): Build {
   const b = new Builder(ref.length * 97 + ref.charCodeAt(0));
   switch (ref) {
     case 'lantern':
@@ -119,47 +121,64 @@ function propBuild(ref: PropRef): Build {
       tree(b, [0, 0, 0], { height: 3.2, spread: 2.4, bark: '#5a4034', leaves: ['#5f9a45', '#76ad52', '#4e8a3b', '#8cbd5c'], lobes: 4 });
       break;
   }
-  return b.finish();
+  const build = b.finish();
+  if (tint) {
+    const paint = new Color(tint);
+    const dye = (colors: Float32Array) => {
+      for (let i = 0; i < colors.length; i += 3) {
+        const light = Math.min(1.3, 0.28 + Math.sqrt(Math.max(colors[i]!, colors[i + 1]!, colors[i + 2]!)));
+        colors[i] = paint.r * light;
+        colors[i + 1] = paint.g * light;
+        colors[i + 2] = paint.b * light;
+      }
+    };
+    for (const mesh of build.meshes) {
+      const colors = mesh.geometry.getAttribute('color')?.array;
+      if (colors instanceof Float32Array) dye(colors);
+    }
+    for (const sprigs of build.sprigs) dye(sprigs.colors);
+  }
+  return build;
 }
 
-function PropItem({ name }: { name: PropRef }) {
+function PropItem({ name, tint }: { name: PropRef; tint?: string }) {
   const [build, setBuild] = useState<Build | null>(null);
+  usePhotoAsset(!!build);
   useEffect(() => {
     let live = true;
-    void Promise.resolve(keptBuild(`decor|${name}`, () => propBuild(name))).then((made) => {
+    void Promise.resolve().then(() => keptBuild(`decor|${name}|${tint ?? ''}`, () => propBuild(name, tint))).then((made) => {
       if (live) setBuild(made);
-    });
+    }, () => undefined);
     return () => {
       live = false;
     };
-  }, [name]);
+  }, [name, tint]);
   return build && <Built build={build} origin={[0, 0, 0]} />;
 }
 
 /** How tall the owner's character stands on the island, in metres: as tall as the house's door. */
 const CHARACTER_HEIGHT = 1.05;
-const characters = new Map<string, Promise<Object3D>>();
 const box = new Box3();
 const size = new Vector3();
 
-function loadCharacter(url: string): Promise<Object3D> {
-  let model = characters.get(url);
-  if (!model) {
-    model = new GLTFLoader()
-      .setMeshoptDecoder(MeshoptDecoder)
-      .loadAsync(url)
-      .then((gltf) => gltf.scene);
-    characters.set(url, model);
-    model.catch(() => characters.delete(url));
-  }
-  return model;
-}
-
-function Character({ url }: { url: string }) {
+function Character({ url, tint }: { url: string; tint?: string }) {
   const [model, setModel] = useState<Object3D | null>(null);
+  usePhotoAsset(!!model);
   useEffect(() => {
     let live = true;
-    loadCharacter(url).then(
+    const dyed = new Map<Material, Material>();
+    const materialOf = (material: Material) => {
+      if (!tint || !(material instanceof MeshStandardMaterial)) return material;
+      let copy = dyed.get(material);
+      if (!copy) {
+        const colored = material.clone();
+        colored.color.set(tint);
+        dyed.set(material, colored);
+        copy = colored;
+      }
+      return copy;
+    };
+    loadDecorModel(url).then(
       (scene) => {
         if (!live) return;
         const copy = cloneSkinned(scene);
@@ -171,6 +190,7 @@ function Character({ url }: { url: string }) {
         copy.traverse((part) => {
           part.castShadow = true;
           part.receiveShadow = true;
+          if (part instanceof Mesh && tint) part.material = Array.isArray(part.material) ? part.material.map(materialOf) : materialOf(part.material);
         });
         setModel(copy);
       },
@@ -178,29 +198,45 @@ function Character({ url }: { url: string }) {
     );
     return () => {
       live = false;
+      for (const material of dyed.values()) material.dispose();
     };
-  }, [url]);
+  }, [url, tint]);
   return model && <primitive object={model} />;
 }
 
 /** What is placed on the 섬 whose island stands at the village's middle. */
-export function DecorLayer({ items, flags, own, character }: { items: readonly DecorItem[]; flags: readonly DecorFlag[]; own: FlagDesign | null; character: string | null }) {
+export type IslandDecor = { items: readonly DecorItem[]; flags: readonly DecorFlag[]; gifts?: readonly DecorGift[]; terrain?: Terrain; own: FlagDesign | null; character: string | null; photoBoard?: BoardPicture | null };
+export function DecorLayer({ items, flags, gifts, own, character, selectedId, photoBoard }: IslandDecor & { selectedId: string | null }) {
   return (
     <group>
+      {photoBoard && <PhotoBoard key={photoBoard.url} photo={photoBoard} />}
       {items.map((item) => {
         let shown = null;
         if (item.kind === 'flag') {
           const design = item.ref === 'mine' ? own : (flags.find((flag) => flag.id === item.ref)?.design ?? null);
-          shown = design && <FlagPole design={design} />;
+          shown = design && <FlagPole design={design} tint={item.color} />;
         } else if (item.kind === 'prop') {
-          shown = <PropItem name={item.ref as PropRef} />;
+          const piece = elementPiece(item.ref);
+          shown = piece ? <ElementOrnament piece={piece} color={item.color} /> : <PropItem name={item.ref as PropRef} tint={item.color} />;
+        } else if (item.kind === 'gift') {
+          const gift = gifts?.find((one) => one.id === item.ref);
+          shown = gift && <CompatGiftObject design={gift.design} tint={item.color} />;
         } else if (item.kind === 'character' && character) {
-          shown = <Character url={character} />;
+          shown = <Character url={character} tint={item.color} />;
         }
         return (
           shown && (
-            <group key={item.id} position={[item.x, 0, item.z]} rotation={[0, item.turn, 0]}>
+            <group key={item.id} position={[item.x, 0, item.z]} rotation={[0, item.turn, 0]} scale={item.scale ?? 1} userData={{ decorId: item.id }}>
               {shown}
+              {/* A rock is drawn entirely as a shader instance, which the scene's solid-mesh picker passes through. */}
+              {item.kind === 'prop' && item.ref === 'rock' && <mesh position={[0, 0.09, 0]} scale={[0.66, 0.4, 0.66]}>
+                <sphereGeometry args={[1, 8, 6]} />
+                <meshBasicMaterial visible={false} />
+              </mesh>}
+              {item.id === selectedId && <mesh position={[0, 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]} renderOrder={20} raycast={() => {}}>
+                <ringGeometry args={[0.76, 0.86, 64]} />
+                <meshBasicMaterial color="#ece5ff" transparent opacity={0.95} depthTest={false} depthWrite={false} />
+              </mesh>}
             </group>
           )
         );

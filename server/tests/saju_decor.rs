@@ -56,6 +56,32 @@ async fn decor(app: &TestApp, username: &str, cookie: Option<&str>) -> Reply {
     app.call("GET", &format!("/api/homes/{username}/saju/decor"), None, cookie).await
 }
 
+#[tokio::test]
+async fn 바닥_선택은_집주인만_저장하고_배치물과_독립적으로_유지된다() {
+    let app = TestApp::new(None).await;
+    let (host, id) = member(&app, "terrain_host", "주인", false).await;
+    let (visitor, _) = member(&app, "terrain_friend", "손님", true).await;
+    let path = "/api/homes/me/saju/terrain";
+    let choose = |tile: &str| Some(json!({"expectedOwnerId": id, "terrain": tile}));
+    assert_eq!(app.call("PUT", path, choose("snow"), None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(refusal(&app.call("PUT", path, choose("snow"), Some(&visitor)).await).1, "owner_changed");
+    assert_eq!(refusal(&app.call("PUT", path, choose("snow"), Some(&host)).await).1, "no_home");
+    build(&app, &host, id).await;
+    let items = json!([item("kept", "prop", "bench")]);
+    let (placed, tiled) =
+        tokio::join!(decorate(&app, &host, id, &items), app.call("PUT", path, choose("snow"), Some(&host)));
+    assert_eq!(placed.status, StatusCode::OK, "{:?}", placed.body);
+    assert_eq!(tiled.status, StatusCode::OK, "{:?}", tiled.body);
+    assert_eq!(refusal(&app.call("PUT", path, choose("unknown"), Some(&host)).await).1, "invalid_terrain");
+    for tile in ["snow", "desert", "moss", "default"] {
+        assert_eq!(app.call("PUT", path, choose(tile), Some(&host)).await.status, StatusCode::OK);
+        let shown = decor(&app, "terrain_host", None).await.body;
+        assert_eq!(shown["items"], items);
+        assert_eq!(shown["terrain"].as_str().unwrap_or("default"), tile);
+    }
+    app.cleanup().await;
+}
+
 async fn give(app: &TestApp, cookie: &str, username: &str, star: &str, element: &str) -> Reply {
     let body = json!({"design": {"star": star, "element": element}});
     app.call("POST", &format!("/api/homes/{username}/saju/flags"), Some(body), Some(cookie)).await
@@ -180,6 +206,11 @@ async fn 꾸밈은_섬에_놓을_수_있는_것만_받는다() {
         ("x past the edge", lantern(|item| item["x"] = json!(40.001))),
         ("z past the edge", lantern(|item| item["z"] = json!(-41))),
         ("turned too far", lantern(|item| item["turn"] = json!(7.5))),
+        ("oversize", lantern(|item| item["scale"] = json!(2.01))),
+        ("undersize", lantern(|item| item["scale"] = json!(0.49))),
+        ("text size", lantern(|item| item["scale"] = json!("1"))),
+        ("invalid tint", lantern(|item| item["color"] = json!("#fx2233"))),
+        ("incomplete tint", lantern(|item| item["color"] = json!("#abc"))),
         ("turned too far back", lantern(|item| item["turn"] = json!(-8))),
         ("x written as text", lantern(|item| item["x"] = json!("1"))),
         ("a turn of null", lantern(|item| item["turn"] = Value::Null)),
@@ -216,6 +247,9 @@ async fn 꾸밈은_섬에_놓을_수_있는_것만_받는다() {
     edge[1]["turn"] = json!(-7);
     edge[2]["turn"] = json!(7.0);
     edge[3]["x"] = json!(0.1 + 0.2);
+    edge[4]["scale"] = json!(0.5);
+    edge[4]["color"] = json!("#BA254c");
+    edge[5]["scale"] = json!(2);
     assert_eq!((edge.len(), edge[0]["id"].as_str().unwrap().len()), (24, 40));
     let saved = decorate(&app, &host, host_id, &json!(edge)).await;
     assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
