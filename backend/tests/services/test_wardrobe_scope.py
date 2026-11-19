@@ -142,6 +142,40 @@ def test_a_member_loads_the_body_and_the_part_files_the_wardrobe_lists(library):
     assert {(BODY, BODY_VERSION, 'hair'), (MEMBER, V1, 'hair')} <= listed
 
 
+def test_the_bodys_own_parts_a_refit_froze_stay_listed_after_it_is_registered_at_the_refit_version(library):
+    # A refit of the body job's hair freezes its top as 'reused_fitted_native'; both slots are still the body job's own.
+    refit = '7' * 24
+    library.assembly(BODY, refit, slots=('hair', 'top'), contents={'body': b'body', 'hair': b'refit hair', 'top': b'top'})
+    record = library.directory(BODY)/'native-parts'/refit/'record.json'
+    value = read_json(record)
+    for part in value['result']['parts']:
+        if part['slot'] == 'top':
+            part['origin'] = 'reused_fitted_native'
+    put(record, value)
+    library.current(BODY, refit)
+    library.register((BODY, refit))
+    library.refresh()
+    for operator in (True, False):
+        slots = {part['slot'] for part in library.wardrobe.parts(BODY, operator=operator)['parts'] if part['job_id'] == BODY}
+        assert slots == {'hair', 'top'}
+    assert library.wardrobe.member_file(BODY, refit, 'top.glb').read_bytes() == b'top'
+
+
+def test_a_variant_without_recorded_slots_still_lists_only_what_it_did_not_copy(library):
+    # Jobs on a base name the slots they made; one without that list keeps the copied slots under the base.
+    library.job(MEMBER, base=(BODY, BODY_VERSION))
+    library.assembly(MEMBER, V1, slots=('hair', 'top'), contents={'hair': b'hair', 'top': b'copied top'})
+    record = library.directory(MEMBER)/'native-parts'/V1/'record.json'
+    value = read_json(record)
+    for part in value['result']['parts']:
+        if part['slot'] == 'top':
+            part['origin'] = 'reused_fitted_native'
+    put(record, value)
+    library.refresh()
+    assert {part['slot'] for part in library.wardrobe.parts(BODY)['parts'] if part['job_id'] == MEMBER} == {'hair'}
+    not_found(lambda: library.wardrobe.member_file(MEMBER, V1, 'top.glb'))
+
+
 @pytest.mark.parametrize('job', [STRAY, UNREGISTERED, DELETED, ARCHIVED, TOMBSTONED, HIDDEN_CHARACTER])
 def test_a_member_cannot_load_a_part_the_wardrobe_does_not_list(library, job):
     library.assembly(job, V1, contents={'hair': b'hair', 'body': b'body'})

@@ -154,6 +154,23 @@ def test_a_blender_lock_names_no_receipt_unless_the_run_gives_one(tmp_path, blen
         assert 'runner' not in json.loads((tmp_path / 'run.lock').read_text(encoding='utf-8'))
 
 
+def test_a_lock_whose_lease_could_not_be_written_is_not_left_to_refuse_every_later_run(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    directory = tmp_path / 'run'
+
+    def disk_full(value):
+        raise OSError(28, 'No space left on device')
+    # The lock file is made, and its lease cannot be written into it.
+    monkeypatch.setattr(run_lock, 'json', SimpleNamespace(dumps=disk_full, loads=json.loads))
+    with pytest.raises(OSError):
+        with lock(directory, 62124, blender=False):
+            pass
+    assert not (tmp_path / 'run.lock').exists()
+    monkeypatch.setattr(run_lock, 'json', json)
+    with lock(directory, 62124, blender=False):
+        assert json.loads((tmp_path / 'run.lock').read_text(encoding='utf-8'))['owner'] == identity()
+
+
 def test_worker_locks_hold_one_worker_per_key_and_forget_it_afterwards():
     workers = WorkerLocks()
     assert workers.acquire('job') and not workers.acquire('job')

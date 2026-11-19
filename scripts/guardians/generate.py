@@ -150,8 +150,10 @@ def from_views(client: httpx.Client, out: Path, item: str, picture: Path) -> dic
     """The picture drawn as a figure from several sides, then the model built from those views."""
     folder = out / item
     picture_uri = 'data:image/png;base64,' + base64.b64encode(picture.read_bytes()).decode()
+    # Always the views endpoint's own input: a receipt that names its task returns before it is used, and one Meshy
+    # refused or never received (not_sent) is sent again with it, not with the image-to-3d `image_url`.
     views = submit(client, out, VIEWS, item, picture, receipt_name='views.json', endpoint=VIEWS_ENDPOINT,
-                   inputs={'reference_image_urls': [picture_uri]} if not (folder / 'views.json').exists() else None)
+                   inputs={'reference_image_urls': [picture_uri]})
     if not views.get('views'):
         state = waited(client, VIEWS_ENDPOINT, folder / 'views.json', views)
         urls = state.get('image_urls') or []

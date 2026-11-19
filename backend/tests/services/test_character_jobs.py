@@ -122,6 +122,22 @@ def test_the_task_id_of_an_accepted_submission_survives_a_storage_blip(tmp_path,
     assert refused and character_jobs.state(run)['task_id'] == 'task-1' and len(sent) == 1
 
 
+def test_the_task_id_of_an_accepted_submission_the_store_never_takes_is_logged(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(run_lock, 'FINAL_WRITE_DELAYS', (0, 0))
+    run, image, client, sent = submission(tmp_path, lambda request: httpx.Response(202, json={'result': 'task-1'}))
+    real = character_jobs._write_json
+
+    def write(path, value):
+        if path.name.endswith('-submission-response.json') or (path.name == 'character.json' and value.get('task_id')):
+            raise OSError('storage down')
+        return real(path, value)
+    monkeypatch.setattr(character_jobs, '_write_json', write)
+    with pytest.raises(OSError):
+        character_jobs.generate(run, image, 1.2, client)
+    # The paid task is named nowhere in the store; the log still names it for recovery.
+    assert len(sent) == 1 and 'task_id=task-1' in caplog.text
+
+
 def test_a_submission_the_runtime_does_not_admit_leaves_no_uncertain_receipt(tmp_path, monkeypatch):
     run, image, client, sent = submission(tmp_path, lambda request: httpx.Response(202, json={'result': 'task-1'}))
     admit = character_jobs.paid_request

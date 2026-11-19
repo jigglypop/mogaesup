@@ -10,7 +10,7 @@ from src.services.object_storage import copy_file
 from src.services.process_identity import identity
 from src.services.run_lock import WorkerLocks, final_write, this_process, worker_alive
 from src.services.avatar_equipment import is_native_part_set
-from src.services.meshy_status import saved_problem
+from src.services.meshy_status import saved_problem, unconfirmed_problem
 
 STAGES = ('images', 'models', 'rig', 'assemble', 'expressions')
 _WORKERS = WorkerLocks()
@@ -248,6 +248,8 @@ class AvatarStageResume:
                    for stage in STAGES if stage != 'expressions' or expressions]
         # An explicit run re-sends a request whose acceptance was never confirmed.
         uncertain_models = any(unconfirmed_submission(directory/'parts'/p['slot']) for p in parts)
+        # An explicit rig run resets every unconfirmed rig and clip receipt, not only the problem reported first.
+        uncertain_rig = unconfirmed_problem(directory/'meshy') if rig_problem else None
         uncertain_expressions = False
         if expressions and not reused_expressions:
             from src.services.avatar_expression_pipeline import UNCONFIRMED_RETRY, unconfirmed_expressions
@@ -255,8 +257,9 @@ class AvatarStageResume:
         for action in actions:
             if action['stage'] in ('images', 'models') and uncertain_models:
                 action['warning'] = '접수 불명 3D 요청 재전송 · 중복 과금 가능'
-            elif action['stage'] == 'rig' and rig_problem and rig_problem.get('status') == 'submission_uncertain':
-                action['warning'] = '접수 불명 리깅 요청 재전송 · 중복 과금 가능'
+            elif action['stage'] == 'rig' and uncertain_rig:
+                action['warning'] = ('접수 불명 리깅 요청 재전송 · 중복 과금 가능' if uncertain_rig['stage'] == 'rigging'
+                                     else '접수 불명 동작 요청 재전송 · 중복 과금 가능')
             elif action['stage'] == 'expressions' and uncertain_expressions:
                 action['warning'] = UNCONFIRMED_RETRY
         recommended = next((a['stage'] for a in reversed(actions) if a['enabled']), None)

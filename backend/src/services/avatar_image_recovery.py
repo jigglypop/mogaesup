@@ -334,7 +334,10 @@ def retry_views(service, owner, job_id, images):
     with _LOCK:
         job = read_json(directory/'job.json')
         state = read_json(directory/'pipeline.json')
-        settle_interrupted(directory, state)
+        if _stopped(job, _RUN_LOCKS.get(str(directory))):
+            # Only a stopped job's cut-off requests are settled: a running worker's request receipt is its own, and a
+            # `not_sent` written over it while the request goes out would let a restart send it again.
+            settle_interrupted(directory, state)
         if not images or len(images) != len({(i['slot'], i['view']) for i in images}):
             raise PipelineError('invalid_views', '중복되지 않은 이미지 요청을 선택하세요.', 422)
         selected = []

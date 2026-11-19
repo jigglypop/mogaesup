@@ -91,9 +91,7 @@ def run_lock(directory: Path, port: int, *, blender: bool | Path = True):
             for path in locks:
                 for attempt in (1, 2):
                     try:
-                        with path.open("x", encoding="utf-8") as stream:
-                            stream.write(json.dumps(lease))
-                        break
+                        stream = path.open("x", encoding="utf-8")
                     except FileExistsError as exc:
                         # The lease guard is held, so no live run can take the lock between this check and the unlink.
                         if attempt == 1 and _reclaimable(path):
@@ -101,6 +99,15 @@ def run_lock(directory: Path, port: int, *, blender: bool | Path = True):
                             path.unlink(missing_ok=True)
                             continue
                         raise ValueError(f"Run or Blender is busy; inspect lock: {path}") from exc
+                    try:
+                        with stream:
+                            stream.write(json.dumps(lease))
+                    except BaseException:
+                        # This run made the file: one left empty or half written (a full disk) reads as no lease
+                        # anyone can reclaim, and would refuse every later run as busy.
+                        path.unlink(missing_ok=True)
+                        raise
+                    break
                 acquired.append(path)
         yield
     except (BlenderExecutionUncertain, KeyboardInterrupt):

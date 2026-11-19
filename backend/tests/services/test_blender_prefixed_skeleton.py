@@ -103,3 +103,20 @@ def test_a_prefixed_skeleton_fits_and_weights_the_sleeves_on_its_own_arm_bones(m
     assert set(report['sides']) == {'left', 'right'}
     assert rows[0] == {prefix+'Spine2'}
     assert rows[1] == {prefix+'LeftForeArm'} and rows[2] == {prefix+'RightForeArm'}
+
+
+@pytest.mark.parametrize('prefix', ['', *PREFIXES])
+def test_a_prefixed_skeleton_gets_its_wrist_and_ankle_cuts(monkeypatch, prefix):
+    """The body crop looked the neck, shoulder, wrist and ankle bones up by their plain names: a prefixed skeleton got
+    no wrist cut, so a short-sleeved top hid its arm skin down to the wrist."""
+    bpy, modules = fake_blender.install(monkeypatch, 'avatar_body_layers')
+    layers = modules['avatar_body_layers']
+    scene = bpy.context.scene
+    rig = posed_rig(scene, prefix)
+    top = mesh(scene, 'top', [(-.2, 0, .3), (.2, 0, .45)])
+    bottom = mesh(scene, 'bottom', [(-.1, 0, .08), (.1, 0, .25)])
+    spec = {'fitting': {}, 'anchors': {'neck': [0, .5, 0], 'shoulder_left': [.16, .43, 0]}}
+    regions, lines = layers.crop_regions({'top': [top], 'bottom': [bottom]}, rig, spec)
+    assert set(regions['top']['wrists']) == {'Left', 'Right'}
+    assert set(regions['bottom']['ankles']) == {'Left', 'Right'}
+    assert {'left_cuff', 'right_cuff', 'left_ankle', 'right_ankle'} <= {line[0] for line in lines}

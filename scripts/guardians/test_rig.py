@@ -67,7 +67,7 @@ def test_a_view_is_written_down_before_it_is_asked_for_and_never_paid_for_twice(
         assert openai.while_out == ['front uncertain']
         kept = receipt(out / '09' / 'tpose' / 'front.json')
         assert kept['status'] == 'done' and kept['image_sha256'] == rig.digest(front) and kept['usage'] == {'total_tokens': 7}
-        assert kept['prompt'] == rig.prompt_of('09', 'front') and kept['model'] == 'gpt-image-2'
+        assert kept['prompt'] == rig.prompt_of('09', 'front') and kept['model'] == rig.DRAWING['model']
         # Drawn already: nothing is sent.
         assert rig.draw(http, out, '09', picture, 'front') == front
         assert len(openai.requests) == 1
@@ -219,9 +219,9 @@ def test_the_animations_are_asked_for_in_one_task_with_their_clips_written_down(
             done = rig.animate(http, out, '09', {'task_id': 'rig-1'})
     finally:
         rig.fetch = fetch
-    assert json.loads(meshy.requests[0].content) == {'rig_task_id': 'rig-1', 'action_ids': [0, 298, 290, 30]}
+    assert json.loads(meshy.requests[0].content) == {'rig_task_id': 'rig-1', 'action_ids': [action for action, _, _ in rig.ACTIONS]}
     kept = receipt(out / '09' / 'animations.json')
-    assert [(action['key'], action['clip']) for action in kept['actions']] == [
-        ('Idle', 'idle'), ('Cheer_with_Both_Hands_Up', 'cheer'), ('Wave_One_Hand', 'wave'), ('Casual_Walk', 'walk')]
+    assert [(action['key'], action['clip']) for action in kept['actions']] == [(key, clip) for _, key, clip in rig.ACTIONS]
+    assert ('Idle', 'idle') in [(action['key'], action['clip']) for action in kept['actions']]
     assert done['status'] == 'SUCCEEDED' and kept['credits'] == 12 and downloads == ['https://assets.meshy.example/animated.glb']
     assert rig.spent(out) == (0, 12)

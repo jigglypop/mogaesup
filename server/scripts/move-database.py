@@ -45,7 +45,10 @@ ALTER ROLE mogaesup_app LOGIN PASSWORD '$APP_PW';
 GRANT CONNECT ON DATABASE mogaesup TO mogaesup_app;
 GRANT USAGE, CREATE ON SCHEMA public TO mogaesup_app;
 SQL
-for extension in $(from_sql -c "SELECT extname FROM pg_extension WHERE extname <> 'plpgsql'"); do
+# Each list is read on its own line first: a query that fails inside `for ... in $(...)` fails nothing, not even the ERR
+# trap, and the loop just runs over no names.
+extensions=$(from_sql -c "SELECT extname FROM pg_extension WHERE extname <> 'plpgsql'")
+for extension in $extensions; do
   to_admin -d mogaesup -c "CREATE EXTENSION IF NOT EXISTS \"$extension\""
 done
 tables=$(to_app -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")
@@ -54,7 +57,9 @@ systemctl stop mogaesup.service
 PGPASSWORD="$FROM_PW" pg_dump -h "$FROM" -U "$FROM_USER" -d mogaesup -Fc --no-owner --no-privileges -f /var/tmp/mogaesup.dump
 PGPASSWORD="$APP_PW" pg_restore -h "$TO" -U mogaesup_app -d mogaesup --no-owner --no-privileges --exit-on-error /var/tmp/mogaesup.dump
 rm -f /var/tmp/mogaesup.dump
-for table in $(from_sql -c "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1"); do
+moved_tables=$(from_sql -c "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")
+[ -n "$moved_tables" ] || { echo "the old database lists no tables to compare"; false; }
+for table in $moved_tables; do
   before=$(from_sql -c "SELECT count(*) FROM public.\"$table\"")
   after=$(to_app -c "SELECT count(*) FROM public.\"$table\"")
   echo "$table $before $after"

@@ -102,6 +102,24 @@ def task_problem(task, stage):
             'task_id': task.get('task_id'), 'message': message}
 
 
+def unconfirmed_problem(run):
+    """The rig or animation receipt whose submission nothing shows was accepted, which an explicit rig run
+    (AvatarMeshy.reset_failed) sends again whatever problem saved_problem reports first; None when there is none. One
+    whose saved 2xx answer names the accepted task is not: the run records that task and polls it."""
+    from src.services.character_motion import submitted_task_id as submitted_clip
+    if read_json(run/'delivery.json').get('origin') == 'transferred_meshy_rig':
+        return None
+    task = read_json(run/'character.json')
+    if task.get('status') == 'submission_uncertain' and not submitted_task_id(run, task):
+        return task_problem(task, task.get('stage', 'rigging'))
+    for path in sorted((run/'actions').glob('*/motion-pack.json')):
+        pack = read_json(path)
+        for slot, clip in pack.get('tasks', {}).items():
+            if clip.get('status') == 'submission_uncertain' and not submitted_clip(path.parent, pack, slot):
+                return {**task_problem(clip, 'animation'), 'action_id': pack.get('action_id')}
+    return None
+
+
 def saved_problem(run):
     """The first rig or animation receipt that blocks the job. A submission whose saved 2xx answer names the task the
     provider accepted is not one: the next run records that task and polls it, and nothing is sent again."""

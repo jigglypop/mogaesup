@@ -182,13 +182,15 @@ class AvatarMeshy:
                 with client(base):
                     pass
                 run.mkdir(exist_ok=True)
+                # The generation receipt first: a run whose input.json exists is never set up again, so a save that
+                # failed between the two would otherwise leave it without the receipt the rig is sent from.
+                if not uploaded:
+                    _write_json(run/'character.json', {**provider, 'height_meters': height})
                 _write_json(run/'input.json', {'source_job_id': job_id, 'source_sha256': source_sha256,
                     'generation_task_id': provider.get('task_id'), 'input_kind': 'model' if uploaded else 'generation',
                     'height_meters': height, 'meshy_base': base,
                     'max_rig_tasks': 1, 'motion_actions': accepted_actions,
                     'max_animation_tasks': max_animation_tasks})
-                if not uploaded:
-                    _write_json(run/'character.json', {**provider, 'height_meters': height})
             else:
                 # Legacy runs may have accepted actions in their immutable pipeline but
                 # predate the self-contained Meshy input contract. Freeze them once.
@@ -221,14 +223,16 @@ class AvatarMeshy:
             task = read_json(run/'character.json')
             changed = False
             if task.get('stage') == 'rigging' and task.get('status') in character_jobs.RETRYABLE:
-                provider = {}
+                replacement = None
                 if contract.get('input_kind') != 'model':
                     provider = read_json(run.parent/'parts/body/character.json')
                     if provider.get('stage') != 'generation' or provider.get('status') != 'SUCCEEDED':
                         raise PipelineError('generation_required', '성공한 Meshy 전신 생성 작업이 필요합니다.', 422)
-                character_jobs.archive_attempt(run, 'explicit')
-                if provider:
-                    _write_json(run/'character.json', {**provider, 'height_meters': contract.get('height_meters', 1.2)})
+                    # Written over the refused attempt's receipt instead of after its removal: a save that fails or a
+                    # process that stops in between never leaves the run without the receipt the rig is sent from.
+                    replacement = {**provider, 'height_meters': contract.get('height_meters', 1.2)}
+                    replacement.pop('archived_as', None)
+                character_jobs.archive_attempt(run, 'explicit', replacement)
                 changed = True
             elif task.get('stage') == 'rigging' and task.get('status') == 'SUCCEEDED':
                 for path in sorted((run/'actions').glob('*/motion-pack.json')):

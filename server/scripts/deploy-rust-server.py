@@ -48,6 +48,9 @@ SERVICE_UNIT = '/etc/systemd/system/mogaesup.service'
 # The SSM command's own limit (executionTimeout), and how long its invocation is waited for past it.
 COMMAND_SECONDS = 900
 COMMAND_WAIT = COMMAND_SECONDS + 120
+# How long a sent install waits for the instance's SSM agent before it expires unrun (send-command --timeout-seconds,
+# an hour by default): one that started any later could still be running, or start, after this deploy gave up on it.
+DELIVERY_SECONDS = COMMAND_WAIT - COMMAND_SECONDS
 
 
 def aws(*args):
@@ -487,7 +490,7 @@ def main():
                           encoding='utf-8')
     command = aws('ssm', 'send-command', '--region', REGION, '--instance-ids', instance, '--document-name',
                   'AWS-RunShellScript', '--parameters', f'file://{parameters.as_posix()}', '--comment',
-                  f'Mogaesup verified {release}')['Command']['CommandId']
+                  f'Mogaesup verified {release}', '--timeout-seconds', str(DELIVERY_SECONDS))['Command']['CommandId']
     receipt = {'release': release, 'instanceId': instance, 'bucket': bucket,
                'files': {name: sha(path) for name, path in files.items()}, 'commandId': command, 'outputs': outputs}
     (receipt_dir / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')

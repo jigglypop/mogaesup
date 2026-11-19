@@ -371,6 +371,29 @@ def offered(public):
             for action in public['next_actions'] if action['id'] == 'retry_image' and action['enabled']]
 
 
+def test_a_retry_refused_for_a_running_job_leaves_its_requests_in_flight_as_they_are(tmp_path):
+    from src.services.avatar_image_pipeline import _RUN_LOCKS
+    (tmp_path / 'output').mkdir()
+    live = {'phase': 'prepared', 'request_started': False, 'durable_start': True, 'client_request_id': 'c1'}
+    request = tmp_path / 'output' / 'top-front-provider.request.json'
+    request.write_text(json.dumps(live))
+    state = {'production_spec': {'generated_views': ['front', 'side']},
+             'parts': [{'slot': 'top', 'image': {'status': 'pending'}, 'model': {'status': 'pending'},
+                        'views': {'front': {'status': 'submitting', 'attempted_at': '2026-11-20T00:00:00+00:00'},
+                                  'side': {'status': 'pending'}}}]}
+    (tmp_path / 'pipeline.json').write_text(json.dumps(state))
+    (tmp_path / 'job.json').write_text(json.dumps({'id': JOB, 'status': 'pipeline_running'}))
+    # The job's worker runs and is about to send the front view's request: its receipt is the worker's own.
+    assert _RUN_LOCKS.acquire(str(StoredPath(tmp_path)))
+    try:
+        with pytest.raises(PipelineError) as error:
+            retry_views(Pipeline(StoredPath(tmp_path)), 1, JOB, [{'slot': 'top', 'view': 'side', 'failure_id': 'abcdefabcdef'}])
+    finally:
+        _RUN_LOCKS.release(str(StoredPath(tmp_path)))
+    assert error.value.code == 'worker_running'
+    assert json.loads(request.read_text()) == live
+
+
 def retried(directory, slot, view, failure_id):
     """The job's records once an explicit request for the view is accepted."""
     _, created = retry_views(Pipeline(directory), 1, JOB, [{'slot': slot, 'view': view, 'failure_id': failure_id}])

@@ -98,7 +98,12 @@ def _task(run, pack, slot, endpoint, payload, client):
             value["payload"] = {"height_meters": payload["height_meters"], "input_sha256": pack["input_sha256"]}
         value.update(task_id=task_id, status="PENDING")
         # The provider accepted (and bills) this task: a storage blip must not leave the receipt without its ID.
-        final_write(lambda: _save(run, pack), 'motion task receipt')
+        try:
+            final_write(lambda: _save(run, pack), 'motion task receipt')
+        except Exception:
+            # Nothing else holds the ID now (the saved answer may be lost too): the log keeps it for recovery.
+            character_jobs.LOGGER.error('Accepted task not saved: run=%s slot=%s task_id=%s', run.name, slot, task_id)
+            raise
     else:
         adopt_submitted_task(run, pack, slot)
     if value["status"] in BLOCKED:

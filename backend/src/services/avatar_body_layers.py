@@ -5,6 +5,7 @@ from mathutils import Vector
 
 from src.services.avatar_fit_geometry import bounds
 from src.services.avatar_blender_common import blender_to_gltf, gltf_to_blender
+from src.services.avatar_bone_names import bone_name
 from src.services.glb import parse_glb, build_glb
 
 
@@ -16,7 +17,9 @@ def crop_regions(garments, rig, spec, coverage_profiles=None):
     coverage_profiles = coverage_profiles or {}
 
     def joint(name):
-        bone = rig.data.bones.get(name)
+        # A skeleton may prefix its bone names ('mixamorig:LeftHand'); the plain name is tried first.
+        found = bone_name(rig, name)
+        bone = rig.data.bones.get(found) if found else None
         return rig.matrix_world @ bone.head_local if bone else None
 
     def horizontal(name, height):

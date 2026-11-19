@@ -1,7 +1,9 @@
 """Bounded action workers. No client-provided code, commands, or paths."""
 
+from contextlib import ExitStack
 import logging
 import os
+import time
 
 import httpx
 
@@ -176,6 +178,22 @@ def execute(pipeline: CharacterPipeline, character_id: str, user_id: int, operat
         OPERATIONS.release(operation_id)
 
 
+def _locked(pipeline, run, blender, stack):
+    """The run lock for an accepted operation, entered on `stack`. Another request of the character (an accept, an
+    update or an upload) holds it only briefly, so it is waited for a few seconds instead of failing the operation."""
+    for delay in (*LOCK_WAITS, None):
+        try:
+            return stack.enter_context(pipeline.lock(run, blender=blender))
+        except PipelineError as exc:
+            if exc.code != "busy" or delay is None:
+                raise
+            time.sleep(delay)
+
+
+# Seconds between attempts to take a character's run lock that another request holds (about 10 s in all).
+LOCK_WAITS = (.25, .5, 1, 2, 2, 4)
+
+
 def _execute(pipeline, character_id, user_id, run, path, operation):
     operation_id = operation["id"]
     # A split runs one isolated Blender worker in the directory perform() gives it. The lock names that worker's
@@ -183,7 +201,8 @@ def _execute(pipeline, character_id, user_id, run, path, operation):
     separate = operation["action_id"] in {"separate_materials", "separate_parts"}
     blender = run / "operations" / operation_id / "blender" / "runner.json" if separate else False
     try:
-        with pipeline.lock(run, blender=blender):
+        with ExitStack() as stack:
+            _locked(pipeline, run, blender, stack)
             operation = read_json(path)
             if operation.get("status") != "accepted" or operation.get("executor") != pipeline.instance:
                 return

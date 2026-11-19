@@ -149,6 +149,16 @@ def lineage_body(jobs_by_id, job_id, registered):
     return None
 
 
+def _made_elsewhere(job, part, slot):
+    """Whether `slot` of `job`'s sealed record came from another job: a variant (a job with a base) copies its base's
+    models or fitted parts and names the slots it made in requested_slots. A job without a base made every slot itself:
+    a refit of one of its slots freezes the others as 'reused_fitted_native', and they stay its own."""
+    requested = job.get('requested_slots')
+    if isinstance(requested, list):
+        return slot not in requested
+    return bool(job.get('base_job_id')) and (part or {}).get('origin') == 'reused_fitted_native'
+
+
 def _reason(part):
     """Short code for why a part report is not offered: the report's reason, else its fit status. Only a code is
     taken from the report; its error messages can carry worker text and are never passed on."""
@@ -568,10 +578,7 @@ class Wardrobe:
         record = self._record(job_id, version) if offered == version else {}
         part = next((p for p in record.get('result', {}).get('parts', [])
                      if isinstance(p, dict) and p.get('slot') == slot), None)
-        requested = job.get('requested_slots')
-        made_elsewhere = (slot not in requested if isinstance(requested, list)
-                          else (part or {}).get('origin') == 'reused_fitted_native')
-        if made_elsewhere or not wearable(record, part, slot):
+        if _made_elsewhere(job, part, slot) or not wearable(record, part, slot):
             raise PipelineError('not_found', message, 404)
         return record
 
@@ -649,12 +656,9 @@ class Wardrobe:
     def _job_parts(self, job, version, record, metadata):
         """(listed parts, (created_at, unavailable entry) rows) of one job's sealed record."""
         items, missing = [], []
-        requested = job.get('requested_slots')
         for part in record.get('result', {}).get('parts', []):
             slot, name = part.get('slot'), f"{part.get('slot')}.glb"
-            made_elsewhere = (slot not in requested if requested is not None
-                              else part.get('origin') == 'reused_fitted_native')
-            if slot == 'body' or made_elsewhere:
+            if slot == 'body' or _made_elsewhere(job, part, slot):
                 continue
             entry = metadata['parts'].get(f"{job['id']}:{slot}", {})
             if entry.get('deleted'):

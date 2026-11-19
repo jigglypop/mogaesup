@@ -578,6 +578,16 @@ def test_where_cloudfront_sends_the_api_is_checked_before_anything_is_installed(
     assert main.count('check_web_origin(') == 1
 
 
+def test_an_install_the_agent_does_not_take_in_time_expires_before_the_deploy_stops_waiting(deploy):
+    # Without a delivery limit SSM keeps the install queued for an hour: one that starts after this deploy gave up on
+    # it (an agent back online late) would install a release reported as failed, or over a newer one.
+    source = Path(deploy.__file__).read_text(encoding='utf-8')
+    main = source[source.index('def main():'):]
+    send = main[main.index("'send-command'"):main.index("['Command']['CommandId']")]
+    assert "'--timeout-seconds', str(DELIVERY_SECONDS)" in send
+    assert 30 <= deploy.DELIVERY_SECONDS and deploy.DELIVERY_SECONDS + deploy.COMMAND_SECONDS <= deploy.COMMAND_WAIT
+
+
 def test_cloudfront_must_send_the_api_to_this_stack(deploy, monkeypatch):
     outputs = {'VpcOriginId': 'vo_1', 'ApiPrivateDns': 'ip-10-0-0-1.ec2.internal'}
 
@@ -648,10 +658,13 @@ def test_the_secret_decides_when_it_is_named_and_the_file_otherwise(openai_env):
 
 
 def test_the_hand_set_openai_settings_stay_after_the_key(openai_env):
-    had = EXISTING + 'PICTURES_MONTHLY=50\nREADINGS_MONTHLY=600\nOPENAI_PICTURE_MODEL=gpt-image-2\nOPENAI_OTHER=x\n'
+    had = (EXISTING + 'PICTURES_MONTHLY=50\nREADINGS_MONTHLY=600\nOPENAI_PICTURE_MODEL=gpt-image-2\n'
+           'OPENAI_READING_EFFORT=low\nOPENAI_OTHER=x\n')
     found, _, lines = openai_env(had, OPENAI_KEY, '--openai-secret', OPENAI_ARN)
-    assert list(found) == ['OPENAI_API_KEY', 'OPENAI_PICTURE_MODEL', 'READINGS_MONTHLY', 'PICTURES_MONTHLY']
-    assert lines[-3:] == ['OPENAI_PICTURE_MODEL=gpt-image-2', 'READINGS_MONTHLY=600', 'PICTURES_MONTHLY=50']
+    assert list(found) == ['OPENAI_API_KEY', 'OPENAI_READING_EFFORT', 'OPENAI_PICTURE_MODEL', 'READINGS_MONTHLY',
+                           'PICTURES_MONTHLY']
+    assert lines[-4:] == ['OPENAI_READING_EFFORT=low', 'OPENAI_PICTURE_MODEL=gpt-image-2', 'READINGS_MONTHLY=600',
+                          'PICTURES_MONTHLY=50']
     assert 'OPENAI_OTHER=x' not in lines
 
 

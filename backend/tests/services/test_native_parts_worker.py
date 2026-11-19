@@ -187,6 +187,24 @@ def test_every_slot_is_bound_with_the_contract_bind_reads_and_sealed(assembly):
     assert assembly.coverage_calls == [['hair', 'shoes', 'top']]
 
 
+def test_metrics_that_cannot_read_the_skeleton_seal_the_assembly_not_measured(assembly, monkeypatch):
+    # A registered GLB body with its own bone names ('upperarm.L'): the comparison metrics cannot find its joints.
+    from src.services.avatar_pipeline_quality import REVISION
+    assembly.payload['contract'] = {'pipeline_quality_revision': REVISION}
+    (assembly.output/'input.json').write_text(json.dumps(assembly.payload), encoding='utf8')
+
+    def unnamed(*args, **kwargs):
+        raise ValueError('Body rig lacks arm, hand, thigh or foot joints for body-shell garments')
+    monkeypatch.setattr(assembly.worker, 'measure_assembly', unnamed)
+    # The worker's own seal (the stand-in exporter's GLBs are not real enough for the server's runtime inspection).
+    assembly.worker.run(assembly.payload)
+    seal = json.loads((assembly.output/'complete.json').read_text(encoding='utf8'))
+    result = seal['result']
+    assert result['fit_status'] == 'complete' and {'hair.glb', 'top.glb', 'shoes.glb', 'quality.json'} <= seal['files'].keys()
+    checks = {check['code']: check['status'] for check in result['quality']['checks']}
+    assert checks['rear_coverage'] == 'not_measured' and result['quality']['parts'] == {}
+
+
 def test_a_slot_whose_fit_raises_is_withdrawn_with_its_path_cut_to_a_file_name(assembly, monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError(r'C:\Users\someone\AppData\Local\Temp\tmpq1\top.blend cannot be read; see /srv/data/x/log.txt')

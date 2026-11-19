@@ -372,6 +372,29 @@ def stopped_animation(service, jid, directory):
     return action
 
 
+def test_an_explicit_rig_run_warns_of_an_unconfirmed_clip_behind_a_failed_one(setup):
+    from src.services.avatar_stage_resume import AvatarStageResume
+    from src.services.meshy_status import saved_problem, unconfirmed_problem
+    service, jid, directory, calls, _ = setup
+    action = stopped_animation(service, jid, directory)
+    run = directory/'meshy'
+    _write_json(run/'character.json', {'stage': 'rigging', 'status': 'SUCCEEDED', 'task_id': 'fixture-rig'})
+    failed = run/'actions/14'
+    failed.mkdir(parents=True)
+    _write_json(failed/'motion-pack.json', {'action_id': 14, 'rig_task_id': 'fixture-rig', 'max_new_tasks': 1,
+                                           'submitted_tasks': 1, 'tasks': {'clip': {'status': 'FAILED', 'task_id': 'clip-14'}}})
+    # The failed clip is the problem reported first; the run would send the unconfirmed one again as well.
+    assert saved_problem(run)['action_id'] == 14
+    assert unconfirmed_problem(run)['action_id'] == 77
+    _write_json(directory/'job.json', {**read_json(directory/'job.json'), 'production_mode': 'character_parts'})
+    rig = next(item for item in AvatarStageResume(service.factory).get(1, jid)['actions'] if item['stage'] == 'rig')
+    assert rig.get('warning') == '접수 불명 동작 요청 재전송 · 중복 과금 가능'
+    # Once its saved answer names the accepted clip, it is polled and nothing is sent again: no warning.
+    _write_json(action/'clip-submission-response.json', {'http_status': 202, 'body': json.dumps({'result': 'clip-77'})})
+    assert unconfirmed_problem(run) is None
+    assert not calls
+
+
 def test_recovering_a_lost_animation_asks_meshy_outside_the_lock(setup, monkeypatch):
     service, jid, directory, calls, transport = setup
     action = stopped_animation(service, jid, directory)
@@ -503,6 +526,51 @@ def test_a_rig_the_provider_accepted_without_a_saved_task_id_is_polled_not_sent_
     assert service.get(1, jid)['status'] == 'ready' and not calls
     saved = read_json(run/'character.json')
     assert saved['task_id'] == 'fixture-rig' and saved['recovery_method'] == 'submission_response'
+
+
+def test_an_explicit_rig_retry_whose_receipt_save_fails_keeps_a_receipt_and_is_sent_once_later(setup, monkeypatch):
+    service, jid, directory, calls, _ = setup
+    run = stopped_rig(service, jid, directory, status='submission_rejected', http_status=400)
+    real = module._write_json
+    failed = []
+
+    def flaky(path, value):
+        # The generation receipt the refused rig is replaced with cannot be saved once (a storage blip).
+        if not failed and path == run/'character.json' and value.get('stage') == 'generation':
+            failed.append(path)
+            raise OSError('storage blip')
+        return real(path, value)
+    monkeypatch.setattr(module, '_write_json', flaky)
+    monkeypatch.setattr(module.character_jobs, '_write_json', flaky)
+    with pytest.raises(OSError):
+        service.reset_failed(1, jid)
+    assert failed and (run/'character.json').is_file()
+    monkeypatch.setattr(module, '_write_json', real)
+    monkeypatch.setattr(module.character_jobs, '_write_json', real)
+    assert service.reset_failed(1, jid) is True
+    assert read_json(run/'character.json')['stage'] == 'generation'
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert [path for path, _ in calls].count('/openapi/v1/rigging') == 1
+    assert service.get(1, jid)['status'] == 'ready'
+
+
+def test_a_rig_set_up_whose_receipt_save_fails_is_set_up_again(setup, monkeypatch):
+    service, jid, directory, calls, _ = setup
+    run = directory/'meshy'
+    real = module._write_json
+
+    def no_receipt(path, value):
+        if path == run/'character.json':
+            raise OSError('storage blip')
+        return real(path, value)
+    monkeypatch.setattr(module, '_write_json', no_receipt)
+    with pytest.raises(OSError):
+        service.start(1, jid)
+    monkeypatch.setattr(module, '_write_json', real)
+    service.start(1, jid); service.execute(1, jid, poll_seconds=0)
+    assert read_json(run/'input.json')['generation_task_id'] == 'generation-fixture'
+    assert [path for path, _ in calls].count('/openapi/v1/rigging') == 1
+    assert service.get(1, jid)['status'] == 'ready'
 
 
 def test_an_accepted_rig_or_clip_named_only_by_its_saved_answer_is_recoverable_without_a_resend(setup):

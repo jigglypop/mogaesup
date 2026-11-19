@@ -204,9 +204,11 @@ def main() -> None:
             ready.raise_for_status()
             if provider not in ready.json()['capabilities'].get('providers', []):
                 raise SystemExit(f'{provider} is not configured on the character API ({PROVIDERS[provider]} in backend/.env)')
+            lines = []
             with ThreadPoolExecutor(PARALLEL) as pool:
                 for line in pool.map(lambda item: generate(client, manifest['style'], item, provider), items):
                     print(line, flush=True)
+                    lines.append(line)
     finally:
         process.terminate()
     after = credits(provider, settings)
@@ -214,6 +216,9 @@ def main() -> None:
         held = f', {after[1]:g} held by running tasks' if after[1] else ''
         used = f', {before[0] - after[0]:g} used this run' if before else ''
         print(f'{provider.capitalize()} credits: {after[0]:g} left{held}{used}', flush=True)
+    # An item refused, blocked, failed or still running is not made: the run is not a success.
+    if any(not line.endswith(': already downloaded') and ': done (' not in line for line in lines):
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

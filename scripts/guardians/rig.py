@@ -500,14 +500,16 @@ def main() -> int:
             print(f'wrote {args.sheet}')
             return 0
         if args.accept:
+            failed = False
             for item in items:
                 views = [args.out / item / 'tpose' / f'{view}.png' for view in VIEWS]
                 if absent := [view.stem for view in views if not view.exists()]:
                     print(f'FAIL {item}: no {", ".join(absent)} view yet', file=sys.stderr)
+                    failed = True
                     continue
                 write(args.out / item / 'tpose' / 'accepted.json', {'id': item, 'views': [digest(view) for view in views]})
                 print(f'ok   {item}: views accepted')
-            return 0
+            return 1 if failed else 0
         if not args.draw and not args.redraw:
             checked_actions(meshy)
 

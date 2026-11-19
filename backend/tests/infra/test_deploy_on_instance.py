@@ -516,6 +516,19 @@ def test_a_restored_runtime_that_never_answers_keeps_its_token_for_the_next_depl
     assert ['candidate-admission', True] in events
 
 
+@pytest.mark.parametrize('early', [{'FAKE_WORKER_CHECK_EXIT': '1'}, {'FAKE_SHARE_EXIT': '1'}])
+def test_a_drain_left_behind_is_reopened_by_a_next_deployment_that_stops_before_its_own(bash, tmp_path, early):
+    # The first deployment's restored runtime never answered its reopen: admission stays closed with the saved token.
+    done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_START_DELAY='1000', ASSET_DEPLOY_REOPEN_SECONDS='0')
+    assert state['draining'] and token_file(root).exists()
+    # The next one stops at the share or the worker check, before it drains: the running release keeps serving, open.
+    again, state, events, root = run_host_deploy(bash, tmp_path, root=root, FAKE_READY='1', **early)
+    assert again.code == 9 and 'running release keeps serving' in again.err
+    assert not state['draining'] and state['drain_owner'] is None and not token_file(root).exists()
+    assert any(event[:2] == ['curl', 'DELETE'] for event in events)
+    assert not any(event[:2] == ['curl', 'POST'] for event in events)
+
+
 def test_a_failed_first_deployment_leaves_admission_resumable_by_the_next(bash, tmp_path):
     # No runtime ran: the candidate closed admission with the token, and nothing is left to reopen it.
     done, state, events, root = run_host_deploy(bash, tmp_path, FAKE_OLD='none')

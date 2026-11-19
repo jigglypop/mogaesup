@@ -1173,7 +1173,13 @@ def run(payload):
     if payload.get('contract', {}).get('pipeline_quality_revision') == QUALITY_REVISION:
         groups = {part['slot']: [obj for obj in fitted if obj['part_role'] == part['slot']]
                   for part in reports if part.get('available', True)}
-        measured = measure_assembly(body, rig, groups)
+        try:
+            measured = measure_assembly(body, rig, groups)
+        except Exception:
+            # Comparison metrics, never a gate: a skeleton whose joints they cannot name (a registered GLB body with
+            # its own bone names) seals the assembly with them `not_measured` instead of failing it.
+            traceback.print_exc()
+            measured = {}
         quality, delivery_files = seal_quality(output, files, parts, spec, measured)
         result.update(quality=quality, delivery=quality['delivery'])
         files += delivery_files

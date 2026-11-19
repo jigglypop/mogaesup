@@ -155,7 +155,13 @@ def _submit(directory: Path, value: dict, endpoint: str, payload: dict, client: 
         raise ValueError("Invalid task ID; recover existing submission before retrying")
     value.update(task_id=task_id, status="PENDING")
     # The provider accepted (and bills) this task: a storage blip must not leave the receipt without its ID.
-    final_write(lambda: _write_json(directory / "character.json", value), 'provider task receipt')
+    try:
+        final_write(lambda: _write_json(directory / "character.json", value), 'provider task receipt')
+    except Exception:
+        # Nothing else holds the ID now (the saved answer may be lost too): the log keeps it for /recover-task.
+        LOGGER.error('Accepted task not saved: run=%s stage=%s provider=%s task_id=%s',
+                     directory.name, value['stage'], value.get('provider', 'meshy'), task_id)
+        raise
     return value
 
 

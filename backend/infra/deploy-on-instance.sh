@@ -202,15 +202,18 @@ except (KeyError, TypeError, ValueError, AttributeError):
 # open, and the next deployment reuses it, so that drain is always its own to resume, never another operation's.
 token_saved=false
 token_created=false
+drain_acquired=false
 if [[ -f "$token_file" ]]; then
   drain_token="$(tr -d '[:space:]' < "$token_file")"
   [[ "$drain_token" =~ ^[0-9a-f]{32}$ ]] || { echo "$token_file holds no admission token; inspect the runtime drain before deploying" >&2; exit 2; }
   token_saved=true
+  # That drain is this deployment's from here on: one that stops before its own drain (a failed migration, share or
+  # worker check) reopens it on the way out, as the running release keeps serving.
+  drain_acquired=true
 else
   drain_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 fi
 drain_payload="{\"token\":\"$drain_token\"}"
-drain_acquired=false
 save_token() {
   # Before anything can close admission with the token.
   [[ "$token_saved" == true ]] && return 0

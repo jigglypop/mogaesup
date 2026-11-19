@@ -258,6 +258,32 @@ def test_character_endpoints_require_authentication(setup):
     assert client.get('/api/characters').status_code == 401
 
 
+def test_an_operation_waits_for_another_request_that_briefly_holds_the_characters_lock(setup, monkeypatch):
+    import threading
+    client, pipeline, _ = setup
+    value = with_model(client)
+    monkeypatch.setattr(character_actions, 'LOCK_WAITS', (.05,)*40, raising=False)
+    operation, _ = pipeline.accept(value['id'], 1, 'inspect_model', 'brief-contention-1', value['revision'], {})
+    _, run, _ = pipeline.entry(value['id'], 1)
+    taken, release = threading.Event(), threading.Event()
+
+    def another_request():
+        # An accept, an update or an upload of the same character, as the operation's background run starts.
+        with pipeline.lock(run):
+            taken.set()
+            release.wait(5)
+    holder = threading.Thread(target=another_request)
+    holder.start()
+    assert taken.wait(5)
+    timer = threading.Timer(.3, release.set)
+    timer.start()
+    try:
+        character_actions.execute(pipeline, value['id'], 1, operation['id'])
+    finally:
+        release.set(); holder.join(); timer.join()
+    assert pipeline.operation(value['id'], 1, operation['id'])['status'] == 'succeeded'
+
+
 def test_an_operation_whose_last_save_failed_does_not_stay_running(setup, monkeypatch):
     from src.services import run_lock
     from src.services.character_pipeline import OPERATIONS

@@ -24,7 +24,9 @@ def sync(client, source, destination, request_id):
     if 'AWSCURRENT' not in current.get(previous['VersionId'], []):
         raise RuntimeError('Studio provider configuration changed; inspect before repeating')
     # A rotation: the app server keeps sending the old key until it restarts with the new one, so nginx accepts both
-    # until the next sync (deploy-on-instance.sh and entrypoint.py take STUDIO_GATEWAY_KEY_PREVIOUS).
+    # (deploy-on-instance.sh and entrypoint.py take STUDIO_GATEWAY_KEY_PREVIOUS). A sync whose key is already in place
+    # changes nothing, so the old key stays accepted until it is removed from the provider secret by hand and the
+    # studio deployed again (backend/README.md); a later rotation replaces it with the key it rotates out.
     replaced = str(settings.get('STUDIO_GATEWAY_KEY') or '').strip()
     if replaced and replaced != gateway and re.fullmatch(r'[A-Za-z0-9._~-]{16,256}', replaced):
         settings['STUDIO_GATEWAY_KEY_PREVIOUS'] = replaced
