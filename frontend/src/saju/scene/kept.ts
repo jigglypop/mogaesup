@@ -12,9 +12,14 @@ import { fromShelf, shelving, toShelf } from './shelf';
 
 /** How many builds are kept, the ones used longest ago let go first. */
 const KEEP = 24;
+/**
+ * How many charts' own islands are kept, the ones used longest ago let go first: the page's own and the few looked at
+ * before it. An estate is some seven megabytes of numbers, and the charts it is kept for are kept all day (see engine).
+ */
+const KEEP_READINGS = 4;
 
 const kept = new Map<string, Build>();
-const readings = new WeakMap<object, Map<string, Build>>();
+const readings = new Map<object, Map<string, Build>>();
 
 function copy(geometry: BufferGeometry): BufferGeometry {
   const own = new BufferGeometry();
@@ -69,18 +74,31 @@ export function keptBuild(key: string, make: () => Build): Build | Promise<Build
   return read.then(own);
 }
 
+/** The builds kept for `reading`, now the ones used last (see KEEP_READINGS). */
+function used(reading: object): Map<string, Build> | undefined {
+  const builds = readings.get(reading);
+  if (builds) {
+    readings.delete(reading);
+    readings.set(reading, builds);
+  }
+  return builds;
+}
+
 /** The page's own island kept for a chart's `reading` (the same object for the same birth all day) and `key`. */
 export function keptEstate(reading: object, key: string): Build | null {
   const build = readings.get(reading)?.get(key);
-  return build ? own(build) : null;
+  if (!build) return null;
+  used(reading);
+  return own(build);
 }
 
 /** Keeps the page's own island built for `reading` and `key` (see keptEstate); `build` stays the caller's. */
 export function keepEstate(reading: object, key: string, build: Build): void {
-  let builds = readings.get(reading);
+  let builds = used(reading);
   if (!builds) {
     builds = new Map();
     readings.set(reading, builds);
+    while (readings.size > KEEP_READINGS) readings.delete(readings.keys().next().value!);
   }
   // A reading's island is laid out again only when its bridges move: the last few are enough.
   if (builds.size >= 4) builds.delete(builds.keys().next().value!);

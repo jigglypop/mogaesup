@@ -27,6 +27,8 @@ const axis = new Vector3(1, 0, 0);
 const place = new Vector3();
 const size = new Vector3();
 const offset = new Vector3();
+/** Where each plaque's cord meets its rail: the same every frame. */
+const SPOTS = Array.from({ length: PLAQUES }, (_, index) => plaqueSpot(index));
 
 /** The plaques on the frame standing at `at` (about the island's middle), facing `facing`. */
 export function GuestPlaques({ at, facing, notes, onPress }: { at: readonly [number, number]; facing: number; notes: readonly GuestNote[]; onPress?: (() => void) | undefined }) {
@@ -49,19 +51,27 @@ export function GuestPlaques({ at, facing, notes, onPress }: { at: readonly [num
     shown.forEach((note, index) => mesh.setColorAt(index, color.set(shadeOf(note.key))));
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }, [shown]);
+  /** The wind's time and the meshes the plaques were last hung at: a frame with neither changed (a still scene) has nothing to hang again. */
+  const hung = useRef<{ time: number; plaques: InstancedMesh | null; cords: InstancedMesh | null }>({ time: NaN, plaques: null, cords: null });
   // Each hangs from its rail and swings about it, a little and at its own time.
   useFrame(() => {
-    const [plaqueMesh, cordMesh] = [plaques.current, cords.current];
+    const plaqueMesh = plaques.current;
+    const cordMesh = cords.current;
     if (!plaqueMesh || !cordMesh) return;
     const time = wind.value as number;
-    shown.forEach((_, index) => {
-      const [x, y, z] = plaqueSpot(index);
+    const last = hung.current;
+    if (last.time === time && last.plaques === plaqueMesh && last.cords === cordMesh) return;
+    last.time = time;
+    last.plaques = plaqueMesh;
+    last.cords = cordMesh;
+    for (let index = 0; index < shown.length; index++) {
+      const spot = SPOTS[index]!;
       turn.setFromAxisAngle(axis, Math.sin(time * 1.3 + index * 1.7) * 0.08);
       offset.set(0, -CORD / 2, 0).applyQuaternion(turn);
-      cordMesh.setMatrixAt(index, matrix.compose(place.set(x, y, z).add(offset), turn, size.set(1, CORD, 1)));
+      cordMesh.setMatrixAt(index, matrix.compose(place.set(spot[0], spot[1], spot[2]).add(offset), turn, size.set(1, CORD, 1)));
       offset.set(0, -CORD - PLAQUE[1] / 2, 0).applyQuaternion(turn);
-      plaqueMesh.setMatrixAt(index, matrix.compose(place.set(x, y, z).add(offset), turn, size.set(PLAQUE[0], PLAQUE[1], PLAQUE[2])));
-    });
+      plaqueMesh.setMatrixAt(index, matrix.compose(place.set(spot[0], spot[1], spot[2]).add(offset), turn, size.set(PLAQUE[0], PLAQUE[1], PLAQUE[2])));
+    }
     plaqueMesh.instanceMatrix.needsUpdate = true;
     cordMesh.instanceMatrix.needsUpdate = true;
   });

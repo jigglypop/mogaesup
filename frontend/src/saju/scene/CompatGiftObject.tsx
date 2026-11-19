@@ -12,7 +12,9 @@ export function CompatGiftObject({ design, tint }: { design: GiftDesign; tint?: 
   const first = tint ?? GIFT_STONES[from].color;
   const second = GIFT_STONES[to].color;
   const [models, setModels] = useState<Object3D[]>([]);
-  usePhotoAsset(models.length > 0);
+  // A model that could not be had is not waited for: the picture is taken without it, as the island shows it.
+  const [failed, setFailed] = useState(false);
+  usePhotoAsset(models.length > 0 || failed);
   useEffect(() => {
     let live = true;
     const dyed: MeshStandardMaterial[] = [];
@@ -34,7 +36,11 @@ export function CompatGiftObject({ design, tint }: { design: GiftDesign; tint?: 
         return model;
       };
       setModels(tone === 'same' ? [dress(first), dress(second)] : [dress(first)]);
-    }, () => { if (live) setModels([]); });
+    }, () => {
+      if (!live) return;
+      setModels([]);
+      setFailed(true);
+    });
     return () => {
       live = false;
       for (const material of dyed) material.dispose();

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DataTexture } from 'three';
 
 import { Builder, materialFor, mergeBuilds } from '../scene/build';
-import { keptBuild } from '../scene/kept';
+import { keepEstate, keptBuild, keptEstate } from '../scene/kept';
 import { detailTexture, foamTexture } from '../scene/ocean/detailNormals';
 import { detailData, foamData, SEA_TILE } from '../scene/ocean/seaTiles';
 import { paint, paintsPending } from '../scene/painter';
@@ -126,6 +126,17 @@ describe('지어 둔 것', () => {
     const [a, b] = [first, second].map((build) => (build as Exclude<typeof build, Promise<unknown>>).meshes[0]!.geometry);
     expect(a!.getAttribute('position').array).toBe(b!.getAttribute('position').array);
     expect(a!.getAttribute('position')).not.toBe(b!.getAttribute('position'));
+  });
+
+  it('제 섬의 영지는 최근에 본 사주 몇 개의 것만 남기고, 오래된 것부터 놓는다', () => {
+    const build = () => new Builder(2).box([1, 1, 1], [0, 0, 0], '#888888').finish();
+    const charts = Array.from({ length: 5 }, () => ({}));
+    for (const chart of charts.slice(0, 4)) keepEstate(chart, 'landings', build());
+    // 다시 본 사주는 가장 최근 것이 된다.
+    expect(keptEstate(charts[0]!, 'landings')).not.toBeNull();
+    keepEstate(charts[4]!, 'landings', build());
+    expect(keptEstate(charts[1]!, 'landings')).toBeNull();
+    for (const chart of [charts[0]!, ...charts.slice(2)]) expect(keptEstate(chart, 'landings')).not.toBeNull();
   });
 
   it('긴 글은 늘 같은 짧은 이름이 된다', () => {
