@@ -424,6 +424,20 @@ class DeployBases(unittest.TestCase):
     def setUp(self):
         self.bases = load_bases().bases
 
+    def test_gh_asks_again_after_a_refusal_and_says_why_when_it_keeps_failing(self):
+        module = load_bases()
+        failed = subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="HTTP 502: Bad Gateway")
+        passed = subprocess.CompletedProcess(["gh"], 0, stdout='{"ok": true}', stderr="")
+        with mock.patch.object(module.subprocess, "run", side_effect=[failed, failed, passed]) as run,                 mock.patch.object(module.time, "sleep") as slept:
+            self.assertEqual(module.gh("repos/x/y"), {"ok": True})
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([call.args[0] for call in slept.call_args_list], [5, 10])
+        out = io.StringIO()
+        with mock.patch.object(module.subprocess, "run", return_value=failed), mock.patch.object(module.time, "sleep"),                 contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            module.gh("repos/x/y")
+        self.assertIn("::error::gh api repos/x/y", out.getvalue())
+        self.assertIn("HTTP 502: Bad Gateway", out.getvalue())
+
     @staticmethod
     def run_(sha, event="push", conclusion="success", run_id=None):
         return {"id": run_id or sha, "head_sha": sha, "event": event, "status": "completed", "conclusion": conclusion}

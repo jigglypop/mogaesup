@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 
 PARTS = ('server', 'web', 'studio')
@@ -29,9 +30,18 @@ PARTS = ('server', 'web', 'studio')
 RUNS = 50
 
 
-def gh(path):
-    done = subprocess.run(['gh', 'api', path], check=True, capture_output=True, text=True)
-    return json.loads(done.stdout)
+def gh(path, attempts=4, wait=5):
+    """`gh api path`, read as JSON. A refusal the API may not repeat (a 5xx, a moment's limit) is asked again a few
+    times, a little later each time; the last one says why on the run's page (an annotation) before it ends the step."""
+    for attempt in range(attempts):
+        done = subprocess.run(['gh', 'api', path], capture_output=True, text=True)
+        if done.returncode == 0:
+            return json.loads(done.stdout)
+        if attempt + 1 < attempts:
+            time.sleep(wait * (attempt + 1))
+    why = ' '.join((done.stderr or done.stdout or '').split())[:400]
+    print(f'::error::gh api {path} 이(가) {attempts}번 모두 실패했습니다: {why}')
+    raise SystemExit(1)
 
 
 def bases(runs, jobs_of):
