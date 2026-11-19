@@ -5,7 +5,7 @@ use common::TestApp;
 use serde_json::json;
 
 #[tokio::test]
-async fn 사주는_동의한_뒤에만_남에게_보인다() {
+async fn 풀이는_동의한_뒤에만_남에게_보인다() {
     let app = TestApp::new(None).await;
     let host = app.register("share_host", "주인").await;
     let id = app.user_id("share_host").await;
@@ -31,9 +31,10 @@ async fn 사주는_동의한_뒤에만_남에게_보인다() {
     assert_eq!(closed.status, StatusCode::CONFLICT, "{:?}", closed.body);
     assert_eq!(closed.body["code"], "consent_required");
 
-    let hidden = app.call("GET", "/api/homes/share_host/saju", None, None).await;
-    assert_eq!(hidden.status, StatusCode::OK, "{:?}", hidden.body);
-    assert!(hidden.body["saju"].is_null());
+    // The house stands for a visitor all the same (it is drawn from the birth); the reading waits for consent.
+    let house = app.call("GET", "/api/homes/share_host/saju", None, None).await;
+    assert_eq!(house.status, StatusCode::OK, "{:?}", house.body);
+    assert_eq!(house.body["saju"]["name"], "가온");
     let owner = app.call("GET", "/api/homes/share_host/saju", None, Some(&host)).await;
     assert_eq!(owner.body["saju"]["name"], "가온");
     assert_eq!(app.call("GET", "/api/homes/share_host/saju/reading", None, None).await.body["status"], "none");

@@ -410,6 +410,7 @@ async fn 사주_집은_주인만_짓고_마을에는_이웃의_집과_공개된_
     assert_eq!(village["village"].as_array().unwrap().len(), 1);
     assert_eq!(village["village"][0]["user"]["username"], "friend_s");
     assert_eq!(village["village"][0]["neighbour"], false);
+    assert_eq!(village["village"][0]["visitable"], true);
 
     let ask = json!({"name": "옆집", "theirName": "앞집"});
     app.call("POST", "/api/ilchon/host_s/request", Some(ask), Some(&friend)).await;
@@ -424,19 +425,23 @@ async fn 사주_집은_주인만_짓고_마을에는_이웃의_집과_공개된_
     assert_eq!(back["village"][0]["user"]["username"], "host_s");
     assert_eq!(back["village"][0]["neighbour"], true);
 
-    // A home kept to 이웃 stands in a village only for those who may see the home itself.
+    // A home kept to 이웃 stands in its 이웃's village whoever looks; only those who may see the home itself can go on
+    // to it.
     app.call("PATCH", "/api/homes/me", Some(json!({"visibility": "ilchon"})), Some(&friend)).await;
     let seen = |cookie: Option<String>| {
         let app = &app;
         async move {
             let village = app.call("GET", "/api/homes/host_s/saju", None, cookie.as_deref()).await.body;
-            village["village"].as_array().unwrap().len()
+            let homes = village["village"].as_array().unwrap().clone();
+            assert_eq!(homes.len(), 1);
+            assert_eq!(homes[0]["user"]["username"], "friend_s");
+            homes[0]["visitable"].as_bool().unwrap()
         }
     };
-    assert_eq!(seen(None).await, 0);
-    assert_eq!(seen(Some(stranger.clone())).await, 0);
-    assert_eq!(seen(Some(host.clone())).await, 1);
-    assert_eq!(seen(Some(friend.clone())).await, 1);
+    assert!(!seen(None).await);
+    assert!(!seen(Some(stranger.clone())).await);
+    assert!(seen(Some(host.clone())).await);
+    assert!(seen(Some(friend.clone())).await);
     let closed = app.call("GET", "/api/homes/friend_s/saju", None, Some(&stranger)).await;
     assert_eq!(closed.status, StatusCode::FORBIDDEN);
 

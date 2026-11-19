@@ -2,8 +2,9 @@
 //!
 //! The app works a chart out in the browser, where the calendar tables are, so the server keeps what was entered and
 //! hands it to whoever may see the member's home ([`visible_home`]): the home's visibility and 이웃 decide that, as
-//! they do for its guestbook. The birth itself also needs the owner's consent to share it. A home's village is its owner's 이웃 who built a home of their own and, in the places
-//! they leave, the public homes built most recently.
+//! they do for its guestbook. A home's village is its owner's 이웃 who built a home of their own (their houses stand
+//! whoever looks; only those the viewer may see can be visited) and, in the places they leave, the public homes built
+//! most recently.
 
 use axum::{
     Json, Router,
@@ -29,8 +30,6 @@ use crate::{
 
 /// Homes a village shows around its own: one on each side and corner of the map.
 const VILLAGE_HOMES: usize = 8;
-/// 이웃 looked at for those places: some may keep their home from this viewer.
-const NEIGHBOURS_READ: i64 = 40;
 /// Saves of one member's 사주 in the rate window (ten minutes).
 const SAVES_PER_MEMBER: u32 = 30;
 const NAME_MAX: usize = 12;
@@ -64,19 +63,18 @@ fn home(row: &PgRow) -> Value {
 }
 
 /// `GET /api/homes/{username}/saju`: the member's 사주 home (`saju`, null until they build one) and the village around
-/// it (`village`). Their 이웃 with a home this viewer may see come first (`neighbour: true`; the viewer before the
-/// others, then the oldest 이웃); the places left go to the public homes built or built again most recently.
+/// it (`village`). Their 이웃 come first (`neighbour: true`; the viewer before the others, then the oldest 이웃), each
+/// house standing whoever looks; `visitable` says whether this viewer may go on to that 이웃's 섬 (a home kept to its
+/// 이웃 or to its owner stands in the village all the same, closed). The places left go to the public homes built or
+/// built again most recently. What the owner agreed to share (the chart's details, the reading) is the page's to hold
+/// back: a house is drawn from the birth.
 async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let viewer = optional_user(&state, &headers).await?;
-    let (profile, is_owner) = visible_home(&state, &name, viewer.as_ref()).await?;
-    let own = if is_owner || profile.saju_share_consent {
-        sqlx::query(&format!("SELECT {COLUMNS} FROM saju_homes s WHERE s.owner_id = $1"))
-            .bind(profile.owner_id)
-            .fetch_optional(&state.db)
-            .await?
-    } else {
-        None
-    };
+    let (profile, _) = visible_home(&state, &name, viewer.as_ref()).await?;
+    let own = sqlx::query(&format!("SELECT {COLUMNS} FROM saju_homes s WHERE s.owner_id = $1"))
+        .bind(profile.owner_id)
+        .fetch_optional(&state.db)
+        .await?;
     let viewer_id = viewer.as_ref().map(|user| user.id);
     let rows = sqlx::query(&format!(
         "SELECT u.id, u.username, u.display_name, h.emoji, h.visibility, {COLUMNS}
@@ -85,41 +83,41 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
          JOIN users u ON u.id = mine.friend_id
          JOIN homes h ON h.owner_id = u.id
          JOIN saju_homes s ON s.owner_id = u.id
-         WHERE mine.user_id = $1 AND u.saju_share_consent_at IS NOT NULL
+         WHERE mine.user_id = $1
          ORDER BY (u.id IS NOT DISTINCT FROM $2) DESC, mine.since, u.id LIMIT $3"
     ))
     .bind(profile.owner_id)
     .bind(viewer_id)
-    .bind(NEIGHBOURS_READ)
+    .bind(VILLAGE_HOMES as i64)
     .fetch_all(&state.db)
     .await?;
     let subject = viewer_id.map_or(Subject::Anonymous, Subject::User);
     let mut village = Vec::new();
     let mut placed = vec![profile.owner_id];
     for row in &rows {
-        if village.len() == VILLAGE_HOMES {
-            break;
-        }
         let owner: Uuid = row.get("id");
         let mut checker = Checker::new(&state.db);
         checker.know_home(owner, row.get::<String, _>("visibility").as_str());
-        if checker.check(subject, &Object::home(owner), "viewer").await? {
-            village.push(json!({"user": card(row, ""), "saju": home(row), "neighbour": true}));
-            placed.push(owner);
-        }
+        let visitable = checker.check(subject, &Object::home(owner), "viewer").await?;
+        village.push(json!({"user": card(row, ""), "saju": home(row), "neighbour": true, "visitable": visitable}));
+        placed.push(owner);
     }
     if village.len() < VILLAGE_HOMES {
         let others = sqlx::query(&format!(
             "SELECT u.id, u.username, u.display_name, h.emoji, {COLUMNS}
              FROM saju_homes s JOIN users u ON u.id = s.owner_id JOIN homes h ON h.owner_id = u.id
-             WHERE h.visibility = 'public' AND u.saju_share_consent_at IS NOT NULL AND NOT (u.id = ANY($1))
+             WHERE h.visibility = 'public' AND NOT (u.id = ANY($1))
              ORDER BY s.updated_at DESC, u.id LIMIT $2"
         ))
         .bind(&placed)
         .bind((VILLAGE_HOMES - village.len()) as i64)
         .fetch_all(&state.db)
         .await?;
-        village.extend(others.iter().map(|row| json!({"user": card(row, ""), "saju": home(row), "neighbour": false})));
+        village.extend(
+            others
+                .iter()
+                .map(|row| json!({"user": card(row, ""), "saju": home(row), "neighbour": false, "visitable": true})),
+        );
     }
     Ok(Json(json!({"saju": own.as_ref().map(home), "village": village})))
 }
