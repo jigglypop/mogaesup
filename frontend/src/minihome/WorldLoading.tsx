@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { useWorldLoadProgress, type WorldLoadStage } from 'gaesup-world';
 
-import { Icon } from '../ui/icons';
+import { BrandMark } from '../ui/BrandMark';
 
 const STAGE: Record<WorldLoadStage, string> = { assets: '섬을 불러오는 중', shaders: '빛과 그림자를 준비하는 중', ready: '다 됐어요' };
 
@@ -21,7 +21,7 @@ export function WorldLoading() {
     <div className={`mg-world-loading${stage === 'ready' ? ' is-done' : ''}`} role="status" aria-live="polite">
       <div className="mg-loading-card mg-glass">
         <span className="mg-brand-mark" aria-hidden="true">
-          <Icon name="island" />
+          <BrandMark />
         </span>
         <b>{STAGE[stage]}</b>
         {/* The count changes with every file; only the stage above is read out. */}

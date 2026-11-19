@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { readingOf, type Birth } from '../engine';
 import { profileOfReading } from '../profile';
-import { BRIDGE_FOOT, ESTATE_HALF, LANDINGS } from '../scene/estate/coast';
+import { BRIDGE_FOOT, HOME_HALF, LANDINGS } from '../scene/estate/coast';
 import { estateOf } from '../scene/estate/layout';
 import { Builder } from '../scene/build';
 import { estateGround } from '../scene/estate/ground';
@@ -22,10 +22,10 @@ const wet = (id: string, motif?: string) => id === 'shore:jetty' || id.startsWit
 
 describe('미니홈피 주인의 섬: 호수가 아는 둥근 네모 위의 영지', () => {
   it('섬은 영지의 크기다: 이웃 섬 네 개를 늘어놓은 만큼 넓고, 모서리는 영지의 물가만큼 둥글다', () => {
-    expect(ISLANDS.home.half).toBe(ESTATE_HALF);
+    expect(ISLANDS.home.half).toBe(HOME_HALF);
     expect(ISLANDS.home.corner).toBeLessThan(ISLANDS.home.half);
     // 대각선의 물가는 둥근 영지(초타원)의 물가와 반 미터 안쪽으로 만난다.
-    expect(Math.abs(shoreAt(ISLANDS.home, Math.PI / 4) - ESTATE_HALF * 2 ** (0.5 - 1 / 2.5))).toBeLessThan(0.5);
+    expect(Math.abs(shoreAt(ISLANDS.home, Math.PI / 4) - HOME_HALF * 2 ** (0.5 - 1 / 2.5))).toBeLessThan(0.5);
   });
 
   it('물가 선은 호수가 아는 둥근 네모를 따라 반 미터 안쪽으로만 구불거린다', () => {

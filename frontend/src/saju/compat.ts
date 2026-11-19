@@ -52,6 +52,8 @@ export type Compat = {
   /** The two homes' elements, the bridge's ends: the viewer's, then the other's. */
   from: Element;
   to: Element;
+  /** The two day masters it is read between, the viewer's first: `정화(丁火)`. */
+  days: readonly [string, string];
 };
 
 /** `a` and `b` in whichever order `pairs` writes them, or null when they are not a pair. */
@@ -132,5 +134,5 @@ export function compatOf(mine: Profile, theirs: Profile): Compat {
     headline = `${days} 자극! ${SPARKS[giver]}`;
     tone = 'spark';
   }
-  return { headline, tone, notes, from, to };
+  return { headline, tone, notes, from, to, days: [mine.dayMaster.label, theirs.dayMaster.label] };
 }

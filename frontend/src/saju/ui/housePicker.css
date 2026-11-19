@@ -1,0 +1,5 @@
+.mg-house-pick { display: grid; gap: 14px; }
+.mg-house-row { display: grid; gap: 8px; }
+.mg-house-row > h3 { margin: 0; color: var(--mg-ink); font-size: 14px; font-weight: 750; }
+.mg-house-pick .mg-chip i { width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--mg-hair); }
+.mg-house-pick > .mg-btn { justify-self: start; }

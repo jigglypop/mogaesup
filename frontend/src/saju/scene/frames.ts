@@ -32,8 +32,8 @@ export type Frame = {
   reach: number;
 };
 
-/** A place in the village: an island's middle on the ground, and whose island it is. */
-export type Spot = { x: number; z: number; kind?: IslandKind };
+/** A place in the village: an island's middle on the ground, and whose island it is; `reach` for an island of its own size (a shared island's harbour). */
+export type Spot = { x: number; z: number; kind?: IslandKind; reach?: number };
 
 /** An island reaches this much further across the picture than its bank does: the shore's stones, a leaning tree. */
 const SIDE_MARGIN = 0.6;
@@ -47,8 +47,8 @@ const STANDING = (7 - ISLANDS.neighbour.reach * Math.sin(ELEVATION)) / Math.cos(
 const EYE_HEIGHT = 1.5;
 
 /** How far an island reaches from its middle on the ground: the page's own island, at the village's middle, is the larger. */
-function reachOf({ x, z, kind }: Spot): number {
-  return ISLANDS[kind ?? (x === 0 && z === 0 ? 'home' : 'neighbour')].reach;
+function reachOf({ x, z, kind, reach }: Spot): number {
+  return reach ?? ISLANDS[kind ?? (x === 0 && z === 0 ? 'home' : 'neighbour')].reach;
 }
 
 /** How far an island that reaches `reach` metres spreads across the picture from its middle, to either side. */
@@ -147,7 +147,7 @@ export function openArea(width: number, height: number, inset: Inset): { x: numb
 }
 
 /** How far in and out a viewer may zoom, as a multiple of the size at which the frame just fits. */
-export const ZOOM_RANGE = { min: 0.5, max: 7 } as const;
+export const ZOOM_RANGE = { min: 0.5, max: 12 } as const;
 export const clampZoom = (zoom: number) => Math.min(ZOOM_RANGE.max, Math.max(ZOOM_RANGE.min, zoom));
 
 /** How much a wheel's step zooms, per pixel it would have scrolled; a trackpad's pinch sends finer steps and counts for more. */
@@ -163,7 +163,10 @@ const WHEEL_NOTCH = 100;
  */
 export function wheelZoom(pixels: number, pinch: boolean): number {
   const notch = WHEEL_NOTCH * WHEEL_ZOOM;
-  return Math.exp(pinch ? Math.min(notch, Math.max(-notch, -pixels * WHEEL_PINCH)) : -pixels * WHEEL_ZOOM);
+  // One event zooms a notch and a half at most: a wheel spun hard, or a mouse that sends a page's worth at once, would
+  // otherwise jump the picture several times closer in a single step.
+  const most = pinch ? notch : notch * 1.5;
+  return Math.exp(Math.min(most, Math.max(-most, -pixels * (pinch ? WHEEL_PINCH : WHEEL_ZOOM))));
 }
 
 /** How many pixels a metre takes for `frame` to fit a view `width` by `height` pixels. */

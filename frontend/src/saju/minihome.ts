@@ -53,7 +53,7 @@ async function read(username: string, viewer: string | null): Promise<Minihome> 
   return {
     view,
     owner,
-    village: village.village.map(({ user, saju, neighbour, visitable, shared }) => ({ ...residentOf(user.username, saju), neighbour, visitable: visitable !== false, shared: shared !== false })),
+    village: village.village.map(({ user, saju, neighbour, visitable, shared }) => ({ ...residentOf(user.username, saju), avatarUrl: user.avatarUrl ?? null, neighbour, visitable: visitable !== false, shared: shared !== false })),
     mine: viewer === username ? owner : mine && viewer ? residentOf(viewer, mine) : null,
     as: viewer,
   };
@@ -65,7 +65,7 @@ async function read(username: string, viewer: string | null): Promise<Minihome> 
  * (who may see the home) are the owner's: they keep the change on the server and show the answer.
  */
 export function useMinihome(username: string) {
-  const { status, user, lapsed, nameAs } = useAuth();
+  const { status, user, lapsed, nameAs, pictureAs } = useAuth();
   const viewer = user?.username ?? null;
   const settled = status !== 'loading';
   const [state, setState] = useState<MinihomeState>({ status: 'loading' });
@@ -179,8 +179,9 @@ export function useMinihome(username: string) {
       const { profile } = image ? await homeApi.setAvatar({ expectedOwnerId: ownerId, image }) : await homeApi.removeAvatar({ expectedOwnerId: ownerId });
       writes.current += 1;
       setState(onOwn(ownerId, (minihome) => ({ ...minihome, view: { ...minihome.view, profile } })));
+      pictureAs(profile.avatarUrl ?? null);
     },
-    [ownerId],
+    [ownerId, pictureAs],
   );
   return { state, build, demolish, open, saveProfile, changeAvatar };
 }

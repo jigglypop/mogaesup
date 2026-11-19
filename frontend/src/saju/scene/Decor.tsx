@@ -12,12 +12,12 @@ import { CompatGiftObject } from './CompatGiftObject';
 import type { BoardPicture } from '../ui/PhotoBoardCard';
 import { BOARD_SPOT, PhotoBoard } from './PhotoBoard';
 import { ElementOrnament } from './ElementOrnament';
-import { barrel, bench, jar, lantern, parasol, pot, tableSet, well, woodpile } from './arch';
+import { barrel, bench, fence, jar, lantern, parasol, pot, stoneWall, tableSet, well, woodpile } from './arch';
 import { Builder, type Build } from './build';
 import { Built } from './Built';
 import { loadDecorModel } from './decorModel';
 import { keptBuild } from './kept';
-import { bush, rock, tree } from './plants';
+import { bamboo, bush, pine, rock, steppingStones, tree } from './plants';
 import { wind } from './sprigs';
 import { usePhotoAsset } from './works';
 
@@ -80,7 +80,7 @@ function FlagPole({ design: { star, element }, tint }: { design: FlagDesign; tin
 }
 
 /** A small thing for the garden, built as the island's own are (see build), about its middle. */
-function propBuild(ref: PropRef, tint?: string): Build {
+export function propBuild(ref: PropRef, tint?: string): Build {
   const b = new Builder(ref.length * 97 + ref.charCodeAt(0));
   switch (ref) {
     case 'lantern':
@@ -119,6 +119,52 @@ function propBuild(ref: PropRef, tint?: string): Build {
       break;
     case 'tree':
       tree(b, [0, 0, 0], { height: 3.2, spread: 2.4, bark: '#5a4034', leaves: ['#5f9a45', '#76ad52', '#4e8a3b', '#8cbd5c'], lobes: 4 });
+      break;
+    case 'pine':
+      pine(b, [0, 0, 0], { height: 3.6, spread: 2.8, needles: ['#3d6b3c', '#4e7d46', '#335c35', '#5d8a4f'] });
+      break;
+    case 'blossom':
+      tree(b, [0, 0, 0], { height: 3, spread: 2.8, bark: '#4d3b38', leaves: ['#f2b8c9', '#f7cdd9', '#eaa3b9', '#fbe0e8'], lobes: 5, blooms: { colors: ['#fff5f8', '#ffd6e2'], share: 0.45 } });
+      break;
+    case 'maple':
+      tree(b, [0, 0, 0], { height: 3.1, spread: 2.6, bark: '#56403a', leaves: ['#d2492c', '#e56c35', '#c13a2a', '#eb9a3c'], lobes: 5 });
+      break;
+    case 'bamboo':
+      bamboo(b, [0, 0, 0], { canes: 9, height: 3.8, reach: 0.65 });
+      break;
+    case 'stones':
+      for (const [x, z, size] of [[-0.32, 0.1, 0.34], [0.18, -0.2, 0.28], [0.3, 0.26, 0.22], [-0.05, -0.34, 0.18], [-0.4, -0.24, 0.16]] as const) rock(b, [x, 0, z], size, '#aaa194', 0.62);
+      break;
+    case 'boulder':
+      rock(b, [0, 0, 0], 1.45, '#9d968a', 0.62);
+      rock(b, [0.82, 0, 0.42], 0.42, '#a59c8e', 0.6);
+      rock(b, [-0.7, 0, 0.55], 0.3, '#b0a798', 0.6);
+      break;
+    case 'stepping':
+      steppingStones(b, [[-1.1, 0], [1.1, 0]], 0.5, ['#b9b0a1', '#a89f91', '#c4bcae']);
+      break;
+    case 'path-stone':
+      // 판석: flat slabs, two across and five along, a little out of line as a laid path is.
+      for (let along = 0; along < 5; along++) {
+        for (const across of [-0.27, 0.27]) {
+          const size = b.between(0.44, 0.5);
+          b.box([size, 0.07, size * b.between(0.86, 1)], [along * 0.5 - 1 + b.between(-0.03, 0.03), 0.035, across + b.between(-0.03, 0.03)], b.pick(['#b9b0a1', '#a89f91', '#c4bcae']), { surface: 'stone', rough: 0.9, vary: 0.08 }, [0, b.between(-0.08, 0.08), 0]);
+        }
+      }
+      break;
+    case 'path-wood':
+      // 마루길: planks across two runners.
+      for (const across of [-0.4, 0.4]) b.box([2.4, 0.08, 0.1], [0, 0.04, across], '#6f5237', { surface: 'wood', rough: 0.85 });
+      for (let plank = 0; plank < 12; plank++) b.box([0.18, 0.05, 1.05], [plank * 0.2 - 1.1, 0.105, 0], b.pick(['#9a7650', '#a7825a', '#8d6b48']), { surface: 'wood', rough: 0.8, vary: 0.1 });
+      break;
+    case 'fence-wood':
+      fence(b, [-1, 0], [1, 0], { kind: 'picket', height: 0.62, color: '#8a6648' });
+      break;
+    case 'fence-bamboo':
+      fence(b, [-1, 0], [1, 0], { kind: 'bamboo', height: 0.78, color: '#9cb16c' });
+      break;
+    case 'stone-wall':
+      stoneWall(b, [-1, 0], [1, 0], 0.62, ['#b5ab98', '#a39988', '#c2b8a6'], '#5f5c5a');
       break;
   }
   const build = b.finish();
@@ -212,6 +258,14 @@ function Character({ url, tint }: { url: string; tint?: string }) {
   return model && <primitive object={model} />;
 }
 
+/** The things built of stones alone, and the unseen round that a press on one of them meets: its middle and its size. */
+export const PICKED_BY: Partial<Record<string, { at: [number, number, number]; size: [number, number, number] }>> = {
+  rock: { at: [0, 0.09, 0], size: [0.66, 0.4, 0.66] },
+  stones: { at: [0, 0.06, 0], size: [0.62, 0.22, 0.56] },
+  boulder: { at: [0.05, 0.3, 0.12], size: [1.25, 0.75, 1.05] },
+  stepping: { at: [0, 0.04, 0], size: [1.3, 0.12, 0.36] },
+};
+
 /** What is placed on the 섬 whose island stands at the village's middle. */
 export type IslandDecor = { items: readonly DecorItem[]; flags: readonly DecorFlag[]; gifts?: readonly DecorGift[]; terrain?: Terrain; tiles?: readonly TerrainCell[]; own: FlagDesign | null; character: string | null; photoBoard?: BoardPicture | null };
 export function DecorLayer({ items, flags, gifts, own, character, selectedId, photoBoard }: IslandDecor & { selectedId: string | null }) {
@@ -244,8 +298,8 @@ export function DecorLayer({ items, flags, gifts, own, character, selectedId, ph
           shown && (
             <group key={item.id} position={[item.x, 0, item.z]} rotation={[0, item.turn, 0]} scale={item.scale ?? 1} userData={{ decorId: item.id }}>
               {shown}
-              {/* A rock is drawn entirely as a shader instance, which the scene's solid-mesh picker passes through. */}
-              {item.kind === 'prop' && item.ref === 'rock' && <mesh position={[0, 0.09, 0]} scale={[0.66, 0.4, 0.66]}>
+              {/* Stones are drawn entirely as shader instances, which the scene's solid-mesh picker passes through. */}
+              {item.kind === 'prop' && PICKED_BY[item.ref] && <mesh position={PICKED_BY[item.ref]!.at} scale={PICKED_BY[item.ref]!.size}>
                 <sphereGeometry args={[1, 8, 6]} />
                 <meshBasicMaterial visible={false} />
               </mesh>}

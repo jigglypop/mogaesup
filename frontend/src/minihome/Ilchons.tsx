@@ -96,11 +96,11 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
   return { list, loaded, received, status, error: actError || loadError, busy, act };
 }
 
-function Person({ username, name, detail }: { username: string; name: string; detail: string }) {
+function Person({ username, name, detail, avatarUrl }: { username: string; name: string; detail: string; avatarUrl?: string | null | undefined }) {
   return (
     <>
       <span className="mg-avatar" data-tone={toneOf(username)} aria-hidden="true">
-        {initialOf(name)}
+        {avatarUrl ? <img src={avatarUrl} alt="" /> : initialOf(name)}
       </span>
       <div>
         <b>{name}</b>
@@ -140,7 +140,7 @@ export function NeighborActions({ view, viewer, neighbors }: { view: HomeView; v
           <ul className="mg-people">
             {received.map((request) => (
               <li key={request.id}>
-                <Person username={request.from.username} name={request.from.displayName} detail={request.message || `'${request.theirName}'로 불러 달래요`} />
+                <Person username={request.from.username} name={request.from.displayName} avatarUrl={request.from.avatarUrl} detail={request.message || `'${request.theirName}'로 불러 달래요`} />
                 <span className="mg-people-actions">
                   <button className="mg-btn is-primary is-small" aria-disabled={busy || undefined} onClick={() => act(() => socialApi.accept(request.id, {}))}>
                     수락
@@ -230,7 +230,7 @@ export function NeighborsTab({ view, viewer, neighbors }: { view: HomeView; view
         <ul className="mg-people">
           {list.map((ilchon) => (
             <li key={ilchon.user.id}>
-              <Person username={ilchon.user.username} name={ilchon.user.displayName} detail={`${ownerName}의 ${ilchon.name}`} />
+              <Person username={ilchon.user.username} name={ilchon.user.displayName} avatarUrl={ilchon.user.avatarUrl} detail={`${ownerName}의 ${ilchon.name}`} />
               <Link className="mg-btn is-small" to={`/@${ilchon.user.username}`}>
                 놀러가기
               </Link>

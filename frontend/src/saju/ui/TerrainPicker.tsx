@@ -2,7 +2,7 @@ import type { Terrain } from '../../api/types';
 import './terrainPicker.css';
 
 const TILES = [
-  ['default', '사주 잔디'], ['snow', '눈밭'], ['desert', '모래사막'], ['moss', '이끼 정원'],
+  ['default', '사주 잔디'], ['snow', '눈밭'], ['desert', '모래사막'], ['moss', '이끼 정원'], ['gravel', '자갈길'], ['soil', '흙길'],
 ] as const;
 
 export function TerrainPicker({

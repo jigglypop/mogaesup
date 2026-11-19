@@ -86,7 +86,7 @@ describe('섬 읽기', () => {
     const minihome = page.ready()!;
     expect(minihome.owner).toEqual({ id: 'sol', name: '솔', birth });
     expect(minihome.mine).toBe(minihome.owner);
-    expect(minihome.village).toEqual([{ id: 'noeul', name: '노을', birth, neighbour: true, visitable: true, shared: true }]);
+    expect(minihome.village).toEqual([{ id: 'noeul', name: '노을', birth, avatarUrl: null, neighbour: true, visitable: true, shared: true }]);
     await page.unmount();
   });
 

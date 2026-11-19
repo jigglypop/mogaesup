@@ -14,7 +14,7 @@ import type { EstateSite } from './site';
 
 /** The colours of an estate's ground. */
 export type GroundPaint = {
-  surface?: 'snow' | 'desert' | 'moss';
+  surface?: 'snow' | 'desert' | 'moss' | 'gravel' | 'soil';
   /** The lawn's body, its lighter patches, its flecks (the season's grass). */
   lawn: readonly [string, string, string];
   /** Bare earth where the turf thins toward the bank, the yard's packed earth and the paths' trodden earth. */

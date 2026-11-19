@@ -1,5 +1,5 @@
 import type { Element } from '../elements';
-import { ROOF_BY_SYMBOL, type House } from '../profile';
+import { roofOf, type House } from '../profile';
 import { gableRoof, windowAt } from './arch';
 import type { Builder, V3 } from './build';
 
@@ -94,7 +94,7 @@ function lanternTower(b: Builder, paint: string): void {
 export function drawRoofFeature(b: Builder, house: House): void {
   const paint = FINISH[house.accent ?? house.style];
   b.group([0, RIDGE[house.style], 0], () => {
-    switch (ROOF_BY_SYMBOL[house.symbol]) {
+    switch (roofOf(house)) {
       case 'gables': return twinGables(b, paint);
       case 'glasshouse': return glasshouse(b, paint);
       case 'dome': return observatory(b, paint);

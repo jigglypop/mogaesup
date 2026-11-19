@@ -1,7 +1,7 @@
 import { Color } from 'three';
 
 import type { Builder, Finish } from './build';
-import { ESTATE_HALF } from './estate/coast';
+import { HOME_HALF } from './estate/coast';
 import { WATER_LEVEL } from './mood';
 import { noise2 } from './noise';
 import { reeds, rock, type Palette } from './plants';
@@ -50,7 +50,7 @@ const ESTATE_CORNER = 0.83;
  * corners as the estate's coast; a neighbour's keeps to its house and a few trees.
  */
 export const ISLANDS: Record<IslandKind, IslandShape> = {
-  home: { half: ESTATE_HALF, corner: ESTATE_HALF * ESTATE_CORNER, reach: ESTATE_HALF + 1.9 },
+  home: { half: HOME_HALF, corner: HOME_HALF * ESTATE_CORNER, reach: HOME_HALF + 1.9 },
   neighbour: { half: 5.5, corner: 2.6, reach: 7.4 },
 };
 

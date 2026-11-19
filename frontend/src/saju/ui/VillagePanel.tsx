@@ -63,7 +63,7 @@ export function VillagePanel({ owner, villagers, viewer }: {
             <li key={resident.id}>
               <Door className="mg-saju-villager mg-card" data-element={balance.dominant} to={homePath(resident.id)}>
                 <span className="mg-saju-villager-mark">
-                  <PixelIcon name={balance.dominant} size={26} />
+                  {resident.avatarUrl ? <img className="mg-saju-avatar" src={resident.avatarUrl} alt="" /> : <PixelIcon name={balance.dominant} size={26} />}
                 </span>
                 <span className="mg-saju-villager-text">
                   <b>

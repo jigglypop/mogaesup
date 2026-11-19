@@ -18,6 +18,11 @@ const SAMPLES = 1440;
  * paths and framing all follow it.
  */
 export const ESTATE_HALF = 24;
+/**
+ * How large the page's own island is laid out (its half, as ESTATE_HALF's): the estate's places spread out by
+ * HOME_HALF / ESTATE_HALF, so each thing keeps its size and the lawn between them grows, room for what the owner adds.
+ */
+export const HOME_HALF = 30;
 /** Between a circle (2) and a square (large): a round that still has shoulders where the corners' bridges land. */
 const ROUNDNESS = 2.5;
 /** How far a bridge's foot reaches up the bank past the waterline (as village.ts reckons a bridge). */

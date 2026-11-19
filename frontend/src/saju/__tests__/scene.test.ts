@@ -241,9 +241,9 @@ describe('다섯 집', () => {
 });
 
 describe('섬의 모양', () => {
-  it('미니홈피 주인의 섬은 이웃 섬 네 개쯤을 가로세로로 늘어놓은 만큼 넓다', () => {
-    expect(ISLANDS.home.half / ISLANDS.neighbour.half).toBeGreaterThan(4);
-    expect(ISLANDS.home.half / ISLANDS.neighbour.half).toBeLessThan(4.6);
+  it('미니홈피 주인의 섬은 이웃 섬 다섯 개쯤을 가로세로로 늘어놓은 만큼 넓다', () => {
+    expect(ISLANDS.home.half / ISLANDS.neighbour.half).toBeGreaterThan(5);
+    expect(ISLANDS.home.half / ISLANDS.neighbour.half).toBeLessThan(5.6);
     for (const kind of KINDS) {
       const { half, corner, reach } = ISLANDS[kind];
       expect(corner).toBeGreaterThan(0);

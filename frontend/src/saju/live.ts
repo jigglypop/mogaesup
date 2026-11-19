@@ -23,6 +23,10 @@ export type Walker = {
   action: Action;
   /** Counts each move begun (a jump, a wave), so the same move twice is played twice. */
   moves: number;
+  /** The island's owner, walking it as its guardian dog (the server says so). */
+  owner: boolean;
+  /** Their profile picture, shown with their name. */
+  avatarUrl: string | null;
 };
 
 /** A line in the room's talk: something said, or someone coming or going. */
@@ -55,7 +59,7 @@ export function dogOfUrl(url: unknown): string {
   return found?.[1] ?? '02';
 }
 
-type State = { name?: string; position?: number[]; rotation?: number[]; animation?: string; modelUrl?: string };
+type State = { name?: string; owner?: boolean; avatarUrl?: string; position?: number[]; rotation?: number[]; animation?: string; modelUrl?: string };
 
 /** The action an animation label carries (`jump:3`: the third move begun), and its count. */
 function actionOf(label: string | undefined): { action: Action; moves: number } | null {
@@ -78,6 +82,9 @@ function walkerOf(id: string, state: State, was?: Walker): Walker {
     facing: state.rotation ? facingOf(state.rotation) : (was?.facing ?? 0),
     action: actionOf(state.animation)?.action ?? was?.action ?? 'idle',
     moves: actionOf(state.animation)?.moves ?? was?.moves ?? 0,
+    owner: state.owner ?? was?.owner ?? false,
+    // Only a stored picture of the site's own is shown.
+    avatarUrl: typeof state.avatarUrl === 'string' && state.avatarUrl.startsWith('/models/') ? state.avatarUrl : (was?.avatarUrl ?? null),
   };
 }
 
@@ -94,6 +101,8 @@ export type VillageRoom = {
   refused: string | null;
   /** The viewer's account came into this room from another window, which now stands there in this one's place. */
   elsewhere: boolean;
+  /** The island's owner is among the others, walking it as its guardian dog. */
+  ownerHere: boolean;
   /** Comes back into the room from this window (the other one is let go). */
   rejoin: () => void;
   /** Tells the room where the viewer is and what they are doing (`moves` counts the moves begun). */
@@ -115,6 +124,7 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
   const [connected, setConnected] = useState(false);
   const [refused, setRefused] = useState<string | null>(null);
   const [elsewhere, setElsewhere] = useState(false);
+  const [ownerHere, setOwnerHere] = useState(false);
   const [joins, setJoins] = useState(0);
   const [, setTalk] = useState(0);
   const [log, setLog] = useState<Line[]>([]);
@@ -137,7 +147,10 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
     here.current = { position: start, facing: 0, action: 'idle', moves: 0, sentAt: 0, dirty: true };
     setLog([]);
     setElsewhere(false);
-    const roster = () => setPresent([...others.keys()]);
+    const roster = () => {
+      setPresent([...others.keys()]);
+      setOwnerHere([...others.values()].some((walker) => walker.owner));
+    };
     const open = async () => {
       if (stopped) return;
       try {
@@ -283,5 +296,5 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
     [said, write],
   );
 
-  return { others, present, said, log, connected, refused, elsewhere, rejoin, move, say };
+  return { others, present, said, log, connected, refused, elsewhere, ownerHere, rejoin, move, say };
 }

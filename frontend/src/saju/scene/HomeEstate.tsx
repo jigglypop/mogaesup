@@ -208,11 +208,11 @@ function Estate({
   const { reading, house, guardian } = profile;
   // The landings as a key: a new list of the same landings lays the estate out no differently.
   const landings = bridges ? bridges.join() : null;
-  const estate = useMemo(() => estateHomeOf(reading, landings === null ? undefined : landings.split(',').filter(Boolean).map(Number)), [reading, landings]);
+  const estate = useMemo(() => estateHomeOf(reading, landings === null ? undefined : landings.split(',').filter(Boolean).map(Number), house), [reading, landings, house]);
   const parts = useMemo<Piece[]>(() => {
     return estateParts(estate, { lush, paint: lawnOf(estate, house.style, terrain), house: () => buildHouse(house, lush) });
   }, [estate, lush, house, terrain]);
-  const build = useParts(parts, turn, reading, `${landings ?? ''}|${lush}|${house.style}|${house.accent}|${house.symbol}|${terrain}`);
+  const build = useParts(parts, turn, reading, `${landings ?? ''}|${lush}|${house.style}|${house.accent}|${house.symbol}|${house.roof ?? ''}|${terrain}`);
   const dog = useDog(guardian.dog);
   const charms = guardian.charms.map((item) => item.charm).join('+');
   const board = estate.placements.find((placement) => placement.kind === 'guestbook');

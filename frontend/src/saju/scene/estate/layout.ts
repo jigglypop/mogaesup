@@ -2,7 +2,7 @@ import type { Element } from '../../elements';
 import { pillarsOf, type PillarKey, type Reading } from '../../engine';
 import { MOTIFS, type MotifId } from '../../motifs';
 import { islandPlanOf, STYLE_MOTIFS, type BedKind, type IslandPlan, type Placed, type TreeState } from '../../mulsang';
-import { profileOfReading, type Profile } from '../../profile';
+import { profileOfReading, type House, type Profile } from '../../profile';
 import { rng } from '../noise';
 import { Coast, ESTATE_HALF, type Jetty, type Landing } from './coast';
 import { boxOf, crossing, nearestOn, pointAlong, smoothLine, type V2 } from './lines';
@@ -157,6 +157,8 @@ export type EstateOptions = {
    * sides' always have a path, which the house's own ways run on to; a corner's has one only when a bridge lands there.
    */
   bridges?: readonly number[];
+  /** The house its owner chose, in place of the one the reading gives. */
+  house?: House;
 };
 
 /** Today's five houses, every side of them: the plinth, the porch and its steps in front, the chimney and the woodshed behind. */
@@ -361,7 +363,8 @@ const reachOf = (motif: MotifId) => MOTIFS[motif].reach + 0.35;
 /** Lays out the estate of `reading`. */
 export function estateOf(reading: Reading, options: EstateOptions = {}): Estate {
   const plan = options.plan ?? islandPlanOf(reading);
-  const profile = profileOfReading(reading);
+  const read = profileOfReading(reading);
+  const profile = options.house ? { ...read, house: options.house } : read;
   const half = options.half ?? ESTATE_HALF;
   const k = half / ESTATE_HALF;
   const seed = plan.seed;

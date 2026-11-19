@@ -38,6 +38,7 @@ import type {
   DecorItem,
   FlagDesign,
   GiftDesign,
+  HouseChoice,
   PhotoBoard,
   SajuDecor,
   Terrain,
@@ -198,6 +199,8 @@ export const sajuApi = {
   /** Places what the caller's 섬 shows (at most 24 things); refused 409 `no_home` before the home is built. */
   placeDecor: (body: { expectedOwnerId: string; items: DecorItem[] }) => api<SajuDecor>('/homes/me/saju/decor', { method: 'PUT', body }),
   setTerrain: (body: { expectedOwnerId: string; terrain?: Terrain; tiles?: TerrainCell[] }) => api<SajuDecor>('/homes/me/saju/terrain', { method: 'PUT', body }),
+  /** The house the owner's home is built as; null builds the one their chart gives again. */
+  setHouse: (body: { expectedOwnerId: string; house: HouseChoice | null }) => api<SajuDecor>('/homes/me/saju/house', { method: 'PUT', body }),
   /** Gives a member's 섬 the caller's flag: once a day for each 섬 (409 `already_given`), not one's own (400 `own_home`). */
   giveFlag: (username: string, design: FlagDesign) => api<DecorFlag>(`/homes/${segment(username)}/saju/flags`, { method: 'POST', body: { design } }),
   giveGift: (username: string, body: { expectedGiverId: string; giverBirth: SajuBirth; recipientBirth: SajuBirth; giverPillars: string[]; recipientPillars: string[]; design: GiftDesign; x?: number; z?: number }) =>

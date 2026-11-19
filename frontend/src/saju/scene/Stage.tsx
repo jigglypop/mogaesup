@@ -5,7 +5,6 @@ import { AdditiveBlending, CylinderGeometry, Matrix4, MeshBasicMaterial, PCFShad
 import { WebGPURenderer } from 'three/webgpu';
 
 import type { Terrain, TerrainCell } from '../../api/types';
-import { Icon } from '../../ui/icons';
 import type { Compat } from '../compat';
 import type { Profile } from '../profile';
 import { rectOf, type CellRect } from '../tiles';
@@ -13,6 +12,7 @@ import { Bridge } from './Bridge';
 import { Built, LampPool, Wind } from './Built';
 import { FlagIsland, type StageFlag } from './Flag';
 import { FLAG_ISLAND } from './flagIsland';
+import { buildHarbor, HARBOR_ISLAND } from './harbor';
 import { AZIMUTH, clampTilt, clampZoom, dragShift, ELEVATION, NO_INSET, wheelZoom, zoomShift, type Frame, type Inset, type Spot } from './frames';
 import { loadDogModel, type DogModel } from './dogModel';
 import { landingsOf } from './estateHome';
@@ -31,14 +31,18 @@ import { keepGlimpse, readGlimpse, takeGlimpse } from './glimpse';
 import { makeInBackground, makingOf } from './making';
 import { paintsPending } from './painter';
 import { countWork, newWorks, useBuild, useMood, WorksContext, type Works } from './works';
+import { BrandMark } from '../../ui/BrandMark';
 
 // The village: every home on its own island in one lake at the day's last light, seen by one isometric camera that
 // moves between a single home, two homes with their bridge, and the whole village, and that the viewer turns, tilts,
 // moves and zooms about them. It is drawn with WebGPU, or with WebGL 2 where the browser has no WebGPU.
 
 /** A home on the stage: where its island lies, and whose it is (nobody's yet when `profile` is null). */
-/** A home in the village; `closed` when this viewer may not go into its 섬 (its house stands all the same). */
-export type StageHome = { id: string; x: number; z: number; profile: Profile | null; closed?: boolean };
+/**
+ * A home in the village; `closed` when this viewer may not go into its 섬 (its house stands all the same). `place`
+ * `harbor` is a shared island, a harbour where many come together, in place of a home.
+ */
+export type StageHome = { id: string; x: number; z: number; profile: Profile | null; closed?: boolean; place?: 'harbor' };
 /** A bridge the viewer built, from their own home to a neighbour's. */
 export type StageBridge = { from: StageHome; to: StageHome; compat: Compat; colors: [string, string] };
 /** An island's ground as the lake meets it: where its middle is, and its shape (see terrain). */
@@ -68,8 +72,6 @@ const KEY_ZOOM = 1.25;
  * frame's own size), or by this much closer again when it is that close already.
  */
 const CLOSE_IN = 2.6;
-/** How close the camera comes, the first time on an island the viewer sends their walker somewhere, to follow it. */
-const FOLLOW_ZOOM = 2.2;
 const CLOSER = 1.5;
 /** A pressed point this far above the ground (metres) is something standing on it, not the lawn. */
 const STANDING = 0.14;
@@ -175,8 +177,8 @@ function useDog(id: string): DogModel | null {
 export function Diorama({ profile, origin, playful = false, lush = true, turn = 0, kind = 'home' }: { profile: Pick<Profile, 'house' | 'guardian'>; origin: readonly [number, number, number]; playful?: boolean; lush?: boolean; turn?: number; kind?: IslandKind }) {
   const { house, guardian } = profile;
   const make = useCallback(
-    () => keptBuild(`home|${house.style}|${house.accent}|${house.symbol}|${lush}|${kind}`, () => buildHome({ style: house.style, accent: house.accent, symbol: house.symbol }, lush, kind)),
-    [house.style, house.accent, house.symbol, lush, kind],
+    () => keptBuild(`home|${house.style}|${house.accent}|${house.symbol}|${house.roof ?? ''}|${lush}|${kind}`, () => buildHome({ style: house.style, accent: house.accent, symbol: house.symbol, ...(house.roof ? { roof: house.roof } : {}) }, lush, kind)),
+    [house.style, house.accent, house.symbol, house.roof, lush, kind],
   );
   const build = useBuild(make, turn);
   const dog = useDog(guardian.dog);
@@ -192,6 +194,13 @@ export function Diorama({ profile, origin, playful = false, lush = true, turn = 
       )}
     </>
   );
+}
+
+/** A shared island: the harbour (see harbor). */
+function Harbor({ origin, lush, turn }: { origin: readonly [number, number, number]; lush: boolean; turn: number }) {
+  const make = useCallback(() => keptBuild(`harbor|${lush}`, () => buildHarbor(lush)), [lush]);
+  const build = useBuild(make, turn);
+  return build && <Built build={build} origin={origin} />;
 }
 
 function EmptyLot({ origin, lush, turn, kind }: { origin: readonly [number, number, number]; lush: boolean; turn: number; kind: IslandKind }) {
@@ -257,7 +266,9 @@ const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, terr
         />
       )}
       <mesh geometry={HALO} material={glow} position={[0, WATER_LEVEL + 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]} scale={reach / ISLANDS.neighbour.reach} renderOrder={1} />
-      {home.profile ? (
+      {home.place === 'harbor' ? (
+        <Harbor origin={origin} lush={lush} turn={turn} />
+      ) : home.profile ? (
         kind === 'home' ? (
           <HomeEstate profile={home.profile} origin={origin} terrain={terrain} {...(tiles ? { tiles } : {})} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} guardianAway={guardianAway} />
         ) : (
@@ -723,7 +734,6 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   useLayoutEffect(() => {
     gaze.current = { ...UNMOVED, pan: { ...UNMOVED.pan } };
     following.current = true;
-    followedIn.current = false;
   }, [village]);
   const cover = useRef(inset);
   cover.current = inset;
@@ -735,7 +745,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   // Where the bridges land on the page's own island: its estate lays a way to each.
   const landings = useMemo(() => landingsOf(bridges.map((bridge) => bridge.to)), [bridges]);
   const islands = useMemo<StageIsland[]>(
-    () => [...homes.map((home, index) => ({ x: home.x, z: home.z, ...ISLANDS[kindAt(index)] })), ...(flag ? [{ x: flag.x, z: flag.z, ...FLAG_ISLAND }] : [])],
+    () => [...homes.map((home, index) => ({ x: home.x, z: home.z, ...(home.place === 'harbor' ? HARBOR_ISLAND : ISLANDS[kindAt(index)]) })), ...(flag ? [{ x: flag.x, z: flag.z, ...FLAG_ISLAND }] : [])],
     [homes, flag],
   );
   const bounds = useRef({ minX: 0, maxX: 0, minZ: 0, maxZ: 0 });
@@ -749,8 +759,6 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   aim.current = frame.target;
   /** Whether the camera keeps the viewer's walker in the middle (see `follow`): until the picture is moved by hand. */
   const following = useRef(true);
-  /** Whether the camera has come in to follow the walker on this island yet: once, and never again past a zoom by hand. */
-  const followedIn = useRef(false);
   const followed = useRef(follow);
   followed.current = follow;
   /** Moves the point the camera looks at by `shift`, as far as the village's islands go. */
@@ -863,7 +871,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
       touched.current = performance.now();
-      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 100 : 1;
       zoomAt(wheelZoom(event.deltaY * lines, event.ctrlKey), event.clientX, event.clientY);
     };
     // Safari says a trackpad's pinch in events of its own, each with how far apart the fingers are against where they
@@ -1048,18 +1056,18 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       if (board && onOpenPhoto) return onOpenPhoto();
     }
     const hit = first?.point;
-    if (!hit || hit.y <= STANDING) {
-      // The bare ground of the page's own island: the viewer's dog walks there.
-      const ground = groundAt(camera, area, event.clientX, event.clientY, 0);
+    // With a walker of the viewer's own, a press on the page's own island sends it there, whatever stands where the
+    // press lands (a tree, the house): the camera follows it, and no press brings the camera in on its own.
+    if (onWalk && islands[0]) {
       const home = islands[0];
-      if (onWalk && ground && home && over(home, ground)) {
+      const ground = hit && hit.y > STANDING && over(home, { x: hit.x, z: hit.z }) ? { x: hit.x, z: hit.z } : groundAt(camera, area, event.clientX, event.clientY, 0);
+      if (ground && over(home, ground)) {
         following.current = true;
-        if (!followedIn.current && gaze.current.zoom < FOLLOW_ZOOM) gaze.current.zoom = FOLLOW_ZOOM;
-        followedIn.current = true;
         onWalk(ground, twice);
+        return;
       }
-      return;
     }
+    if (!hit || hit.y <= STANDING) return;
     const visited = homes.findIndex((home, index) => !!onVisit && !home.closed && home.id !== focus && over(islands[index]!, { x: hit.x, z: hit.z }));
     if (visited >= 0) return;
     closeIn(hit);
@@ -1255,7 +1263,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
         <div className="mg-saju-meter" ref={meter} role="progressbar" aria-label="섬 불러오는 중" aria-valuemin={0} aria-valuemax={100}>
           <div className="mg-loading-card mg-glass">
             <span className="mg-brand-mark" aria-hidden="true">
-              <Icon name="island" />
+              <BrandMark />
             </span>
             <b>불러오는 중</b>
             <span className="mg-progress">

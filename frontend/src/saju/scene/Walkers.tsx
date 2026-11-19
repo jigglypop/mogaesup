@@ -268,10 +268,13 @@ export function Walkers({
   control,
   layer,
   balloon = DEFAULT_BALLOON,
+  avatar = null,
 }: {
   room: VillageRoom;
   own: string | null;
   name: string;
+  /** The viewer's profile picture, shown with their name. */
+  avatar?: string | null;
   start: [number, number, number];
   control: RefObject<WalkerControl>;
   layer: RefObject<HTMLDivElement | null>;
@@ -424,6 +427,7 @@ export function Walkers({
         layer={layer}
         ids={[...(own ? [SELF] : []), ...room.present]}
         names={(id) => (id === SELF ? name : (room.others.get(id)?.name ?? ''))}
+        faces={(id) => (id === SELF ? avatar : (room.others.get(id)?.avatarUrl ?? null))}
         design={design}
         onChange={() => {
           labelled.current += 1;
@@ -438,18 +442,21 @@ function Labels({
   layer,
   ids,
   names,
+  faces,
   design,
   onChange,
 }: {
   layer: RefObject<HTMLDivElement | null>;
   ids: string[];
   names: (id: string) => string;
+  /** Each one's profile picture, or null. */
+  faces: (id: string) => string | null;
   design: string;
   /** Told once the labels in `layer` were made again (the frame loop finds their parts anew). */
   onChange: () => void;
 }) {
   // A name changed (someone renamed themselves while here) is a change too.
-  const key = `${ids.map((id) => `${id}=${names(id)}`).join('|')}|${design}`;
+  const key = `${ids.map((id) => `${id}=${names(id)}=${faces(id) ?? ''}`).join('|')}|${design}`;
   useEffect(() => {
     const host = layer.current;
     if (!host) return;
@@ -470,7 +477,16 @@ function Labels({
         host.append(element);
       }
       const tag = element.querySelector<HTMLElement>('.mg-saju-walker-name')!;
-      tag.textContent = names(id);
+      const face = faces(id);
+      if (face) {
+        const picture = document.createElement('img');
+        picture.className = 'mg-saju-walker-face';
+        picture.src = face;
+        picture.alt = '';
+        tag.replaceChildren(picture, document.createTextNode(names(id)));
+      } else {
+        tag.textContent = names(id);
+      }
       if (id === SELF) {
         element.dataset['own'] = '';
         tag.style.removeProperty('--tag');

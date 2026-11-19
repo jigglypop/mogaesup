@@ -6,9 +6,9 @@ import { problemText } from '../api/client';
 import { useAuth } from '../auth/AuthProvider';
 import { hasUnsavedWork } from '../auth/sessionWork';
 import { returnPath } from '../auth/signIn';
-import { Icon } from '../ui/icons';
 import { useTabs } from '../ui/tabs';
 import { Loading } from './Loading';
+import { BrandMark } from '../ui/BrandMark';
 
 type Mode = 'login' | 'signup';
 const MODES: readonly Mode[] = ['login', 'signup'];
@@ -73,7 +73,7 @@ export function AuthPage() {
       <section className="mg-auth-card mg-glass">
         <h1 className="mg-auth-brand">
           <span className="mg-brand-mark" aria-hidden="true">
-            <Icon name="island" />
+            <BrandMark />
           </span>
           모개숲
         </h1>

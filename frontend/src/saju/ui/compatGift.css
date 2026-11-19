@@ -3,6 +3,6 @@
 .mg-saju-gift-picture img { width: 100%; object-fit: contain; }
 .mg-saju-gift-picture[data-pair='true'] img { width: 52%; }
 .mg-saju-gift-preview strong { display: block; margin-bottom: 5px; color: var(--mg-ink); }
-.mg-saju-gift-reading { margin: 0; font-size: 13px; color: var(--mg-ink); }
-.mg-saju-gift-preview small { display: block; color: var(--mg-muted); font-size: 12px; overflow-wrap: anywhere; }
+.mg-saju-gift-reading { margin: 0; font-size: 14px; color: var(--mg-ink); }
+.mg-saju-gift-preview small { display: block; color: var(--mg-muted); font-size: 13px; overflow-wrap: anywhere; }
 .mg-saju-gift-preview i { display: inline-block; width: 8px; height: 8px; margin-inline-end: 5px; border: 1px solid var(--mg-hair); border-radius: 50%; }

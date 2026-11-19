@@ -279,9 +279,12 @@ describe('카메라가 서는 거리', () => {
   it('틀이 창을 채우는 화면은 늘 서던 자리에서 그린다', () => {
     const wide = fitted(1440, 900, PANELS);
     expect(cameraRange(wide.height, wide.shift, wide.zoom, DROP, 1)).toEqual({ distance: 120, far: 400 });
-    // 휴대폰에 꼭 맞춘 내 섬도, 가까이 당긴 집도 그렇다.
+    // 휴대폰에 꼭 맞춘 내 섬은 넓어서 조금 더 물러선다. 가까이 당긴 집은 늘 서던 자리다.
     const phone = openArea(390, 844, PHONE);
-    expect(cameraRange(844, phone.y, zoomOf(frameOf([{ x: 0, z: 0 }]), phone.width, phone.height), DROP, 1)).toEqual({ distance: 120, far: 400 });
+    const own = cameraRange(844, phone.y, zoomOf(frameOf([{ x: 0, z: 0 }]), phone.width, phone.height), DROP, 1);
+    expect(own.distance).toBeGreaterThanOrEqual(120);
+    expect(own.distance).toBeLessThan(130);
+    expect(own.far).toBeGreaterThanOrEqual(400);
     expect(cameraRange(900, 3, 54, DROP, 1)).toEqual({ distance: 120, far: 400 });
   });
 

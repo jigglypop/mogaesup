@@ -3,8 +3,9 @@ import { Color } from 'three';
 import type { Terrain } from '../../api/types';
 import type { Element } from '../elements';
 import type { Reading } from '../engine';
+import type { House } from '../profile';
 import type { Season } from '../mulsang';
-import { BRIDGE_FOOT, Coast, LANDINGS, type Jetty, type Landing } from './estate/coast';
+import { BRIDGE_FOOT, Coast, HOME_HALF, LANDINGS, type Jetty, type Landing } from './estate/coast';
 import { seasonPaint } from './estate/draw';
 import type { GroundPaint } from './estate/ground';
 import { estateOf, type Estate, type EstatePath, type Placement } from './estate/layout';
@@ -218,6 +219,14 @@ export const TERRAIN_GROUND: Readonly<Record<Exclude<Terrain, 'default'>, Ground
     surface: 'moss', lawn: ['#447158', '#729147', '#9dba63'], dirt: '#5e6241', yard: '#979164', path: '#8d8468',
     stones: '#889382', bank: '#6b756b', sand: '#b9b18e', bed: '#244238', cover: 0,
   },
+  gravel: {
+    surface: 'gravel', lawn: ['#aaa497', '#c2bcae', '#8e887d'], dirt: '#8c8475', yard: '#a39b8c', path: '#7d766a',
+    stones: '#9a9488', bank: '#8e8a80', sand: '#cfc6b3', bed: '#3b3a36', cover: 0,
+  },
+  soil: {
+    surface: 'soil', lawn: ['#93694a', '#ab8259', '#7b573c'], dirt: '#7f5e42', yard: '#a07a55', path: '#6e5038',
+    stones: '#8f7a63', bank: '#8d7660', sand: '#d0b48c', bed: '#3d3228', cover: 0,
+  },
 };
 
 /** The estate's ground in its month's season, kept as green as the house's own lawn (see {@link KEEP_GREEN}). */
@@ -244,7 +253,7 @@ export function landingsOf(spots: readonly { x: number; z: number }[]): number[]
   return [...found].sort((a, b) => a - b);
 }
 
-/** The page's own island for `reading`: its estate, laid on the rounded square the lake knows. */
-export function estateHomeOf(reading: Reading, bridges: readonly number[] = [1, 3, 5, 7]): Estate {
-  return onSquare(estateOf(reading, { bridges }));
+/** The page's own island for `reading`: its estate, laid on the rounded square the lake knows, about `house` if given. */
+export function estateHomeOf(reading: Reading, bridges: readonly number[] = [1, 3, 5, 7], house?: House): Estate {
+  return onSquare(estateOf(reading, { bridges, half: HOME_HALF, ...(house ? { house } : {}) }));
 }

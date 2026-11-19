@@ -3,10 +3,10 @@ import type { Terrain, TerrainCell } from '../api/types';
 /** One metre of ground, in the island's own measure, wearing a terrain other than the island's fallback. */
 export type { TerrainCell };
 
-/** How many painted cells one island keeps: the whole of an estate's lawn (48 metres across). */
-export const MOST_CELLS = 48 * 48;
+/** How many painted cells one island keeps: the whole of an estate's lawn (60 metres across). */
+export const MOST_CELLS = 60 * 60;
 
-const PAINTED = new Set<TerrainCell['terrain']>(['snow', 'desert', 'moss']);
+const PAINTED = new Set<TerrainCell['terrain']>(['snow', 'desert', 'moss', 'gravel', 'soil']);
 
 /** A rectangle of whole cells, from its least corner to its greatest, both included. */
 export type CellRect = { x0: number; z0: number; x1: number; z1: number };

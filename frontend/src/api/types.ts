@@ -12,6 +12,8 @@ export type User = {
   role: Role;
   /** Sent with sign-in and `/auth/me`. */
   permissions?: PermissionName[];
+  /** The member's profile picture (a stored square JPEG); null or missing until they choose one. */
+  avatarUrl?: string | null;
 };
 
 export type Credentials = { username: string; password: string };
@@ -30,6 +32,8 @@ export type UserCard = {
   username: string;
   displayName: string;
   emoji: string;
+  /** Their profile picture; null or missing for none. */
+  avatarUrl?: string | null;
 };
 
 export type HomeVisibility = 'public' | 'ilchon' | 'private';
@@ -155,8 +159,13 @@ export type SajuBirth = {
   gender: 'female' | 'male';
 };
 
-/** A member's 사주 home as the server keeps it: the name on its gate and the birth. */
-export type SajuHome = { name: string; birth: SajuBirth };
+/** The roofs a house can wear (see profile's ROOF_BY_SYMBOL for the one each day master gives). */
+export type HouseRoof = 'gables' | 'glasshouse' | 'dome' | 'lantern' | 'ridge';
+/** The house an owner chose in place of the one their chart gives: its kind, its roof and its trim. */
+export type HouseChoice = { style: ReadingElement; roof: HouseRoof; accent: ReadingElement | null };
+
+/** A member's 사주 home as the server keeps it: the name on its gate and the birth, and the house its owner chose. */
+export type SajuHome = { name: string; birth: SajuBirth; house?: HouseChoice | null };
 
 /**
  * `GET /api/homes/{username}/saju`: the member's 사주 home (null until they build one) and the village around it, at
@@ -185,11 +194,11 @@ export type DecorGift = { id: string; giver: { username: string; name: string };
  * `GET /api/homes/{username}/saju/decor`: what is placed on the 섬, the flags given to it (all of them for its owner, the
  * placed ones for others) and its owner's character model (for the owner when it is ready, for others when placed).
  */
-export type Terrain = 'default' | 'snow' | 'desert' | 'moss';
+export type Terrain = 'default' | 'snow' | 'desert' | 'moss' | 'gravel' | 'soil';
 /** One painted metre of an island, in the island's own measure. */
 export type TerrainCell = { x: number; z: number; terrain: Exclude<Terrain, 'default'> };
 export type PhotoBoard = { version: string; width: number; height: number };
-export type SajuDecor = { items: DecorItem[]; flags: DecorFlag[]; gifts?: DecorGift[]; terrain?: Terrain; tiles?: TerrainCell[]; character: { modelUrl: string } | null; photoBoard?: PhotoBoard | null };
+export type SajuDecor = { items: DecorItem[]; flags: DecorFlag[]; gifts?: DecorGift[]; terrain?: Terrain; tiles?: TerrainCell[]; character: { modelUrl: string } | null; photoBoard?: PhotoBoard | null; house?: HouseChoice | null };
 
 /** A public island anyone can raise and open. */
 export type SharedIsland = { id: string; slug: string; title: string; creator: string; createdAt: string };

@@ -16,6 +16,7 @@ import { Icon } from '../ui/icons';
 import { useTheme, type ThemeChoice } from '../ui/theme';
 import { leaveFor } from './leaving';
 import { PasswordDialog, type PasswordAction } from './PasswordDialog';
+import { BrandMark } from '../ui/BrandMark';
 
 /** Where an arrow, Home or End key moves to in a menu of `count` items from `index` (-1: none focused yet). */
 export function nextMenuIndex(key: string, index: number, count: number): number | null {
@@ -87,7 +88,7 @@ export function Brand() {
   return (
     <Link className="mg-brand" to={user ? `/@${user.username}` : '/'} aria-label="모개숲 처음으로">
       <span className="mg-brand-mark" aria-hidden="true">
-        <Icon name="island" />
+        <BrandMark />
       </span>
       <b>모개숲</b>
     </Link>
@@ -276,7 +277,7 @@ function Notifications() {
             {received.map((request) => (
               <li key={request.id}>
                 <Link className="mg-avatar" data-tone={toneOf(request.from.username)} to={`/@${request.from.username}`}>
-                  {initialOf(request.from.displayName)}
+                  {request.from.avatarUrl ? <img src={request.from.avatarUrl} alt="" /> : initialOf(request.from.displayName)}
                 </Link>
                 <div>
                   <b>{request.from.displayName}</b>
@@ -370,7 +371,7 @@ function UserMenu() {
     <div className="mg-anchor" ref={ref}>
       <button ref={trigger} className="mg-me" aria-label="내 메뉴" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span className="mg-avatar is-round" data-tone={toneOf(user.username)}>
-          {initialOf(user.displayName)}
+          {user.avatarUrl ? <img src={user.avatarUrl} alt="" /> : initialOf(user.displayName)}
         </span>
       </button>
       {open && (

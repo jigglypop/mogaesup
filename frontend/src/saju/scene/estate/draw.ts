@@ -919,7 +919,7 @@ function drawPaths(b: Builder, estate: Estate, site: EstateSite): void {
 /** Today's house without its island, about its own foot: what stands in for the houses builder's until it is there. */
 export function standInHouse(estate: Estate, lush = true): Build {
   const { house } = estate.profile;
-  const build = buildHome({ style: house.style, accent: house.accent, symbol: house.symbol }, lush, 'neighbour');
+  const build = buildHome({ style: house.style, accent: house.accent, symbol: house.symbol, ...(house.roof ? { roof: house.roof } : {}) }, lush, 'neighbour');
   const ground = new Set([surfaceMaps('ground').map, surfaceMaps('rock').map]);
   const meshes = build.meshes.filter(({ material }) => !ground.has((material as Material & { map?: unknown }).map as never));
   for (const { geometry } of meshes) geometry.translate(-HOUSE[0], 0, -HOUSE[2]);

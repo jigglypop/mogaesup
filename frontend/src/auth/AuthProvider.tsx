@@ -30,6 +30,8 @@ type AuthValue = {
   logout: () => Promise<void>;
   /** The name the account shows, after it was saved. */
   nameAs: (displayName: string) => void;
+  /** The profile picture the account shows, after it was put up (a site path) or taken down (null). */
+  pictureAs: (avatarUrl: string | null) => void;
 };
 
 const AuthContext = createContext<AuthValue | null>(null);
@@ -313,6 +315,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return next;
     });
   }, []);
+  const pictureAs = useCallback((avatarUrl: string | null) => {
+    setUser((current) => {
+      if (!current || (current.avatarUrl ?? null) === avatarUrl) return current;
+      const next = { ...current, avatarUrl };
+      owner.current = next;
+      return next;
+    });
+  }, []);
   const value = useMemo<AuthValue>(
     () => ({
       status: !ready ? 'loading' : user ? 'signedIn' : 'anonymous',
@@ -335,8 +345,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await change(authApi.logout, () => null, true);
       },
       nameAs,
+      pictureAs,
     }),
-    [ready, user, lapsed, failures, nameAs],
+    [ready, user, lapsed, failures, nameAs, pictureAs],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

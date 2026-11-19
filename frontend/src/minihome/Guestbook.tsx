@@ -165,7 +165,7 @@ export function Guestbook({ username, viewer, onChange }: { username: string; vi
         {entries.map((entry) => (
           <li key={entry.id}>
             <Link className="mg-avatar" data-tone={toneOf(entry.author.username)} to={`/@${entry.author.username}`} aria-label={`${entry.author.displayName}의 섬`}>
-              {initialOf(entry.author.displayName)}
+              {entry.author.avatarUrl ? <img src={entry.author.avatarUrl} alt="" /> : initialOf(entry.author.displayName)}
             </Link>
             <div>
               <p className="mg-entry-meta">

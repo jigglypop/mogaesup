@@ -31,6 +31,7 @@ describe('궁합', () => {
 
   it('합이 없으면 일간의 오행과 일지의 반합을 적는다', () => {
     expect(compatOf(sample('sol'), sample('bori')).notes).toEqual(['일간 갑기합(甲己合)']);
+    expect(compatOf(sample('sol'), sample('bori')).days).toEqual(['갑목(甲木)', '기토(己土)']);
     const compat = compatOf(sample('noeul'), sample('bori'));
     expect(compat.notes).toEqual(['일간 화생토(火生土)', '일지 유축 반합(酉丑)']);
     expect(compat.headline).toBe('화생토(火生土) 시너지! 따뜻하게 품어 주는 사이');

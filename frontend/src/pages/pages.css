@@ -3,7 +3,7 @@
 .mg-progress.is-indeterminate i { width: 40%; animation: mg-slide 1.3s ease-in-out infinite; }
 .mg-loading-card { display: grid; justify-items: center; gap: 10px; padding: 32px 44px; text-align: center; }
 .mg-loading-card b { font-size: 17px; font-weight: 800; }
-.mg-loading-card small { min-height: 1.2em; color: var(--mg-muted); font-size: 13px; }
+.mg-loading-card small { min-height: 1.2em; color: var(--mg-muted); font-size: 14px; }
 .mg-loading-card .mg-brand-mark { width: 44px; height: 44px; border-radius: 14px; animation: mg-bob 2.4s ease-in-out infinite; }
 .mg-loading-card .mg-brand-mark svg { width: 24px; height: 24px; }
 .mg-loading-card .mg-brand-mark.is-still { animation: none; }
@@ -57,8 +57,8 @@
 .mg-island-sky span { position: relative; z-index: 1; font-size: 56px; line-height: 1; }
 .mg-island-info { display: grid; gap: 3px; padding: 14px 16px 16px; }
 .mg-island-info b { font-size: 15px; font-weight: 800; }
-.mg-island-info small { font-size: 12px; color: var(--mg-muted); }
-.mg-island-meta { display: flex; gap: 10px; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--mg-muted); }
+.mg-island-info small { font-size: 13px; color: var(--mg-muted); }
+.mg-island-meta { display: flex; gap: 10px; margin-top: 4px; font-size: 13px; font-weight: 700; color: var(--mg-muted); }
 /* A list that did not load: why, and a way to ask again. */
 .mg-explore-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 16px; }
 /* The top bar's search folds into a button on a phone; there 둘러보기 carries its own box, and the button is not shown. */
@@ -89,14 +89,14 @@
 .mg-column { display: grid; align-content: start; gap: 10px; padding: 14px; min-height: 280px; background: var(--mg-glass); }
 .mg-column > header { display: flex; justify-content: space-between; align-items: center; padding: 2px 4px; }
 .mg-column > header b { font-size: 14px; font-weight: 800; }
-.mg-column > header span { font-size: 12px; font-weight: 750; color: var(--mg-muted); }
+.mg-column > header span { font-size: 13px; font-weight: 750; color: var(--mg-muted); }
 .mg-admin-card { display: grid; gap: 10px; padding: 12px; border-radius: 16px; background: var(--mg-card); border: 1px solid var(--mg-hair); justify-items: start; }
 .mg-admin-card.is-draft { border: 2px solid var(--mg-primary); }
 .mg-admin-card.is-row { grid-template-columns: auto 1fr auto; align-items: center; }
 .mg-admin-card.is-row > div { display: grid; min-width: 0; }
 .mg-admin-card-main { display: flex; gap: 12px; align-items: flex-start; }
 .mg-admin-card-main > div { display: grid; gap: 2px; min-width: 0; }
-.mg-admin-card small { font-size: 12px; color: var(--mg-muted); }
+.mg-admin-card small { font-size: 13px; color: var(--mg-muted); }
 .mg-admin-card .mg-warn-text { color: var(--mg-warn); font-weight: 700; }
 .mg-admin-thumb { display: grid; place-items: center; width: 64px; height: 64px; flex: none; border-radius: 14px; overflow: hidden; background: var(--mg-primary-soft); font-size: 28px; }
 .mg-admin-card.is-row .mg-admin-thumb { width: 44px; height: 44px; border-radius: 12px; font-size: 20px; }
@@ -104,12 +104,21 @@
 .mg-clips { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .mg-table-wrap { overflow-x: auto; }
-.mg-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.mg-table th { text-align: left; padding: 8px 10px; font-size: 12px; color: var(--mg-muted); font-weight: 800; border-bottom: 1px solid var(--mg-hair-strong); }
+.mg-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.mg-table th { text-align: left; padding: 8px 10px; font-size: 13px; color: var(--mg-muted); font-weight: 800; border-bottom: 1px solid var(--mg-hair-strong); }
 .mg-table td { padding: 8px 10px; border-bottom: 1px solid var(--mg-hair); vertical-align: middle; }
 .mg-table .mg-admin-thumb { width: 40px; height: 40px; border-radius: 10px; font-size: 20px; }
-.mg-table code { font-family: var(--mg-mono); font-size: 12px; }
+.mg-table code { font-family: var(--mg-mono); font-size: 13px; }
 
 @media (max-width: 1100px) {
   .mg-board { grid-template-columns: 1fr; }
 }
+
+/* 공용섬: raising one, the harbours already raised, and one opened (its owner named in the bar). */
+.mg-shared-create { display: flex; gap: 8px; margin: 4px 0 18px; }
+.mg-shared-create .mg-field { flex: 1; min-width: 0; }
+.mg-island-sky.is-harbor { background: linear-gradient(180deg, var(--mg-sky-2) 0%, var(--mg-sky-2) 55%, #6aa7c9 56%, #4a86ad 100%); color: #fff; }
+.mg-island-sky.is-harbor svg { position: relative; z-index: 1; width: 48px; height: 48px; stroke-width: 1.6; }
+.mg-shared-owner { color: var(--mg-muted); text-decoration: none; }
+.mg-shared-owner b { color: var(--mg-ink); }
+.mg-shared-problem { position: absolute; z-index: 2; top: 96px; left: 50%; transform: translateX(-50%); }

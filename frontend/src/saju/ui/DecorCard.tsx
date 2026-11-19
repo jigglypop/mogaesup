@@ -2,7 +2,7 @@ import { useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import type { DecorItem, FlagDesign } from '../../api/types';
 import { Icon } from '../../ui/icons';
-import { MOST_ITEMS, PROPS, type Decor } from '../decor';
+import { MOST_ITEMS, PROP_GROUPS, PROPS, type Decor } from '../decor';
 import { elementPiece } from '../elementalDecor';
 import { giftLabel } from '../gifts';
 import './decorEditor.css';
@@ -64,6 +64,7 @@ type DecorCardProps = {
 
 const SECTIONS = [
   { id: 'items', label: '아이템' },
+  { id: 'house', label: '집' },
   { id: 'terrain', label: '바닥 타일' },
   { id: 'photo', label: '사진 전광판' },
 ] as const;
@@ -73,11 +74,12 @@ type StudioProps = DecorCardProps & {
   id: string;
   section: DecorSection;
   onSection: (next: DecorSection) => void;
+  housePick?: ReactNode;
   terrainPick?: ReactNode;
   photoBoard?: ReactNode;
 };
 
-export function DecorCard({ id, section, onSection, terrainPick, photoBoard, ...items }: StudioProps) {
+export function DecorCard({ id, section, onSection, housePick, terrainPick, photoBoard, ...items }: StudioProps) {
   const { decor, problem } = items.state;
   if (!decor) return problem ? <p className="mg-error" role="alert">{problem}</p> : null;
   const chooseByKey = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -94,7 +96,7 @@ export function DecorCard({ id, section, onSection, terrainPick, photoBoard, ...
     onSection(SECTIONS[next]!.id);
     event.currentTarget.querySelectorAll<HTMLButtonElement>('[role=tab]')[next]?.focus();
   };
-  const content = { items: <DecorItems {...items} decor={decor} />, terrain: terrainPick, photo: photoBoard };
+  const content = { items: <DecorItems {...items} decor={decor} />, house: housePick, terrain: terrainPick, photo: photoBoard };
   return (
     <section id={id} className="mg-saju-card mg-saju-decor" aria-labelledby={`${id}-heading`}>
       <header className="mg-decor-header">
@@ -168,17 +170,19 @@ function DecorItems({ state, decor, own, placing, onPlacing, selectedId, onSelec
         </ul>
       </div>}
       {children}
-      <details className="mg-decor-base" open>
-        <summary>기본 소품</summary>
-        <div className="mg-saju-decor-pick" role="group" aria-label="놓을 것">
-          {PROPS.map((prop) => (
-            <button key={prop.ref} className="mg-chip is-soft" aria-pressed={chosen('prop', prop.ref)} disabled={full} onClick={() => pick({ kind: 'prop', ref: prop.ref, label: prop.label })}>{prop.label}</button>
-          ))}
-          {own && <button className="mg-chip" aria-pressed={chosen('flag', 'mine')} disabled={full} onClick={() => pick({ kind: 'flag', ref: 'mine', label: `내 깃발 · ${own.star}` })}>내 깃발 · {own.star}</button>}
-          {decor.character && !characterPlaced && <button className="mg-chip" aria-pressed={chosen('character', 'me')} disabled={full} onClick={() => pick({ kind: 'character', ref: 'me', label: '내 캐릭터' })}>내 캐릭터</button>}
-          {decor.photoBoard && !boardPlaced && <button className="mg-chip" aria-pressed={chosen('board', 'photo')} disabled={full} onClick={() => pick({ kind: 'board', ref: 'photo', label: '사진 전광판' })}>사진 전광판</button>}
-        </div>
-      </details>
+      {PROP_GROUPS.map((group, index) => (
+        <details key={group.id} className="mg-decor-base" open={index === 0}>
+          <summary>{group.label}</summary>
+          <div className="mg-saju-decor-pick" role="group" aria-label={index === 0 ? '놓을 것' : group.label}>
+            {PROPS.filter((prop) => prop.group === group.id).map((prop) => (
+              <button key={prop.ref} className="mg-chip is-soft" aria-pressed={chosen('prop', prop.ref)} disabled={full} onClick={() => pick({ kind: 'prop', ref: prop.ref, label: prop.label })}>{prop.label}</button>
+            ))}
+            {index === 0 && own && <button className="mg-chip" aria-pressed={chosen('flag', 'mine')} disabled={full} onClick={() => pick({ kind: 'flag', ref: 'mine', label: `내 깃발 · ${own.star}` })}>내 깃발 · {own.star}</button>}
+            {index === 0 && decor.character && !characterPlaced && <button className="mg-chip" aria-pressed={chosen('character', 'me')} disabled={full} onClick={() => pick({ kind: 'character', ref: 'me', label: '내 캐릭터' })}>내 캐릭터</button>}
+            {index === 0 && decor.photoBoard && !boardPlaced && <button className="mg-chip" aria-pressed={chosen('board', 'photo')} disabled={full} onClick={() => pick({ kind: 'board', ref: 'photo', label: '사진 전광판' })}>사진 전광판</button>}
+          </div>
+        </details>
+      ))}
       {(!!decor.gifts?.length || decor.flags.length > 0) && <div className="mg-decor-section">
         <h3>받은 선물</h3>
         <div className="mg-saju-decor-pick">

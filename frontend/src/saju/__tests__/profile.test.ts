@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { pillarsOf } from '../engine';
-import { HOUSE_NAME, profileOf } from '../profile';
+import { choiceOf, HOUSE_NAME, houseName, profileOf, roofOf, withHouse } from '../profile';
 import { PEOPLE, personOf } from './people';
 
 const profile = (id: string) => profileOf(personOf(id).birth);
@@ -27,6 +27,18 @@ describe('네 사람의 사주', () => {
       { style: 'water', accent: 'metal', symbol: 'lighthouse' },
     ]);
     expect(HOUSE_NAME[profile('noeul').house.style]).toBe('붉은 벽돌집');
+  });
+
+  it('주인이 고른 집은 모양과 지붕과 장식 색을 바꾸고, 같은 선택이면 같은 프로필이다', () => {
+    const sol = profile('sol');
+    expect(withHouse(sol, null)).toBe(sol);
+    const chosen = withHouse(sol, { style: 'metal', roof: 'dome', accent: null });
+    expect(chosen.house).toEqual({ style: 'metal', accent: null, symbol: 'tree', roof: 'dome' });
+    expect(withHouse(sol, { style: 'metal', roof: 'dome', accent: null })).toBe(chosen);
+    expect(chosen.reading).toBe(sol.reading);
+    expect(houseName(chosen.house)).toBe('은빛 기와집 · 천문 돔');
+    expect(roofOf(sol.house)).toBe('gables');
+    expect(choiceOf(sol.house)).toEqual({ style: 'wood', roof: 'gables', accent: 'fire' });
   });
 
   it('일간을 한 줄로 말한다', () => {

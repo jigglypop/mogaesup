@@ -9,9 +9,12 @@ const SNOW = ['#cfdddd', '#e8f1ef', '#e1ecee'];
 const OLIVE = ['#929564', '#9c9c65', '#7d885a', '#a8a373'];
 const MOSS = ['#75925b', '#567552', '#a0b46a'];
 
-/** Wild growth follows the surface. The orchard, flower beds, stream and the chart's named motifs keep their places. */
+/**
+ * Wild growth follows the surface. The orchard, flower beds, stream and the chart's named motifs keep their places; the
+ * grounds of paths (자갈, 흙) keep the island's own growth.
+ */
 export function terrainPlant(b: Builder, terrain: Terrain | undefined, p: Placement): boolean {
-  if (!terrain || terrain === 'default') return false;
+  if (!terrain || terrain === 'default' || terrain === 'gravel' || terrain === 'soil') return false;
   const [x, z] = p.at;
   const at: V3 = [x, 0, z];
   if (terrain === 'snow') {

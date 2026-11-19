@@ -45,6 +45,7 @@ function BridgeCard({ view, viewer, neighbors, bridge }: { view: HomeView; viewe
       <h2 className="mg-heading">궁합 다리</h2>
       {joined && bridge.compat && (
         <>
+          <p className="mg-saju-bridge-days">일간 궁합 · {bridge.compat.days[0]} ↔ {bridge.compat.days[1]}</p>
           <p className="mg-saju-bridge-line">{bridge.compat.headline}</p>
           <ul className="mg-saju-notes">
             {bridge.compat.notes.map((note) => (

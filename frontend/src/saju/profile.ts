@@ -1,3 +1,4 @@
+import type { HouseChoice, HouseRoof } from '../api/types';
 import { dogOf } from './dogs';
 import { balanceOf, branchElement, ELEMENT_NAME, stemElement, type Balance, type Element } from './elements';
 import { pillarsOf, readingOf, type Birth, type Reading } from './engine';
@@ -59,11 +60,15 @@ export type Guardian = {
   charms: { charm: Charm; label: string }[];
 };
 
-/** The main element selects the house, the day master its roof and yard symbol, and the second element its trim and keepsake. */
+/**
+ * The main element selects the house, the day master its roof and yard symbol, and the second element its trim and
+ * keepsake; an owner may choose the house, the roof and the trim themselves (`roof` then the one they chose).
+ */
 export type House = {
   style: Element;
   accent: Element | null;
   symbol: YardSymbol;
+  roof?: Roof;
 };
 
 export const HOUSE_NAME: Record<Element, string> = {
@@ -74,18 +79,25 @@ export const HOUSE_NAME: Record<Element, string> = {
   water: '푸른 지붕 연못집',
 };
 
-type Roof = 'gables' | 'glasshouse' | 'dome' | 'lantern' | 'ridge';
+export type Roof = HouseRoof;
+export const ROOFS: readonly Roof[] = ['gables', 'glasshouse', 'dome', 'lantern', 'ridge'];
 
 export const ROOF_BY_SYMBOL: Record<YardSymbol, Roof> = {
   tree: 'gables', trellis: 'glasshouse', sun: 'dome', candle: 'lantern', mountain: 'gables',
   field: 'ridge', anvil: 'ridge', gem: 'dome', lighthouse: 'ridge', rain: 'glasshouse',
 };
 
-const ROOF_NAME: Record<Roof, string> = {
+export const ROOF_NAME: Record<Roof, string> = {
   gables: '쌍박공', glasshouse: '온실 다락', dome: '천문 돔', lantern: '등탑', ridge: '용마루',
 };
 
-export const houseName = (house: House): string => `${HOUSE_NAME[house.style]} · ${ROOF_NAME[ROOF_BY_SYMBOL[house.symbol]]}`;
+/** The roof a house wears: its owner's choice, else its day master's. */
+export const roofOf = (house: House): Roof => house.roof ?? ROOF_BY_SYMBOL[house.symbol];
+
+export const houseName = (house: House): string => `${HOUSE_NAME[house.style]} · ${ROOF_NAME[roofOf(house)]}`;
+
+/** The house `profile`'s chart gives, as a choice to start from. */
+export const choiceOf = (house: House): HouseChoice => ({ style: house.style, roof: roofOf(house), accent: house.accent });
 
 export type Profile = {
   reading: Reading;
@@ -151,3 +163,22 @@ export function profileOfReading(reading: Reading): Profile {
 
 /** Throws a `BirthError` as {@link readingOf} does. */
 export const profileOf = (birth: Birth): Profile => profileOfReading(readingOf(birth));
+
+const chosen = new WeakMap<Profile, Map<string, Profile>>();
+
+/**
+ * `profile` with its house as its owner chose it (`choice`; none keeps the chart's), the same object each time for the
+ * same choice: what is built from a profile is built once.
+ */
+export function withHouse(profile: Profile, choice: HouseChoice | null | undefined): Profile {
+  if (!choice) return profile;
+  const key = `${choice.style}|${choice.roof}|${choice.accent ?? ''}`;
+  let kept = chosen.get(profile);
+  if (!kept) chosen.set(profile, (kept = new Map()));
+  let made = kept.get(key);
+  if (!made) {
+    made = { ...profile, house: { ...profile.house, style: choice.style, roof: choice.roof, accent: choice.accent } };
+    kept.set(key, made);
+  }
+  return made;
+}

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { ApiRequestError } from '../api/client';
 import { sajuApi } from '../api/endpoints';
-import type { DecorFlag, DecorItem, FlagDesign, SajuDecor, Terrain, TerrainCell } from '../api/types';
+import type { DecorFlag, DecorItem, FlagDesign, HouseChoice, SajuDecor, Terrain, TerrainCell } from '../api/types';
 import { paintAll } from './tiles';
 import type { Birth } from './engine';
 import { ziweiOf } from './ziwei';
@@ -11,25 +11,45 @@ import { ziweiOf } from './ziwei';
 // the flags other members gave it, small things for the garden, and their own character from the studio. Read for
 // whoever looks at the 섬; placed by its owner.
 
-/** The small things a 섬 can be decorated with, by the name the server knows each by. */
-export const PROPS = [
-  { ref: 'lantern', label: '석등' },
-  { ref: 'bench', label: '벤치' },
-  { ref: 'jar', label: '장독' },
-  { ref: 'pot', label: '화분' },
-  { ref: 'barrel', label: '나무통' },
-  { ref: 'woodpile', label: '장작더미' },
-  { ref: 'table', label: '탁자' },
-  { ref: 'parasol', label: '파라솔' },
-  { ref: 'well', label: '우물' },
-  { ref: 'bush', label: '덤불' },
-  { ref: 'rock', label: '바위' },
-  { ref: 'tree', label: '나무' },
+/** The shelves the things are kept on. */
+export const PROP_GROUPS = [
+  { id: 'things', label: '기본 소품' },
+  { id: 'plants', label: '나무·풀' },
+  { id: 'stones', label: '돌·길' },
+  { id: 'fences', label: '울타리·담' },
 ] as const;
+
+/** The things a 섬 can be decorated with, by the name the server knows each by, and the shelf each is on. */
+export const PROPS = [
+  { ref: 'lantern', label: '석등', group: 'things' },
+  { ref: 'bench', label: '벤치', group: 'things' },
+  { ref: 'jar', label: '장독', group: 'things' },
+  { ref: 'pot', label: '화분', group: 'things' },
+  { ref: 'barrel', label: '나무통', group: 'things' },
+  { ref: 'woodpile', label: '장작더미', group: 'things' },
+  { ref: 'table', label: '탁자', group: 'things' },
+  { ref: 'parasol', label: '파라솔', group: 'things' },
+  { ref: 'well', label: '우물', group: 'things' },
+  { ref: 'bush', label: '덤불', group: 'plants' },
+  { ref: 'rock', label: '바위', group: 'stones' },
+  { ref: 'tree', label: '나무', group: 'plants' },
+  { ref: 'pine', label: '소나무', group: 'plants' },
+  { ref: 'blossom', label: '벚나무', group: 'plants' },
+  { ref: 'maple', label: '단풍나무', group: 'plants' },
+  { ref: 'bamboo', label: '대나무', group: 'plants' },
+  { ref: 'stones', label: '조약돌', group: 'stones' },
+  { ref: 'boulder', label: '큰 바위', group: 'stones' },
+  { ref: 'stepping', label: '징검돌', group: 'stones' },
+  { ref: 'path-stone', label: '돌길', group: 'stones' },
+  { ref: 'path-wood', label: '나무 데크길', group: 'stones' },
+  { ref: 'fence-wood', label: '나무 울타리', group: 'fences' },
+  { ref: 'fence-bamboo', label: '대나무 울타리', group: 'fences' },
+  { ref: 'stone-wall', label: '돌담', group: 'fences' },
+] as const satisfies readonly { ref: string; label: string; group: (typeof PROP_GROUPS)[number]['id'] }[];
 export type PropRef = (typeof PROPS)[number]['ref'];
 
-/** As many things as a 섬 holds (the server's limit). */
-export const MOST_ITEMS = 24;
+/** As many things as a 섬 holds (the server's limit): fences and paths are laid a piece at a time. */
+export const MOST_ITEMS = 64;
 
 /** The fourteen main stars of 자미두수, as the server takes them; a 명궁 with none of them flies 공궁. */
 const STARS = ['자미', '천기', '태양', '무곡', '천동', '염정', '천부', '태음', '탐랑', '거문', '천상', '천량', '칠살', '파군'];
@@ -53,6 +73,8 @@ export type Decor = {
   setTerrain: (terrain: Terrain) => void;
   /** Lays a terrain on the island's own ground over whole cells. `default` gives them back to the island's terrain. */
   paint: (cells: readonly { x: number; z: number }[], terrain: Terrain) => void;
+  /** Builds the owner's house as they chose it; null builds the one their chart gives again. */
+  setHouse: (house: HouseChoice | null) => void;
   reload: () => void;
   /** The owner takes down a flag given to the 섬. */
   drop: (flag: DecorFlag) => void;
@@ -145,6 +167,10 @@ export function useDecor(username: string, ownerId: string | null): Decor {
     const tiles: TerrainCell[] = paintAll(decor.tiles ?? [], cells, terrain);
     write({ ...decor, tiles }, () => sajuApi.setTerrain({ expectedOwnerId: ownerId, tiles }));
   }, [ownerId, decor, write]);
+  const setHouse = useCallback((house: HouseChoice | null) => {
+    if (!ownerId || !decor) return;
+    write({ ...decor, house }, () => sajuApi.setHouse({ expectedOwnerId: ownerId, house }));
+  }, [ownerId, decor, write]);
   const reload = useCallback(() => {
     sajuApi.decor(username).then(
       (next) => {
@@ -172,5 +198,5 @@ export function useDecor(username: string, ownerId: string | null): Decor {
       return { ...before, photoBoard: await sajuApi.uploadPhotoBoard(ownerId, image) };
     });
   }, [ownerId, decor, write]);
-  return { decor, place, setTerrain, paint, drop, give, changePhoto, reload, problem };
+  return { decor, place, setTerrain, paint, setHouse, drop, give, changePhoto, reload, problem };
 }

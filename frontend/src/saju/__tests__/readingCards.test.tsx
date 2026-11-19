@@ -81,6 +81,8 @@ let auth: { status: 'anonymous' | 'signedIn'; user: User | null } = { status: 'a
 vi.mock('../../auth/AuthProvider', () => ({ useAuth: () => auth, useOptionalAuth: () => null }));
 
 const { default: SajuPage } = await import('../SajuPage');
+// The 명반 comes in a chunk of its own: it is here before a tab asks for it, so a tab opens on it at once.
+await import('../ui/ZiweiPanel');
 
 /** What the 2D canvas the picture is checked on holds: sixteen pixels a side. */
 const pixels = new Uint8ClampedArray(16 * 16 * 4);

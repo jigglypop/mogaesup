@@ -5,7 +5,7 @@ import { Fragment, lazy, Suspense, useCallback, useEffect, useId, useLayoutEffec
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { sajuApi, socialApi } from '../api/endpoints';
-import type { HomeVisibility, ProfileChanges, Terrain, TerrainCell, User } from '../api/types';
+import type { HomeVisibility, HouseChoice, ProfileChanges, Terrain, TerrainCell, User } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { NeighborActions, NeighborsTab, useNeighbors } from '../minihome/Ilchons';
@@ -17,7 +17,7 @@ import { compatOf } from './compat';
 import { keyOf, pillarsOf, readingOf as chartOf, type Birth } from './engine';
 import { flagDesignOf, itemId, MOST_ITEMS, useDecor } from './decor';
 import { forgetLegacyHome, readLegacyHome, useMinihome, type Minihome } from './minihome';
-import { profileOf, type Profile } from './profile';
+import { profileOf, withHouse, type Profile } from './profile';
 import type { Resident } from './residents';
 import { chartPath, editPath, homePath, routeOf, villagePath, waveOf, ziweiPath } from './routes';
 import type { StageFlag } from './scene/Flag';
@@ -37,6 +37,7 @@ import { ElementShelf } from './ui/ElementShelf';
 import { CompatGiftCard } from './ui/CompatGiftCard';
 import { PictureCard, PictureView, usePicture } from './ui/Picture';
 import { PhotoBoardCard } from './ui/PhotoBoardCard';
+import { HousePicker } from './ui/HousePicker';
 import { TerrainPicker } from './ui/TerrainPicker';
 import { PixelIcon } from './ui/PixelIcon';
 import { Making, ReadingCard, useReading } from './ui/Reading';
@@ -57,6 +58,13 @@ const NO_TILES: readonly TerrainCell[] = [];
 const NO_NOTES: readonly GuestNote[] = [];
 /** On one's own 섬 there is no bridge to show. */
 const NO_BRIDGE: Bridge = { compat: null, canShow: false, shown: false, onShow: () => {} };
+
+/** The house a key of {@link Village}'s names (`style|roof|accent`), none for the empty key. */
+function houseOfKey(key: string): HouseChoice | null {
+  if (!key) return null;
+  const [style, roof, accent] = key.split('|') as [HouseChoice['style'], HouseChoice['roof'], string];
+  return { style, roof, accent: (accent || null) as HouseChoice['accent'] };
+}
 
 /** A resident's chart, or null for a stored birth this version cannot read. */
 function profileOrNull(resident: Resident): Profile | null {
@@ -233,20 +241,30 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
     (panelOpen ? folder : opener).current?.focus();
   }, [panelOpen]);
 
-  // Everyone with a home here and what their chart gives. An answer to an 이웃 request or a line in the guestbook
-  // leaves these as they are, and with them the homes the canvas draws.
+  // What the owner has placed on the 섬 (see decor), and the house they chose: the decor says it once read, the
+  // village until then.
+  const decor = useDecor(username, view.isOwner ? view.profile.ownerId : null);
+  const chosenHouse = decor.decor ? (decor.decor.house ?? null) : (owner?.house ?? null);
+  const houseKey = chosenHouse ? `${chosenHouse.style}|${chosenHouse.roof}|${chosenHouse.accent ?? ''}` : '';
+  // Everyone with a home here and what their chart gives, each house as its owner chose it. An answer to an 이웃
+  // request or a line in the guestbook leaves these as they are, and with them the homes the canvas draws; so does a
+  // save of the decor that keeps the house as it was.
   const host = useMemo(() => {
     const profile = owner && profileOrNull(owner);
-    return owner && profile ? { resident: owner, profile } : null;
-  }, [owner]);
+    return owner && profile ? { resident: owner, chart: profile.house, profile: withHouse(profile, houseOfKey(houseKey)) } : null;
+  }, [owner, houseKey]);
   const around = useMemo(
     () => others.flatMap((resident) => {
       const profile = profileOrNull(resident);
-      return profile ? [{ resident, profile, bridged: resident.neighbour, closed: !resident.visitable, shared: resident.shared }] : [];
+      return profile ? [{ resident, profile: withHouse(profile, resident.house), bridged: resident.neighbour, closed: !resident.visitable, shared: resident.shared }] : [];
     }),
     [others],
   );
-  const myProfile = useMemo(() => (view.isOwner ? (host?.profile ?? null) : mine && profileOrNull(mine)), [view.isOwner, host, mine]);
+  const myProfile = useMemo(() => {
+    if (view.isOwner) return host?.profile ?? null;
+    const profile = mine && profileOrNull(mine);
+    return profile ? withHouse(profile, mine?.house) : null;
+  }, [view.isOwner, host, mine]);
   const homes = useMemo<StageHome[]>(() => {
     const plots = plotsOf(around.map(({ resident, profile }) => ({ id: resident.id, element: profile.balance.dominant })));
     return [
@@ -299,10 +317,8 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   }, [homes, wide, together, visitorHome, flag]);
 
   const visit = useCallback((id: string) => navigate(homePath(id)), [navigate]);
-  // What the owner has placed on the 섬 (see decor): their flag flies from the owner's chart, whoever looks. A visitor
-  // with a home of their own can give the 섬 theirs. While the owner picks a place for something, a press on the
-  // island places it and visits nothing.
-  const decor = useDecor(username, view.isOwner ? view.profile.ownerId : null);
+  // The owner's flag flies from their chart, whoever looks. A visitor with a home of their own can give the 섬 theirs.
+  // While the owner picks a place for something, a press on the island places it and visits nothing.
   const ownFlag = useMemo(() => (host ? flagDesignOf(host.resident.birth) : null), [host]);
   const board = decor.decor?.photoBoard;
   const photoBoard = useMemo(() => board ? { ...board, url: `/api/homes/${encodeURIComponent(username)}/saju/photo-board/${board.version}` } : null, [board, username]);
@@ -501,7 +517,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // The panel widens for the 명반, and a birth without an hour has none.
   const charted = tab === 'ziwei' && !!host?.resident.birth.time;
   const widened = charted && roomy;
-  const villagers = host ? [{ ...host, bridged: false, shared: chartShared }, ...around] : around;
+  const villagers = host ? [{ ...host, resident: { ...host.resident, avatarUrl: view.profile.avatarUrl ?? null }, bridged: false, shared: chartShared }, ...around] : around;
   // Each tab of the chart opens with its part of the reading; a written one can be saved as a PDF, with the picture.
   const pictureUrl = picture.made?.status === 'ready' ? picture.made.url : null;
   const readingOf = (part: 'saju' | 'ziwei') =>
@@ -569,9 +585,9 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           onOpenPhoto={photoBoard ? showBoard : undefined}
           notes={notes.of === username ? notes.list : NO_NOTES}
           onBoard={placing ? undefined : openGuestbook}
-          onWalk={walking ? walkTo : undefined}
-          follow={walking ? walker : undefined}
-          guardianAway={walking && view.isOwner}
+          onWalk={walking && !room.elsewhere ? walkTo : undefined}
+          follow={walking && !room.elsewhere ? walker : undefined}
+          guardianAway={(walking && view.isOwner && !room.elsewhere) || room.ownerHere}
           overlay={<div className="mg-saju-walkers" ref={talkLayer} />}
           decor={
             <>
@@ -580,8 +596,9 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                 <Walkers
                   key={username}
                   room={room}
-                  own={myDog}
+                  own={room.elsewhere ? null : myDog}
                   name={viewer?.displayName ?? ''}
+                  avatar={viewer?.avatarUrl ?? null}
                   start={start}
                   control={control}
                   layer={talkLayer}
@@ -753,6 +770,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                       const item = decor.decor?.items.find((one) => one.id === id);
                       if (item) stage.current?.focusItem({ x: item.x, z: item.z });
                     }}
+                    housePick={<HousePicker chart={host.chart} chosen={chosenHouse} onChoose={decor.setHouse} />}
                     terrainPick={(
                       <TerrainPicker
                         value={decor.decor?.terrain ?? 'default'}

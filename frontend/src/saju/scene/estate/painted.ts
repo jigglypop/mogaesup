@@ -28,7 +28,7 @@ export function paintedGround(site: EstateSite, cells: readonly TerrainCell[], p
   const b = new Builder(site.estate.seed);
   const seed = site.estate.seed % 1000;
   const color = new Color();
-  for (const terrain of ['snow', 'desert', 'moss'] as const) {
+  for (const terrain of ['snow', 'desert', 'moss', 'gravel', 'soil'] as const) {
     const mine = cells.filter((cell) => cell.terrain === terrain);
     if (mine.length === 0) continue;
     const paint = paints[terrain];
