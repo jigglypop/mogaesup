@@ -280,7 +280,8 @@ export function Walkers({
 }) {
   const camera = useThree((state) => state.camera);
   const size = useThree((state) => state.size);
-  const mine = useRef({ position: [...start] as [number, number, number], facing: 0, action: 'idle' as Action, moves: 0, asked: 0, busy: 0 });
+  // A move asked before this island's walk began (another island's, or before placing something) is not played again.
+  const mine = useRef({ position: [...start] as [number, number, number], facing: 0, action: 'idle' as Action, moves: 0, asked: control.current.asked?.at ?? 0, busy: 0 });
   const shown = useRef(new Map<string, { position: Vector3; facing: number }>());
   const holders = useRef(new Map<string, RefObject<Group | null>>());
   const holderOf = (id: string) => {
@@ -292,7 +293,8 @@ export function Walkers({
     return holder;
   };
   useEffect(() => {
-    mine.current = { position: [...start] as [number, number, number], facing: 0, action: 'idle', moves: 0, asked: 0, busy: 0 };
+    mine.current = { position: [...start] as [number, number, number], facing: 0, action: 'idle', moves: 0, asked: control.current.asked?.at ?? 0, busy: 0 };
+    control.current.goal = null;
     // `start` is where the viewer stands as they come to an island (its key stands for it).
   }, [start.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
   // Off the island, the viewer's dog is nowhere the camera could follow.

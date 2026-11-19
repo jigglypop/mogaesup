@@ -143,12 +143,16 @@ function propBuild(ref: PropRef, tint?: string): Build {
 
 function PropItem({ name, tint }: { name: PropRef; tint?: string }) {
   const [build, setBuild] = useState<Build | null>(null);
-  usePhotoAsset(!!build);
+  // One that cannot be built is not waited for: a picture of the island is taken without it.
+  const [failed, setFailed] = useState(false);
+  usePhotoAsset(!!build || failed);
   useEffect(() => {
     let live = true;
     void Promise.resolve().then(() => keptBuild(`decor|${name}|${tint ?? ''}`, () => propBuild(name, tint))).then((made) => {
       if (live) setBuild(made);
-    }, () => undefined);
+    }, () => {
+      if (live) setFailed(true);
+    });
     return () => {
       live = false;
     };
@@ -163,7 +167,9 @@ const size = new Vector3();
 
 function Character({ url, tint }: { url: string; tint?: string }) {
   const [model, setModel] = useState<Object3D | null>(null);
-  usePhotoAsset(!!model);
+  // A character whose model cannot be had (a look taken away) is not waited for either.
+  const [failed, setFailed] = useState(false);
+  usePhotoAsset(!!model || failed);
   useEffect(() => {
     let live = true;
     const dyed = new Map<Material, Material>();
@@ -194,7 +200,9 @@ function Character({ url, tint }: { url: string; tint?: string }) {
         });
         setModel(copy);
       },
-      () => undefined,
+      () => {
+        if (live) setFailed(true);
+      },
     );
     return () => {
       live = false;

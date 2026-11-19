@@ -47,7 +47,7 @@ static DECODING: Semaphore = Semaphore::const_new(2);
 /// Pictures waiting for a decoding slot at most, each holding its request's body, and how long one waits: past either,
 /// the sender is told to try again instead of the bodies piling up.
 const MAX_WAITING: usize = 6;
-const DECODE_WAIT: Duration = Duration::from_secs(10);
+pub(crate) const DECODE_WAIT: Duration = Duration::from_secs(10);
 static WAITING: AtomicUsize = AtomicUsize::new(0);
 /// The site's own picture (frontend/public), for the site and every island without one of its own.
 pub const SITE_PICTURE: &str = "/share.jpg";
@@ -131,7 +131,7 @@ impl Drop for Waiting {
 
 /// A decoding slot, waited for at most `wait` and by at most [`MAX_WAITING`] pictures at once; [`PICTURE_BUSY`] past
 /// either.
-async fn decoding_slot(wait: Duration) -> ApiResult<SemaphorePermit<'static>> {
+pub(crate) async fn decoding_slot(wait: Duration) -> ApiResult<SemaphorePermit<'static>> {
     if let Ok(permit) = DECODING.try_acquire() {
         return Ok(permit);
     }

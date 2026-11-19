@@ -201,6 +201,8 @@ export function LampPool({ count, gain, children }: { count: number; gain: numbe
   const registry = useMemo<LampRegistry>(() => ({ sources: new Set() }), []);
   const lights = useRef<(PointLight | null)[]>([]);
   const chosen = useRef<{ lamp: Lamp; origin: Vector3 }[]>([]);
+  /** What each light was last set to show. */
+  const placed = useRef<({ lamp: Lamp; origin: Vector3 } | undefined)[]>([]);
   const tick = useRef(0);
   const focus = useMemo(() => new Vector3(), []);
   useFrame(({ camera, clock }) => {
@@ -228,9 +230,14 @@ export function LampPool({ count, gain, children }: { count: number; gain: numbe
         continue;
       }
       const { lamp, origin } = pick;
-      light.position.set(lamp.at[0] + origin.x, lamp.at[1] + origin.y, lamp.at[2] + origin.z);
-      light.color.set(lamp.color);
-      light.distance = lamp.reach;
+      // A light keeps its place, colour and reach until another lamp is picked for it (the picking is redone now and
+      // then): reading a colour's text again every frame is work for nothing.
+      if (placed.current[index] !== pick) {
+        placed.current[index] = pick;
+        light.position.set(lamp.at[0] + origin.x, lamp.at[1] + origin.y, lamp.at[2] + origin.z);
+        light.color.set(lamp.color);
+        light.distance = lamp.reach;
+      }
       const flicker = lamp.flicker ? 0.86 + Math.sin(clock.elapsedTime * 11 + index) * 0.08 + Math.sin(clock.elapsedTime * 17.3) * 0.06 : 1;
       light.intensity = lamp.power * LAMP_CANDELA * gain * flicker;
     }

@@ -29,12 +29,12 @@ use crate::{
     auth::{current_user, optional_user},
     config::OpenAi,
     error::{ApiError, ApiResult, conflict, internal, not_found},
-    homes::{limited_body, same_owner, visible_home},
+    homes::{PICTURE_SAVING, limited_body, same_owner, visible_home},
     openai::{self, Failure, Image},
     runtime::retry,
     saju::Birth,
     saju_reading::{self, ReadingChart},
-    security::rate_limit,
+    security::{rate_limit, rate_running},
 };
 
 /// A pending reading or picture older than this was cut short (a restart) and reads as failed, `interrupted`. Work
@@ -400,6 +400,8 @@ struct DrawRequest {
 async fn draw(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Response> {
     let user = current_user(&state, &headers).await?;
     rate_limit(&state, format!("saju-picture:{}", user.id), REQUESTS_PER_WINDOW)?;
+    // One body of a member's read at a time: each may be some megabytes.
+    let _reading = rate_running(&state, &format!("saju-picture-running:{}", user.id), 1)?.ok_or(PICTURE_SAVING)?;
     // A body that says it is past the limit is refused before anything waits for it.
     let declared = headers.get(header::CONTENT_LENGTH).and_then(|value| value.to_str().ok()?.parse::<u64>().ok());
     if declared.is_some_and(|length| length > MAX_PICTURE_REQUEST_BYTES as u64) {

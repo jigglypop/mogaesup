@@ -110,6 +110,20 @@ const UNKNOWN = '？';
 export const keyOf = (birth: Birth) => JSON.stringify([birth.calendar, birth.year, birth.month, birth.day, birth.leapMonth, birth.time, birth.gender]);
 const charts = new Map<string, Chart>();
 const readings = new Map<string, Reading>();
+/**
+ * Births whose chart and reading are kept, the ones used longest ago let go first: a village is nine homes, and a day
+ * of visits would otherwise keep every chart seen. A reading kept is the same object the next time (the islands built
+ * for it are kept by it, see scene/kept).
+ */
+const KEEP_BIRTHS = 96;
+
+/** `value` kept under `key` in `kept` as the one used last, the oldest let go past {@link KEEP_BIRTHS}. */
+function keep<T>(kept: Map<string, T>, key: string, value: T): T {
+  kept.delete(key);
+  kept.set(key, value);
+  while (kept.size > KEEP_BIRTHS) kept.delete(kept.keys().next().value!);
+  return value;
+}
 /** The Seoul day the charts kept here were drawn on. A chart also says what is running that day (the 대운, the 명반's 대한). */
 let drawnOn = '';
 
@@ -131,7 +145,7 @@ export function chartOf(birth: Birth): Chart {
   forgetOlder();
   const key = keyOf(birth);
   const known = charts.get(key);
-  if (known) return known;
+  if (known) return keep(charts, key, known);
   const request: ChartRequest = {
     calendar: birth.calendar,
     date: dateOf(birth),
@@ -148,8 +162,7 @@ export function chartOf(birth: Birth): Chart {
     // jamiblossom explains a skipped or repeated summer-time hour in Korean; its other refusals are a date out of range.
     throw new BirthError(/[가-힣]/.test(message) ? message : '계산할 수 없는 날짜예요.');
   }
-  charts.set(key, chart);
-  return chart;
+  return keep(charts, key, chart);
 }
 
 /**
@@ -161,7 +174,7 @@ export function readingOf(birth: Birth): Reading {
   forgetOlder();
   const key = keyOf(birth);
   const known = readings.get(key);
-  if (known) return known;
+  if (known) return keep(readings, key, known);
   const chart = chartOf(birth);
   const { saju } = chart;
   const reading: Reading = {
@@ -181,8 +194,7 @@ export function readingOf(birth: Birth): Reading {
   if (!birth.time) {
     reading.sinsal = { ...reading.sinsal, twelve: reading.sinsal.twelve.filter((cell) => cell.pillar !== 'hour') };
   }
-  readings.set(key, reading);
-  return reading;
+  return keep(readings, key, reading);
 }
 
 /** The pillars a reading has, 년주 first. */

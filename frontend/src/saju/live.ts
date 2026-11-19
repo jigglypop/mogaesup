@@ -205,6 +205,9 @@ export function useVillageRoom(username: string, viewerId: string | null, dog: s
         });
         ws.addEventListener('close', (event) => {
           if (socket.current === ws) socket.current = null;
+          // A socket of a room the page has left (another 섬, another viewer) closing late: the room on the page now is
+          // not its to clear.
+          if (stopped) return;
           setConnected(false);
           others.clear();
           roster();

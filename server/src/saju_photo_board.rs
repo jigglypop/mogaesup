@@ -17,8 +17,9 @@ use crate::{
     AppState,
     auth::{current_user, optional_user},
     error::{ApiError, ApiResult, bad, conflict, internal, not_found},
-    homes::{limited_body, same_owner, visible_home},
-    security::rate_limit,
+    homes::{PICTURE_SAVING, limited_body, same_owner, visible_home},
+    security::{rate_limit, rate_running},
+    share,
 };
 
 const EDGE: u32 = 1280;
@@ -64,11 +65,20 @@ fn normalized(data: String) -> ApiResult<(u32, u32, Vec<u8>)> {
 async fn save(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Json<Value>> {
     let owner = current_user(&state, &headers).await?;
     rate_limit(&state, format!("saju-photo-board:{}", owner.id), 30)?;
+    // One photo of a member's at a time, and decoded as the site's other pictures are: a few at once across the server.
+    let _uploading =
+        rate_running(&state, &format!("saju-photo-board-running:{}", owner.id), 1)?.ok_or(PICTURE_SAVING)?;
     let bytes = limited_body(body, MAX_BODY, LARGE, INVALID).await?;
     let upload: Upload = serde_json::from_slice(&bytes).map_err(|_| INVALID)?;
     same_owner(upload.expected_owner_id, owner.id)?;
     drop(bytes);
-    let (width, height, jpeg) = tokio::task::spawn_blocking(|| normalized(upload.image)).await.map_err(internal)??;
+    let permit = share::decoding_slot(share::DECODE_WAIT).await?;
+    let (width, height, jpeg) = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        normalized(upload.image)
+    })
+    .await
+    .map_err(internal)??;
     let version = Uuid::new_v4();
     let saved = sqlx::query(
         "INSERT INTO saju_photo_boards (owner_id, version, width, height, jpeg)

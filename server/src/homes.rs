@@ -125,7 +125,7 @@ const SAVE_RUNNING: ApiError = ApiError::new(
 );
 const SITE_FULL: ApiError =
     ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "site_storage_full", "지금은 섬을 더 크게 저장할 수 없어요.");
-const PICTURE_SAVING: ApiError = ApiError::new(
+pub(crate) const PICTURE_SAVING: ApiError = ApiError::new(
     StatusCode::TOO_MANY_REQUESTS,
     "picture_saving",
     "앞서 올린 사진을 아직 받고 있어요. 잠시 뒤에 다시 올려 주세요.",

@@ -322,7 +322,12 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   const placing = canDecorate && placingFor.of === username ? placingFor.placing : null;
   const [brushFor, setBrushFor] = useState<{ of: string; brush: Terrain | null }>({ of: username, brush: null });
   const brush = canDecorate && !placing && brushFor.of === username ? brushFor.brush : null;
-  const [leavingGift, setLeavingGift] = useState(false);
+  // Choosing where to leave a keepsake belongs to the 섬 it was begun on: going elsewhere ends it.
+  const [leavingOn, setLeavingOn] = useState<string | null>(null);
+  const leavingGift = leavingOn === username;
+  const setLeavingGift = useCallback((on: boolean | ((was: boolean) => boolean)) => {
+    setLeavingOn((was) => ((typeof on === 'function' ? on(was === username) : on) ? username : null));
+  }, [username]);
   const [selectedFor, setSelectedFor] = useState<{ of: string; id: string } | null>(null);
   const selectedId = canDecorate && selectedFor?.of === username ? selectedFor.id : null;
   const setPlacing = useCallback((next: Placing | null) => {
@@ -383,7 +388,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
       setLeavingGift(false);
       decor.reload();
     }, () => setLeavingGift(false));
-  }, [leavingGift, viewer, mine, host, compat, decor]);
+  }, [leavingGift, viewer, mine, host, compat, decor, setLeavingGift]);
   // What this browser kept from the village's first days, for a member who has not built their home here yet.
   const legacy = useMemo(() => (view.isOwner && !owner ? readLegacyHome() : null), [username, view.isOwner, owner]);
   const buildHome = useCallback(
@@ -573,6 +578,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
               {islandDecor && <DecorLayer {...islandDecor} selectedId={selectedId} />}
               {walking && (
                 <Walkers
+                  key={username}
                   room={room}
                   own={myDog}
                   name={viewer?.displayName ?? ''}
