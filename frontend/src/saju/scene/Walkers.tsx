@@ -283,6 +283,9 @@ export function Walkers({
   // A move asked before this island's walk began (another island's, or before placing something) is not played again.
   const mine = useRef({ position: [...start] as [number, number, number], facing: 0, action: 'idle' as Action, moves: 0, asked: control.current.asked?.at ?? 0, busy: 0 });
   const shown = useRef(new Map<string, { position: Vector3; facing: number }>());
+  /** The labels' parts, found once each time the labels change (`labelled` counts the changes). */
+  const labelled = useRef(0);
+  const tags = useRef<{ of: HTMLElement | null; version: number; list: { id: string; element: HTMLElement; cloud: HTMLElement | null; words: Element | null }[] }>({ of: null, version: -1, list: [] });
   const holders = useRef(new Map<string, RefObject<Group | null>>());
   const holderOf = (id: string) => {
     let holder = holders.current.get(id);
@@ -361,25 +364,42 @@ export function Walkers({
         holder.rotation.y = at.facing;
       }
     }
-    for (const id of shown.current.keys()) if (!room.others.has(id)) shown.current.delete(id);
-    // Names and clouds over their heads.
+    for (const id of shown.current.keys()) {
+      if (room.others.has(id)) continue;
+      shown.current.delete(id);
+      holders.current.delete(id);
+    }
+    // Names and clouds over their heads (the labels' parts found again only when the labels change, see Labels).
     const host = layer.current;
     if (!host) return;
+    if (tags.current.of !== host || tags.current.version !== labelled.current) {
+      tags.current = {
+        of: host,
+        version: labelled.current,
+        list: [...host.querySelectorAll<HTMLElement>('[data-walker]')].map((element) => {
+          const cloud = element.querySelector<HTMLElement>('.mg-balloon');
+          return { id: element.dataset['walker']!, element, cloud, words: cloud?.querySelector('b') ?? null };
+        }),
+      };
+    }
     const now = Date.now();
-    for (const element of host.querySelectorAll<HTMLElement>('[data-walker]')) {
-      const id = element.dataset['walker']!;
-      const at = id === SELF ? mine.current.position : shown.current.get(id)?.position.toArray();
-      if (!at) {
-        element.style.visibility = 'hidden';
-        continue;
+    for (const { id, element, cloud, words } of tags.current.list) {
+      if (id === SELF) {
+        const at = mine.current.position;
+        point.set(at[0], at[1] + OVER, at[2]);
+      } else {
+        const at = shown.current.get(id)?.position;
+        if (!at) {
+          element.style.visibility = 'hidden';
+          continue;
+        }
+        point.set(at.x, at.y + OVER, at.z);
       }
-      point.set(at[0]!, (at[1] ?? 0) + OVER, at[2]!).project(camera);
+      point.project(camera);
       const x = (point.x * 0.5 + 0.5) * size.width;
       const y = (-point.y * 0.5 + 0.5) * size.height;
       element.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
       element.style.visibility = point.z > 1 ? 'hidden' : '';
-      const cloud = element.querySelector<HTMLElement>('.mg-balloon');
-      const words = cloud?.querySelector('b');
       const said = room.said.get(id);
       if (cloud && words) {
         const showing = !!said && said.until > now;
@@ -405,6 +425,9 @@ export function Walkers({
         ids={[...(own ? [SELF] : []), ...room.present]}
         names={(id) => (id === SELF ? name : (room.others.get(id)?.name ?? ''))}
         design={design}
+        onChange={() => {
+          labelled.current += 1;
+        }}
       />
     </>
   );
@@ -416,13 +439,17 @@ function Labels({
   ids,
   names,
   design,
+  onChange,
 }: {
   layer: RefObject<HTMLDivElement | null>;
   ids: string[];
   names: (id: string) => string;
   design: string;
+  /** Told once the labels in `layer` were made again (the frame loop finds their parts anew). */
+  onChange: () => void;
 }) {
-  const key = `${ids.join('|')}|${design}`;
+  // A name changed (someone renamed themselves while here) is a change too.
+  const key = `${ids.map((id) => `${id}=${names(id)}`).join('|')}|${design}`;
   useEffect(() => {
     const host = layer.current;
     if (!host) return;
@@ -457,6 +484,7 @@ function Labels({
       const cloud = element.querySelector<HTMLElement>('.mg-balloon');
       if (cloud) cloud.dataset['design'] = id === SELF ? design : DEFAULT_BALLOON;
     }
+    onChange();
   }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => layer.current?.replaceChildren(), [layer]);
   return null;
