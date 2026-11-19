@@ -128,8 +128,8 @@ export async function createRenderer({ canvas }: { canvas?: unknown }): Promise<
 
 /**
  * The most device pixels the canvas draws to a CSS pixel. On a screen of twice the pixels the darkroom's passes (shade,
- * lens, glow) and every leaf would be drawn four times over; at one and a half the picture, soft with its lens and glow
- * already, reads as sharp for a little more than half of that.
+ * glow) and every leaf would be drawn four times over; at one and a half the picture reads as sharp for a little more
+ * than half of that.
  */
 const MOST_DPR = 1.5;
 
@@ -526,9 +526,10 @@ function Cadence({ running, still, touched }: { running: boolean; still: boolean
 
 /**
  * How much longer than the canvas's pace asks (see Cadence) the middle one of the measured frames may take before the
- * costly parts of the look are given up: at the moving pace, under 33 frames a second.
+ * costly parts of the look are given up: at the moving pace, under 40 frames a second. A walk the camera follows is
+ * drawn at that pace for as long as it lasts.
  */
-const SLOW_EXCESS_MS = 30 - 1000 / 60;
+const SLOW_EXCESS_MS = 25 - 1000 / 60;
 const SETTLE_FRAMES = 45;
 const MEASURED_FRAMES = 90;
 
@@ -547,6 +548,8 @@ function Pace({ onSlow }: { onSlow: () => void }) {
     pace.last = now;
     // A stall (the tab was hidden, a home was being built) is not the scene's own pace, nor a frame before it shows.
     if (pace.done || took > 250 || (works && !works.shown)) return;
+    // Measured at the moving pace: how the device keeps up with a camera on the move is what the look must suit.
+    if (works) works.activeAt = now;
     pace.frames += 1;
     if (pace.frames <= SETTLE_FRAMES) return;
     pace.excess.push(took - (works?.interval ?? 1000 / 60));

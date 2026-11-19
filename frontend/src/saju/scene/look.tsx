@@ -3,10 +3,9 @@ import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type
 import { useFrame, useThree } from '@react-three/fiber';
 import { ACESFilmicToneMapping, Color, Fog, Matrix4, Vector3, type DirectionalLight, type OrthographicCamera, type Scene } from 'three';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { color as tone, distance, float, mix, orthographicDepthToViewZ, pass, pow, screenUV, smoothstep, toneMapping, uniform, vec2, vec3, vec4 } from 'three/tsl';
-import { PMREMGenerator, RenderPipeline, type Node, type TextureNode, type WebGPURenderer } from 'three/webgpu';
+import { PMREMGenerator, RenderPipeline, type Node, type WebGPURenderer } from 'three/webgpu';
 
 import { setLampGain } from './build';
 import { GRASS_LAYER } from './Built';
@@ -17,9 +16,9 @@ import { WorksContext } from './works';
 
 // How the village is photographed: one isometric camera that moves between frames and that the viewer turns, tilts,
 // moves and zooms about what it looks at, the low sun and its shadows, the sky that lights what the sun does not, the
-// lake, and the darkroom after (shade in the corners things meet in, a lens that keeps one distance sharp, the glow of
-// what is bright, film's roll-off), all drawn by WebGPU (or WebGL 2 where a browser has no WebGPU) through node
-// materials.
+// lake, and the darkroom after (shade in the corners things meet in, the glow of what is bright, film's roll-off), all
+// drawn by WebGPU (or WebGL 2 where a browser has no WebGPU) through node materials. Everything in view is drawn
+// sharp, to the picture's edges.
 
 /** `high` draws everything; `low` leaves out what a phone's graphics chip pays most for. */
 export type Quality = 'high' | 'low';
@@ -116,9 +115,6 @@ const makeDials = () => ({
   far: uniform(400),
   hazeNear: uniform(0),
   hazeFar: uniform(1),
-  focus: uniform(120),
-  range: uniform(10),
-  bokeh: uniform(2),
   exposure: uniform(1),
 });
 
@@ -126,9 +122,9 @@ const makeDials = () => ({
 type Darkroom = { pipeline: RenderPipeline; shot: ReturnType<typeof pass>; dispose: () => void };
 
 /**
- * The picture as it is developed: the scene drawn into light's own values, shaded where things meet and softened away
- * from the lens's distance (on `fine` devices only), the glow of what is brighter than white added, rolled off as film
- * does, given a little more colour and darkened toward the corners.
+ * The picture as it is developed: the scene drawn into light's own values, shaded where things meet (on `fine` devices
+ * only), the glow of what is brighter than white added, rolled off as film does, given a little more colour and
+ * darkened toward the corners.
  */
 function darkroom(renderer: WebGPURenderer, scene: Scene, camera: OrthographicCamera, fine: boolean, dials: Dials): Darkroom {
   const shot = pass(scene, camera);
@@ -138,9 +134,8 @@ function darkroom(renderer: WebGPURenderer, scene: Scene, camera: OrthographicCa
   // The camera is orthographic: depth is a straight share of the way from its near plane to its far one.
   const viewZ = orthographicDepthToViewZ(depth, dials.near, dials.far);
   const parts: { dispose: () => void }[] = [shot];
-  /** The picture so far as a node, and the texture it is held in. */
+  /** The picture so far. */
   let developed: Node<'vec4'> = color;
-  let held: TextureNode = color;
   if (fine) {
     // Normals are worked out from depth, as N8AO did: the scene is drawn once, into one picture and its depth.
     const shade = ao(depth, null as unknown as Node, camera);
@@ -151,15 +146,10 @@ function darkroom(renderer: WebGPURenderer, scene: Scene, camera: OrthographicCa
     // The shade fades with the haze, as the distance does.
     const hazed = smoothstep(dials.hazeNear, dials.hazeFar, viewZ.negate());
     const open = mix(pow(shade.getTextureNode().r, SHADE.power), float(1), hazed);
-    const shaded = vec4(color.rgb.mul(mix(tone(SHADE.color), vec3(1), open)), 1);
-    const lens = dof(shaded, viewZ, dials.focus, dials.range, dials.bokeh);
-    parts.push(lens);
-    // The lens is developed when it is read as a node, and before the glow that reads the picture it leaves.
-    developed = lens as unknown as Node<'vec4'>;
-    // Its picture's texture; three's typings leave the getter off.
-    held = (lens as unknown as { getTextureNode: () => TextureNode }).getTextureNode();
+    developed = vec4(color.rgb.mul(mix(tone(SHADE.color), vec3(1), open)), 1);
   }
-  const glow = bloom(held, GLOW.strength, GLOW.radius, GLOW.threshold);
+  // What glows is what is bright before it is shaded: shade does not reach a lamp's light.
+  const glow = bloom(color, GLOW.strength, GLOW.radius, GLOW.threshold);
   glow.smoothWidth.value = GLOW.soft;
   parts.push(glow);
   const light = developed.rgb.add(glow.rgb);
@@ -379,10 +369,6 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
     dials.far.value = camera.far;
     dials.hazeNear.value = haze.near;
     dials.hazeFar.value = haze.far;
-    // What is in view is in focus to about its edges, which go soft: softer in a close view than in a wide one.
-    dials.focus.value = away;
-    dials.range.value = Math.max(10, (extent.halfHeight * 2) / Math.max(1, at.zoom));
-    dials.bokeh.value = Math.min(3, Math.max(0.5, camera.zoom / 26));
     // A camera on the move (the viewer's hand, a new frame easing in) is drawn at the moving pace (see Stage's Cadence).
     const moving = !stood.view.equals(camera.matrixWorld) || !stood.projection.equals(camera.projectionMatrix);
     stood.view.copy(camera.matrixWorld);

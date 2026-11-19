@@ -90,25 +90,26 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 /* The people walking the island: a name over each, and what they say in a glass balloon above it. */
 .mg-saju-walkers { position: absolute; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
 .mg-saju-walker { position: absolute; top: 0; left: 0; display: grid; justify-items: center; gap: 5px; }
+/* A name stands on its own colour, whatever lies behind it (a sunlit lawn, snow, the night's water): each one's colour
+   with the ink that reads on it, and the viewer's own in their element's deep ink with the page's paper on it. */
 .mg-saju-walker-name {
-  padding: 3px 9px 4px;
-  border: 1.5px solid color-mix(in srgb, var(--tag, var(--mg-ink)) 55%, var(--mg-ink));
+  padding: 3px 10px 4px;
+  border: 1.5px solid color-mix(in srgb, var(--tag, var(--mg-ink)) 70%, #10091f);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--tag, var(--mg-glass-strong)) 22%, var(--mg-glass-strong));
-  color: var(--tag-ink, var(--mg-ink));
-  font-size: 12.5px;
+  background: var(--tag, var(--mg-ink));
+  color: var(--tag-ink, var(--mg-surface));
+  font-size: 13px;
   font-weight: 800;
   letter-spacing: -0.01em;
   white-space: nowrap;
-  box-shadow: 2px 2px 0 var(--mg-saju-edge);
+  box-shadow: 0 2px 6px rgba(16, 9, 31, 0.3);
 }
 .mg-saju-walker-name:has(.mg-saju-walker-face) { display: inline-flex; align-items: center; gap: 5px; padding-left: 3px; }
 .mg-saju-walker-face { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; }
 .mg-saju-walker[data-own] .mg-saju-walker-name {
-  background: var(--el-soft, var(--mg-primary-soft));
-  color: var(--el-ink, var(--mg-primary-ink));
+  background: var(--el-ink, var(--mg-ink));
+  color: var(--mg-surface);
   border-color: var(--el, var(--mg-primary));
-  box-shadow: 2px 2px 0 color-mix(in srgb, var(--el, var(--mg-primary)) 35%, var(--mg-saju-edge));
 }
 /* Balloons reuse minihome/balloons.css; keep them above the name without the layer's absolute placement. */
 .mg-saju-walker > .mg-balloon { position: relative; left: auto; top: auto; margin-bottom: 2px; }
@@ -132,21 +133,37 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
   overflow-y: auto;
   border: 1px solid var(--mg-line);
   border-radius: 20px;
-  background: var(--mg-glass-strong);
+  background: var(--mg-surface);
   box-shadow: var(--mg-shadow-soft);
   display: grid;
-  gap: 6px;
+  gap: 8px;
   align-content: start;
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1.45;
 }
-.mg-saju-talk-log li { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: baseline; }
-.mg-saju-talk-log li b { color: var(--mg-primary); font-weight: 800; white-space: nowrap; }
-.mg-saju-talk-log li[data-own] b { color: var(--mg-accent); }
-.mg-saju-talk-log li span { color: var(--mg-ink); overflow-wrap: anywhere; }
-.mg-saju-talk-log li time { color: var(--mg-muted); font-size: 12.5px; }
-.mg-saju-talk-log li.is-note { display: block; color: var(--mg-muted); font-size: 13px; text-align: center; }
+/* Each line a bubble: who and when over what they said, the viewer's own on the right. */
+.mg-saju-talk-log li {
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas: 'who when' 'what what';
+  justify-content: start;
+  justify-self: start;
+  gap: 1px 8px;
+  max-width: 88%;
+  padding: 6px 12px 8px;
+  border-radius: 16px 16px 16px 6px;
+  background: color-mix(in srgb, var(--mg-ink) 6%, var(--mg-surface));
+}
+.mg-saju-talk-log li b { grid-area: who; color: var(--mg-primary); font-size: 13px; font-weight: 800; white-space: nowrap; }
+.mg-saju-talk-log li span { grid-area: what; color: var(--mg-ink); font-weight: 600; overflow-wrap: anywhere; }
+.mg-saju-talk-log li time { grid-area: when; align-self: center; color: var(--mg-muted); font-size: 12px; }
+.mg-saju-talk-log li[data-own] { justify-self: end; border-radius: 16px 16px 6px 16px; background: var(--mg-primary); }
+.mg-saju-talk-log li[data-own] b, .mg-saju-talk-log li[data-own] span { color: var(--mg-primary-ink); }
+.mg-saju-talk-log li[data-own] time { color: color-mix(in srgb, var(--mg-primary-ink) 72%, transparent); }
+.mg-saju-talk-log li.is-note { display: block; justify-self: center; max-width: none; padding: 2px 8px; background: none; color: var(--mg-muted); font-size: 13px; text-align: center; }
 @media (max-width: 520px) { .mg-saju-moves .mg-icon-btn { width: 30px; } }
-.mg-saju-talk input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--mg-ink); font: inherit; font-size: 14px; outline: none; }
+/* 16px: iOS zooms the page into a smaller field when it takes focus. */
+.mg-saju-talk input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--mg-ink); font: inherit; font-size: 16px; outline: none; }
 .mg-saju-pin {
   position: absolute;
   top: 0;

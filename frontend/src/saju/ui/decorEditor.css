@@ -13,7 +13,8 @@
 }
 .mg-decor-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   gap: 3px;
   padding: 3px;
   border: 1px solid var(--mg-hair);
@@ -95,6 +96,8 @@
   background: var(--mg-field);
   cursor: pointer;
 }
+/* iOS zooms the page into a field under 16px when it takes focus. */
+@media (pointer: coarse) { .mg-decor-line select { font-size: 16px; } }
 .mg-decor-reset { font-size: 13px; white-space: nowrap; }
 .mg-decor-swatches { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
 .mg-decor-swatches button {
