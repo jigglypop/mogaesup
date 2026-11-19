@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import { Link } from 'react-router-dom';
 
 import { ELEMENTS } from '../elements';
@@ -5,10 +7,20 @@ import { houseName, type Profile } from '../profile';
 import type { Resident } from '../residents';
 import { homePath } from '../routes';
 import { FLAG_NEIGHBOURS, flagRaised } from '../village';
+import { Icon } from '../../ui/icons';
 import { PixelIcon } from './PixelIcon';
 
-/** A home in the village; `bridged` when its owner is an 이웃 of the village's. */
-export type Villager = { resident: Resident; profile: Profile; bridged: boolean };
+/** A home the viewer may not go into: it is listed, and leads nowhere. */
+function ClosedDoor({ className, children, 'data-element': element }: { className: string; to: string; children: ReactNode; 'data-element'?: string }) {
+  return (
+    <div className={`${className} is-closed`} aria-disabled="true" data-element={element}>
+      {children}
+    </div>
+  );
+}
+
+/** A home in the village; `bridged` when its owner is an 이웃 of the village's, `closed` when the viewer may not go in. */
+export type Villager = { resident: Resident; profile: Profile; bridged: boolean; closed?: boolean };
 
 /**
  * 마을 갤러리: the homes of a village, each a way into its 섬: the owner's first (an empty plot until they build
@@ -41,11 +53,12 @@ export function VillagePanel({ owner, villagers, viewer }: {
             </Link>
           </li>
         )}
-        {villagers.map(({ resident, profile, bridged }) => {
+        {villagers.map(({ resident, profile, bridged, closed }) => {
           const { balance } = profile;
+          const Door = closed ? ClosedDoor : Link;
           return (
             <li key={resident.id}>
-              <Link className="mg-saju-villager mg-card" data-element={balance.dominant} to={homePath(resident.id)}>
+              <Door className="mg-saju-villager mg-card" data-element={balance.dominant} to={homePath(resident.id)}>
                 <span className="mg-saju-villager-mark">
                   <PixelIcon name={balance.dominant} size={26} />
                 </span>
@@ -54,6 +67,7 @@ export function VillagePanel({ owner, villagers, viewer }: {
                     {resident.name}
                     {resident.id === viewer && <span className="mg-badge">내 집</span>}
                     {bridged && <span className="mg-badge is-published">이웃</span>}
+                    {closed && <Icon name="lock" />}
                   </b>
                   <small>{profile.badge}</small>
                   <small>
@@ -63,7 +77,7 @@ export function VillagePanel({ owner, villagers, viewer }: {
                     {ELEMENTS.flatMap((element) => Array.from({ length: balance.counts[element] }, (_, index) => <i key={`${element}${index}`} data-element={element} />))}
                   </span>
                 </span>
-              </Link>
+              </Door>
             </li>
           );
         })}

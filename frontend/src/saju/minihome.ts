@@ -15,8 +15,11 @@ export type Minihome = {
   view: HomeView;
   /** The owner's 사주 home, once they have built one. */
   owner: Resident | null;
-  /** The homes around the owner's: their 이웃' (`neighbour`, joined to it by a bridge) and other members'. */
-  village: (Resident & { neighbour: boolean })[];
+  /**
+   * The homes around the owner's: their 이웃' (`neighbour`, joined to it by a bridge) and other members'. A home this
+   * viewer may not go into stands among them closed (`visitable` false).
+   */
+  village: (Resident & { neighbour: boolean; visitable: boolean })[];
   /** The viewer's own home: the owner's on their own 섬, null for a visitor without one. */
   mine: Resident | null;
   /** Who it was read for: the signed-in viewer's username, null for a signed-out visit. */
@@ -31,6 +34,16 @@ export type MinihomeState =
 
 pageArrived();
 
+/**
+ * Makes `change` to the page's 섬 if it is still the one an owner's change was made on: `ownerId`'s, read for its
+ * owner. An answer that comes back after the page has gone on to another 섬 (or after someone else has signed in) is
+ * not that 섬's.
+ */
+const onOwn = (ownerId: string, change: (minihome: Minihome) => Minihome) => (current: MinihomeState): MinihomeState =>
+  current.status === 'ready' && current.minihome.view.isOwner && current.minihome.view.profile.ownerId === ownerId
+    ? { status: 'ready', minihome: change(current.minihome) }
+    : current;
+
 async function read(username: string, viewer: string | null): Promise<Minihome> {
   // One round trip: the visitor's own home does not wait for this one to arrive. The route may have asked already,
   // while this page's code was arriving (see early).
@@ -40,7 +53,7 @@ async function read(username: string, viewer: string | null): Promise<Minihome> 
   return {
     view,
     owner,
-    village: village.village.map(({ user, saju, neighbour }) => ({ ...residentOf(user.username, saju), neighbour })),
+    village: village.village.map(({ user, saju, neighbour, visitable }) => ({ ...residentOf(user.username, saju), neighbour, visitable: visitable !== false })),
     mine: viewer === username ? owner : mine && viewer ? residentOf(viewer, mine) : null,
     as: viewer,
   };
@@ -126,7 +139,7 @@ export function useMinihome(username: string) {
       const { saju } = await sajuApi.save({ expectedOwnerId: ownerId, name, birth });
       const built = residentOf(username, saju);
       writes.current += 1;
-      setState((current) => (current.status === 'ready' ? { status: 'ready', minihome: { ...current.minihome, owner: built, mine: built } } : current));
+      setState(onOwn(ownerId, (minihome) => ({ ...minihome, owner: built, mine: built })));
     },
     [ownerId, username],
   );
@@ -134,7 +147,7 @@ export function useMinihome(username: string) {
     if (!ownerId) return;
     await sajuApi.remove({ expectedOwnerId: ownerId });
     writes.current += 1;
-    setState((current) => (current.status === 'ready' ? { status: 'ready', minihome: { ...current.minihome, owner: null, mine: null } } : current));
+    setState(onOwn(ownerId, (minihome) => ({ ...minihome, owner: null, mine: null })));
   }, [ownerId]);
   const open = useCallback(
     async (visibility: HomeVisibility, consent = false) => {
@@ -145,7 +158,7 @@ export function useMinihome(username: string) {
         ...(consent ? { sajuShareConsent: true } : {}),
       });
       writes.current += 1;
-      setState((current) => (current.status === 'ready' ? { status: 'ready', minihome: { ...current.minihome, view: { ...current.minihome.view, profile } } } : current));
+      setState(onOwn(ownerId, (minihome) => ({ ...minihome, view: { ...minihome.view, profile } })));
     },
     [ownerId],
   );
@@ -154,7 +167,7 @@ export function useMinihome(username: string) {
       if (!ownerId) return;
       const { profile } = await homeApi.update({ expectedOwnerId: ownerId, ...changes });
       writes.current += 1;
-      setState((current) => (current.status === 'ready' ? { status: 'ready', minihome: { ...current.minihome, view: { ...current.minihome.view, profile } } } : current));
+      setState(onOwn(ownerId, (minihome) => ({ ...minihome, view: { ...minihome.view, profile } })));
       if (changes.displayName) nameAs(changes.displayName);
     },
     [ownerId, nameAs],

@@ -170,10 +170,12 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
   transition: opacity 0.3s ease;
 }
 .mg-saju-pin[data-placed] { opacity: 1; visibility: visible; }
+.mg-saju-pin.is-closed { display: flex; align-items: center; gap: 4px; color: var(--mg-muted); cursor: default; }
+.mg-saju-pin.is-closed svg { width: 13px; height: 13px; }
 .mg-saju-pin small { font-size: 10px; font-weight: 750; color: var(--el-ink); }
 .mg-saju-pin::before { content: ''; position: absolute; left: 50%; bottom: -7px; width: 8px; height: 8px; margin-left: -4px; background: var(--el); border: 2px solid var(--mg-ink); border-radius: 2px; }
 @media (hover: hover) {
-  .mg-saju-pin:hover { background: var(--mg-card); }
+  .mg-saju-pin:not(.is-closed):hover { background: var(--mg-card); }
 }
 
 /* What 궁합 found, said over the two homes, in the middle of the open water. A drag across it turns the picture. */
@@ -408,6 +410,9 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
   .mg-saju-villager:active { transform: scale(0.98); }
 }
 .mg-saju-villager.is-lot { border: 2px dotted var(--mg-hair-strong); background: transparent; }
+/* A home the viewer may not go into: listed, and still. */
+.mg-saju-villager.is-closed, .mg-saju-villager.is-closed:hover, .mg-saju-villager.is-closed:active { transform: none; box-shadow: none; cursor: default; }
+.mg-saju-villager.is-closed b svg { width: 14px; height: 14px; margin-left: 4px; vertical-align: -2px; color: var(--mg-muted); }
 .mg-saju-villager-mark { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: var(--el-soft); color: var(--el-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
 .mg-saju-villager-text { display: grid; gap: 2px; min-width: 0; }
 .mg-saju-villager-text b { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 15px; font-weight: 850; }

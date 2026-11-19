@@ -148,11 +148,13 @@ function Doors({ visibility, consented, onChange }: {
  * of its island, the balance of elements, the bridge to it and its guestbook. A home not built yet has its bridge and
  * guestbook all the same: a visitor finds them under the empty plot, the owner under the card that builds the home.
  */
-export function HomePanel({ view, viewer, profile, picture, decor, neighbors, bridge, onVisibility, onProfile, onGuestbook }: {
+export function HomePanel({ view, viewer, profile, chartShared = true, picture, decor, neighbors, bridge, onVisibility, onProfile, onGuestbook }: {
   view: HomeView;
   viewer: User | null;
   /** The home's chart, once its owner has built it. */
   profile: Profile | null;
+  /** Whether this viewer may read the chart: its owner, or anyone once the owner agreed to share it. The house stands either way. */
+  chartShared?: boolean;
   /** The card with the picture of the built home's island. */
   picture?: ReactNode;
   /** The card that decorates the built home's island (its owner's), or gives it a flag (a visitor's). */
@@ -176,13 +178,13 @@ export function HomePanel({ view, viewer, profile, picture, decor, neighbors, br
               <PixelIcon name={profile.balance.dominant} size={30} />
             </span>
             <div className="mg-saju-who-text">
-              <p className="mg-saju-badge">{profile.badge}</p>
+              {chartShared && <p className="mg-saju-badge">{profile.badge}</p>}
               <ul className="mg-saju-notes">
                 <li className="mg-chip is-soft">{houseName(profile.house)}</li>
                 <li className="mg-chip is-soft">
-                  {profile.guardian.name} · {profile.guardian.pillar}
+                  {chartShared ? `${profile.guardian.name} · ${profile.guardian.pillar}` : profile.guardian.name}
                 </li>
-                {profile.guardian.charms.map((item) => (
+                {chartShared && profile.guardian.charms.map((item) => (
                   <li key={item.charm} className="mg-chip is-soft">
                     {item.label}
                   </li>
@@ -197,10 +199,12 @@ export function HomePanel({ view, viewer, profile, picture, decor, neighbors, br
           </section>
           {picture}
           {decor}
-          <section className="mg-saju-card" aria-label="오행 밸런스">
-            <h2 className="mg-heading">오행 밸런스</h2>
-            <Gauge balance={profile.balance} />
-          </section>
+          {chartShared && (
+            <section className="mg-saju-card" aria-label="오행 밸런스">
+              <h2 className="mg-heading">오행 밸런스</h2>
+              <Gauge balance={profile.balance} />
+            </section>
+          )}
         </>
       ) : view.isOwner ? null : (
         <section className="mg-saju-card mg-saju-who" aria-label="빈 터">

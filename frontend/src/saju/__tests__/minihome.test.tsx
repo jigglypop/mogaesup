@@ -86,7 +86,7 @@ describe('섬 읽기', () => {
     const minihome = page.ready()!;
     expect(minihome.owner).toEqual({ id: 'sol', name: '솔', birth });
     expect(minihome.mine).toBe(minihome.owner);
-    expect(minihome.village).toEqual([{ id: 'noeul', name: '노을', birth, neighbour: true }]);
+    expect(minihome.village).toEqual([{ id: 'noeul', name: '노을', birth, neighbour: true, visitable: true }]);
     await page.unmount();
   });
 
@@ -240,6 +240,46 @@ describe('섬 읽기', () => {
     expect(save).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
+    await page.unmount();
+  });
+
+  it('주인이 바꾼 것의 답이 다른 섬으로 간 뒤에 오면, 그 섬에 섞이지 않는다', async () => {
+    const noeulView: HomeView = { ...view(false), profile: { ...view(false).profile, ownerId: 'u2', username: 'noeul', ownerName: '노을이', title: '노을이의 섬' } };
+    get.mockImplementation(async (username: string) => (username === 'noeul' ? noeulView : view(false)));
+    village.mockImplementation(async (username: string) => (username === 'noeul' ? { saju: home('노을'), village: [] } : sols));
+    const seen: { hook: Hook | null } = { hook: null };
+    function Probe({ username }: { username: string }) {
+      const hook = useMinihome(username);
+      useEffect(() => {
+        seen.hook = hook;
+      });
+      return null;
+    }
+    const ready = () => (seen.hook!.state.status === 'ready' ? seen.hook!.state.minihome : null);
+    const page = await mount(<Probe username="sol" />);
+    await settle();
+    expect(ready()!.view.isOwner).toBe(true);
+    // 솔이 제 섬의 문을 닫고 집을 다시 짓는데, 답이 오기 전에 노을의 섬으로 간다.
+    let closed: (value: unknown) => void = () => {};
+    let built: (value: unknown) => void = () => {};
+    update.mockReturnValue(new Promise((resolve) => (closed = resolve)));
+    save.mockReturnValue(new Promise((resolve) => (built = resolve)));
+    const { open: close, build } = seen.hook!;
+    const sent: Promise<void>[] = [];
+    await act(async () => void sent.push(close('private'), build('가온', birth)));
+    await page.rerender(<Probe username="noeul" />);
+    await settle();
+    expect(ready()!.view.profile.username).toBe('noeul');
+    await act(async () => {
+      closed({ ...view(true), profile: { ...view(true).profile, visibility: 'private' } });
+      built({ saju: home('가온') });
+      await Promise.all(sent);
+    });
+    await settle();
+    // 노을의 섬은 노을의 것 그대로다.
+    expect(ready()!.view.profile).toEqual(noeulView.profile);
+    expect(ready()!.owner).toEqual({ id: 'noeul', name: '노을', birth });
+    expect(ready()!.mine).toEqual({ id: 'sol', name: '솔', birth });
     await page.unmount();
   });
 });

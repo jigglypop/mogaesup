@@ -35,7 +35,8 @@ import { countWork, newWorks, useBuild, useMood, WorksContext, type Works } from
 // moves and zooms about them. It is drawn with WebGPU, or with WebGL 2 where the browser has no WebGPU.
 
 /** A home on the stage: where its island lies, and whose it is (nobody's yet when `profile` is null). */
-export type StageHome = { id: string; x: number; z: number; profile: Profile | null };
+/** A home in the village; `closed` when this viewer may not go into its 섬 (its house stands all the same). */
+export type StageHome = { id: string; x: number; z: number; profile: Profile | null; closed?: boolean };
 /** A bridge the viewer built, from their own home to a neighbour's. */
 export type StageBridge = { from: StageHome; to: StageHome; compat: Compat; colors: [string, string] };
 /** An island's ground as the lake meets it: where its middle is, and its shape (see terrain). */
@@ -212,7 +213,7 @@ const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, terr
   const canvas = useThree((state) => state.gl.domElement);
   const glow = useMemo(() => new MeshBasicMaterial({ color: '#ffe2b0', transparent: true, opacity: 0, depthWrite: false, blending: AdditiveBlending }), []);
   const origin = useMemo(() => [home.x, 0, home.z] as const, [home.x, home.z]);
-  const visitable = !!onVisit && !focused;
+  const visitable = !!onVisit && !focused && !home.closed;
   const { half, reach } = ISLANDS[kind];
   useEffect(() => () => glow.dispose(), [glow]);
   // Over an island that can be visited the canvas shows the hand that visits, in place of the one that turns it.
@@ -955,7 +956,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       if (onWalk && ground && home && over(home, ground)) onWalk(ground, twice);
       return;
     }
-    const visited = homes.findIndex((home, index) => !!onVisit && home.id !== focus && over(islands[index]!, { x: hit.x, z: hit.z }));
+    const visited = homes.findIndex((home, index) => !!onVisit && !home.closed && home.id !== focus && over(islands[index]!, { x: hit.x, z: hit.z }));
     if (visited >= 0) return;
     closeIn(hit);
   };

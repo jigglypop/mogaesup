@@ -233,7 +233,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   const around = useMemo(
     () => others.flatMap((resident) => {
       const profile = profileOrNull(resident);
-      return profile ? [{ resident, profile, bridged: resident.neighbour }] : [];
+      return profile ? [{ resident, profile, bridged: resident.neighbour, closed: !resident.visitable }] : [];
     }),
     [others],
   );
@@ -244,7 +244,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
       { id: username, x: 0, z: 0, profile: host?.profile ?? null },
       ...plots.flatMap((plot) => {
         const neighbour = around.find(({ resident }) => resident.id === plot.id);
-        return neighbour ? [{ id: plot.id, x: plot.x, z: plot.z, profile: neighbour.profile }] : [];
+        return neighbour ? [{ id: plot.id, x: plot.x, z: plot.z, profile: neighbour.profile, ...(neighbour.closed ? { closed: true } : {}) }] : [];
       }),
     ];
   }, [username, host, around]);
@@ -388,7 +388,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
     navigate(homePath(username));
   }, [onDemolish, navigate, username]);
   // The same home for as long as this village is on the page.
-  const wave = useMemo(() => waveOf(around.map(({ resident }) => resident.id), viewer?.username ?? null), [around, viewer?.username]);
+  const wave = useMemo(() => waveOf(around.filter(({ closed }) => !closed).map(({ resident }) => resident.id), viewer?.username ?? null), [around, viewer?.username]);
 
   const name = host?.resident.name ?? ownerName;
   const title = `${name}의 섬`;
@@ -404,7 +404,9 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // What the server makes for the built home from its birth: the reading of its chart, read once its tabs are opened,
   // and the picture of its island. The owner's are asked for here, and looked at again while they are being made and
   // shown: the reading on its tabs, the picture on the home's (and for the PDF on the reading's).
-  const tab = route.kind === 'home' && host ? route.tab : 'home';
+  // A visitor sees the chart, the 명반 and the reading once the owner has agreed to share them; the house stands anyway.
+  const chartShared = view.isOwner || view.profile.sajuShareConsent !== false;
+  const tab = route.kind === 'home' && host && (chartShared || route.tab === 'home') ? route.tab : 'home';
 
   // The home's room: everyone signed in here walks its island as their own guardian dog, and what they say shows over
   // them. The viewer's dog walks where they press the island's ground.
@@ -572,6 +574,13 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
             wide &&
             homes.map((home) => {
               const resident = villagers.find((villager) => villager.resident.id === home.id)?.resident;
+              if (home.closed) {
+                return (
+                  <span key={home.id} className="mg-saju-pin is-closed" data-pin={home.id} data-element={home.profile?.balance.dominant} aria-disabled="true">
+                    <Icon name="lock" /> {resident?.name ?? '빈 터'}
+                  </span>
+                );
+              }
               return (
                 <Link key={home.id} className="mg-saju-pin" data-pin={home.id} data-element={home.profile?.balance.dominant} to={homePath(home.id)} draggable={false}>
                   {resident ? resident.name : '빈 터'}
@@ -640,12 +649,12 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           <Link to={homePath(username)} aria-current={route.kind !== 'village' && tab === 'home' ? 'page' : undefined}>
             홈
           </Link>
-          {host && (
+          {host && chartShared && (
             <Link to={chartPath(username)} aria-current={tab === 'chart' ? 'page' : undefined}>
               사주보기
             </Link>
           )}
-          {host && (
+          {host && chartShared && (
             <Link to={ziweiPath(username)} aria-current={tab === 'ziwei' ? 'page' : undefined}>
               자미두수
             </Link>
@@ -696,6 +705,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
               view={view}
               viewer={viewer}
               profile={host?.profile ?? null}
+              chartShared={chartShared}
               picture={
                 host && (
                   <PictureCard name={host.resident.name} state={picture} drawing={picture.drawing} owner={view.isOwner} onDraw={picture.draw} onReload={picture.reload} />

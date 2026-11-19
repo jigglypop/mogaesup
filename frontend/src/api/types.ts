@@ -158,12 +158,13 @@ export type SajuHome = { name: string; birth: SajuBirth };
 
 /**
  * `GET /api/homes/{username}/saju`: the member's 사주 home (null until they build one) and the village around it, at
- * most eight homes: their 이웃' that the viewer may see (`neighbour`, the viewer's own first), then the public homes
- * built most recently.
+ * most eight homes: their 이웃' (`neighbour`, the viewer's own first), then the public homes built most recently.
+ * `visitable` is false for an 이웃's home this viewer may not go into (kept to its 이웃 or its owner): it stands in
+ * the village all the same.
  */
 export type SajuVillage = {
   saju: SajuHome | null;
-  village: { user: UserCard; saju: SajuHome; neighbour: boolean }[];
+  village: { user: UserCard; saju: SajuHome; neighbour: boolean; visitable?: boolean }[];
 };
 
 /** The five elements as the chart names them, in the order each gives rise to the next. */
