@@ -1,5 +1,6 @@
-//! The browser's Korean calendar supplies each home's three or four pillars. Recount both elements and determine
-//! the gift from those pillars, then bind delivery to the two stored births and the signed-in giver.
+//! The browser's Korean calendar supplies each home's three or four pillars. From those pillars recount both homes'
+//! dominant elements (the gift's from and to) and judge the pair as compatOf does, by the two day pillars (합, then the
+//! two 일간's elements), then bind delivery to the two stored births and the signed-in giver.
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -27,6 +28,9 @@ const NO_HOME: ApiError = conflict("no_home", "두 사람 모두 사주 집이 �
 const STALE: ApiError = conflict("stale_birth", "사주가 바뀌었어요. 화면을 새로 불러와 주세요.");
 const INVALID: ApiError = bad("invalid_gift", "선물의 궁합과 오행을 확인해 주세요.");
 const ELEMENTS: [&str; 5] = ["wood", "fire", "earth", "metal", "water"];
+/// Keepsakes a home's owner reads of their own: the newest this many, and the placed ones besides. A giver who builds
+/// their home again from another birth sends another, so a home's keepsakes have no end.
+const OWNER_GIFTS: i64 = 100;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new().route("/api/homes/{username}/saju/gifts", post(give))
@@ -85,13 +89,15 @@ impl Chart {
         Ok(Self { dominant, day_stem, day_branch })
     }
 
-    /// The same precedence as compatOf: 천간합 or 육합, then 상생, 비화, 반합 and 상극.
+    /// The same precedence as compatOf: 천간합 or 육합; then the two 일간's own elements, 상생 or 비화; then 반합; and
+    /// 상극 last. The homes' dominant elements are the gift's from and to, not its tone.
     fn tone(&self, other: &Self) -> &'static str {
+        let (mine, theirs) = (STEM_ELEMENTS[self.day_stem], STEM_ELEMENTS[other.day_stem]);
         if self.day_stem.abs_diff(other.day_stem) == 5 || (self.day_branch + other.day_branch) % 12 == 1 {
             "union"
-        } else if matches!(self.dominant.abs_diff(other.dominant), 1 | 4) {
+        } else if matches!(mine.abs_diff(theirs), 1 | 4) {
             "flow"
-        } else if self.dominant == other.dominant {
+        } else if mine == theirs {
             "same"
         } else if self.day_branch != other.day_branch && self.day_branch % 4 == other.day_branch % 4 {
             "union"
@@ -112,6 +118,11 @@ async fn give(
     let (home, own) = visible_home(&state, &name, Some(&giver)).await?;
     if own {
         return Err(bad("own_home", "다른 사람의 집에 선물해 주세요."));
+    }
+    // The recipient's stored birth is held against the one sent (`stale_birth`): a home whose owner has not agreed to
+    // share their 사주 answers as one without a 사주 home, so whether a guessed birth is theirs is never told.
+    if !home.saju_share_consent {
+        return Err(NO_HOME);
     }
     let mine = Chart::read(&body.giver_pillars, body.giver_birth.time.is_some())?;
     let theirs = Chart::read(&body.recipient_pillars, body.recipient_birth.time.is_some())?;
@@ -205,7 +216,8 @@ async fn leave_at(tx: &mut PgConnection, owner: Uuid, gift: Uuid, x: f64, z: f64
     Ok(())
 }
 
-/// Visitors see only keepsakes the owner has placed. A sender leaving does not take their keepsake away.
+/// Visitors see only keepsakes the owner has placed; the owner also the newest [`OWNER_GIFTS`]. A sender leaving does
+/// not take their keepsake away.
 pub(super) async fn inventory(
     db: &mut PgConnection,
     owner: Uuid,
@@ -217,10 +229,12 @@ pub(super) async fn inventory(
     }
     let rows = sqlx::query(
         "SELECT g.*, u.username, u.display_name FROM saju_gifts g LEFT JOIN users u ON u.id = g.giver_id
-         WHERE g.owner_id = $1 AND ($2 OR g.id = ANY($3)) ORDER BY g.created_at DESC, g.id",
+         WHERE g.owner_id = $1 AND (g.id = ANY($3) OR g.id IN (
+           SELECT id FROM saju_gifts WHERE owner_id = $1 ORDER BY created_at DESC, id LIMIT $2))
+         ORDER BY g.created_at DESC, g.id",
     )
     .bind(owner)
-    .bind(own)
+    .bind(if own { OWNER_GIFTS } else { 0 })
     .bind(placed)
     .fetch_all(db)
     .await?;

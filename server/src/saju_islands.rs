@@ -15,7 +15,7 @@ use crate::{
     AppState,
     auth::current_user,
     error::{ApiError, ApiResult, bad, not_found},
-    security::rate_limit,
+    security::{plain_text, rate_limit},
 };
 
 const TITLE: ApiError = bad("invalid_title", "이름은 24자 이하로 입력해 주세요.");
@@ -30,9 +30,10 @@ struct Create {
     title: String,
 }
 
+/// A title everyone's listing shows: it reads as it was written ([`plain_text`]), with nothing that hides or turns text.
 fn title_of(title: &str) -> ApiResult<&str> {
     let title = title.trim();
-    if title.is_empty() || title.chars().count() > 24 || title.chars().any(char::is_control) {
+    if title.is_empty() || title.chars().count() > 24 || !plain_text(title, false) {
         return Err(TITLE);
     }
     Ok(title)
@@ -113,5 +114,9 @@ mod tests {
         assert!(title_of("  호수  ").is_ok());
         assert!(title_of(" ").is_err());
         assert!(title_of(&"가".repeat(25)).is_err());
+        // Nothing that turns the text around or hides part of it in the public listing.
+        assert!(title_of("호\u{202e}수").is_err());
+        assert!(title_of("호\u{200b}수").is_err());
+        assert!(title_of("호\n수").is_err());
     }
 }
