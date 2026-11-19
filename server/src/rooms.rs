@@ -255,6 +255,12 @@ pub(crate) fn seat<'a>(
 #[serde(rename_all = "camelCase")]
 struct PlayerState {
     name: String,
+    /// The island's owner, walking it as their guardian dog: the page puts the guardian at the door away for them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    owner: bool,
+    /// The member's profile picture (a stored file's site path), shown with their name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    avatar_url: Option<String>,
     color: String,
     position: [f64; 3],
     rotation: [f64; 4],
@@ -617,6 +623,8 @@ struct Peer {
     session: String,
     user: User,
     name: String,
+    /// The member's profile picture, as the database had it when they came in (see [`Rooms::picture`]).
+    avatar: Option<String>,
     /// The island's owner: always let in, and never counted against anyone else's seats.
     owner: bool,
     /// Where the socket came from ([`client_address`]).
@@ -1072,6 +1080,7 @@ impl Rooms {
                 session: session.clone(),
                 user,
                 name,
+                avatar: None,
                 owner: standing.owner(),
                 address,
                 state: None,
@@ -1099,6 +1108,13 @@ impl Rooms {
 
     fn remove(&self, room_key: &str, id: &str) {
         self.hub().remove(room_key, id);
+    }
+
+    /// Gives socket `id` of `room_key` its member's profile picture, which their state carries from their next Join.
+    pub(crate) fn picture(&self, room_key: &str, id: &str, avatar: Option<String>) {
+        if let Some(peer) = self.hub().rooms.get_mut(room_key).and_then(|peers| peers.get_mut(id)) {
+            peer.avatar = avatar;
+        }
     }
 
     /// Takes `account`'s sockets out of `room_key`, each told it was taken from another window ([`ELSEWHERE`]): a page
@@ -1330,6 +1346,8 @@ impl Rooms {
                 let previous = peer.state.take();
                 let state = PlayerState {
                     name: peer.name.clone(),
+                    owner: peer.owner,
+                    avatar_url: peer.avatar.clone(),
                     color,
                     position: previous.as_ref().map_or([0.0; 3], |p| p.position),
                     rotation: previous.as_ref().map_or(REST_ROTATION, |p| p.rotation),
@@ -1569,10 +1587,16 @@ async fn upgrade(
     if query.once {
         state.rooms.evict_account(&home.username, visitor.id);
     }
+    let avatar: Option<String> = sqlx::query_scalar("SELECT avatar_url FROM users WHERE id = $1")
+        .bind(visitor.id)
+        .fetch_optional(&state.db)
+        .await?
+        .flatten();
     let registration = match state.rooms.register(&home.username, visitor, display, claims.session, standing, address) {
         Ok(registration) => registration,
         Err(refused) => return Ok(ws.on_upgrade(move |socket| refuse(socket, refused))),
     };
+    state.rooms.picture(&home.username, &registration.id, avatar);
     Ok(ws
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)

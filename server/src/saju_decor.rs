@@ -27,8 +27,8 @@ use crate::{
     security::rate_limit,
 };
 
-/// Things one island holds at once.
-const MAX_ITEMS: usize = 24;
+/// Things one island holds at once: fences and paths are laid a piece at a time.
+const MAX_ITEMS: usize = 64;
 /// An item's id: 1 to this many letters, digits, `_` or `-`.
 const ID_MAX: usize = 40;
 /// How far from the island's middle a thing may stand, along x and along z, and how far it may be turned either way.
@@ -69,7 +69,22 @@ const PROPS: &[&str] = &[
     "lotus-basin",
     "rain-spout",
     "koi-fountain",
+    "fence-wood",
+    "fence-bamboo",
+    "stone-wall",
+    "pine",
+    "blossom",
+    "maple",
+    "bamboo",
+    "stones",
+    "stepping",
+    "boulder",
+    "path-stone",
+    "path-wood",
 ];
+/// The kinds of house, roofs and trims an owner may choose in place of their chart's.
+const HOUSE_STYLES: [&str; 5] = ELEMENTS;
+const ROOFS: [&str; 5] = ["gables", "glasshouse", "dome", "lantern", "ridge"];
 /// What a flag may show: the 14 main stars of 자미두수, and 공궁 for a life palace without one.
 const STARS: [&str; 15] = [
     "자미", "천기", "태양", "무곡", "천동", "염정", "천부", "태음", "탐랑", "거문", "천상", "천량", "칠살", "파군",
@@ -98,6 +113,7 @@ const FLAG_COLUMNS: &str = "f.id, f.star, f.element, f.created_at, u.username, u
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/homes/me/saju/decor", put(save))
+        .route("/api/homes/me/saju/house", put(choose_house))
         .route("/api/homes/me/saju/flags/{id}", delete(take_down))
         .route("/api/homes/{username}/saju/decor", get(view))
         .route("/api/homes/{username}/saju/flags", post(give))
@@ -191,9 +207,10 @@ fn flag(row: &PgRow) -> Value {
 /// the owner the newest [`OWNER_FLAGS`] given besides, the newest first (`flags`); and the owner's character when their
 /// look is ready with a model (`character`), for anyone else only once it is placed.
 pub(super) async fn shown(db: &mut PgConnection, owner: Uuid, own: bool) -> Result<Value, sqlx::Error> {
-    let (items, terrain, tiles, board): (Value, String, Value, Option<Value>) = sqlx::query_as(
+    let (items, terrain, tiles, board, house): (Value, String, Value, Option<Value>, Option<Value>) = sqlx::query_as(
         "SELECT COALESCE(d.items, '[]'::jsonb), COALESCE(d.terrain, 'default'), COALESCE(d.tiles, '[]'::jsonb),
-          CASE WHEN b.version IS NOT NULL THEN jsonb_build_object('version', b.version, 'width', b.width, 'height', b.height) END
+          CASE WHEN b.version IS NOT NULL THEN jsonb_build_object('version', b.version, 'width', b.width, 'height', b.height) END,
+          d.house
          FROM (SELECT $1::uuid AS owner_id) o LEFT JOIN saju_decor d USING (owner_id)
          LEFT JOIN saju_photo_boards b USING (owner_id)",
     )
@@ -248,7 +265,70 @@ pub(super) async fn shown(db: &mut PgConnection, owner: Uuid, own: bool) -> Resu
     if let Some(board) = board {
         decor["photoBoard"] = board;
     }
+    if let Some(house) = house {
+        decor["house"] = house;
+    }
     Ok(decor)
+}
+
+#[derive(Deserialize)]
+struct HouseChoice {
+    style: String,
+    roof: String,
+    accent: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HouseSave {
+    expected_owner_id: Option<Uuid>,
+    /// Read as a [`HouseChoice`] once the account is known ([`checked_house`]); null gives the home back the house its
+    /// chart gives.
+    house: Value,
+}
+
+/// The house as it is kept and shown, if it is one of the known kinds, roofs and trims; None for null.
+fn checked_house(house: Value) -> ApiResult<Option<Value>> {
+    if house.is_null() {
+        return Ok(None);
+    }
+    let choice: HouseChoice = serde_json::from_value(house).map_err(|_| INVALID_DECOR)?;
+    let known = HOUSE_STYLES.contains(&choice.style.as_str())
+        && ROOFS.contains(&choice.roof.as_str())
+        && choice.accent.as_deref().is_none_or(|accent| ELEMENTS.contains(&accent));
+    if !known {
+        return Err(INVALID_DECOR);
+    }
+    Ok(Some(json!({"style": choice.style, "roof": choice.roof, "accent": choice.accent})))
+}
+
+/// `PUT /api/homes/me/saju/house` `{expectedOwnerId, house: {style, roof, accent} | null}`: the house the owner's home is
+/// built as, in place of the one their chart gives (null for that one again); answered with the decor (see [`shown`]).
+async fn choose_house(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<HouseSave>,
+) -> ApiResult<Json<Value>> {
+    let user = current_user(&state, &headers).await?;
+    same_owner(body.expected_owner_id, user.id)?;
+    let house = checked_house(body.house)?;
+    rate_limit(&state, format!("saju-decor:{}", user.id), SAVES_PER_MEMBER)?;
+    let mut tx = state.db.begin().await?;
+    let saved = sqlx::query(
+        "INSERT INTO saju_decor (owner_id, house)
+         SELECT owner_id, $2 FROM saju_homes WHERE owner_id = $1 FOR KEY SHARE
+         ON CONFLICT (owner_id) DO UPDATE SET house = excluded.house, updated_at = now()",
+    )
+    .bind(user.id)
+    .bind(house)
+    .execute(&mut *tx)
+    .await?;
+    if saved.rows_affected() == 0 {
+        return Err(NO_HOME);
+    }
+    let decor = shown(&mut tx, user.id, true).await?;
+    tx.commit().await?;
+    Ok(Json(decor))
 }
 
 /// `GET /api/homes/{username}/saju/decor`: the decor of the member's island (see [`shown`]), for whoever may see their
@@ -461,6 +541,23 @@ mod tests {
         };
         assert!(flag(MINE).is_ok() && flag(&id.to_string()).is_ok());
         assert!(flag("yours").is_err() && flag(&id.simple().to_string()).is_err());
+    }
+
+    #[test]
+    fn 고른_집은_아는_모양과_지붕과_색만_된다() {
+        let brick = json!({"style": "fire", "roof": "gables", "accent": "metal"});
+        assert_eq!(checked_house(brick.clone()).unwrap(), Some(brick));
+        assert_eq!(checked_house(Value::Null).unwrap(), None);
+        assert!(checked_house(json!({"style": "wood", "roof": "ridge", "accent": null})).unwrap().is_some());
+        for wrong in [
+            json!({"style": "brick", "roof": "gables", "accent": null}),
+            json!({"style": "fire", "roof": "tower", "accent": null}),
+            json!({"style": "fire", "roof": "dome", "accent": "gold"}),
+            json!({"style": "fire"}),
+            json!("fire"),
+        ] {
+            assert!(checked_house(wrong.clone()).is_err(), "{wrong}");
+        }
     }
 
     #[test]

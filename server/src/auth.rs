@@ -259,6 +259,13 @@ async fn with_permissions(state: &AppState, user: &User) -> ApiResult<Value> {
     }
     let mut value = serde_json::to_value(user).map_err(internal)?;
     value["permissions"] = json!(held);
+    // The member's profile picture, which every page shows for them (the bar's account button among them).
+    let avatar: Option<String> = sqlx::query_scalar("SELECT avatar_url FROM users WHERE id = $1")
+        .bind(user.id)
+        .fetch_optional(&state.db)
+        .await?
+        .flatten();
+    value["avatarUrl"] = json!(avatar);
     Ok(value)
 }
 

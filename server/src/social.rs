@@ -75,11 +75,14 @@ pub fn router() -> Router<AppState> {
 
 /// A user as pages show them: name and their 미니미 emoji.
 pub(crate) fn card(row: &PgRow, prefix: &str) -> Value {
+    // The profile picture, where the query read it (`<prefix>avatar_url`): every card of a member shows the one they chose.
+    let avatar = row.try_get::<Option<String>, _>(format!("{prefix}avatar_url").as_str()).ok().flatten();
     json!({
         "id": row.get::<Uuid, _>(format!("{prefix}id").as_str()),
         "username": row.get::<String, _>(format!("{prefix}username").as_str()),
         "displayName": row.get::<String, _>(format!("{prefix}display_name").as_str()),
         "emoji": row.get::<Option<String>, _>(format!("{prefix}emoji").as_str()).unwrap_or_else(|| "🧑".into()),
+        "avatarUrl": avatar,
     })
 }
 
@@ -93,7 +96,7 @@ async fn guestbook(
     let (home, is_owner) = visible_home(&state, &name, viewer.as_ref()).await?;
     let limit = page.limit();
     let rows = sqlx::query(
-        "SELECT g.id AS entry_id, g.body, g.secret, g.created_at, u.id, u.username, u.display_name, h.emoji
+        "SELECT g.id AS entry_id, g.body, g.secret, g.created_at, u.id, u.username, u.display_name, u.avatar_url, h.emoji
          FROM guestbook_entries g JOIN users u ON u.id = g.author_id LEFT JOIN homes h ON h.owner_id = u.id
          WHERE g.home_owner_id = $1 AND g.deleted_at IS NULL AND g.created_at < $2
          ORDER BY g.created_at DESC LIMIT $3",
@@ -276,7 +279,7 @@ async fn clear_author(
 }
 
 const ILCHON_SELECT: &str =
-    "SELECT mine.name, theirs.name AS their_name, mine.since, u.id, u.username, u.display_name, h.emoji
+    "SELECT mine.name, theirs.name AS their_name, mine.since, u.id, u.username, u.display_name, u.avatar_url, h.emoji
     FROM ilchons mine
     JOIN ilchons theirs ON theirs.user_id = mine.friend_id AND theirs.friend_id = mine.user_id
     JOIN users u ON u.id = mine.friend_id LEFT JOIN homes h ON h.owner_id = u.id";
@@ -314,8 +317,9 @@ async fn ilchons(
 }
 
 const REQUEST_SELECT: &str = "SELECT r.id AS request_id, r.name, r.their_name, r.message, r.created_at,
-    f.id AS f_id, f.username AS f_username, f.display_name AS f_display_name, fh.emoji AS f_emoji,
-    t.id AS t_id, t.username AS t_username, t.display_name AS t_display_name, th.emoji AS t_emoji
+    f.id AS f_id, f.username AS f_username, f.display_name AS f_display_name, f.avatar_url AS f_avatar_url,
+    fh.emoji AS f_emoji, t.id AS t_id, t.username AS t_username, t.display_name AS t_display_name,
+    t.avatar_url AS t_avatar_url, th.emoji AS t_emoji
     FROM ilchon_requests r
     JOIN users f ON f.id = r.from_id LEFT JOIN homes fh ON fh.owner_id = f.id
     JOIN users t ON t.id = r.to_id LEFT JOIN homes th ON th.owner_id = t.id";

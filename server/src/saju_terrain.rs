@@ -32,18 +32,21 @@ struct Choice {
     tiles: Option<Vec<Tile>>,
 }
 
-/// The whole of an estate's lawn, 48 metres across (the app's MOST_CELLS).
-const MOST_TILES: usize = 48 * 48;
+/// The whole of an estate's lawn, 60 metres across (the app's MOST_CELLS).
+const MOST_TILES: usize = 60 * 60;
+/// The grounds a cell may be painted with, and the island's whole ground besides the lawn it has (`default`): the app's
+/// PAINTED.
+const GROUNDS: [&str; 5] = ["snow", "desert", "moss", "gravel", "soil"];
 
 /// Painted cells, each a metre and a known terrain, with no cell twice.
 fn checked_tiles(tiles: &[Tile]) -> ApiResult<Vec<Value>> {
     if tiles.len() > MOST_TILES {
-        return Err(bad("invalid_terrain", "칸은 2304개까지 깔 수 있어요."));
+        return Err(bad("invalid_terrain", "칸은 3600개까지 깔 수 있어요."));
     }
     let mut seen = HashSet::new();
     let mut kept = Vec::with_capacity(tiles.len());
     for tile in tiles {
-        if !matches!(tile.terrain.as_str(), "snow" | "desert" | "moss") || tile.x.abs() > 40 || tile.z.abs() > 40 {
+        if !GROUNDS.contains(&tile.terrain.as_str()) || tile.x.abs() > 40 || tile.z.abs() > 40 {
             return Err(bad("invalid_terrain", "목록에서 땅 타일을 골라 주세요."));
         }
         if !seen.insert((tile.x, tile.z)) {
@@ -61,7 +64,8 @@ async fn save(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
         return Err(bad("invalid_terrain", "목록에서 땅 타일을 골라 주세요."));
     }
     if let Some(terrain) = &body.terrain
-        && !matches!(terrain.as_str(), "default" | "snow" | "desert" | "moss")
+        && terrain != "default"
+        && !GROUNDS.contains(&terrain.as_str())
     {
         return Err(bad("invalid_terrain", "목록에서 땅 타일을 골라 주세요."));
     }
@@ -101,5 +105,7 @@ mod tests {
         assert!(checked_tiles(&[Tile { x: 0, z: 0, terrain: "default".into() }]).is_err());
         let kept = checked_tiles(&[Tile { x: 3, z: 4, terrain: "desert".into() }]).unwrap();
         assert_eq!(kept[0]["terrain"], "desert");
+        let paths = [Tile { x: 0, z: 0, terrain: "gravel".into() }, Tile { x: 1, z: 0, terrain: "soil".into() }];
+        assert_eq!(checked_tiles(&paths).unwrap().len(), 2);
     }
 }

@@ -9,8 +9,32 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// The props the app has models for, the stars a flag may show and its elements, as the server takes them.
-const PROPS: [&str; 12] =
-    ["lantern", "bench", "jar", "pot", "barrel", "woodpile", "table", "parasol", "well", "bush", "rock", "tree"];
+const PROPS: [&str; 24] = [
+    "lantern",
+    "bench",
+    "jar",
+    "pot",
+    "barrel",
+    "woodpile",
+    "table",
+    "parasol",
+    "well",
+    "bush",
+    "rock",
+    "tree",
+    "fence-wood",
+    "fence-bamboo",
+    "stone-wall",
+    "pine",
+    "blossom",
+    "maple",
+    "bamboo",
+    "stones",
+    "stepping",
+    "boulder",
+    "path-stone",
+    "path-wood",
+];
 const STARS: [&str; 15] = [
     "자미", "천기", "태양", "무곡", "천동", "염정", "천부", "태음", "탐랑", "거문", "천상", "천량", "칠살", "파군",
     "공궁",
@@ -87,6 +111,53 @@ async fn 바닥_선택은_집주인만_저장하고_배치물과_독립적으로
     assert_eq!(shown["tiles"], json!([{"x": 1, "z": -2, "terrain": "moss"}]));
     assert_eq!(shown["terrain"].as_str().unwrap_or("default"), "default");
     assert_eq!(shown["items"], items);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 고른_집은_주인만_저장하고_꾸밈과_마을에_함께_보인다() {
+    let app = TestApp::new(None).await;
+    let (host, id) = member(&app, "house_host", "주인", false).await;
+    let (visitor, _) = member(&app, "house_friend", "손님", true).await;
+    let path = "/api/homes/me/saju/house";
+    let choose = |house: Value| Some(json!({"expectedOwnerId": id, "house": house}));
+    let brick = json!({"style": "fire", "roof": "dome", "accent": "metal"});
+    assert_eq!(app.call("PUT", path, choose(brick.clone()), None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(refusal(&app.call("PUT", path, choose(brick.clone()), Some(&visitor)).await).1, "owner_changed");
+    assert_eq!(refusal(&app.call("PUT", path, choose(brick.clone()), Some(&host)).await).1, "no_home");
+    build(&app, &host, id).await;
+    let items = json!([item("kept", "prop", "fence-wood")]);
+    assert_eq!(decorate(&app, &host, id, &items).await.status, StatusCode::OK);
+    for wrong in [
+        json!({"style": "brick", "roof": "dome", "accent": null}),
+        json!({"style": "fire", "roof": "tower", "accent": null}),
+        json!({"style": "fire", "roof": "dome", "accent": "gold"}),
+        json!({"style": "fire"}),
+    ] {
+        assert_eq!(
+            refusal(&app.call("PUT", path, choose(wrong.clone()), Some(&host)).await).1,
+            "invalid_decor",
+            "{wrong}"
+        );
+    }
+    let saved = app.call("PUT", path, choose(brick.clone()), Some(&host)).await;
+    assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+    assert_eq!(saved.body["house"], brick);
+    assert_eq!(saved.body["items"], items);
+    let shown = decor(&app, "house_host", None).await.body;
+    assert_eq!((shown["house"].clone(), shown["items"].clone()), (brick.clone(), items.clone()));
+    // The village says it with the home, for the owner's own page and for each house around another's.
+    let village = app.call("GET", "/api/homes/house_host/saju", None, None).await.body;
+    assert_eq!(village["saju"]["house"], brick);
+    let around = app.call("GET", "/api/homes/house_friend/saju", None, Some(&visitor)).await.body;
+    let entry =
+        around["village"].as_array().unwrap().iter().find(|entry| entry["user"]["username"] == "house_host").cloned();
+    assert_eq!(entry.map(|entry| entry["saju"]["house"].clone()), Some(brick));
+    // None builds the chart's house again.
+    let back = app.call("PUT", path, choose(Value::Null), Some(&host)).await;
+    assert_eq!(back.status, StatusCode::OK, "{:?}", back.body);
+    assert!(back.body.get("house").is_none());
+    assert!(app.call("GET", "/api/homes/house_host/saju", None, None).await.body["saju"].get("house").is_none());
     app.cleanup().await;
 }
 
@@ -193,10 +264,10 @@ async fn 꾸밈은_섬에_놓을_수_있는_것만_받는다() {
     let (host, host_id) = member(&app, "rule_host", "주인", true).await;
     let kept = lantern(|_| {});
     assert_eq!(decorate(&app, &host, host_id, &kept).await.status, StatusCode::OK);
-    let rocks: Vec<Value> = (0..25).map(|at| item(&format!("rock-{at}"), "prop", "rock")).collect();
+    let rocks: Vec<Value> = (0..65).map(|at| item(&format!("rock-{at}"), "prop", "rock")).collect();
     let never_given = Uuid::new_v4().to_string();
     let refused = [
-        ("25 things", json!(rocks)),
+        ("65 things", json!(rocks)),
         ("an empty id", lantern(|item| item["id"] = json!(""))),
         ("an id of 41 letters", lantern(|item| item["id"] = json!("a".repeat(41)))),
         ("an id with a space", lantern(|item| item["id"] = json!("a b"))),
@@ -243,11 +314,11 @@ async fn 꾸밈은_섬에_놓을_수_있는_것만_받는다() {
     // None of them changed what stands on the island.
     assert_eq!(decor(&app, "rule_host", None).await.body["items"], kept);
 
-    // At the edges: 24 things, every prop, an id of 40 letters, digits, `_` and `-`, the island's edge and the most a
+    // At the edges: 64 things, every prop, an id of 40 letters, digits, `_` and `-`, the island's edge and the most a
     // thing turns. The numbers are kept as they were written.
     let mut edge: Vec<Value> =
         PROPS.iter().enumerate().map(|(at, prop)| item(&format!("prop-{at}"), "prop", prop)).collect();
-    edge.extend((0..11).map(|at| item(&format!("flag_{at}"), "flag", "mine")));
+    edge.extend((0..39).map(|at| item(&format!("flag_{at}"), "flag", "mine")));
     edge.push(item("me", "character", "me"));
     edge[0]["id"] = json!(format!("{}-_09", "Az".repeat(18)));
     edge[1]["x"] = json!(40);
@@ -258,7 +329,7 @@ async fn 꾸밈은_섬에_놓을_수_있는_것만_받는다() {
     edge[4]["scale"] = json!(0.5);
     edge[4]["color"] = json!("#BA254c");
     edge[5]["scale"] = json!(2);
-    assert_eq!((edge.len(), edge[0]["id"].as_str().unwrap().len()), (24, 40));
+    assert_eq!((edge.len(), edge[0]["id"].as_str().unwrap().len()), (64, 40));
     let saved = decorate(&app, &host, host_id, &json!(edge)).await;
     assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
     assert_eq!(saved.body["items"], json!(edge));
