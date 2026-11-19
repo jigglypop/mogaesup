@@ -9,9 +9,8 @@ import type { DecorFlag, DecorGift, DecorItem, FlagDesign, Terrain, TerrainCell 
 import type { PropRef } from '../decor';
 import { elementPiece } from '../elementalDecor';
 import { CompatGiftObject } from './CompatGiftObject';
-import { TerrainPatches } from './TerrainPatches';
 import type { BoardPicture } from '../ui/PhotoBoardCard';
-import { PhotoBoard } from './PhotoBoard';
+import { BOARD_SPOT, PhotoBoard } from './PhotoBoard';
 import { ElementOrnament } from './ElementOrnament';
 import { barrel, bench, jar, lantern, parasol, pot, tableSet, well, woodpile } from './arch';
 import { Builder, type Build } from './build';
@@ -207,11 +206,16 @@ function Character({ url, tint }: { url: string; tint?: string }) {
 
 /** What is placed on the 섬 whose island stands at the village's middle. */
 export type IslandDecor = { items: readonly DecorItem[]; flags: readonly DecorFlag[]; gifts?: readonly DecorGift[]; terrain?: Terrain; tiles?: readonly TerrainCell[]; own: FlagDesign | null; character: string | null; photoBoard?: BoardPicture | null };
-export function DecorLayer({ items, flags, gifts, tiles = [], own, character, selectedId, photoBoard }: IslandDecor & { selectedId: string | null }) {
+export function DecorLayer({ items, flags, gifts, own, character, selectedId, photoBoard }: IslandDecor & { selectedId: string | null }) {
+  // A board its owner has not placed stands where boards stood before they could be moved.
+  const boardPlaced = items.some((item) => item.kind === 'board');
   return (
     <group>
-      <TerrainPatches tiles={tiles} />
-      {photoBoard && <PhotoBoard key={photoBoard.url} photo={photoBoard} />}
+      {photoBoard && !boardPlaced && (
+        <group position={[BOARD_SPOT.x, 0, BOARD_SPOT.z]} rotation={[0, BOARD_SPOT.turn, 0]}>
+          <PhotoBoard key={photoBoard.url} photo={photoBoard} />
+        </group>
+      )}
       {items.map((item) => {
         let shown = null;
         if (item.kind === 'flag') {
@@ -225,6 +229,8 @@ export function DecorLayer({ items, flags, gifts, tiles = [], own, character, se
           shown = gift && <CompatGiftObject design={gift.design} tint={item.color} />;
         } else if (item.kind === 'character' && character) {
           shown = <Character url={character} tint={item.color} />;
+        } else if (item.kind === 'board' && photoBoard) {
+          shown = <PhotoBoard key={photoBoard.url} photo={photoBoard} tint={item.color} />;
         }
         return (
           shown && (

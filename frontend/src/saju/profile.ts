@@ -78,7 +78,7 @@ type Roof = 'gables' | 'glasshouse' | 'dome' | 'lantern' | 'ridge';
 
 export const ROOF_BY_SYMBOL: Record<YardSymbol, Roof> = {
   tree: 'gables', trellis: 'glasshouse', sun: 'dome', candle: 'lantern', mountain: 'gables',
-  field: 'ridge', anvil: 'ridge', gem: 'dome', lighthouse: 'lantern', rain: 'glasshouse',
+  field: 'ridge', anvil: 'ridge', gem: 'dome', lighthouse: 'ridge', rain: 'glasshouse',
 };
 
 const ROOF_NAME: Record<Roof, string> = {

@@ -13,6 +13,9 @@ pub struct OpenAi {
     pub base_url: String,
     /// `OPENAI_READING_MODEL`: the Responses API model a reading is written with.
     pub reading_model: String,
+    /// `OPENAI_READING_EFFORT`: how much the model reasons before it writes a reading (`none`, `low`, `medium` or
+    /// `high`). Reasoning is paid for as written text; a reading is laid out from the chart's own lines, so `low` holds.
+    pub reading_effort: String,
     /// `OPENAI_PICTURE_MODEL`: the image model an island is drawn again with, on `/images/edits`.
     pub picture_model: String,
     /// Paid calls of each kind allowed per calendar month (UTC) across all members: `READINGS_MONTHLY`,
@@ -31,6 +34,7 @@ impl Default for OpenAi {
             api_key: None,
             base_url: "https://api.openai.com/v1".into(),
             reading_model: "gpt-6.1-terra".into(),
+            reading_effort: "low".into(),
             picture_model: "gpt-image-2.6-sunburst".into(),
             readings_monthly: 3000,
             pictures_monthly: 500,
@@ -61,6 +65,11 @@ impl OpenAi {
             api_key: var("OPENAI_API_KEY"),
             base_url: var("OPENAI_BASE_URL").map_or(Ok(defaults.base_url), |url| openai_url(&url))?,
             reading_model: model("OPENAI_READING_MODEL", defaults.reading_model)?,
+            reading_effort: match var("OPENAI_READING_EFFORT") {
+                None => defaults.reading_effort,
+                Some(effort) if matches!(effort.as_str(), "none" | "low" | "medium" | "high") => effort,
+                Some(effort) => bail!("OPENAI_READING_EFFORT must be none, low, medium or high, not {effort}"),
+            },
             picture_model: model("OPENAI_PICTURE_MODEL", defaults.picture_model)?,
             readings_monthly: monthly("READINGS_MONTHLY", defaults.readings_monthly)?,
             pictures_monthly: monthly("PICTURES_MONTHLY", defaults.pictures_monthly)?,

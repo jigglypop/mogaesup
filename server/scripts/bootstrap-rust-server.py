@@ -22,7 +22,8 @@ OPENAI_PLACEHOLDER = 'placeholder'
 OPENAI_KEY = re.compile(r'[A-Za-z0-9_-]{20,512}')
 # The OpenAI entries of server.env set by hand on the instance (the models and the monthly budgets), kept as the file has
 # them after the key.
-OPENAI_KEPT = ('OPENAI_BASE_URL', 'OPENAI_READING_MODEL', 'OPENAI_PICTURE_MODEL', 'READINGS_MONTHLY', 'PICTURES_MONTHLY')
+OPENAI_KEPT = ('OPENAI_BASE_URL', 'OPENAI_READING_MODEL', 'OPENAI_READING_EFFORT', 'OPENAI_PICTURE_MODEL', 'READINGS_MONTHLY',
+               'PICTURES_MONTHLY')
 
 
 def parse_args(argv=None):

@@ -204,7 +204,8 @@ export function pathLamps(paths: readonly EstatePath[], stream: Estate['stream']
  */
 const KEEP_GREEN: Record<Season['key'], number> = { spring: 0.3, summer: 0.25, autumn: 0.82, winter: 0.7 };
 
-const TILES: Record<Exclude<Terrain, 'default'>, GroundPaint> = {
+/** The ground of each terrain an owner may lay: over the whole island, or cell by cell (estate/painted). */
+export const TERRAIN_GROUND: Readonly<Record<Exclude<Terrain, 'default'>, GroundPaint>> = {
   snow: {
     surface: 'snow', lawn: ['#d6e7f2', '#f1f7fc', '#c6daeb'], dirt: '#abc1cc', yard: '#cdd7d9', path: '#8f9fad',
     stones: '#9fadc0', bank: '#929ca8', sand: '#d2dce0', bed: '#253e50', cover: 0,
@@ -221,7 +222,7 @@ const TILES: Record<Exclude<Terrain, 'default'>, GroundPaint> = {
 
 /** The estate's ground in its month's season, kept as green as the house's own lawn (see {@link KEEP_GREEN}). */
 export function lawnOf(estate: Estate, style: Element, terrain: Terrain = 'default'): GroundPaint {
-  if (terrain !== 'default') return TILES[terrain];
+  if (terrain !== 'default') return TERRAIN_GROUND[terrain];
   const season = seasonPaint(estate);
   const share = KEEP_GREEN[estate.plan.season.key];
   const keep = (hex: string, green: string) => `#${new Color(hex).lerp(new Color(green), share).getHexString()}`;

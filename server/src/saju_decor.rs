@@ -38,6 +38,8 @@ const MAX_TURN: f64 = 7.0;
 const MINE: &str = "mine";
 /// What the character item shows: the owner's own character.
 const ME: &str = "me";
+/// What the board item shows: the home's photo board.
+const BOARD: &str = "photo";
 /// The props the app has models for.
 const PROPS: &[&str] = &[
     "lantern",
@@ -113,6 +115,8 @@ enum Kind {
     Prop,
     /// The owner's character ([`ME`]).
     Character,
+    /// The photo board ([`BOARD`]), where its owner put it.
+    Board,
 }
 
 /// One thing on the island, as the app placed it: what it is (`kind`) and shows (`ref`), where it stands (`x`, `z`)
@@ -144,7 +148,8 @@ fn given_flag(reference: &str) -> Option<Uuid> {
 /// (in [`save`]).
 fn checked(items: Value) -> ApiResult<Vec<Item>> {
     let items: Vec<Item> = serde_json::from_value(items).map_err(|_| INVALID_DECOR)?;
-    if items.len() > MAX_ITEMS || items.iter().filter(|item| item.kind == Kind::Character).count() > 1 {
+    let single = |kind: Kind| items.iter().filter(|item| item.kind == kind).count() > 1;
+    if items.len() > MAX_ITEMS || single(Kind::Character) || single(Kind::Board) {
         return Err(INVALID_DECOR);
     }
     let within = |number: &Number, most: f64| number.as_f64().is_some_and(|v| v.is_finite() && v.abs() <= most);
@@ -158,6 +163,7 @@ fn checked(items: Value) -> ApiResult<Vec<Item>> {
             Kind::Gift => given_flag(&item.reference).is_some(),
             Kind::Prop => PROPS.contains(&item.reference.as_str()),
             Kind::Character => item.reference == ME,
+            Kind::Board => item.reference == BOARD,
         };
         let placed = within(&item.x, REACH) && within(&item.z, REACH) && within(&item.turn, MAX_TURN);
         let sized = item.scale.as_ref().is_none_or(|n| n.as_f64().is_some_and(|v| (0.5..=2.0).contains(&v)));
@@ -455,5 +461,13 @@ mod tests {
         };
         assert!(flag(MINE).is_ok() && flag(&id.to_string()).is_ok());
         assert!(flag("yours").is_err() && flag(&id.simple().to_string()).is_err());
+    }
+
+    #[test]
+    fn 전광판은_한_번만_놓이고_사진만_가리킨다() {
+        let board = |id: &str, reference: &str| json!({"id": id, "kind": "board", "ref": reference, "x": 1, "z": -2, "turn": 0.78});
+        assert!(checked(json!([board("a", "photo")])).is_ok());
+        assert!(checked(json!([board("a", "picture")])).is_err());
+        assert!(checked(json!([board("a", "photo"), board("b", "photo")])).is_err());
     }
 }

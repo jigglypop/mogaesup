@@ -456,12 +456,13 @@ fn schema(ziwei: bool) -> Value {
     json!({"type": "object", "additionalProperties": false, "required": required, "properties": properties})
 }
 
-/// The Responses API request that writes `chart`'s reading with `model`. Nothing is stored at the provider.
-pub fn request(chart: &ReadingChart, model: &str) -> Value {
+/// The Responses API request that writes `chart`'s reading with `model`, reasoning as much as `effort` says. Nothing
+/// is stored at the provider.
+pub fn request(chart: &ReadingChart, model: &str, effort: &str) -> Value {
     let ziwei = chart.has_ziwei();
     json!({
         "model": model,
-        "reasoning": {"effort": "medium"},
+        "reasoning": {"effort": effort},
         "input": [
             {"role": "developer", "content": instructions(ziwei)},
             {"role": "user", "content": chart_text(chart)},
@@ -651,9 +652,9 @@ mod tests {
     #[test]
     fn the_request_asks_for_a_strict_reading_with_a_ziwei_part_only_for_a_chart_that_has_one() {
         let chart: ReadingChart = serde_json::from_value(fixture("hour")).unwrap();
-        let sent = request(&chart, "gpt-6.1-terra");
+        let sent = request(&chart, "gpt-6.1-terra", "low");
         assert_eq!(sent["model"], "gpt-6.1-terra");
-        assert_eq!(sent["reasoning"], json!({"effort": "medium"}));
+        assert_eq!(sent["reasoning"], json!({"effort": "low"}));
         assert_eq!(sent["store"], false);
         assert_eq!(sent["input"][0]["role"], "developer");
         assert_eq!(sent["input"][1]["role"], "user");
@@ -667,7 +668,7 @@ mod tests {
             assert!(developer.contains(asked), "{asked}");
         }
         let chart: ReadingChart = serde_json::from_value(fixture("no-hour")).unwrap();
-        let sent = request(&chart, "gpt-6.1-terra");
+        let sent = request(&chart, "gpt-6.1-terra", "low");
         assert_eq!(sent["text"]["format"]["schema"]["required"], json!(["saju"]));
         assert!(!sent["input"][0]["content"].as_str().unwrap().contains("ziwei"));
     }

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiRequestError } from '../api/client';
 import { sajuApi } from '../api/endpoints';
 import type { DecorFlag, DecorItem, FlagDesign, SajuDecor, Terrain, TerrainCell } from '../api/types';
-import { paintCells } from './tiles';
+import { paintAll } from './tiles';
 import type { Birth } from './engine';
 import { ziweiOf } from './ziwei';
 
@@ -51,8 +51,8 @@ export type Decor = {
   /** The owner places what the 섬 shows; a refusal is said in `problem` and the 섬 keeps what it had. */
   place: (items: DecorItem[]) => void;
   setTerrain: (terrain: Terrain) => void;
-  /** Paints one metre. `default` clears that cell back to the island's terrain. */
-  paintCell: (x: number, z: number, terrain: Terrain) => void;
+  /** Lays a terrain on the island's own ground over whole cells. `default` gives them back to the island's terrain. */
+  paint: (cells: readonly { x: number; z: number }[], terrain: Terrain) => void;
   reload: () => void;
   /** The owner takes down a flag given to the 섬. */
   drop: (flag: DecorFlag) => void;
@@ -139,9 +139,10 @@ export function useDecor(username: string, ownerId: string | null): Decor {
     if (!ownerId || !decor || terrain === (decor.terrain ?? 'default')) return;
     write({ ...decor, terrain }, () => sajuApi.setTerrain({ expectedOwnerId: ownerId, terrain }));
   }, [ownerId, decor, write]);
-  const paintCell = useCallback((x: number, z: number, terrain: Terrain) => {
-    if (!ownerId || !decor) return;
-    const tiles: TerrainCell[] = paintCells(decor.tiles ?? [], x, z, terrain);
+  /** Lays `terrain` on the island's own ground over every cell of `cells` (`default` gives them back to the island's). */
+  const paint = useCallback((cells: readonly { x: number; z: number }[], terrain: Terrain) => {
+    if (!ownerId || !decor || cells.length === 0) return;
+    const tiles: TerrainCell[] = paintAll(decor.tiles ?? [], cells, terrain);
     write({ ...decor, tiles }, () => sajuApi.setTerrain({ expectedOwnerId: ownerId, tiles }));
   }, [ownerId, decor, write]);
   const reload = useCallback(() => {
@@ -171,5 +172,5 @@ export function useDecor(username: string, ownerId: string | null): Decor {
       return { ...before, photoBoard: await sajuApi.uploadPhotoBoard(ownerId, image) };
     });
   }, [ownerId, decor, write]);
-  return { decor, place, setTerrain, paintCell, drop, give, changePhoto, reload, problem };
+  return { decor, place, setTerrain, paint, drop, give, changePhoto, reload, problem };
 }

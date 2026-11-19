@@ -32,12 +32,13 @@ struct Choice {
     tiles: Option<Vec<Tile>>,
 }
 
-const MOST_TILES: usize = 256;
+/// The whole of an estate's lawn, 48 metres across (the app's MOST_CELLS).
+const MOST_TILES: usize = 48 * 48;
 
 /// Painted cells, each a metre and a known terrain, with no cell twice.
 fn checked_tiles(tiles: &[Tile]) -> ApiResult<Vec<Value>> {
     if tiles.len() > MOST_TILES {
-        return Err(bad("invalid_terrain", "칸은 256개까지 깔 수 있어요."));
+        return Err(bad("invalid_terrain", "칸은 2304개까지 깔 수 있어요."));
     }
     let mut seen = HashSet::new();
     let mut kept = Vec::with_capacity(tiles.len());

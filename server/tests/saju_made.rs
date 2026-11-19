@@ -284,7 +284,7 @@ async fn 풀이는_주인만_청하고_집을_볼_수_있는_사람이_읽으며
     assert_eq!(ready["reading"]["saju"]["sections"][0]["title"], "타고난 기질");
     assert_eq!(ready["reading"]["ziwei"]["sections"].as_array().unwrap().len(), 4);
 
-    // What the API was sent: the key in its header, the reading model at medium effort, a strict schema, and the
+    // What the API was sent: the key in its header, the reading model at low effort, a strict schema, and the
     // chart written from its own names, without the birth date.
     {
         let fake = fake.lock().unwrap();
@@ -293,7 +293,7 @@ async fn 풀이는_주인만_청하고_집을_볼_수_있는_사람이_읽으며
         assert_eq!(call.content_type, "application/json");
         let sent: Value = serde_json::from_slice(&call.body).unwrap();
         assert_eq!(sent["model"], "gpt-6.1-terra");
-        assert_eq!(sent["reasoning"]["effort"], "medium");
+        assert_eq!(sent["reasoning"]["effort"], "low");
         assert_eq!(sent["text"]["format"]["type"], "json_schema");
         assert_eq!(sent["text"]["format"]["strict"], true);
         assert_eq!(sent["input"][0]["role"], "developer");

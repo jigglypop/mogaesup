@@ -1,11 +1,11 @@
 import './saju.css';
 
-import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { sajuApi, socialApi } from '../api/endpoints';
-import type { HomeVisibility, ProfileChanges, Terrain, User } from '../api/types';
+import type { HomeVisibility, ProfileChanges, Terrain, TerrainCell, User } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { NeighborActions, NeighborsTab, useNeighbors } from '../minihome/Ilchons';
@@ -22,6 +22,7 @@ import type { Resident } from './residents';
 import { chartPath, editPath, homePath, routeOf, villagePath, waveOf, ziweiPath } from './routes';
 import type { StageFlag } from './scene/Flag';
 import { DecorLayer } from './scene/Decor';
+import { BOARD_SPOT } from './scene/PhotoBoard';
 import { frameOf, NO_INSET, type Inset, type Spot } from './scene/frames';
 import type { GuestNote } from './scene/GuestPlaques';
 import { Stage, type StageBridge, type StageHandle, type StageHome } from './scene/Stage';
@@ -38,16 +39,20 @@ import { PictureCard, PictureView, usePicture } from './ui/Picture';
 import { PhotoBoardCard } from './ui/PhotoBoardCard';
 import { TerrainPicker } from './ui/TerrainPicker';
 import { PixelIcon } from './ui/PixelIcon';
-import { ReadingCard, useReading } from './ui/Reading';
+import { Making, ReadingCard, useReading } from './ui/Reading';
 import { SavePicture } from './ui/SavePicture';
 import { SaveReport } from './ui/SaveReport';
 import { FlagCard, VillagePanel } from './ui/VillagePanel';
-import { ZiweiPanel } from './ui/ZiweiPanel';
 import { FLAG_SPOT, flagRaised, plotsOf } from './village';
+
+/** The 명반 comes with the first 자미두수 tab opened: most visits never open it. */
+const ZiweiPanel = lazy(() => import('./ui/ZiweiPanel').then((module) => ({ default: module.ZiweiPanel })));
 
 const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 /** How much one press of a zoom button brings the picture closer. */
 const ZOOM_STEP = 1.3;
+/** No cells painted another terrain. */
+const NO_TILES: readonly TerrainCell[] = [];
 /** No lines hung on the 기념 방명록 yet (another 섬's are not this one's). */
 const NO_NOTES: readonly GuestNote[] = [];
 /** On one's own 섬 there is no bridge to show. */
@@ -135,7 +140,7 @@ export default function SajuPage({ username, rest }: { username: string; rest: s
   const { user } = useAuth();
   const signIn = useSignInPath();
   const { search } = useLocation();
-  const { state, build, demolish, open, saveProfile } = useMinihome(username);
+  const { state, build, demolish, open, saveProfile, changeAvatar } = useMinihome(username);
   // The 섬 on the page, and the address it was shown for. Going to another 섬 keeps it until the next one has been read:
   // the canvas, its renderer and every shader it has made stay, and the islands both villages share stay built (see
   // Stage, which makes the next village ready out of sight). Its panel waits meanwhile.
@@ -177,11 +182,12 @@ export default function SajuPage({ username, rest }: { username: string; rest: s
       onDemolish={demolish}
       onVisibility={open}
       onProfile={saveProfile}
+      onAvatar={changeAvatar}
     />
   );
 }
 
-function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish, onVisibility, onProfile }: {
+function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish, onVisibility, onProfile, onAvatar }: {
   minihome: Minihome;
   viewer: User | null;
   rest: string;
@@ -192,9 +198,12 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   onDemolish: () => Promise<void>;
   onVisibility: (visibility: HomeVisibility, consent?: boolean) => Promise<void>;
   onProfile: (changes: ProfileChanges) => Promise<void>;
+  onAvatar: (image: string | null) => Promise<void>;
 }) {
   const { view, owner, village: others, mine } = minihome;
   const { username, ownerName } = view.profile;
+  // A visitor reads the chart (and the 궁합 drawn from it) once the owner has agreed to share it; the house stands anyway.
+  const chartShared = view.isOwner || view.profile.sajuShareConsent !== false;
   const navigate = useNavigate();
   const neighbors = useNeighbors(view, viewer);
   // The page's element, kept in state: what measures the page follows the element that is in the document.
@@ -233,7 +242,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   const around = useMemo(
     () => others.flatMap((resident) => {
       const profile = profileOrNull(resident);
-      return profile ? [{ resident, profile, bridged: resident.neighbour, closed: !resident.visitable }] : [];
+      return profile ? [{ resident, profile, bridged: resident.neighbour, closed: !resident.visitable, shared: resident.shared }] : [];
     }),
     [others],
   );
@@ -350,17 +359,19 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
         decor.place(items.map((item) => item.id === id ? { ...item, ...at } : item));
       } else {
         if (items.length >= MOST_ITEMS) return setPlacing(null);
-        decor.place([...items, { id, kind: placing.kind, ref: placing.ref, ...at, turn: 0 }]);
+        decor.place([...items, { id, kind: placing.kind, ref: placing.ref, ...at, turn: placing.kind === 'board' ? BOARD_SPOT.turn : 0 }]);
       }
       selectOnIsland(id);
     },
     [placing, decor, selectOnIsland, setPlacing],
   );
-  const paintAt = useCallback((spot: Spot) => {
-    if (!brush) return;
-    decor.paintCell(spot.x, spot.z, brush);
+  const paintCells = useCallback((cells: readonly { x: number; z: number }[]) => {
+    if (brush) decor.paint(cells, brush);
   }, [brush, decor]);
-  const compat = !view.isOwner && myProfile && host ? compatOf(myProfile, host.profile) : null;
+  const compat = useMemo(
+    () => (!view.isOwner && chartShared && myProfile && host ? compatOf(myProfile, host.profile) : null),
+    [view.isOwner, chartShared, myProfile, host],
+  );
   const leaveAt = useCallback((spot: Spot) => {
     if (!leavingGift || !viewer || !mine || !host || !compat) return;
     const design = { tone: compat.tone, from: compat.from, to: compat.to };
@@ -404,8 +415,6 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // What the server makes for the built home from its birth: the reading of its chart, read once its tabs are opened,
   // and the picture of its island. The owner's are asked for here, and looked at again while they are being made and
   // shown: the reading on its tabs, the picture on the home's (and for the PDF on the reading's).
-  // A visitor sees the chart, the 명반 and the reading once the owner has agreed to share them; the house stands anyway.
-  const chartShared = view.isOwner || view.profile.sajuShareConsent !== false;
   const tab = route.kind === 'home' && host && (chartShared || route.tab === 'home') ? route.tab : 'home';
 
   // The home's room: everyone signed in here walks its island as their own guardian dog, and what they say shows over
@@ -418,7 +427,9 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   }, [viewer?.id]);
   const room = useVillageRoom(username, walking ? (viewer?.id ?? null) : null, myDog, start);
   // Where the viewer's dog is going (a press on the ground; twice, it runs) and what it was last asked to do.
-  const control = useRef<WalkerControl>({ goal: null, run: false, asked: null });
+  const control = useRef<WalkerControl>({ goal: null, run: false, asked: null, at: null });
+  /** Where the viewer's dog is, for the camera to follow. */
+  const walker = useCallback(() => control.current.at ?? null, []);
   const walkTo = useCallback((spot: Spot, twice: boolean) => {
     control.current.goal = [spot.x, 0, spot.z];
     control.current.run = twice;
@@ -485,7 +496,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // The panel widens for the 명반, and a birth without an hour has none.
   const charted = tab === 'ziwei' && !!host?.resident.birth.time;
   const widened = charted && roomy;
-  const villagers = host ? [{ ...host, bridged: false }, ...around] : around;
+  const villagers = host ? [{ ...host, bridged: false, shared: chartShared }, ...around] : around;
   // Each tab of the chart opens with its part of the reading; a written one can be saved as a PDF, with the picture.
   const pictureUrl = picture.made?.status === 'ready' ? picture.made.url : null;
   const readingOf = (part: 'saju' | 'ziwei') =>
@@ -508,7 +519,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           <Brand />
           <div className="mg-pill mg-glass mg-saju-bar">
             <span className="mg-saju-bar-mark">
-              <PixelIcon name={element ?? 'house'} size={20} />
+              {view.profile.avatarUrl ? <img className="mg-saju-avatar" src={view.profile.avatarUrl} alt="" width={28} height={28} /> : <PixelIcon name={element ?? 'house'} size={20} />}
             </span>
             <h1 className="mg-saju-bar-title">{title}</h1>
             <p className="mg-saju-visits">
@@ -545,13 +556,16 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           flag={flag}
           focus={wide ? null : username}
           onVisit={placing || brush || leavingGift ? undefined : visit}
-          onPlace={placing ? placeAt : brush ? paintAt : leavingGift ? leaveAt : undefined}
+          onPlace={placing ? placeAt : leavingGift ? leaveAt : undefined}
+          onPaint={brush ? paintCells : undefined}
           terrain={islandDecor?.terrain ?? 'default'}
+          tiles={islandDecor?.tiles ?? NO_TILES}
           onSelectItem={canDecorate ? selectOnIsland : undefined}
           onOpenPhoto={photoBoard ? showBoard : undefined}
           notes={notes.of === username ? notes.list : NO_NOTES}
           onBoard={placing ? undefined : openGuestbook}
           onWalk={walking ? walkTo : undefined}
+          follow={walking ? walker : undefined}
           guardianAway={walking && view.isOwner}
           overlay={<div className="mg-saju-walkers" ref={talkLayer} />}
           decor={
@@ -679,7 +693,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                 onDemolish={takeDown}
               />
               {/* An owner who has not built yet still has a guestbook to read, requests to answer and a door to close. */}
-              {route.kind === 'home' && <HomePanel view={view} viewer={viewer} profile={null} neighbors={neighbors} bridge={NO_BRIDGE} onVisibility={onVisibility} onProfile={onProfile} />}
+              {route.kind === 'home' && <HomePanel view={view} viewer={viewer} profile={null} neighbors={neighbors} bridge={NO_BRIDGE} onVisibility={onVisibility} onProfile={onProfile} onAvatar={onAvatar} />}
             </>
           ) : village ? (
             <>
@@ -699,7 +713,9 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           ) : tab === 'chart' && host ? (
             <ChartPanel profile={host.profile} head={readingOf('saju')} />
           ) : tab === 'ziwei' && host ? (
-            <ZiweiPanel birth={host.resident.birth} editTo={view.isOwner ? editPath(username) : null} head={readingOf('ziwei')} />
+            <Suspense fallback={<Making label="불러오는 중" />}>
+              <ZiweiPanel birth={host.resident.birth} editTo={view.isOwner ? editPath(username) : null} head={readingOf('ziwei')} />
+            </Suspense>
           ) : (
             <HomePanel
               view={view}
@@ -739,7 +755,19 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                         onFill={decor.setTerrain}
                       />
                     )}
-                    photoBoard={<PhotoBoardCard photo={photoBoard} onChange={decor.changePhoto} onOpen={showBoard} />}
+                    photoBoard={
+                      <PhotoBoardCard
+                        photo={photoBoard}
+                        onChange={decor.changePhoto}
+                        onOpen={showBoard}
+                        onPlace={() => {
+                          const placed = decor.decor?.items.find((item) => item.kind === 'board');
+                          setDecorTab({ of: username, section: 'items' });
+                          if (placed) selectItem(placed.id);
+                          setPlacing({ kind: 'board', ref: 'photo', label: '사진 전광판', ...(placed ? { itemId: placed.id } : {}) });
+                        }}
+                      />
+                    }
                   >
                     <ElementShelf balance={host.profile.balance} dayMaster={host.profile.dayMaster} placing={placing} onPlacing={setPlacing} full={(decor.decor?.items.length ?? 0) >= MOST_ITEMS} />
                   </DecorCard>
@@ -757,6 +785,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
               bridge={{ compat, canShow: !!visitorHome, shown: together, onShow: setBridgeShown }}
               onVisibility={onVisibility}
               onProfile={onProfile}
+              onAvatar={onAvatar}
               onGuestbook={rereadNotes}
             />
           )}

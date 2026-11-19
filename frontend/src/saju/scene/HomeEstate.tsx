@@ -1,6 +1,6 @@
 import { Component, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
-import type { Terrain } from '../../api/types';
+import type { Terrain, TerrainCell } from '../../api/types';
 import type { Profile } from '../profile';
 import { mergeBuilds, type Build, type V3 } from './build';
 import { keepEstate, keptEstate } from './kept';
@@ -8,7 +8,10 @@ import { fromShelf, nameOf, shelving, toShelf } from './shelf';
 import { Built } from './Built';
 import { loadDogModel, type DogModel } from './dogModel';
 import { estateParts } from './estate/draw';
-import { estateHomeOf, lawnOf } from './estateHome';
+import { paintedGround } from './estate/painted';
+import { EstateSite } from './estate/site';
+import type { Estate as EstateLayout } from './estate/layout';
+import { estateHomeOf, lawnOf, TERRAIN_GROUND } from './estateHome';
 import { Guardian } from './Guardian';
 import { GuestPlaques, type GuestNote } from './GuestPlaques';
 import { buildHouse, buildLot } from './homes';
@@ -151,8 +154,19 @@ function Found({ origin, lush, turn }: { origin: readonly [number, number, numbe
   return build && <Built build={build} origin={origin} />;
 }
 
+const NO_TILES: readonly TerrainCell[] = [];
+
+/** The cells the owner painted, laid on the estate's own ground (see estate/painted), once the estate is built. */
+function PaintedGround({ estate, tiles, origin }: { estate: EstateLayout; tiles: readonly TerrainCell[]; origin: readonly [number, number, number] }) {
+  const site = useMemo(() => (tiles.length > 0 ? new EstateSite(estate) : null), [estate, tiles.length > 0]); // eslint-disable-line react-hooks/exhaustive-deps
+  const build = useMemo(() => (site && tiles.length > 0 ? paintedGround(site, tiles, TERRAIN_GROUND) : null), [site, tiles]);
+  return build && <Built build={build} origin={origin} />;
+}
+
 type EstateProps = {
   terrain?: Terrain;
+  /** The cells painted another terrain, on the island's own ground. */
+  tiles?: readonly TerrainCell[];
   profile: Pick<Profile, 'reading' | 'house' | 'guardian'>;
   origin: readonly [number, number, number];
   playful?: boolean;
@@ -182,6 +196,7 @@ function Estate({
   profile,
   origin,
   terrain = 'default',
+  tiles = NO_TILES,
   playful = false,
   lush = true,
   turn = 0,
@@ -204,6 +219,7 @@ function Estate({
   return (
     <>
       {build && <Built build={build} origin={origin} />}
+      {build && <PaintedGround estate={estate} tiles={tiles} origin={origin} />}
       {build && board && <GuestPlaques at={board.at} facing={board.facing} notes={notes} onPress={onBoard} />}
       {dog && !guardianAway && (
         <group key={`${guardian.dog}:${charms}`} position={[estate.guardian.at[0], 0, estate.guardian.at[1]]} scale={GUARDIAN_SCALE}>

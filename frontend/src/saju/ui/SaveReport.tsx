@@ -4,7 +4,6 @@ import type { SajuReading } from '../../api/types';
 import { Icon } from '../../ui/icons';
 import type { Birth } from '../engine';
 import { profileOf } from '../profile';
-import { pictureAt, reportFileName, reportOf } from '../report/make';
 import type { Picture } from '../report/pages';
 import type { IslandDecor } from '../scene/Decor';
 import { Snapshot } from '../scene/Snapshot';
@@ -43,6 +42,8 @@ export function SaveReport({ name, birth, reading, pictureUrl, decor }: { name: 
   const make = async () => {
     setState('making');
     try {
+      // The PDF's makings come with the first PDF asked for: most visits never ask for one.
+      const { pictureAt, reportFileName, reportOf } = await import('../report/make');
       const picture = (pictureUrl ? await pictureAt(pictureUrl).catch(() => null) : null) ?? (await island());
       const report = await reportOf({ name, birth, reading, picture });
       // A page left before the PDF was ready does not hand a file over after it.

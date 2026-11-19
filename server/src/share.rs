@@ -79,6 +79,20 @@ pub fn router(state: AppState) -> Router {
 /// and cropped about its centre to fill [`WIDTH`]×[`HEIGHT`]. Its size is checked before anything is decoded, and the
 /// work runs on a blocking thread, a few at a time.
 pub async fn picture(data: String) -> ApiResult<Vec<u8>> {
+    fitted(data, WIDTH, HEIGHT).await
+}
+
+/// A member's profile picture, side of its square.
+pub const AVATAR_EDGE: u32 = 320;
+
+/// The picture in `data` as a member's profile picture: read as [`picture`] reads one, and scaled and cropped about its
+/// centre to fill a square [`AVATAR_EDGE`] across.
+pub async fn avatar(data: String) -> ApiResult<Vec<u8>> {
+    fitted(data, AVATAR_EDGE, AVATAR_EDGE).await
+}
+
+/// [`picture`] and [`avatar`]: the picture in `data` filling `width`×`height`.
+async fn fitted(data: String, width: u32, height: u32) -> ApiResult<Vec<u8>> {
     let encoded = ["data:image/jpeg;base64,", "data:image/png;base64,"]
         .iter()
         .find_map(|prefix| data.strip_prefix(prefix))
@@ -91,7 +105,7 @@ pub async fn picture(data: String) -> ApiResult<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let bytes = STANDARD.decode(&data[start..]).map_err(|_| INVALID_PICTURE)?;
-        fill(&bytes)
+        fill(&bytes, (width, height))
     })
     .await
     .map_err(internal)?
@@ -128,8 +142,8 @@ async fn decoding_slot(wait: Duration) -> ApiResult<SemaphorePermit<'static>> {
     }
 }
 
-/// [`picture`]'s work on the decoded bytes.
-fn fill(bytes: &[u8]) -> ApiResult<Vec<u8>> {
+/// [`fitted`]'s work on the decoded bytes.
+fn fill(bytes: &[u8], into: (u32, u32)) -> ApiResult<Vec<u8>> {
     if bytes.len() > MAX_PICTURE_BYTES {
         return Err(PICTURE_TOO_LARGE);
     }
@@ -143,7 +157,7 @@ fn fill(bytes: &[u8]) -> ApiResult<Vec<u8>> {
         return Err(PICTURE_TOO_LARGE);
     }
     let picture = crate::slim::decode(bytes, format, MAX_EDGE, MAX_DECODE_BYTES).ok_or(INVALID_PICTURE)?;
-    let filled = opaque(picture).resize_to_fill(WIDTH, HEIGHT, FilterType::Triangle);
+    let filled = opaque(picture).resize_to_fill(into.0, into.1, FilterType::Triangle);
     let mut out = Cursor::new(Vec::new());
     JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY).encode_image(&filled.to_rgb8()).map_err(internal)?;
     Ok(out.into_inner())
@@ -273,6 +287,20 @@ fn answer(status: StatusCode, body: String) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The link preview's fill, as the tests below read it.
+    fn fill(bytes: &[u8]) -> ApiResult<Vec<u8>> {
+        super::fill(bytes, (WIDTH, HEIGHT))
+    }
+
+    #[test]
+    fn a_profile_picture_fills_a_square() {
+        let wide = RgbImage::from_pixel(900, 300, Rgb([30, 140, 60]));
+        let jpeg =
+            super::fill(&encoded(DynamicImage::ImageRgb8(wide), ImageFormat::Png), (AVATAR_EDGE, AVATAR_EDGE)).unwrap();
+        let out = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(out.dimensions(), (AVATAR_EDGE, AVATAR_EDGE));
+    }
     use image::{Rgb, RgbImage, Rgba, RgbaImage};
 
     fn encoded(picture: DynamicImage, format: ImageFormat) -> Vec<u8> {

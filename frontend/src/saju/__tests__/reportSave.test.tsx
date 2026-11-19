@@ -39,6 +39,11 @@ function deferred<T>() {
 
 /** Lets the promises the button waits on go on. */
 const settle = () => act(async () => {});
+/** Lets the PDF's makings, which arrive with the first press, arrive. */
+const loaded = () =>
+  act(async () => {
+    await import('../report/make');
+  });
 
 async function renderButton(pictureUrl: string | null) {
   const view = await mount(<SaveReport name={noeul.name} birth={noeul.birth} reading={READING} pictureUrl={pictureUrl} decor={{ items: [], flags: [], own: null, character: null }} />);
@@ -64,6 +69,7 @@ describe('PDF 저장', () => {
     expect(view.button().disabled).toBe(false);
 
     await view.press();
+    await loaded();
     expect(view.button().disabled).toBe(true);
     expect(view.button().textContent).toBe(' PDF 만드는 중…');
     expect(pictureAt).toHaveBeenCalledWith('/models/abc.webp');
@@ -84,6 +90,7 @@ describe('PDF 저장', () => {
     reportOf.mockResolvedValue(new Blob(['%PDF']));
     const view = await renderButton(null);
     await view.press();
+    await loaded();
     expect(pictureAt).not.toHaveBeenCalled();
     expect(view.container.querySelector('.snapshot')).not.toBeNull();
     expect(reportOf).not.toHaveBeenCalled();
@@ -102,6 +109,7 @@ describe('PDF 저장', () => {
     reportOf.mockResolvedValue(new Blob(['%PDF']));
     const view = await renderButton('/models/gone.webp');
     await view.press();
+    await loaded();
     await settle();
     expect(view.container.querySelector('.snapshot')).not.toBeNull();
     await view.unmount();
@@ -112,6 +120,7 @@ describe('PDF 저장', () => {
     reportOf.mockResolvedValue(new Blob(['%PDF']));
     const view = await renderButton(null);
     await view.press();
+    await loaded();
     expect(view.container.querySelector('.snapshot')).not.toBeNull();
     await act(async () => {
       vi.advanceTimersByTime(15_000);
@@ -128,6 +137,7 @@ describe('PDF 저장', () => {
     reportOf.mockRejectedValueOnce(new Error('canvas'));
     const view = await renderButton('/models/abc.webp');
     await view.press();
+    await loaded();
     await settle();
     expect(view.container.querySelector('[role=alert]')?.textContent).toBe('PDF를 만들지 못했어요');
     expect(view.button().disabled).toBe(false);

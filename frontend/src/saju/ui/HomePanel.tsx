@@ -77,62 +77,56 @@ const VISIBILITY: { value: HomeVisibility; label: string }[] = [
   { value: 'private', label: '나만' },
 ];
 
-/** Who may see the home, and with it the birth its chart is read from: the owner's to say, after they agree. */
-function Doors({ visibility, consented, onChange }: {
+/**
+ * Who may come to the home (its house stands in villages either way), and apart from that whether visitors may read
+ * the chart it is built from: both the owner's to say, each on its own.
+ */
+function Doors({ visibility, consented, onChange, onConsent }: {
   visibility: HomeVisibility;
-  /** `false` until the owner agrees that visitors may see the birth, chart and reading. */
+  /** Whether the owner agreed that visitors may see the birth, chart and reading. */
   consented: boolean;
-  onChange: (visibility: HomeVisibility, consent?: boolean) => Promise<void>;
+  onChange: (visibility: HomeVisibility) => Promise<void>;
+  onConsent?: ((agreed: boolean) => Promise<void>) | undefined;
 }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  const [pending, setPending] = useState<HomeVisibility | null>(null);
-  const [agreed, setAgreed] = useState(false);
-  const send = (value: HomeVisibility, consent = false) => {
+  const run = (change: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
     setProblem('');
-    (consent ? onChange(value, true) : onChange(value))
-      .then(() => setPending(null))
+    change()
       .catch((error: unknown) => setProblem(problemText(error)))
       .finally(() => setBusy(false));
   };
-  const pick = (value: HomeVisibility) => {
-    if (busy || (value === visibility && (value === 'private' || consented))) return;
-    if (value !== 'private' && !consented) {
-      setPending(value);
-      setAgreed(false);
-      return;
-    }
-    send(value);
-  };
-  const asking = pending ?? (!consented && visibility !== 'private' ? visibility : null);
   return (
     <section className="mg-saju-card" aria-label="공개 범위">
       <h2 className="mg-heading">누가 놀러 올 수 있나요</h2>
       <div className="mg-tabs" role="radiogroup" aria-label="공개 범위">
         {VISIBILITY.map((option) => (
-          <button key={option.value} type="button" role="radio" aria-checked={visibility === option.value} disabled={busy} onClick={() => pick(option.value)}>
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={visibility === option.value}
+            disabled={busy}
+            onClick={() => {
+              if (option.value !== visibility) run(() => onChange(option.value));
+            }}
+          >
             {option.label}
           </button>
         ))}
       </div>
-      {asking && (
-        <form
-          className="mg-saju-consent"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (agreed) send(asking, true);
-          }}
-        >
+      {onConsent && (
+        <div className="mg-saju-consent">
           <p>생년월일, 사주, 풀이를 방문자가 볼 수 있습니다.</p>
           <label>
-            <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} /> 동의합니다
+            <input type="checkbox" checked={consented} disabled={busy} onChange={(event) => {
+              const agreed = event.target.checked;
+              run(() => onConsent(agreed));
+            }} /> 동의합니다
           </label>
-          <button className="mg-btn is-small" type="submit" disabled={busy || !agreed}>
-            공개
-          </button>
-        </form>
+        </div>
       )}
       {problem && (
         <p className="mg-error" role="alert">
@@ -148,7 +142,7 @@ function Doors({ visibility, consented, onChange }: {
  * of its island, the balance of elements, the bridge to it and its guestbook. A home not built yet has its bridge and
  * guestbook all the same: a visitor finds them under the empty plot, the owner under the card that builds the home.
  */
-export function HomePanel({ view, viewer, profile, chartShared = true, picture, decor, neighbors, bridge, onVisibility, onProfile, onGuestbook }: {
+export function HomePanel({ view, viewer, profile, chartShared = true, picture, decor, neighbors, bridge, onVisibility, onProfile, onAvatar, onGuestbook }: {
   view: HomeView;
   viewer: User | null;
   /** The home's chart, once its owner has built it. */
@@ -165,6 +159,8 @@ export function HomePanel({ view, viewer, profile, chartShared = true, picture, 
   onVisibility: (visibility: HomeVisibility, consent?: boolean) => Promise<void>;
   /** Saves the owner's profile. */
   onProfile?: ((changes: ProfileChanges) => Promise<void>) | undefined;
+  /** Puts up (a data URL) or takes down (null) the owner's profile picture. */
+  onAvatar?: ((image: string | null) => Promise<void>) | undefined;
   /** Told when a line is left in the guestbook or taken away (the island's 기념 방명록 hangs them). */
   onGuestbook?: (() => void) | undefined;
 }) {
@@ -175,7 +171,7 @@ export function HomePanel({ view, viewer, profile, chartShared = true, picture, 
         <>
           <section className="mg-saju-card mg-saju-who" aria-label="사주 요약">
             <span className="mg-saju-who-mark">
-              <PixelIcon name={profile.balance.dominant} size={30} />
+              {view.profile.avatarUrl ? <img className="mg-saju-avatar" src={view.profile.avatarUrl} alt="" width={44} height={44} /> : <PixelIcon name={profile.balance.dominant} size={30} />}
             </span>
             <div className="mg-saju-who-text">
               {chartShared && <p className="mg-saju-badge">{profile.badge}</p>}
@@ -216,8 +212,15 @@ export function HomePanel({ view, viewer, profile, chartShared = true, picture, 
           </div>
         </section>
       )}
-      {view.isOwner && onProfile && <ProfileCard profile={view.profile} onSave={onProfile} />}
-      {view.isOwner && <Doors visibility={view.profile.visibility} consented={view.profile.sajuShareConsent !== false} onChange={onVisibility} />}
+      {view.isOwner && onProfile && <ProfileCard profile={view.profile} onSave={onProfile} {...(onAvatar ? { onAvatar } : {})} />}
+      {view.isOwner && (
+        <Doors
+          visibility={view.profile.visibility}
+          consented={view.profile.sajuShareConsent !== false}
+          onChange={(visibility) => onVisibility(visibility)}
+          onConsent={onProfile && ((agreed) => onProfile({ sajuShareConsent: agreed }))}
+        />
+      )}
       <BridgeCard view={view} viewer={viewer} neighbors={neighbors} bridge={bridge} />
       <section className="mg-saju-guestbook" aria-label="방명록">
         <h2 className="mg-heading">방명록</h2>

@@ -299,6 +299,11 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 
 .mg-saju-who { position: relative; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px; }
 .mg-saju-who-mark { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 14px; background: var(--el-soft); color: var(--el-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
+/* The owner's profile picture, in the element's mark (the bar, the story's first card) and in the profile card. */
+.mg-saju-avatar { display: block; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.mg-saju-avatar-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.mg-saju-avatar-edit .mg-saju-avatar { width: 64px; height: 64px; border-radius: 16px; border: 2px solid var(--mg-ink); box-shadow: 3px 3px 0 var(--mg-saju-edge); }
+.mg-saju-avatar.is-empty { background: var(--el-soft, var(--mg-card)); }
 .mg-saju-who-text { display: grid; gap: 8px; min-width: 0; }
 .mg-saju-who-edit { justify-self: start; }
 .mg-saju-badge { font-size: 16px; font-weight: 850; letter-spacing: -0.025em; line-height: 1.3; color: var(--el-ink); }

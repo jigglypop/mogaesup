@@ -19,8 +19,11 @@ function ClosedDoor({ className, children, 'data-element': element }: { classNam
   );
 }
 
-/** A home in the village; `bridged` when its owner is an 이웃 of the village's, `closed` when the viewer may not go in. */
-export type Villager = { resident: Resident; profile: Profile; bridged: boolean; closed?: boolean };
+/**
+ * A home in the village; `bridged` when its owner is an 이웃 of the village's, `closed` when the viewer may not go in,
+ * `shared` false when its owner has not agreed that visitors read its chart (its house and guardian are named alone).
+ */
+export type Villager = { resident: Resident; profile: Profile; bridged: boolean; closed?: boolean; shared?: boolean };
 
 /**
  * 마을 갤러리: the homes of a village, each a way into its 섬: the owner's first (an empty plot until they build
@@ -53,7 +56,7 @@ export function VillagePanel({ owner, villagers, viewer }: {
             </Link>
           </li>
         )}
-        {villagers.map(({ resident, profile, bridged, closed }) => {
+        {villagers.map(({ resident, profile, bridged, closed, shared = true }) => {
           const { balance } = profile;
           const Door = closed ? ClosedDoor : Link;
           return (
@@ -69,13 +72,15 @@ export function VillagePanel({ owner, villagers, viewer }: {
                     {bridged && <span className="mg-badge is-published">이웃</span>}
                     {closed && <Icon name="lock" />}
                   </b>
-                  <small>{profile.badge}</small>
+                  {shared && <small>{profile.badge}</small>}
                   <small>
                     {houseName(profile.house)} · {profile.guardian.name}
                   </small>
-                  <span className="mg-saju-mix" aria-hidden="true">
-                    {ELEMENTS.flatMap((element) => Array.from({ length: balance.counts[element] }, (_, index) => <i key={`${element}${index}`} data-element={element} />))}
-                  </span>
+                  {shared && (
+                    <span className="mg-saju-mix" aria-hidden="true">
+                      {ELEMENTS.flatMap((element) => Array.from({ length: balance.counts[element] }, (_, index) => <i key={`${element}${index}`} data-element={element} />))}
+                    </span>
+                  )}
                 </span>
               </Door>
             </li>

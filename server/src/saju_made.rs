@@ -378,7 +378,7 @@ async fn read(State(state): State<AppState>, headers: HeaderMap, Json(body): Jso
         return Err(INVALID_CHART);
     }
     let work = Work::Reading {
-        request: saju_reading::request(&chart, &state.config.openai.reading_model),
+        request: saju_reading::request(&chart, &state.config.openai.reading_model, &state.config.openai.reading_effort),
         ziwei: chart.has_ziwei(),
     };
     start(&state, user.id, request.again.unwrap_or(false), key, work).await

@@ -35,14 +35,15 @@ const SWEEP_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const SWEEP_MOST: usize = 1000;
 
 /// Every stored file's site path the database refers to: catalog items and every version kept of them, pet breeds,
-/// members' looks, islands' link pictures, 사주 homes' 미연시 pictures, and the models placed on saved islands. A world's
+/// members' looks and profile pictures, islands' link pictures, 사주 homes' 미연시 pictures, and the models placed on
+/// saved islands. A world's
 /// are the ones read from it as it was saved (`model_refs`, see `homes::model_refs`) while they are still its
 /// revision's; a world saved by a release that did not read them is searched as text, as [`model_refs`] would read it.
 const REFERENCED: &str = r"SELECT url FROM (
     SELECT model_url AS url FROM catalog_items UNION SELECT thumbnail_url FROM catalog_items
     UNION SELECT model_url FROM catalog_versions UNION SELECT thumbnail_url FROM catalog_versions
     UNION SELECT model_url FROM pet_breeds UNION SELECT thumbnail_url FROM pet_breeds
-    UNION SELECT model_url FROM user_looks UNION SELECT thumbnail_url FROM homes
+    UNION SELECT model_url FROM user_looks UNION SELECT thumbnail_url FROM homes UNION SELECT avatar_url FROM users
     UNION SELECT url FROM saju_pictures
     UNION SELECT unnest(model_refs) FROM home_worlds WHERE model_refs_revision = revision
     UNION SELECT '/models/' || found[1]

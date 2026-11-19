@@ -9,7 +9,7 @@ const sample = (id: string) => profileOf(personOf(id).birth);
 const born = (year: number, month: number, day: number, time: string): Birth => ({ calendar: 'solar', year, month, day, leapMonth: false, time, gender: 'female' });
 
 describe('궁합', () => {
-  it('집의 오행이 상생이면 주는 쪽을 앞에 쓴다', () => {
+  it('일간의 오행이 상생이면 주는 쪽을 앞에 쓴다', () => {
     const forward = compatOf(sample('sol'), sample('noeul'));
     expect(forward.headline).toBe('목생화(木生火) 시너지! 서로 영감을 주는 사이');
     expect(forward.tone).toBe('flow');
@@ -24,20 +24,15 @@ describe('궁합', () => {
     const compat = compatOf(sample('noeul'), sample('garam'));
     expect(compat.headline).toBe('정임합(丁壬合) 인연! 촛불이 밤바다를 물들이듯 마음이 통하는 사이');
     expect(compat.tone).toBe('union');
-    expect(compat.notes).toEqual(['일간 정임합(丁壬合)', '일지 진유합(辰酉合)', '집 수극화(水克火)', '내게 없는 수(水)를 채워 주는 집']);
-    expect(compatOf(sample('garam'), sample('noeul')).notes).toEqual([
-      '일간 정임합(丁壬合)',
-      '일지 진유합(辰酉合)',
-      '집 수극화(水克火)',
-      '내게 없는 화(火)를 채워 주는 집',
-    ]);
+    expect(compat.notes).toEqual(['일간 정임합(丁壬合)', '일지 진유합(辰酉合)', '내게 없는 수(水)를 채워 주는 집']);
+    expect(compatOf(sample('garam'), sample('noeul')).notes).toEqual(['일간 정임합(丁壬合)', '일지 진유합(辰酉合)', '내게 없는 화(火)를 채워 주는 집']);
     expect(compatOf(sample('sol'), sample('bori')).headline).toBe('갑기합(甲己合) 인연! 큰 나무와 너른 땅처럼 믿음이 자라는 사이');
   });
 
-  it('합이 없으면 일지의 반합과 집의 관계를 적는다', () => {
-    expect(compatOf(sample('sol'), sample('bori')).notes).toEqual(['일간 갑기합(甲己合)', '집 목극토(木克土)']);
+  it('합이 없으면 일간의 오행과 일지의 반합을 적는다', () => {
+    expect(compatOf(sample('sol'), sample('bori')).notes).toEqual(['일간 갑기합(甲己合)']);
     const compat = compatOf(sample('noeul'), sample('bori'));
-    expect(compat.notes).toEqual(['일지 유축 반합(酉丑)', '집 화생토(火生土)']);
+    expect(compat.notes).toEqual(['일간 화생토(火生土)', '일지 유축 반합(酉丑)']);
     expect(compat.headline).toBe('화생토(火生土) 시너지! 따뜻하게 품어 주는 사이');
   });
 
@@ -56,8 +51,22 @@ describe('궁합', () => {
     expect(metal.reading.day.cn).toBe('庚申');
     expect(metal.balance.dominant).toBe('metal');
     const compat = compatOf(sample('sol'), metal);
-    expect(compat.notes).toEqual(['일지 인신충(寅申沖)', '집 금극목(金克木)', '내게 없는 금(金)을 채워 주는 집']);
+    expect(compat.notes).toEqual(['일간 금극목(金克木)', '일지 인신충(寅申沖)', '내게 없는 금(金)을 채워 주는 집']);
     expect(compat.headline).toBe('금극목(金克木) 자극! 가지를 다듬어 곧게 키워 주는 사이');
-    expect(compatOf(metal, sample('sol')).notes).toEqual(['일지 인신충(寅申沖)', '집 금극목(金克木)', '내 금(金)이 채워 주는 집']);
+    expect(compatOf(metal, sample('sol')).notes).toEqual(['일간 금극목(金克木)', '일지 인신충(寅申沖)', '내 금(金)이 채워 주는 집']);
+  });
+
+  it('집의 오행이 아니라 일간으로 본다', () => {
+    // 1991-01-12 01:30: 庚午 己丑 壬午 辛丑. 집은 토가 가장 많지만 일간은 임수다. 솔은 갑목 일간.
+    const owner = profileOf({ ...born(1991, 1, 12, '01:30'), gender: 'male' });
+    expect(owner.reading.day.cn).toBe('壬午');
+    expect(owner.balance.dominant).toBe('earth');
+    const compat = compatOf(owner, sample('sol'));
+    expect(compat.headline).toBe('수생목(水生木) 시너지! 촉촉하게 키워 주는 사이');
+    expect(compat.tone).toBe('flow');
+    expect(compat.notes).toEqual(['일간 수생목(水生木)', '일지 인오 반합(寅午)', '내게 없는 목(木)을 채워 주는 집']);
+    // 다리의 양 끝은 두 집의 오행 그대로다.
+    expect(compat).toMatchObject({ from: 'earth', to: 'wood' });
+    expect(compatOf(sample('sol'), owner).headline).toBe(compat.headline);
   });
 });

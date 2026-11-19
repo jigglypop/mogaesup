@@ -195,21 +195,9 @@ const SYMBOLS: Record<YardSymbol, (b: Builder) => void> = {
     b.life({ kind: 'fireflies', at: [0, 1.0, 0], reach: 0.35, count: 4 });
     b.lamp([0, 1.15, 0.1], '#cdd6ff', 1.2, 3);
   },
-  /** 壬: a lighthouse on its rocks, its lamp turning. */
+  /** 壬: rocks the sea has worn round, where the deep water's day master is kept (no tower stands on them). */
   lighthouse: (b) => {
     for (const [x, z, size] of [[0, 0, 1.3], [0.55, 0.3, 0.6], [-0.5, 0.35, 0.55], [0.2, -0.55, 0.5], [-0.3, -0.45, 0.45]] as const) rock(b, [x, 0, z], size, b.pick(['#7d7a74', '#8c8982', '#6c6a66']), 0.5);
-    const radiusAt = (y: number) => 0.34 - ((y - 0.35) / 1.9) * 0.1;
-    b.cyl(0.34, 1.9, [0, 1.3, 0], '#f4f0e6', { top: 0.24, surface: 'plaster', sides: 22 });
-    for (const y of [0.85, 1.55]) b.cyl(radiusAt(y - 0.15) + 0.004, 0.3, [0, y, 0], '#c23b2f', { top: radiusAt(y + 0.15) + 0.004, surface: 'plaster', sides: 22 });
-    b.box([0.16, 0.3, 0.04], [0, 0.52, 0.335], '#2f5f96', WOOD);
-    b.cyl(0.37, 0.05, [0, 2.275, 0], '#3a3d45', { ...IRON, sides: 22 });
-    b.ring(0.36, 0.01, [0, 2.44, 0], '#3a3d45', IRON, [QUARTER, 0, 0]);
-    for (let post = 0; post < 10; post++) b.cyl(0.008, 0.15, [Math.cos((post / 10) * TAU) * 0.36, 2.37, Math.sin((post / 10) * TAU) * 0.36], '#3a3d45', { ...IRON, sides: 4 });
-    b.cyl(0.19, 0.3, [0, 2.45, 0], '#fff3c4', { sides: 14, glow: '#ffd98a', power: 5 });
-    b.cone(0.27, 0.24, [0, 2.72, 0], '#c23b2f', { sides: 16, rough: 0.6 });
-    b.ball(0.035, [0, 2.86, 0], '#3a3d45', { ...IRON, detail: 8 });
-    b.life({ kind: 'beam', at: [0, 2.45, 0] });
-    b.lamp([0, 2.5, 0], '#ffe2a0', 2.6, 6);
   },
   /** 癸: rain caught: a chain from its bracket running into a stone basin, mist over wet stones. */
   rain: (b) => {

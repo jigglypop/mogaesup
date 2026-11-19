@@ -9,7 +9,7 @@ use common::{ORIGIN, Reply, TestApp};
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use mogaesup_server::{
     security::rate_record,
-    share::{HEIGHT, MAX_PICTURE_BYTES, WIDTH},
+    share::{AVATAR_EDGE, HEIGHT, MAX_PICTURE_BYTES, WIDTH},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -85,6 +85,39 @@ async fn 섬_주인은_미리보기_사진을_올리고_되돌린다() {
         app.call("DELETE", "/api/homes/me/thumbnail", Some(json!({"expectedOwnerId": id})), Some(&owner)).await;
     assert_eq!(removed.status, StatusCode::OK, "{:?}", removed.body);
     assert_eq!(removed.body["profile"]["thumbnailUrl"], Value::Null);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn 주인은_프로필_사진을_바꾸고_내린다() {
+    let app = TestApp::new(None).await;
+    let owner = app.register("avatar_owner", "주인").await;
+    let other = app.register("avatar_other", "남").await;
+    let id = app.user_id("avatar_owner").await;
+    let path = "/api/homes/me/avatar";
+    let picture = jpeg_url(900, 600);
+    // Only the owner, from a page loaded for them.
+    assert_eq!(app.call("PUT", path, Some(json!({"image": picture})), None).await.status, StatusCode::UNAUTHORIZED);
+    let foreign = app.call("PUT", path, Some(json!({"expectedOwnerId": id, "image": picture})), Some(&other)).await;
+    assert_eq!(foreign.status, StatusCode::CONFLICT);
+
+    let saved = app.call("PUT", path, Some(json!({"expectedOwnerId": id, "image": picture})), Some(&owner)).await;
+    assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+    let url = saved.body["profile"]["avatarUrl"].as_str().unwrap().to_owned();
+    assert!(stored_picture(&url), "{url}");
+    // A square, whatever shape was sent; visitors see it with the profile.
+    let file = app.call("GET", &url, None, None).await;
+    let shown = image::load_from_memory_with_format(&file.bytes, ImageFormat::Jpeg).unwrap();
+    assert_eq!((shown.width(), shown.height()), (AVATAR_EDGE, AVATAR_EDGE));
+    assert_eq!(app.call("GET", "/api/homes/avatar_owner", None, None).await.body["profile"]["avatarUrl"], url.as_str());
+    let gif = app
+        .call("PUT", path, Some(json!({"expectedOwnerId": id, "image": "data:image/gif;base64,R0lGOD"})), Some(&owner))
+        .await;
+    assert_eq!(gif.body["code"], "invalid_picture");
+
+    let removed = app.call("DELETE", path, Some(json!({"expectedOwnerId": id})), Some(&owner)).await;
+    assert_eq!(removed.status, StatusCode::OK, "{:?}", removed.body);
+    assert_eq!(removed.body["profile"]["avatarUrl"], Value::Null);
     app.cleanup().await;
 }
 

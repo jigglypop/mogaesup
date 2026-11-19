@@ -30,10 +30,12 @@ export async function prepareBoardPhoto(file: File): Promise<string> {
 
 export type BoardPicture = PhotoBoard & { url: string };
 
-export function PhotoBoardCard({ photo, onChange, onOpen }: {
+export function PhotoBoardCard({ photo, onChange, onOpen, onPlace }: {
   photo: BoardPicture | null;
   onChange?: ((image: string | null) => Promise<string>) | undefined;
   onOpen: () => void;
+  /** Picks where on the island the board stands (its owner's). */
+  onPlace?: (() => void) | undefined;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -70,6 +72,7 @@ export function PhotoBoardCard({ photo, onChange, onOpen }: {
         <button type="button" className="mg-btn is-small" disabled={busy} onClick={() => input.current?.click()}>
           {busy ? '처리 중…' : photo ? '사진 교체' : '사진 올리기'}
         </button>
+        {photo && onPlace && <button type="button" className="mg-btn is-small" disabled={busy} onClick={onPlace}>위치 정하기</button>}
         {photo && <button type="button" className="mg-btn is-small" disabled={busy} onClick={() => void change(null)}>사진 내리기</button>}
       </div>}
       {error ? <p className="mg-error" role="alert">{error}</p> : message && <p className="mg-muted" role="status">{message}</p>}

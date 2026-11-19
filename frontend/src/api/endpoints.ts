@@ -117,6 +117,9 @@ export const homeApi = {
     api<HomeView>('/homes/me/thumbnail', { method: 'PUT', body, timeoutMs: 60_000 }),
   /** The link preview shows the site's own picture again. */
   removeThumbnail: (body: { expectedOwnerId: string }) => api<HomeView>('/homes/me/thumbnail', { method: 'DELETE', body }),
+  /** The owner's profile picture: a JPEG or PNG data URL, which the server crops to a square and encodes again. */
+  setAvatar: (body: { expectedOwnerId: string; image: string }) => api<HomeView>('/homes/me/avatar', { method: 'PUT', body, timeoutMs: 60_000 }),
+  removeAvatar: (body: { expectedOwnerId: string }) => api<HomeView>('/homes/me/avatar', { method: 'DELETE', body }),
 };
 
 /** The island's link to send: the server's share page, which link previews read and which takes people on to the island. */

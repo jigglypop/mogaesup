@@ -25,11 +25,12 @@ async fn 풀이는_동의한_뒤에만_남에게_보인다() {
         .await;
     assert_eq!(built.status, StatusCode::OK, "{:?}", built.body);
 
-    let closed = app
+    // Opening the 섬 is not sharing the chart: the door opens, and the consent stays as it was.
+    let opened = app
         .call("PATCH", "/api/homes/me", Some(json!({"expectedOwnerId": id, "visibility": "public"})), Some(&host))
         .await;
-    assert_eq!(closed.status, StatusCode::CONFLICT, "{:?}", closed.body);
-    assert_eq!(closed.body["code"], "consent_required");
+    assert_eq!(opened.status, StatusCode::OK, "{:?}", opened.body);
+    assert_eq!(opened.body["profile"]["sajuShareConsent"], false);
 
     // The house stands for a visitor all the same (it is drawn from the birth); the reading waits for consent.
     let house = app.call("GET", "/api/homes/share_host/saju", None, None).await;
@@ -52,5 +53,13 @@ async fn 풀이는_동의한_뒤에만_남에게_보인다() {
     assert_eq!(agreed.body["profile"]["ownerName"], "가온이");
     let shown = app.call("GET", "/api/homes/share_host/saju", None, None).await;
     assert_eq!(shown.body["saju"]["name"], "가온");
+
+    // The consent can be taken back.
+    let withdrawn = app
+        .call("PATCH", "/api/homes/me", Some(json!({"expectedOwnerId": id, "sajuShareConsent": false})), Some(&host))
+        .await;
+    assert_eq!(withdrawn.status, StatusCode::OK, "{:?}", withdrawn.body);
+    assert_eq!(withdrawn.body["profile"]["sajuShareConsent"], false);
+    assert_eq!(withdrawn.body["profile"]["visibility"], "public");
     app.cleanup().await;
 }

@@ -51,6 +51,8 @@ export type HomeProfile = {
   balloon?: string;
   /** The owner agreed that visitors may see the birth, chart and reading. Missing from an older server. */
   sajuShareConsent?: boolean;
+  /** The owner's profile picture (a stored square JPEG); null or missing until they choose one. */
+  avatarUrl?: string | null;
 };
 
 export type VisitCounter = { today: number; total: number };
@@ -160,18 +162,19 @@ export type SajuHome = { name: string; birth: SajuBirth };
  * `GET /api/homes/{username}/saju`: the member's 사주 home (null until they build one) and the village around it, at
  * most eight homes: their 이웃' (`neighbour`, the viewer's own first), then the public homes built most recently.
  * `visitable` is false for an 이웃's home this viewer may not go into (kept to its 이웃 or its owner): it stands in
- * the village all the same.
+ * the village all the same. `shared` is false for a home whose owner has not agreed that visitors read its chart.
  */
 export type SajuVillage = {
   saju: SajuHome | null;
-  village: { user: UserCard; saju: SajuHome; neighbour: boolean; visitable?: boolean }[];
+  village: { user: UserCard; saju: SajuHome; neighbour: boolean; visitable?: boolean; shared?: boolean }[];
 };
 
 /** The five elements as the chart names them, in the order each gives rise to the next. */
 export type ReadingElement = 'wood' | 'fire' | 'earth' | 'metal' | 'water';
 
 /** What its owner has placed on a 섬: a flag (`ref` "mine", or a given flag's id), a prop (by name) or their character ("me"). */
-export type DecorItem = { id: string; kind: 'flag' | 'prop' | 'character' | 'gift'; ref: string; x: number; z: number; turn: number; scale?: number; color?: string };
+/** One thing on a 섬's island: `board` is the photo board (`ref` 'photo'), placed where its owner put it. */
+export type DecorItem = { id: string; kind: 'flag' | 'prop' | 'character' | 'gift' | 'board'; ref: string; x: number; z: number; turn: number; scale?: number; color?: string };
 /** A flag's look: the main star of its giver's 자미두수 명궁 (공궁 for none) and the element of their 오행국. */
 export type FlagDesign = { star: string; element: ReadingElement };
 /** A flag a member gave to a 섬. */

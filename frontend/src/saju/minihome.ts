@@ -19,7 +19,7 @@ export type Minihome = {
    * The homes around the owner's: their 이웃' (`neighbour`, joined to it by a bridge) and other members'. A home this
    * viewer may not go into stands among them closed (`visitable` false).
    */
-  village: (Resident & { neighbour: boolean; visitable: boolean })[];
+  village: (Resident & { neighbour: boolean; visitable: boolean; shared: boolean })[];
   /** The viewer's own home: the owner's on their own 섬, null for a visitor without one. */
   mine: Resident | null;
   /** Who it was read for: the signed-in viewer's username, null for a signed-out visit. */
@@ -53,7 +53,7 @@ async function read(username: string, viewer: string | null): Promise<Minihome> 
   return {
     view,
     owner,
-    village: village.village.map(({ user, saju, neighbour, visitable }) => ({ ...residentOf(user.username, saju), neighbour, visitable: visitable !== false })),
+    village: village.village.map(({ user, saju, neighbour, visitable, shared }) => ({ ...residentOf(user.username, saju), neighbour, visitable: visitable !== false, shared: shared !== false })),
     mine: viewer === username ? owner : mine && viewer ? residentOf(viewer, mine) : null,
     as: viewer,
   };
@@ -172,7 +172,17 @@ export function useMinihome(username: string) {
     },
     [ownerId, nameAs],
   );
-  return { state, build, demolish, open, saveProfile };
+  /** The owner's profile picture: a data URL to put up, or null to take it down. */
+  const changeAvatar = useCallback(
+    async (image: string | null) => {
+      if (!ownerId) return;
+      const { profile } = image ? await homeApi.setAvatar({ expectedOwnerId: ownerId, image }) : await homeApi.removeAvatar({ expectedOwnerId: ownerId });
+      writes.current += 1;
+      setState(onOwn(ownerId, (minihome) => ({ ...minihome, view: { ...minihome.view, profile } })));
+    },
+    [ownerId],
+  );
+  return { state, build, demolish, open, saveProfile, changeAvatar };
 }
 
 // The village's first days kept each home in its browser's storage. A member who built one there finds its name and

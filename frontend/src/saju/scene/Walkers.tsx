@@ -36,8 +36,8 @@ const FOLLOW = 10;
 /** How high over the ground a walker's name and cloud are. */
 const OVER = HEIGHT + 0.25;
 
-/** What the page can ask of the viewer's own dog. */
-export type WalkerControl = { goal: [number, number, number] | null; run: boolean; asked: { action: Action; at: number } | null };
+/** What the page can ask of the viewer's own dog, and where it is (`at`, null while it is not on the island). */
+export type WalkerControl = { goal: [number, number, number] | null; run: boolean; asked: { action: Action; at: number } | null; at?: readonly [number, number, number] | null };
 const GOING = new Set<Action>(['walk', 'run']);
 const ONCE = new Set<Action>(['jump', 'wave', 'cheer', 'dance']);
 
@@ -295,6 +295,13 @@ export function Walkers({
     mine.current = { position: [...start] as [number, number, number], facing: 0, action: 'idle', moves: 0, asked: 0, busy: 0 };
     // `start` is where the viewer stands as they come to an island (its key stands for it).
   }, [start.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Off the island, the viewer's dog is nowhere the camera could follow.
+  useEffect(() => {
+    const held = control.current;
+    return () => {
+      held.at = null;
+    };
+  }, [control]);
 
   useFrame((_, elapsed) => {
     const delta = Math.min(0.1, elapsed);
@@ -328,6 +335,7 @@ export function Walkers({
       }
       if (me.busy === 0 || (going && me.action !== 'jump')) me.action = going ?? (ONCE.has(me.action) && me.busy > 0 ? me.action : 'idle');
       room.move(me.position, me.facing, me.action, me.moves);
+      ask.at = me.position;
       const holder = holders.current.get(SELF)?.current;
       if (holder) {
         holder.position.set(me.position[0], me.position[1], me.position[2]);

@@ -320,6 +320,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/homes/me", get(mine).patch(update))
         .route("/api/homes/me/world", put(save_world))
         .route("/api/homes/me/thumbnail", put(save_thumbnail).delete(remove_thumbnail))
+        .route("/api/homes/me/avatar", put(save_avatar).delete(remove_avatar))
         .route("/api/homes/{username}", get(view))
         .route("/api/homes/{username}/visits", post(visit))
         .route("/api/homes/{username}/world", get(world))
@@ -345,11 +346,13 @@ pub struct HomeProfile {
     pub balloon: String,
     /// The owner agreed that visitors may see the birth, chart and reading.
     pub saju_share_consent: bool,
+    /// The owner's profile picture, a stored square JPEG's site path; None until they choose one.
+    pub avatar_url: Option<String>,
 }
 
 const PROFILE_SELECT: &str = "SELECT h.owner_id, u.username, u.display_name AS owner_name, h.title, h.status_message,
     h.mood, h.minime, h.emoji, h.visibility, h.updated_at, h.thumbnail_url, h.balloon,
-    u.saju_share_consent_at IS NOT NULL AS saju_share_consent
+    u.saju_share_consent_at IS NOT NULL AS saju_share_consent, u.avatar_url
     FROM homes h JOIN users u ON u.id = h.owner_id";
 
 fn profile(row: &PgRow) -> HomeProfile {
@@ -367,6 +370,7 @@ fn profile(row: &PgRow) -> HomeProfile {
         thumbnail_url: row.get("thumbnail_url"),
         balloon: row.get("balloon"),
         saju_share_consent: row.get("saju_share_consent"),
+        avatar_url: row.get("avatar_url"),
     }
 }
 
@@ -571,7 +575,8 @@ struct ProfileChanges {
     balloon: Option<String>,
     /// The name shown on the account. Omitted fields are left as they are.
     display_name: Option<String>,
-    /// `true` records that the owner agrees visitors may see the birth, chart and reading.
+    /// `true` records that the owner agrees visitors may see the birth, chart and reading; `false` takes that back.
+    /// Who may come to the 섬 at all is `visibility`'s alone: its house stands either way.
     saju_share_consent: Option<bool>,
 }
 
@@ -637,16 +642,6 @@ async fn update(
         return Err(bad("invalid_balloon", "말풍선을 확인해 주세요."));
     }
     let renamed = changes.display_name.as_deref().map(|raw| display_name(Some(raw), &user.username)).transpose()?;
-    let sharing = matches!(changes.visibility.as_deref(), Some("public" | "ilchon"));
-    if sharing && changes.saju_share_consent != Some(true) {
-        let agreed: bool = sqlx::query_scalar("SELECT saju_share_consent_at IS NOT NULL FROM users WHERE id = $1")
-            .bind(user.id)
-            .fetch_one(&state.db)
-            .await?;
-        if !agreed {
-            return Err(conflict("consent_required", "사주를 공개하려면 개인정보 동의가 필요해요."));
-        }
-    }
     // Picking a 미니미 means walking as it: a look the owner wore comes off, in the same transaction, so neither change
     // is kept without the other.
     let picked = minime.is_some();
@@ -674,11 +669,22 @@ async fn update(
             .execute(&mut *tx)
             .await?;
     }
-    if changes.saju_share_consent == Some(true) {
-        sqlx::query("UPDATE users SET saju_share_consent_at = coalesce(saju_share_consent_at, now()) WHERE id = $1")
+    match changes.saju_share_consent {
+        Some(true) => {
+            sqlx::query(
+                "UPDATE users SET saju_share_consent_at = coalesce(saju_share_consent_at, now()) WHERE id = $1",
+            )
             .bind(user.id)
             .execute(&mut *tx)
             .await?;
+        }
+        Some(false) => {
+            sqlx::query("UPDATE users SET saju_share_consent_at = NULL WHERE id = $1")
+                .bind(user.id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        None => {}
     }
     if picked {
         crate::looks::take_off(&mut *tx, user.id).await?;
@@ -732,6 +738,40 @@ async fn save_thumbnail(State(state): State<AppState>, headers: HeaderMap, body:
 #[serde(rename_all = "camelCase")]
 struct OwnerOnly {
     expected_owner_id: Option<Uuid>,
+}
+
+/// `PUT /api/homes/me/avatar`: the owner's profile picture, answered with the island's view. Read as a link picture is
+/// (see [`save_thumbnail`]), and filled into a square ([`share::avatar`]) before it is stored.
+async fn save_avatar(State(state): State<AppState>, headers: HeaderMap, body: Body) -> ApiResult<Json<Value>> {
+    let user = current_user(&state, &headers).await?;
+    rate_limit(&state, format!("avatar:{}", user.id), THUMBNAILS_PER_WINDOW)?;
+    let _uploading = rate_running(&state, &format!("avatar-running:{}", user.id), 1)?.ok_or(PICTURE_SAVING)?;
+    let time = state.homes.picture_time();
+    let bytes =
+        read_within(time, body, MAX_THUMBNAIL_REQUEST_BYTES, share::PICTURE_TOO_LARGE, PICTURE_CUT_SHORT).await?;
+    let save: PictureSave = serde_json::from_slice(&bytes).map_err(|_| share::INVALID_PICTURE)?;
+    drop(bytes);
+    same_owner(save.expected_owner_id, user.id)?;
+    let picture = share::avatar(save.image).await?;
+    let url = state.config.models.put("jpg", picture).await?;
+    create(&state.db, &user).await?;
+    sqlx::query("UPDATE users SET avatar_url = $2 WHERE id = $1").bind(user.id).bind(url).execute(&state.db).await?;
+    let home = my_home(&state, &user).await?;
+    home_view(&state, home, true).await
+}
+
+/// `DELETE /api/homes/me/avatar`: the 섬 shows its element's mark again. The stored file is left to the model sweep.
+async fn remove_avatar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<OwnerOnly>,
+) -> ApiResult<Json<Value>> {
+    let user = current_user(&state, &headers).await?;
+    same_owner(body.expected_owner_id, user.id)?;
+    create(&state.db, &user).await?;
+    sqlx::query("UPDATE users SET avatar_url = NULL WHERE id = $1").bind(user.id).execute(&state.db).await?;
+    let home = my_home(&state, &user).await?;
+    home_view(&state, home, true).await
 }
 
 /// `DELETE /api/homes/me/thumbnail`: the link preview shows the site's own picture again. The stored file is left to

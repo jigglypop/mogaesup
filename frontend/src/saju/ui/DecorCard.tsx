@@ -41,6 +41,7 @@ function ItemPalette({ color, onChange }: { color?: string; onChange: (color: st
 
 const labelOf = (item: DecorItem, decor: NonNullable<Decor['decor']>, own: FlagDesign | null): string => {
   if (item.kind === 'character') return '내 캐릭터';
+  if (item.kind === 'board') return '사진 전광판';
   if (item.kind === 'prop') return elementPiece(item.ref)?.label ?? PROPS.find((prop) => prop.ref === item.ref)?.label ?? item.ref;
   if (item.kind === 'gift') {
     const gift = decor.gifts?.find((one) => one.id === item.ref);
@@ -121,6 +122,7 @@ function DecorItems({ state, decor, own, placing, onPlacing, selectedId, onSelec
   const update = (patch: Partial<DecorItem>) => place(decor.items.map((item) => item.id === selectedId ? { ...item, ...patch } : item));
   const scale = selected?.scale ?? 1;
   const characterPlaced = decor.items.some((item) => item.kind === 'character');
+  const boardPlaced = decor.items.some((item) => item.kind === 'board');
   const labels = decor.items.map((item) => labelOf(item, decor, own));
   const names = new Map(decor.items.map((item, index) => {
     const label = labels[index]!;
@@ -174,6 +176,7 @@ function DecorItems({ state, decor, own, placing, onPlacing, selectedId, onSelec
           ))}
           {own && <button className="mg-chip" aria-pressed={chosen('flag', 'mine')} disabled={full} onClick={() => pick({ kind: 'flag', ref: 'mine', label: `내 깃발 · ${own.star}` })}>내 깃발 · {own.star}</button>}
           {decor.character && !characterPlaced && <button className="mg-chip" aria-pressed={chosen('character', 'me')} disabled={full} onClick={() => pick({ kind: 'character', ref: 'me', label: '내 캐릭터' })}>내 캐릭터</button>}
+          {decor.photoBoard && !boardPlaced && <button className="mg-chip" aria-pressed={chosen('board', 'photo')} disabled={full} onClick={() => pick({ kind: 'board', ref: 'photo', label: '사진 전광판' })}>사진 전광판</button>}
         </div>
       </details>
       {(!!decor.gifts?.length || decor.flags.length > 0) && <div className="mg-decor-section">

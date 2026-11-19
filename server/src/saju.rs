@@ -67,7 +67,7 @@ fn home(row: &PgRow) -> Value {
 /// house standing whoever looks; `visitable` says whether this viewer may go on to that 이웃's 섬 (a home kept to its
 /// 이웃 or to its owner stands in the village all the same, closed). The places left go to the public homes built or
 /// built again most recently. What the owner agreed to share (the chart's details, the reading) is the page's to hold
-/// back: a house is drawn from the birth.
+/// back, by each home's `shared`: a house is drawn from the birth.
 async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let viewer = optional_user(&state, &headers).await?;
     let (profile, _) = visible_home(&state, &name, viewer.as_ref()).await?;
@@ -76,8 +76,16 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
         .fetch_optional(&state.db)
         .await?;
     let viewer_id = viewer.as_ref().map(|user| user.id);
+    // Whether the viewer may go into each 이웃's 섬, read with the rows: a public home, the viewer's own, or one kept to
+    // its 이웃 when the viewer is one (rebac's home facts). A home with grants of its own (`auth_tuples`) is asked of
+    // the checker, as every one once was, one query or two each.
     let rows = sqlx::query(&format!(
-        "SELECT u.id, u.username, u.display_name, h.emoji, h.visibility, {COLUMNS}
+        "SELECT u.id, u.username, u.display_name, h.emoji, h.visibility, {COLUMNS},
+           u.saju_share_consent_at IS NOT NULL AS shared,
+           (h.visibility = 'public' OR u.id IS NOT DISTINCT FROM $2
+             OR (h.visibility = 'ilchon' AND EXISTS (SELECT 1 FROM ilchons v WHERE v.user_id = $2 AND v.friend_id = u.id)))
+             AS open,
+           EXISTS (SELECT 1 FROM auth_tuples t WHERE t.object_type = 'home' AND t.object_id = u.id::text) AS granted
          FROM ilchons mine
          JOIN ilchons theirs ON theirs.user_id = mine.friend_id AND theirs.friend_id = mine.user_id
          JOIN users u ON u.id = mine.friend_id
@@ -96,15 +104,21 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
     let mut placed = vec![profile.owner_id];
     for row in &rows {
         let owner: Uuid = row.get("id");
-        let mut checker = Checker::new(&state.db);
-        checker.know_home(owner, row.get::<String, _>("visibility").as_str());
-        let visitable = checker.check(subject, &Object::home(owner), "viewer").await?;
-        village.push(json!({"user": card(row, ""), "saju": home(row), "neighbour": true, "visitable": visitable}));
+        let visitable = row.get::<bool, _>("open")
+            || (viewer_id.is_some() && row.get::<bool, _>("granted") && {
+                let mut checker = Checker::new(&state.db);
+                checker.know_home(owner, row.get::<String, _>("visibility").as_str());
+                checker.check(subject, &Object::home(owner), "viewer").await?
+            });
+        village.push(json!({
+            "user": card(row, ""), "saju": home(row), "neighbour": true, "visitable": visitable,
+            "shared": row.get::<bool, _>("shared"),
+        }));
         placed.push(owner);
     }
     if village.len() < VILLAGE_HOMES {
         let others = sqlx::query(&format!(
-            "SELECT u.id, u.username, u.display_name, h.emoji, {COLUMNS}
+            "SELECT u.id, u.username, u.display_name, h.emoji, {COLUMNS}, u.saju_share_consent_at IS NOT NULL AS shared
              FROM saju_homes s JOIN users u ON u.id = s.owner_id JOIN homes h ON h.owner_id = u.id
              WHERE h.visibility = 'public' AND NOT (u.id = ANY($1))
              ORDER BY s.updated_at DESC, u.id LIMIT $2"
@@ -113,11 +127,12 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
         .bind((VILLAGE_HOMES - village.len()) as i64)
         .fetch_all(&state.db)
         .await?;
-        village.extend(
-            others
-                .iter()
-                .map(|row| json!({"user": card(row, ""), "saju": home(row), "neighbour": false, "visitable": true})),
-        );
+        village.extend(others.iter().map(|row| {
+            json!({
+                "user": card(row, ""), "saju": home(row), "neighbour": false, "visitable": true,
+                "shared": row.get::<bool, _>("shared"),
+            })
+        }));
     }
     Ok(Json(json!({"saju": own.as_ref().map(home), "village": village})))
 }

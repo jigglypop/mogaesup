@@ -3,7 +3,7 @@ import { act, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { HomeView, HomeVisibility, IlchonRequest, IlchonStatus, User } from '../../api/types';
+import type { HomeView, HomeVisibility, IlchonRequest, IlchonStatus, ProfileChanges, User } from '../../api/types';
 import { mount } from '../../__tests__/mount';
 import type { Neighbors } from '../../minihome/Ilchons';
 import { compatOf } from '../compat';
@@ -66,6 +66,7 @@ describe('집 이야기', () => {
   const noBridge: Bridge = { compat: null, canShow: false, shown: false, onShow: () => {} };
   const compat = compatOf(profile('sol'), profile('noeul'));
   const visibility = vi.fn(async (_visibility: HomeVisibility) => undefined);
+  const saveProfile = vi.fn(async (_changes: ProfileChanges) => undefined);
   const panel = (props: { isOwner?: boolean; viewer?: User | null; built?: boolean; neighbors?: Neighbors; bridge?: Bridge; open?: HomeVisibility; consent?: boolean } = {}) => (
     <HomePanel
       view={{ ...view(props.isOwner ?? false), profile: { ...view(false).profile, visibility: props.open ?? 'public', ...(props.consent === false ? { sajuShareConsent: false } : {}) } }}
@@ -74,6 +75,7 @@ describe('집 이야기', () => {
       neighbors={props.neighbors ?? neighbors()}
       bridge={props.bridge ?? noBridge}
       onVisibility={visibility}
+      onProfile={saveProfile}
     />
   );
 
@@ -132,16 +134,22 @@ describe('집 이야기', () => {
     await guest.unmount();
   });
 
-  it('사주 공개는 동의한 뒤에 보낸다', async () => {
+  it('문은 바로 열고, 사주를 보여 줄지는 따로 동의하고 거둔다', async () => {
     const own = await inRouter(panel({ isOwner: true, viewer: owner, open: 'private', consent: false }));
     const doors = () => [...own.container.querySelectorAll<HTMLButtonElement>('[aria-label="공개 범위"] [role="radiogroup"] button')];
     await act(async () => doors().find((door) => door.textContent === '모두')!.click());
-    expect(visibility).not.toHaveBeenCalled();
+    expect(visibility).toHaveBeenCalledExactlyOnceWith('public');
     const box = own.container.querySelector<HTMLInputElement>('[aria-label="공개 범위"] input[type="checkbox"]')!;
+    expect(box.checked).toBe(false);
     await act(async () => box.click());
-    await act(async () => own.container.querySelector<HTMLButtonElement>('[aria-label="공개 범위"] [type="submit"]')!.click());
-    expect(visibility).toHaveBeenCalledExactlyOnceWith('public', true);
+    expect(saveProfile).toHaveBeenCalledExactlyOnceWith({ sajuShareConsent: true });
     await own.unmount();
+    const agreed = await inRouter(panel({ isOwner: true, viewer: owner, open: 'public' }));
+    const again = agreed.container.querySelector<HTMLInputElement>('[aria-label="공개 범위"] input[type="checkbox"]')!;
+    expect(again.checked).toBe(true);
+    await act(async () => again.click());
+    expect(saveProfile).toHaveBeenLastCalledWith({ sajuShareConsent: false });
+    await agreed.unmount();
   });
 
   it('이웃이 아닌 손님에게는 이웃 신청이 있고, 궁합은 아직 말하지 않는다', async () => {
@@ -159,7 +167,7 @@ describe('집 이야기', () => {
     const { container, rerender, unmount } = await inRouter(panel({ viewer: sol, neighbors: joined, bridge: bridge(false) }));
     expect(container.querySelector('.mg-saju-bridge')?.classList.contains('is-built')).toBe(true);
     expect(container.querySelector('.mg-saju-bridge-line')?.textContent).toBe('목생화(木生火) 시너지! 서로 영감을 주는 사이');
-    expect(texts(container, '.mg-saju-bridge .mg-chip')).toEqual(['집 목생화(木生火)']);
+    expect(texts(container, '.mg-saju-bridge .mg-chip')).toEqual(['일간 목생화(木生火)']);
     expect(texts(container, '.mg-state span')).toEqual(['이웃 · 나의 옆집']);
     const toggle = () => container.querySelector<HTMLButtonElement>('.mg-saju-bridge button[aria-pressed]')!;
     expect(toggle().textContent?.trim()).toBe('다리 보기');

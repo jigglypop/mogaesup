@@ -77,18 +77,29 @@ function act(giver: Element, verb: '生' | '克', taker: Element): string {
 }
 
 /**
- * 궁합: how the viewer's home stands to another. The two day pillars are looked at for a joining (천간합, 육합), then the
- * two homes' elements for 상생; whichever comes first gives the one line, and every tie found is listed.
+ * 궁합: how the viewer's home stands to another, read 일간 to 일간. The two day masters are looked at for a joining
+ * (천간합), the two day branches for 육합; then the day masters' own elements for 상생, 비화 or 상극, and the day branches
+ * for 반합 and 충. Whichever comes first gives the one line, and every tie found is listed. The bridge's ends stay the
+ * two homes' elements (each house is built in its own).
  */
 export function compatOf(mine: Profile, theirs: Profile): Compat {
   const from = mine.balance.dominant;
   const to = theirs.balance.dominant;
   const myDay = mine.reading.day;
   const theirDay = theirs.reading.day;
+  const mySelf = mine.dayMaster.element;
+  const theirSelf = theirs.dayMaster.element;
   const notes: string[] = [];
 
   const stemUnion = pairIn(Object.keys(STEM_UNIONS), myDay.stem, theirDay.stem);
-  if (stemUnion) notes.push(`일간 ${koPair(stemUnion)}합(${stemUnion}合)`);
+  const relation = relationOf(mySelf, theirSelf);
+  const [giver, taker] = relation === 'generates' || relation === 'controls' ? [mySelf, theirSelf] : [theirSelf, mySelf];
+  const days =
+    relation === 'same'
+      ? `같은 ${elementLabel(mySelf)}`
+      : act(giver, relation === 'generates' || relation === 'generated' ? '生' : '克', taker);
+  // A joined pair of day masters is read as joined, not by how their elements stand.
+  notes.push(stemUnion ? `일간 ${koPair(stemUnion)}합(${stemUnion}合)` : `일간 ${days}`);
 
   const branchUnion = pairIn(BRANCH_UNIONS, myDay.branch, theirDay.branch);
   const halfTriad = halfTriadOf(myDay.branch, theirDay.branch);
@@ -96,14 +107,6 @@ export function compatOf(mine: Profile, theirs: Profile): Compat {
   if (branchUnion) notes.push(`일지 ${koPair(branchUnion)}합(${branchUnion}合)`);
   else if (halfTriad) notes.push(`일지 ${koPair(halfTriad)} 반합(${halfTriad})`);
   else if (clash) notes.push(`일지 ${koPair(clash)}충(${clash}沖)`);
-
-  const relation = relationOf(from, to);
-  const [giver, taker] = relation === 'generates' || relation === 'controls' ? [from, to] : [to, from];
-  const houses =
-    relation === 'same'
-      ? `같은 ${elementLabel(from)}`
-      : act(giver, relation === 'generates' || relation === 'generated' ? '生' : '克', taker);
-  notes.push(`집 ${houses}`);
 
   if (mine.balance.lacking.includes(to)) notes.push(`내게 없는 ${asObject(to)} 채워 주는 집`);
   else if (theirs.balance.lacking.includes(from)) notes.push(`내 ${asSubject(from)} 채워 주는 집`);
@@ -117,16 +120,16 @@ export function compatOf(mine: Profile, theirs: Profile): Compat {
     headline = `${koPair(branchUnion)}합(${branchUnion}合) 단짝! 곁에 있으면 마음이 편안한 사이`;
     tone = 'union';
   } else if (relation === 'generates' || relation === 'generated') {
-    headline = `${houses} 시너지! ${FLOWS[giver]}`;
+    headline = `${days} 시너지! ${FLOWS[giver]}`;
     tone = 'flow';
   } else if (relation === 'same') {
-    headline = `${houses} 기운! ${SAMES[from]}`;
+    headline = `${days} 기운! ${SAMES[mySelf]}`;
     tone = 'same';
   } else if (halfTriad) {
     headline = `${koPair(halfTriad)}(${halfTriad}) 반합! 같은 꿈을 꾸는 사이`;
     tone = 'union';
   } else {
-    headline = `${houses} 자극! ${SPARKS[giver]}`;
+    headline = `${days} 자극! ${SPARKS[giver]}`;
     tone = 'spark';
   }
   return { headline, tone, notes, from, to };

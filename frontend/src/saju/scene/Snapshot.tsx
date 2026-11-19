@@ -57,7 +57,7 @@ export function Snapshot({ profile, decor, onShot }: { profile: Profile; decor: 
     <div className="mg-saju-snapshot" style={{ width: PICTURE_SIZE, height: PICTURE_SIZE }} aria-hidden="true">
       <Canvas orthographic flat shadows={SHADOWS} dpr={1} frameloop={warm ? 'always' : 'never'} gl={createRenderer} camera={{ near: 1, far: 400, position: [60, 60, 60] }}>
         <Scene frame={FRAME} snap islands={ISLAND} mood={mood} quality="high" still onWarm={warmed} onReady={readied}>
-          <HomeEstate profile={composition.profile} origin={ORIGIN} terrain={composition.decor.terrain ?? 'default'} />
+          <HomeEstate profile={composition.profile} origin={ORIGIN} terrain={composition.decor.terrain ?? 'default'} {...(composition.decor.tiles ? { tiles: composition.decor.tiles } : {})} />
           <PhotoAssets.Provider value={assets}>
             <DecorLayer {...composition.decor} selectedId={null} />
           </PhotoAssets.Provider>

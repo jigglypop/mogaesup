@@ -4,10 +4,11 @@ import { Canvas, useFrame, useThree, type Renderer } from '@react-three/fiber';
 import { AdditiveBlending, CylinderGeometry, Matrix4, MeshBasicMaterial, PCFShadowMap, Plane, Raycaster, RingGeometry, Vector2, Vector3, type BufferGeometry, type Camera, type InstancedBufferGeometry, type Mesh, type Object3D, type Scene as World } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 
-import type { Terrain } from '../../api/types';
+import type { Terrain, TerrainCell } from '../../api/types';
 import { Icon } from '../../ui/icons';
 import type { Compat } from '../compat';
 import type { Profile } from '../profile';
+import { rectOf, type CellRect } from '../tiles';
 import { Bridge } from './Bridge';
 import { Built, LampPool, Wind } from './Built';
 import { FlagIsland, type StageFlag } from './Flag';
@@ -15,6 +16,7 @@ import { FLAG_ISLAND } from './flagIsland';
 import { AZIMUTH, clampTilt, clampZoom, dragShift, ELEVATION, NO_INSET, wheelZoom, zoomShift, type Frame, type Inset, type Spot } from './frames';
 import { loadDogModel, type DogModel } from './dogModel';
 import { landingsOf } from './estateHome';
+import { CellCursor } from './CellCursor';
 import { HomeEstate } from './HomeEstate';
 import type { GuestNote } from './GuestPlaques';
 import { Guardian } from './Guardian';
@@ -66,6 +68,8 @@ const KEY_ZOOM = 1.25;
  * frame's own size), or by this much closer again when it is that close already.
  */
 const CLOSE_IN = 2.6;
+/** How close the camera comes, the first time on an island the viewer sends their walker somewhere, to follow it. */
+const FOLLOW_ZOOM = 2.2;
 const CLOSER = 1.5;
 /** A pressed point this far above the ground (metres) is something standing on it, not the lawn. */
 const STANDING = 0.14;
@@ -208,7 +212,7 @@ const DRUM = new CylinderGeometry(1, 1, 1, 48);
  * A home's island in its place. The water about it lights up under the pointer when it can be visited. Memoized: the
  * page around the canvas renders again for every line in a guestbook, and a home is a great deal to go over.
  */
-const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, terrain = 'default', landings, notes, onBoard, guardianAway = false }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; terrain?: Terrain; landings?: readonly number[]; notes?: readonly GuestNote[]; onBoard?: (() => void) | undefined; guardianAway?: boolean }) {
+const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, terrain = 'default', tiles, landings, notes, onBoard, guardianAway = false }: { home: StageHome; kind: IslandKind; turn: number; focused: boolean; lush: boolean; onVisit: ((id: string) => void) | undefined; terrain?: Terrain; tiles?: readonly TerrainCell[]; landings?: readonly number[]; notes?: readonly GuestNote[]; onBoard?: (() => void) | undefined; guardianAway?: boolean }) {
   const [hovered, setHovered] = useState(false);
   const canvas = useThree((state) => state.gl.domElement);
   const glow = useMemo(() => new MeshBasicMaterial({ color: '#ffe2b0', transparent: true, opacity: 0, depthWrite: false, blending: AdditiveBlending }), []);
@@ -255,7 +259,7 @@ const Plot = memo(function Plot({ home, kind, turn, focused, lush, onVisit, terr
       <mesh geometry={HALO} material={glow} position={[0, WATER_LEVEL + 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]} scale={reach / ISLANDS.neighbour.reach} renderOrder={1} />
       {home.profile ? (
         kind === 'home' ? (
-          <HomeEstate profile={home.profile} origin={origin} terrain={terrain} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} guardianAway={guardianAway} />
+          <HomeEstate profile={home.profile} origin={origin} terrain={terrain} {...(tiles ? { tiles } : {})} playful={focused} lush={lush} turn={turn} bridges={landings} {...(notes ? { notes } : {})} onBoard={onBoard} guardianAway={guardianAway} />
         ) : (
           <Diorama profile={home.profile} origin={origin} playful={focused} lush={lush} turn={turn} kind={kind} />
         )
@@ -558,6 +562,35 @@ class Failsafe extends Component<{ fallback: ReactNode; children: ReactNode }, {
 
 const calm = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+/**
+ * Keeps the viewer's walker where the camera looks while `following` holds: each frame the point the camera looks at
+ * is moved to it (the camera eases after it as it eases after a hand), as far as the village's islands go.
+ */
+function Follow({ at, following, gaze, aim, bounds, touched }: {
+  at: RefObject<(() => readonly [number, number, number] | null) | undefined>;
+  following: RefObject<boolean>;
+  gaze: RefObject<Gaze>;
+  aim: RefObject<readonly [number, number, number]>;
+  bounds: RefObject<{ minX: number; maxX: number; minZ: number; maxZ: number }>;
+  touched: RefObject<number>;
+}) {
+  useFrame(() => {
+    if (!following.current) return;
+    const spot = at.current?.();
+    if (!spot) return;
+    const [x, , z] = aim.current;
+    const { minX, maxX, minZ, maxZ } = bounds.current;
+    const pan = gaze.current.pan;
+    const nextX = Math.min(maxX - x, Math.max(minX - x, spot[0] - x));
+    const nextZ = Math.min(maxZ - z, Math.max(minZ - z, spot[2] - z));
+    if (Math.abs(nextX - pan.x) < 1e-4 && Math.abs(nextZ - pan.z) < 1e-4) return;
+    pan.x = nextX;
+    pan.z = nextZ;
+    touched.current = performance.now();
+  });
+  return null;
+}
+
 /** What the page around the canvas can ask of it. */
 export type StageHandle = {
   /** Zooms in (a factor above 1) or out (below 1), within what the canvas allows. */
@@ -608,11 +641,18 @@ type StageProps = {
   /** What its owner has placed on the island at the village's middle (see Decor), in its own measure. */
   decor?: ReactNode;
   terrain?: Terrain;
+  /** The cells of the island at the village's middle its owner painted another terrain. */
+  tiles?: readonly TerrainCell[];
   /**
    * Told of a press on the island at the village's middle, where on its ground, while something is being placed on it:
    * a press then places, and visits nothing.
    */
   onPlace?: ((spot: Spot) => void) | undefined;
+  /**
+   * While a terrain is being laid: a press on the island at the village's middle, or a drag across it, picks the cells
+   * of a rectangle (shown hatched under the pointer), and letting go tells them (those on the island's firm ground).
+   */
+  onPaint?: ((cells: readonly { x: number; z: number }[]) => void) | undefined;
   onSelectItem?: (id: string) => void;
   onOpenPhoto?: (() => void) | undefined;
   /** The guestbook's lines, hung on the page's own island's 기념 방명록; pressing it is told to `onBoard`. */
@@ -620,6 +660,12 @@ type StageProps = {
   onBoard?: (() => void) | undefined;
   /** Told of a press on the bare ground of the island at the village's middle, where (the viewer's dog walks there). */
   onWalk?: ((spot: Spot, twice: boolean) => void) | undefined;
+  /**
+   * Where the viewer's own walker is, on the island at the village's middle, read every frame: the camera follows it
+   * (from the first frame it is there, and again after each press that sends it somewhere) until the viewer moves the
+   * picture themselves.
+   */
+  follow?: (() => readonly [number, number, number] | null) | undefined;
   /** The page's own island's guardian is away: its owner walks the island as that dog. */
   guardianAway?: boolean;
   /** Laid over the picture, under the labels: what the scene places over it (the walkers' names and clouds). */
@@ -657,24 +703,27 @@ function groundAt(camera: Camera | null, box: DOMRect, x: number, y: number, hei
 
 /**
  * The village's canvas. It draws while it is on screen, and holds still for a viewer who asked for less motion. A drag,
- * or a finger, moves what the camera looks at about the village, as a map is moved; a drag with the right button or
- * with shift held turns the camera about what it shows all the way round and tilts it between a low look across the
- * water and one nearly straight down, as two fingers turning about each other turn it and two fingers moved up or down
- * together tilt it. The wheel (toward the pointer), two fingers pinching, or the page's own buttons (through `ref`) zoom
- * it in and out. The keys move it too: W A S D or the arrows forward, back and to either side as it faces, Q and E turn
+ * or a finger, turns the camera about what it shows all the way round and tilts it between a low look across the water
+ * and one nearly straight down, as two fingers turning about each other turn it and two fingers moved up or down
+ * together tilt it; a drag with the right button or with shift held, or two fingers moved together, moves what the
+ * camera looks at about the village, as a map is moved. The wheel (toward the pointer), two fingers pinching, or the
+ * page's own buttons (through `ref`) zoom it in and out. With a walker of the viewer's own (`follow`) the camera keeps
+ * it in the middle, turning and zooming about it, until the picture is moved by hand. The keys move it too: W A S D or the arrows forward, back and to either side as it faces, Q and E turn
  * it, R and F (or Page Up and Page Down) raise and lower it, + and - zoom, Home puts it back. A press on something
  * standing on the island in view brings the camera to it and in close; a double press on the water puts it back where
  * it began.
  */
-export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, terrain = 'default', onPlace, onSelectItem, onOpenPhoto, notes, onBoard, onWalk, overlay, guardianAway = false }: StageProps) {
+export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = null, focus, onVisit, pins, decor, terrain = 'default', tiles, onPlace, onPaint, onSelectItem, onOpenPhoto, notes, onBoard, onWalk, follow, overlay, guardianAway = false }: StageProps) {
   const box = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const gaze = useRef<Gaze>({ ...UNMOVED, pan: { ...UNMOVED.pan } });
   /** Whose village it is: the home at its middle. */
   const village = homes[0]?.id ?? '';
-  // Another village begins where the camera begins, as the first did.
+  // Another village begins where the camera begins, as the first did, following the viewer's walker again.
   useLayoutEffect(() => {
     gaze.current = { ...UNMOVED, pan: { ...UNMOVED.pan } };
+    following.current = true;
+    followedIn.current = false;
   }, [village]);
   const cover = useRef(inset);
   cover.current = inset;
@@ -698,6 +747,12 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
   };
   const aim = useRef(frame.target);
   aim.current = frame.target;
+  /** Whether the camera keeps the viewer's walker in the middle (see `follow`): until the picture is moved by hand. */
+  const following = useRef(true);
+  /** Whether the camera has come in to follow the walker on this island yet: once, and never again past a zoom by hand. */
+  const followedIn = useRef(false);
+  const followed = useRef(follow);
+  followed.current = follow;
   /** Moves the point the camera looks at by `shift`, as far as the village's islands go. */
   const moveBy = (shift: Spot) => {
     const { pan } = gaze.current;
@@ -725,6 +780,8 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     gaze.current.zoom = after;
     const element = box.current;
     if (x === undefined || y === undefined || !element || after === before) return;
+    // Following the viewer's walker, the picture is zoomed about it.
+    if (following.current && followed.current?.()) return;
     const [tx, ty, tz] = aim.current;
     const { pan } = gaze.current;
     const under = groundAt(eye.current, element.getBoundingClientRect(), x, y, ty);
@@ -740,6 +797,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
    * of `point` as the camera will face, so that `point` is in the middle of the view.
    */
   const closeIn = (point: Vector3, zoomAgain = true) => {
+    following.current = false;
     const want = gaze.current;
     const azimuth = AZIMUTH + want.turn;
     const [tx, ty, tz] = aim.current;
@@ -763,7 +821,18 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     }),
     [],
   );
-  const drag = useRef<{ pointer: number; x: number; y: number; fromX: number; fromY: number; kept: boolean; turn: boolean } | null>(null);
+  /** A press under way: `turn` when it turns the camera (else it moves the picture), `click` when letting go of it unmoved is a press on what is under it. */
+  const drag = useRef<{ pointer: number; x: number; y: number; fromX: number; fromY: number; kept: boolean; turn: boolean; click: boolean } | null>(null);
+  /** The cells a terrain is being laid over (see `onPaint`): from the press, and where the pointer is now. */
+  const painting = useRef<{ pointer: number; from: Spot } | null>(null);
+  const cursor = useRef<CellRect | null>(null);
+  /** The spot on the page's own island under (`x`, `y`) on the page, or null off its firm ground. */
+  const homeSpot = (x: number, y: number): Spot | null => {
+    const element = box.current;
+    const home = islands[0];
+    const spot = element && home ? groundAt(eye.current, element.getBoundingClientRect(), x, y, 0) : null;
+    return spot && home && over(home, spot) ? { x: spot.x - home.x, z: spot.z - home.z } : null;
+  };
   /** When the viewer's hand was last on the picture: the canvas draws at its moving pace from then (see Cadence). */
   const touched = useRef(0);
   /** Fingers on the picture, by pointer; two of them pinch and move, and how far apart they were and where their middle was is what the next move compares with. */
@@ -843,6 +912,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
       const across = (moves.has('right') ? 1 : 0) - (moves.has('left') ? 1 : 0);
       const zoom = eye.current && 'zoom' in eye.current ? (eye.current.zoom as number) : 0;
       if ((along || across) && zoom > 0) {
+        following.current = false;
         const { azimuth } = bearing();
         const metres = (KEY_MOVE * elapsed) / zoom / Math.hypot(along, across);
         // Forward is the way the camera faces, over the ground; right is across it.
@@ -903,9 +973,35 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     }
     const right = event.pointerType === 'mouse' && event.button === 2;
     if (event.pointerType === 'mouse' && event.button !== 0 && !right) return;
-    drag.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, fromX: event.clientX, fromY: event.clientY, kept: false, turn: right || event.shiftKey };
+    // Laying a terrain, the left button (or a finger) picks cells; the picture still moves with the right one or shift.
+    if (onPaint && !right && !event.shiftKey) {
+      const spot = homeSpot(event.clientX, event.clientY);
+      if (spot) {
+        painting.current = { pointer: event.pointerId, from: spot };
+        cursor.current = rectOf(spot, spot);
+        event.currentTarget.setPointerCapture(event.pointerId);
+        return;
+      }
+    }
+    // The left button (or a finger) turns the camera about what it shows; the right one, or shift, moves the picture.
+    drag.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, fromX: event.clientX, fromY: event.clientY, kept: false, turn: !(right || event.shiftKey), click: !(right || event.shiftKey) };
   };
   const release = (event: PointerEvent<HTMLDivElement>) => {
+    const picked = painting.current;
+    if (picked && picked.pointer === event.pointerId) {
+      painting.current = null;
+      const rect = cursor.current;
+      const home = islands[0];
+      if (event.type === 'pointerup' && rect && home && onPaint) {
+        const cells: { x: number; z: number }[] = [];
+        for (let z = rect.z0; z <= rect.z1; z++) {
+          for (let x = rect.x0; x <= rect.x1; x++) if (over(home, { x: home.x + x + 0.5, z: home.z + z + 0.5 })) cells.push({ x, z });
+        }
+        onPaint(cells);
+      }
+      cursor.current = null;
+      return;
+    }
     touches.current.delete(event.pointerId);
     spread.current = apart();
     middle.current = centreOf();
@@ -915,7 +1011,7 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     drag.current = null;
     delete event.currentTarget.dataset['turning'];
     // A press that stayed a press, on the picture itself: two of them close together on the water undo the viewer's moves.
-    if (held.kept || held.turn || event.type !== 'pointerup' || !(event.target instanceof HTMLCanvasElement)) return;
+    if (held.kept || !held.click || event.type !== 'pointerup' || !(event.target instanceof HTMLCanvasElement)) return;
     // Placing something: a press on the home's island puts it there.
     if (onPlace) {
       const element = box.current;
@@ -942,18 +1038,26 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     pointer.set(((event.clientX - area.left) / area.width) * 2 - 1, -((event.clientY - area.top) / area.height) * 2 + 1);
     const first = standingAt(world.current, camera, pointer);
     if (onSelectItem || onOpenPhoto) {
+      // The owner, decorating, picks a placed thing (the board too); anyone else's press on the board opens its photo.
+      let board = false;
       for (let part: Object3D | null = first?.object ?? null; part; part = part.parent) {
-        if (onOpenPhoto && part.userData['photoBoard']) return onOpenPhoto();
         const id = part.userData['decorId'];
         if (onSelectItem && typeof id === 'string') return onSelectItem(id);
+        if (part.userData['photoBoard']) board = true;
       }
+      if (board && onOpenPhoto) return onOpenPhoto();
     }
     const hit = first?.point;
     if (!hit || hit.y <= STANDING) {
       // The bare ground of the page's own island: the viewer's dog walks there.
       const ground = groundAt(camera, area, event.clientX, event.clientY, 0);
       const home = islands[0];
-      if (onWalk && ground && home && over(home, ground)) onWalk(ground, twice);
+      if (onWalk && ground && home && over(home, ground)) {
+        following.current = true;
+        if (!followedIn.current && gaze.current.zoom < FOLLOW_ZOOM) gaze.current.zoom = FOLLOW_ZOOM;
+        followedIn.current = true;
+        onWalk(ground, twice);
+      }
       return;
     }
     const visited = homes.findIndex((home, index) => !!onVisit && !home.closed && home.id !== focus && over(islands[index]!, { x: hit.x, z: hit.z }));
@@ -966,6 +1070,19 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     if (event.target === event.currentTarget) release(event);
   };
   const pull = (event: PointerEvent<HTMLDivElement>) => {
+    if (onPaint) {
+      const picked = painting.current;
+      touched.current = performance.now();
+      if (picked && picked.pointer === event.pointerId) {
+        const spot = homeSpot(event.clientX, event.clientY);
+        if (spot) cursor.current = rectOf(picked.from, spot);
+        return;
+      }
+      if (!drag.current && touches.current.size === 0 && event.pointerType !== 'touch') {
+        const spot = homeSpot(event.clientX, event.clientY);
+        cursor.current = spot ? rectOf(spot, spot) : null;
+      }
+    }
     if (drag.current || touches.current.size > 0) touched.current = performance.now();
     const finger = touches.current.get(event.pointerId);
     if (finger) {
@@ -990,7 +1107,10 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
           // Moved up or down together, as far apart as they were: the camera is raised or lowered, as a drag with
           // shift does. Any other way, the picture moves with them.
           if (Math.abs(down) > Math.abs(right) * 1.5 && Math.abs(now - spread.current) < Math.abs(down) * 0.5) gaze.current.tilt = clampTilt(gaze.current.tilt + down * TILT_PER_PIXEL);
-          else if (zoom > 0) moveBy(dragShift(right, down, zoom, azimuth, tilt));
+          else if (zoom > 0 && Math.hypot(right, down) > 0.5) {
+            following.current = false;
+            moveBy(dragShift(right, down, zoom, azimuth, tilt));
+          }
         }
         if (spread.current > 0 && now > 0) zoomAt(now / spread.current, centre?.x, centre?.y);
         spread.current = now;
@@ -1013,7 +1133,10 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
     } else {
       const { azimuth, tilt } = bearing();
       const zoom = eye.current && 'zoom' in eye.current ? (eye.current.zoom as number) : 0;
-      if (zoom > 0) moveBy(dragShift(right, down, zoom, azimuth, tilt));
+      if (zoom > 0) {
+        following.current = false;
+        moveBy(dragShift(right, down, zoom, azimuth, tilt));
+      }
     }
     // Past a drag's length the picture keeps the pointer: it goes on moving outside the canvas, and letting go is no
     // click on an island or a label.
@@ -1107,13 +1230,15 @@ export function Stage({ ref, homes, bridges, frame, inset = NO_INSET, flag = nul
         >
           <Scene frame={frame} snap={still} gaze={gaze} inset={cover} islands={islands} mood={mood} quality={quality} still={still} onWarm={warmed} onReady={shown} village={village}>
             {homes.map((home, index) => (
-              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { terrain, landings, ...(notes ? { notes } : {}), onBoard, guardianAway } : {})} />
+              <Plot key={`${home.id}:${home.profile ? 'home' : 'lot'}`} home={home} kind={kindAt(index)} turn={index} focused={home.id === focus} lush={lush} onVisit={onVisit} {...(index === 0 ? { terrain, ...(tiles ? { tiles } : {}), landings, ...(notes ? { notes } : {}), onBoard, guardianAway } : {})} />
             ))}
             {bridges.map((bridge) => (
               <Bridge key={`${bridge.to.id}:${bridge.colors.join()}`} from={[bridge.from.x, bridge.from.z]} to={[bridge.to.x, bridge.to.z]} colors={bridge.colors} tone={bridge.compat.tone} />
             ))}
             {flag && <FlagIsland flag={flag} lush={lush} turn={homes.length} />}
             {decor}
+            {follow && <Follow at={followed} following={following} gaze={gaze} aim={aim} bounds={bounds} touched={touched} />}
+            {onPaint && <CellCursor rect={cursor} />}
             <Cadence running={inView && warm} still={still} touched={touched} />
             {!slow && <Pace onSlow={() => setSlow(true)} />}
             <Meter bar={meter} village={village} />
