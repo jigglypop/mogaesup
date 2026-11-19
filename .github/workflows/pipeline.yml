@@ -2,8 +2,9 @@ name: 점검과 배포
 
 # Pull requests and pushes to main run the checks of the parts they changed. A run on main that passes them deploys each
 # part that changed since that part was last deployed: server, then studio, then web (the web calls the studio's
-# endpoints through the server, so it goes last). Infrastructure (CloudFormation) is never applied here; the deploy role
-# cannot do it.
+# endpoints through the server, so it goes last). A studio deploy that fails does not hold the web back: the 섬 never
+# calls the studio, and only the studio screens can meet an older studio until it is deployed. Infrastructure
+# (CloudFormation) is never applied here; the deploy role cannot do it.
 on:
   pull_request:
   push:
@@ -482,8 +483,8 @@ jobs:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
       # The instance may power itself off after two idle hours (backend/infra/idle-stop.sh, unless IDLE_STOP=off), and
-      # this job does not start it. The studio then stays pending, and the web with it (it may call new studio
-      # endpoints): once the instance is on, the next run on main (a push, or a manual run of any target) deploys both.
+      # this job does not start it. The studio then stays pending (the web still goes out): once the instance is on, the
+      # next run on main (a push, or a manual run of any target) deploys it.
       - name: 스튜디오 인스턴스
         id: instance
         run: |
@@ -511,7 +512,8 @@ jobs:
 
   deploy-web:
     needs: [changes, gate, build-server, deploy-server, deploy-studio]
-    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.build-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-studio.result) && needs.changes.outputs.deploy_web == 'true' }}
+    # After the studio's attempt, whatever its result (see the top of this file).
+    if: ${{ !cancelled() && needs.gate.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.build-server.result) && contains(fromJSON('["success", "skipped"]'), needs.deploy-server.result) && needs.changes.outputs.deploy_web == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: ${{ vars.DEPLOY_ENVIRONMENT || '' }}
