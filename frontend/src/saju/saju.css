@@ -87,29 +87,30 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 /* The labels' layer cuts what leaves it and never scrolls: a label past its edge that took the keyboard's focus would
    otherwise pull the layer after it, and every label off its island. */
 .mg-saju-pins { position: absolute; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
-/* The people walking the island: a name over each, and what they say in a cloud above it. */
+/* The people walking the island: a name over each, and what they say in a glass balloon above it. */
 .mg-saju-walkers { position: absolute; inset: 0; overflow: hidden; overflow: clip; pointer-events: none; }
-.mg-saju-walker { position: absolute; top: 0; left: 0; display: grid; justify-items: center; gap: 4px; }
-.mg-saju-walker-name { padding: 2px 8px; border-radius: 999px; background: var(--mg-glass-strong); color: var(--mg-ink); font-size: 11px; font-weight: 750; white-space: nowrap; box-shadow: var(--mg-shadow-soft); }
-.mg-saju-said {
-  position: relative;
-  max-width: 220px;
-  margin: 0 0 6px;
-  padding: 8px 12px;
-  border-radius: 18px;
-  background: #fff;
-  color: #2b2724;
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 1.35;
-  word-break: keep-all;
-  overflow-wrap: anywhere;
-  box-shadow: var(--mg-shadow-soft);
-  animation: mg-saju-said-in 0.18s ease-out;
+.mg-saju-walker { position: absolute; top: 0; left: 0; display: grid; justify-items: center; gap: 5px; }
+.mg-saju-walker-name {
+  padding: 3px 9px 4px;
+  border: 1.5px solid color-mix(in srgb, var(--tag, var(--mg-ink)) 55%, var(--mg-ink));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tag, var(--mg-glass-strong)) 22%, var(--mg-glass-strong));
+  color: var(--tag-ink, var(--mg-ink));
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  box-shadow: 2px 2px 0 var(--mg-saju-edge);
 }
-.mg-saju-said::after { content: ''; position: absolute; left: 50%; bottom: -6px; width: 12px; height: 12px; background: #fff; transform: translateX(-50%) rotate(45deg); border-radius: 2px; }
-.mg-saju-said[hidden] { display: none; }
-@keyframes mg-saju-said-in { from { opacity: 0; transform: translateY(4px) scale(0.96); } to { opacity: 1; transform: none; } }
+.mg-saju-walker[data-own] .mg-saju-walker-name {
+  background: var(--el-soft, var(--mg-primary-soft));
+  color: var(--el-ink, var(--mg-primary-ink));
+  border-color: var(--el, var(--mg-primary));
+  box-shadow: 2px 2px 0 color-mix(in srgb, var(--el, var(--mg-primary)) 35%, var(--mg-saju-edge));
+}
+/* Balloons reuse minihome/balloons.css; keep them above the name without the layer's absolute placement. */
+.mg-saju-walker > .mg-balloon { position: relative; left: auto; top: auto; margin-bottom: 2px; }
+.mg-saju-walker > .mg-balloon[hidden] { display: none; }
 .mg-saju-elsewhere { display: flex; align-items: center; gap: 10px; margin: 0; padding: 6px 6px 6px 16px; border: 1px solid var(--mg-line); border-radius: 999px; background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); font-size: 13px; font-weight: 700; color: var(--mg-ink); }
 .mg-saju-talk-box { position: relative; flex: 1 1 260px; max-width: 520px; min-width: 0; }
 .mg-saju-talk { display: flex; align-items: center; gap: 2px; height: 48px; padding: 0 4px; border: 1px solid var(--mg-line); border-radius: 999px; background: var(--mg-glass-strong); box-shadow: var(--mg-shadow-soft); }
@@ -142,7 +143,6 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 .mg-saju-talk-log li span { color: var(--mg-ink); overflow-wrap: anywhere; }
 .mg-saju-talk-log li time { color: var(--mg-muted); font-size: 11px; }
 .mg-saju-talk-log li.is-note { display: block; color: var(--mg-muted); font-size: 12px; text-align: center; }
-.mg-saju-walker[data-own] .mg-saju-walker-name { background: var(--mg-primary); color: var(--mg-primary-ink); }
 @media (max-width: 520px) { .mg-saju-moves .mg-icon-btn { width: 30px; } }
 .mg-saju-talk input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--mg-ink); font: inherit; font-size: 14px; outline: none; }
 .mg-saju-pin {

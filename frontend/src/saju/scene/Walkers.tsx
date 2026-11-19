@@ -4,8 +4,16 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { AnimationMixer, DoubleSide, LoopOnce, LoopRepeat, MeshStandardMaterial, Vector3, type AnimationAction, type AnimationClip, type Group, type Object3D } from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
+import { balloonElement } from '../../minihome/balloons/dom';
+import { DEFAULT_BALLOON, PERSON_COLORS, balloonOf, readableInk } from '../../minihome/balloons/designs';
+import '../../minihome/balloons/balloons.css';
 import { SELF, type Action, type VillageRoom } from '../live';
 import { loadDogModel, type DogModel } from './dogModel';
+
+/** A stable name-tag fill for someone who is not the viewer, from the same six colours the live room uses. */
+function tagColor(id: string): string {
+  return PERSON_COLORS[[...id].reduce((sum, char) => sum + char.charCodeAt(0), 0) % PERSON_COLORS.length]!;
+}
 
 // The people in a home's room, each as their own guardian dog about its island: the viewer's own, which walks (or, a
 // long way off, runs) where they press the ground, a flag showing where it is going, and jumps, waves, cheers and
@@ -215,7 +223,24 @@ const point = new Vector3();
  * Everyone in `room` on the island, the viewer's own dog (`own`) from `start`, as `control` asks (where to go, a move
  * to make); names and what they say placed in `layer`.
  */
-export function Walkers({ room, own, name, start, control, layer }: { room: VillageRoom; own: string | null; name: string; start: [number, number, number]; control: RefObject<WalkerControl>; layer: RefObject<HTMLDivElement | null> }) {
+export function Walkers({
+  room,
+  own,
+  name,
+  start,
+  control,
+  layer,
+  balloon = DEFAULT_BALLOON,
+}: {
+  room: VillageRoom;
+  own: string | null;
+  name: string;
+  start: [number, number, number];
+  control: RefObject<WalkerControl>;
+  layer: RefObject<HTMLDivElement | null>;
+  /** The viewer's balloon design (`HomeProfile.balloon`); others talk in glass until the room carries theirs. */
+  balloon?: string;
+}) {
   const camera = useThree((state) => state.camera);
   const size = useThree((state) => state.size);
   const mine = useRef({ position: [...start] as [number, number, number], facing: 0, action: 'idle' as Action, moves: 0, asked: 0, busy: 0 });
@@ -306,16 +331,18 @@ export function Walkers({ room, own, name, start, control, layer }: { room: Vill
       const y = (-point.y * 0.5 + 0.5) * size.height;
       element.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
       element.style.visibility = point.z > 1 ? 'hidden' : '';
-      const cloud = element.querySelector<HTMLElement>('.mg-saju-said');
+      const cloud = element.querySelector<HTMLElement>('.mg-balloon');
+      const words = cloud?.querySelector('b');
       const said = room.said.get(id);
-      if (cloud) {
+      if (cloud && words) {
         const showing = !!said && said.until > now;
-        if (showing && cloud.textContent !== said.text) cloud.textContent = said.text;
+        if (showing && words.textContent !== said.text) words.textContent = said.text;
         cloud.hidden = !showing;
       }
     }
   });
 
+  const design = balloonOf(balloon);
   return (
     <>
       {own && <Figure key={`self:${own}`} dog={own} action={() => mine.current.action} moves={() => mine.current.moves} holder={holderOf(SELF)} />}
@@ -326,14 +353,29 @@ export function Walkers({ room, own, name, start, control, layer }: { room: Vill
           <Figure key={`${id}:${walker.dog}`} dog={walker.dog} action={() => room.others.get(id)?.action ?? 'idle'} moves={() => room.others.get(id)?.moves ?? 0} holder={holderOf(id)} />
         ) : null;
       })}
-      <Labels layer={layer} ids={[...(own ? [SELF] : []), ...room.present]} names={(id) => (id === SELF ? name : (room.others.get(id)?.name ?? ''))} />
+      <Labels
+        layer={layer}
+        ids={[...(own ? [SELF] : []), ...room.present]}
+        names={(id) => (id === SELF ? name : (room.others.get(id)?.name ?? ''))}
+        design={design}
+      />
     </>
   );
 }
 
-/** Keeps one label (a name and a cloud) in `layer` for each of `ids`. */
-function Labels({ layer, ids, names }: { layer: RefObject<HTMLDivElement | null>; ids: string[]; names: (id: string) => string }) {
-  const key = ids.join('|');
+/** Keeps one label (a name and a balloon) in `layer` for each of `ids`. */
+function Labels({
+  layer,
+  ids,
+  names,
+  design,
+}: {
+  layer: RefObject<HTMLDivElement | null>;
+  ids: string[];
+  names: (id: string) => string;
+  design: string;
+}) {
+  const key = `${ids.join('|')}|${design}`;
   useEffect(() => {
     const host = layer.current;
     if (!host) return;
@@ -346,16 +388,27 @@ function Labels({ layer, ids, names }: { layer: RefObject<HTMLDivElement | null>
         element.className = 'mg-saju-walker';
         element.dataset['walker'] = id;
         element.style.visibility = 'hidden';
-        const cloud = document.createElement('p');
-        cloud.className = 'mg-saju-said';
+        const cloud = balloonElement('', id === SELF ? design : DEFAULT_BALLOON);
         cloud.hidden = true;
         const tag = document.createElement('span');
         tag.className = 'mg-saju-walker-name';
         element.append(cloud, tag);
         host.append(element);
       }
-      element.querySelector('.mg-saju-walker-name')!.textContent = names(id);
-      if (id === SELF) element.dataset['own'] = '';
+      const tag = element.querySelector<HTMLElement>('.mg-saju-walker-name')!;
+      tag.textContent = names(id);
+      if (id === SELF) {
+        element.dataset['own'] = '';
+        tag.style.removeProperty('--tag');
+        tag.style.removeProperty('--tag-ink');
+      } else {
+        delete element.dataset['own'];
+        const fill = tagColor(id);
+        tag.style.setProperty('--tag', fill);
+        tag.style.setProperty('--tag-ink', readableInk(fill));
+      }
+      const cloud = element.querySelector<HTMLElement>('.mg-balloon');
+      if (cloud) cloud.dataset['design'] = id === SELF ? design : DEFAULT_BALLOON;
     }
   }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => layer.current?.replaceChildren(), [layer]);

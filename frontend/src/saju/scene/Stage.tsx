@@ -513,8 +513,8 @@ function Cadence({ running, still, touched }: { running: boolean; still: boolean
  * costly parts of the look are given up: at the moving pace, under 33 frames a second.
  */
 const SLOW_EXCESS_MS = 30 - 1000 / 60;
-const SETTLE_FRAMES = 90;
-const MEASURED_FRAMES = 120;
+const SETTLE_FRAMES = 45;
+const MEASURED_FRAMES = 90;
 
 /**
  * Watches how long frames take once the scene shows, against the pace they are drawn at, and says so once if they take
@@ -564,20 +564,30 @@ export type StageHandle = {
   focusItem: (spot: Spot) => void;
 };
 
+/** Solid meshes under a world, kept for a short while so a press does not walk the whole tree again. */
+const solids = new WeakMap<World, { at: number; list: Object3D[] }>();
+const SOLIDS_MS = 800;
+
 /**
  * The first solid mesh under the pointer, including its position and parent object. Shader-scattered leaves and
  * grass, the lake, and hidden objects are passed through.
  */
 function standingAt(world: World, camera: Camera, point: Vector2) {
   ray.setFromCamera(point, camera);
-  const solid: Object3D[] = [];
-  world.traverseVisible((object) => {
-    const mesh = object as Mesh<BufferGeometry>;
-    if (!mesh.isMesh || mesh.name === 'lake') return;
-    if ((mesh.geometry as InstancedBufferGeometry).isInstancedBufferGeometry) return;
-    solid.push(mesh);
-  });
-  return ray.intersectObjects(solid, false)[0];
+  const now = performance.now();
+  let cached = solids.get(world);
+  if (!cached || now - cached.at > SOLIDS_MS) {
+    const list: Object3D[] = [];
+    world.traverseVisible((object) => {
+      const mesh = object as Mesh<BufferGeometry>;
+      if (!mesh.isMesh || mesh.name === 'lake') return;
+      if ((mesh.geometry as InstancedBufferGeometry).isInstancedBufferGeometry) return;
+      list.push(mesh);
+    });
+    cached = { at: now, list };
+    solids.set(world, cached);
+  }
+  return ray.intersectObjects(cached.list, false)[0];
 }
 
 type StageProps = {

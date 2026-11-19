@@ -533,7 +533,17 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           decor={
             <>
               {islandDecor && <DecorLayer {...islandDecor} selectedId={selectedId} />}
-              {walking && <Walkers room={room} own={myDog} name={viewer?.displayName ?? ''} start={start} control={control} layer={talkLayer} />}
+              {walking && (
+                <Walkers
+                  room={room}
+                  own={myDog}
+                  name={viewer?.displayName ?? ''}
+                  start={start}
+                  control={control}
+                  layer={talkLayer}
+                  {...(view.isOwner && view.profile.balloon ? { balloon: view.profile.balloon } : {})}
+                />
+              )}
             </>
           }
           pins={

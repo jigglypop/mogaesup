@@ -152,7 +152,8 @@ export function Ocean({ mood, sky, islands, quality }: { mood: Mood; sky: Textur
 
     const time = still ? STILL_AT : clock.elapsedTime;
     surface.time.value = time;
-    fft?.update(gl, time);
+    // A held-still lake keeps the cascades painted at STILL_AT (see the effect above); recomputing them every frame does nothing visible.
+    if (!still) fft?.update(gl, time);
 
     // Schlick's Fresnel for flat water seen from the camera's slant: whether the islands' reflection shows at all.
     const flat = 0.02 + 0.98 * (1 + ahead.y) ** 5;

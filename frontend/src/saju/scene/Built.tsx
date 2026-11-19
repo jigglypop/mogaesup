@@ -371,12 +371,12 @@ const corner = new Vector3();
 const span = new Box3();
 
 /** Leaves drawn into the sun's shadows, against those drawn in the picture: a crown's shadow is as soft with fewer. */
-const SHADOW_LEAVES = 0.45;
+const SHADOW_LEAVES = 0.3;
 /**
  * The share of a crown's leaves drawn for a camera that shows `perMetre` pixels to a metre: all of them close up, a few
  * less far off, where a leaf is a pixel or two and the crown reads as one mass.
  */
-const leavesFor = (perMetre: number) => Math.min(1, Math.max(0.8, 0.8 + ((perMetre - 25) / 30) * 0.2));
+const leavesFor = (perMetre: number) => Math.min(1, Math.max(0.65, 0.65 + ((perMetre - 18) / 40) * 0.35));
 
 /** Scatterings whose copies are already in no order (see inNoOrder): the same numbers are handed to every island using them. */
 const shuffled = new WeakSet<Float32Array>();
