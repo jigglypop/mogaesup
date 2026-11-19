@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { ApiRequestError } from '../api/client';
 import { sajuApi } from '../api/endpoints';
-import type { DecorFlag, DecorItem, FlagDesign, SajuDecor, Terrain } from '../api/types';
+import type { DecorFlag, DecorItem, FlagDesign, SajuDecor, Terrain, TerrainCell } from '../api/types';
+import { paintCells } from './tiles';
 import type { Birth } from './engine';
 import { ziweiOf } from './ziwei';
 
@@ -50,6 +51,9 @@ export type Decor = {
   /** The owner places what the 섬 shows; a refusal is said in `problem` and the 섬 keeps what it had. */
   place: (items: DecorItem[]) => void;
   setTerrain: (terrain: Terrain) => void;
+  /** Paints one metre. `default` clears that cell back to the island's terrain. */
+  paintCell: (x: number, z: number, terrain: Terrain) => void;
+  reload: () => void;
   /** The owner takes down a flag given to the 섬. */
   drop: (flag: DecorFlag) => void;
   /** A visitor gives the 섬 their flag; resolves to what to say (null when it went up). */
@@ -135,6 +139,20 @@ export function useDecor(username: string, ownerId: string | null): Decor {
     if (!ownerId || !decor || terrain === (decor.terrain ?? 'default')) return;
     write({ ...decor, terrain }, () => sajuApi.setTerrain({ expectedOwnerId: ownerId, terrain }));
   }, [ownerId, decor, write]);
+  const paintCell = useCallback((x: number, z: number, terrain: Terrain) => {
+    if (!ownerId || !decor) return;
+    const tiles: TerrainCell[] = paintCells(decor.tiles ?? [], x, z, terrain);
+    write({ ...decor, tiles }, () => sajuApi.setTerrain({ expectedOwnerId: ownerId, tiles }));
+  }, [ownerId, decor, write]);
+  const reload = useCallback(() => {
+    sajuApi.decor(username).then(
+      (next) => {
+        session.saved = next;
+        if (session.live) setRead({ of: session, decor: next });
+      },
+      () => undefined,
+    );
+  }, [session, username]);
   const give = useCallback(async (design: FlagDesign) => {
     try {
       await sajuApi.giveFlag(username, design);
@@ -153,5 +171,5 @@ export function useDecor(username: string, ownerId: string | null): Decor {
       return { ...before, photoBoard: await sajuApi.uploadPhotoBoard(ownerId, image) };
     });
   }, [ownerId, decor, write]);
-  return { decor, place, setTerrain, drop, give, changePhoto, problem };
+  return { decor, place, setTerrain, paintCell, drop, give, changePhoto, reload, problem };
 }

@@ -1,4 +1,5 @@
 .mg-terrain-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.mg-terrain-fill { grid-column: 1 / -1; }
 .mg-terrain-tiles button { min-width: 0; overflow: hidden; border: 1px solid var(--mg-line); border-radius: 12px; padding: 0; background: var(--mg-surface); color: var(--mg-ink); cursor: pointer; font: inherit; text-align: left; }
 .mg-terrain-tiles button[aria-pressed="true"] { border-color: var(--mg-accent); box-shadow: inset 0 0 0 1px var(--mg-accent); }
 .mg-terrain-tiles img { display: block; width: 100%; height: auto; aspect-ratio: 12 / 7; object-fit: cover; }

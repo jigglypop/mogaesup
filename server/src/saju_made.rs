@@ -319,7 +319,10 @@ async fn picture(
 
 async fn view(state: &AppState, headers: &HeaderMap, name: &str, kind: Kind) -> ApiResult<Json<Value>> {
     let viewer = optional_user(state, headers).await?;
-    let (home, _) = visible_home(state, name, viewer.as_ref()).await?;
+    let (home, is_owner) = visible_home(state, name, viewer.as_ref()).await?;
+    if !is_owner && !home.saju_share_consent {
+        return Ok(Json(json!({"status": "none"})));
+    }
     let Some(birth) = home_birth(&state.db, home.owner_id, false).await? else {
         return Ok(Json(json!({"status": "none"})));
     };

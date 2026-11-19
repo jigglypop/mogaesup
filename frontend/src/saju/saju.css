@@ -391,6 +391,10 @@ html:has(.mg-saju-world), html:has(.mg-saju-world) body { overscroll-behavior: n
 .mg-saju-picture-view img { display: block; width: 100%; height: auto; aspect-ratio: 1; border: 2px solid var(--mg-ink); border-radius: 18px; background: var(--mg-surface); box-shadow: var(--mg-shadow); }
 .mg-saju-picture-close { position: absolute; top: 10px; right: 10px; background: var(--mg-glass-strong); }
 
+.mg-saju-consent { display: grid; gap: 8px; margin-top: 10px; }
+.mg-saju-consent p { margin: 0; }
+.mg-saju-consent label { display: flex; gap: 8px; align-items: center; }
+
 /* 깃발 섬: ten blocks, one an 이웃, lit in the home's colour. */
 .mg-saju-flag .mg-saju-gauge-bar i { height: 12px; }
 

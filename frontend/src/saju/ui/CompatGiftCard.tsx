@@ -12,11 +12,13 @@ import './compatGift.css';
 
 const pillars = (birth: Birth) => pillarsOf(readingOf(birth)).map(({ pillar }) => pillar.cn);
 
-export function CompatGiftCard({ giverId, giver, recipient, compat }: {
+export function CompatGiftCard({ giverId, giver, recipient, compat, leaving = false, onLeave }: {
   giverId: string;
   giver: Resident;
   recipient: Resident;
   compat: Compat;
+  leaving?: boolean;
+  onLeave?: () => void;
 }) {
   const [delivery, setDelivery] = useState<'ready' | 'sending' | 'sent'>('ready');
   const [problem, setProblem] = useState('');
@@ -59,6 +61,11 @@ export function CompatGiftCard({ giverId, giver, recipient, compat }: {
       ) : (
         <button className="mg-btn is-primary" disabled={delivery === 'sending'} onClick={() => void give()}>
           {delivery === 'sending' ? '보내는 중…' : `${recipient.name}님에게 선물하기`}
+        </button>
+      )}
+      {onLeave && (
+        <button className="mg-btn" type="button" aria-pressed={leaving} onClick={onLeave}>
+          {leaving ? '섬을 눌러 둘 자리를 고르세요' : '두고 갈 자리 고르기'}
         </button>
       )}
       {problem && <p className="mg-error" role="alert">{problem}</p>}

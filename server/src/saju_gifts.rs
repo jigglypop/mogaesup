@@ -48,6 +48,9 @@ struct GiftRequest {
     giver_pillars: Vec<String>,
     recipient_pillars: Vec<String>,
     design: Design,
+    /// Where on the host's island the keepsake is left, in metres from its middle. Both or neither.
+    x: Option<f64>,
+    z: Option<f64>,
 }
 
 struct Chart {
@@ -116,6 +119,11 @@ async fn give(
     if body.design.tone != tone || body.design.from != from || body.design.to != to {
         return Err(INVALID);
     }
+    let spot = match (body.x, body.z) {
+        (None, None) => None,
+        (Some(x), Some(z)) if x.is_finite() && z.is_finite() && x.abs() <= 40.0 && z.abs() <= 40.0 => Some((x, z)),
+        _ => return Err(INVALID),
+    };
     rate_limit(&state, format!("saju-gift:{}", giver.id), 30)?;
     let mut tx = state.db.begin().await?;
     let rows = sqlx::query("SELECT * FROM saju_homes WHERE owner_id IN ($1, $2) ORDER BY owner_id FOR SHARE")
@@ -135,9 +143,10 @@ async fn give(
         }
     }
     let pair_key = Sha256::digest(format!("{}|{}|{giver_key}|{recipient_key}", giver.id, home.owner_id));
-    sqlx::query(
+    let created: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO saju_gifts (id, owner_id, giver_id, pair_key, tone, from_element, to_element)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (owner_id, giver_id, pair_key) DO NOTHING",
+         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (owner_id, giver_id, pair_key) DO NOTHING
+         RETURNING id",
     )
     .bind(Uuid::new_v4())
     .bind(home.owner_id)
@@ -146,10 +155,54 @@ async fn give(
     .bind(tone)
     .bind(from)
     .bind(to)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let gift_id = match created {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar("SELECT id FROM saju_gifts WHERE owner_id = $1 AND giver_id = $2 AND pair_key = $3")
+                .bind(home.owner_id)
+                .bind(giver.id)
+                .bind(&pair_key[..])
+                .fetch_one(&mut *tx)
+                .await?
+        }
+    };
+    if let Some((x, z)) = spot {
+        leave_at(&mut tx, home.owner_id, gift_id, x, z).await?;
+    }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Puts the keepsake on the host's island at (`x`, `z`). A second leave of the same gift stays where it was.
+async fn leave_at(tx: &mut PgConnection, owner: Uuid, gift: Uuid, x: f64, z: f64) -> ApiResult<()> {
+    sqlx::query(
+        "INSERT INTO saju_decor (owner_id) SELECT owner_id FROM saju_homes WHERE owner_id = $1
+         ON CONFLICT (owner_id) DO NOTHING",
+    )
+    .bind(owner)
+    .execute(&mut *tx)
+    .await?;
+    let current: Value = sqlx::query_scalar("SELECT items FROM saju_decor WHERE owner_id = $1 FOR UPDATE")
+        .bind(owner)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut items = current.as_array().cloned().unwrap_or_default();
+    let reference = gift.to_string();
+    if items.iter().any(|item| item["kind"] == "gift" && item["ref"] == reference) {
+        return Ok(());
+    }
+    if items.len() >= 24 {
+        return Err(conflict("island_full", "섬이 가득 차서 그 자리에는 두지 못했어요."));
+    }
+    items.push(json!({"id": reference, "kind": "gift", "ref": reference, "x": x, "z": z, "turn": 0}));
+    sqlx::query("UPDATE saju_decor SET items = $2, updated_at = now() WHERE owner_id = $1")
+        .bind(owner)
+        .bind(json!(items))
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
 }
 
 /// Visitors see only keepsakes the owner has placed. A sender leaving does not take their keepsake away.

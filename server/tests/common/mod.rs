@@ -163,6 +163,12 @@ impl TestApp {
             )
             .await;
         assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        // Production accounts share a 사주 only after they agree. Tests that read one as a visitor start agreed.
+        sqlx::query("UPDATE users SET saju_share_consent_at = now() WHERE username = $1")
+            .bind(username)
+            .execute(&self.state.db)
+            .await
+            .unwrap();
         reply.cookie.expect("session cookie")
     }
 
@@ -170,12 +176,15 @@ impl TestApp {
     /// password hashing a sign-up takes): for tests whose API deadline is too short for that. Returns the cookie.
     pub async fn quick_member(&self, username: &str) -> String {
         let id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id, username, display_name, password_hash) VALUES ($1, $2, $2, 'not a hash')")
-            .bind(id)
-            .bind(username)
-            .execute(&self.state.db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, display_name, password_hash, saju_share_consent_at)
+             VALUES ($1, $2, $2, 'not a hash', now())",
+        )
+        .bind(id)
+        .bind(username)
+        .execute(&self.state.db)
+        .await
+        .unwrap();
         let token = uuid::Uuid::new_v4().simple().to_string().repeat(2);
         let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()));
         sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 day')")

@@ -66,9 +66,9 @@ describe('집 이야기', () => {
   const noBridge: Bridge = { compat: null, canShow: false, shown: false, onShow: () => {} };
   const compat = compatOf(profile('sol'), profile('noeul'));
   const visibility = vi.fn(async (_visibility: HomeVisibility) => undefined);
-  const panel = (props: { isOwner?: boolean; viewer?: User | null; built?: boolean; neighbors?: Neighbors; bridge?: Bridge; open?: HomeVisibility } = {}) => (
+  const panel = (props: { isOwner?: boolean; viewer?: User | null; built?: boolean; neighbors?: Neighbors; bridge?: Bridge; open?: HomeVisibility; consent?: boolean } = {}) => (
     <HomePanel
-      view={{ ...view(props.isOwner ?? false), profile: { ...view(false).profile, visibility: props.open ?? 'public' } }}
+      view={{ ...view(props.isOwner ?? false), profile: { ...view(false).profile, visibility: props.open ?? 'public', ...(props.consent === false ? { sajuShareConsent: false } : {}) } }}
       viewer={props.viewer ?? null}
       profile={props.built === false ? null : profile('noeul')}
       neighbors={props.neighbors ?? neighbors()}
@@ -130,6 +130,18 @@ describe('집 이야기', () => {
     const guest = await inRouter(panel({ viewer: sol }));
     expect(guest.container.querySelector('[aria-label="공개 범위"]')).toBeNull();
     await guest.unmount();
+  });
+
+  it('사주 공개는 동의한 뒤에 보낸다', async () => {
+    const own = await inRouter(panel({ isOwner: true, viewer: owner, open: 'private', consent: false }));
+    const doors = () => [...own.container.querySelectorAll<HTMLButtonElement>('[aria-label="공개 범위"] [role="radiogroup"] button')];
+    await act(async () => doors().find((door) => door.textContent === '모두')!.click());
+    expect(visibility).not.toHaveBeenCalled();
+    const box = own.container.querySelector<HTMLInputElement>('[aria-label="공개 범위"] input[type="checkbox"]')!;
+    await act(async () => box.click());
+    await act(async () => own.container.querySelector<HTMLButtonElement>('[aria-label="공개 범위"] [type="submit"]')!.click());
+    expect(visibility).toHaveBeenCalledExactlyOnceWith('public', true);
+    await own.unmount();
   });
 
   it('이웃이 아닌 손님에게는 이웃 신청이 있고, 궁합은 아직 말하지 않는다', async () => {

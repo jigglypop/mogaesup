@@ -5,10 +5,11 @@ import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { float, positionGeometry, sin, uv, vec3 } from 'three/tsl';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 
-import type { DecorFlag, DecorGift, DecorItem, FlagDesign, Terrain } from '../../api/types';
+import type { DecorFlag, DecorGift, DecorItem, FlagDesign, Terrain, TerrainCell } from '../../api/types';
 import type { PropRef } from '../decor';
 import { elementPiece } from '../elementalDecor';
 import { CompatGiftObject } from './CompatGiftObject';
+import { TerrainPatches } from './TerrainPatches';
 import type { BoardPicture } from '../ui/PhotoBoardCard';
 import { PhotoBoard } from './PhotoBoard';
 import { ElementOrnament } from './ElementOrnament';
@@ -205,10 +206,11 @@ function Character({ url, tint }: { url: string; tint?: string }) {
 }
 
 /** What is placed on the 섬 whose island stands at the village's middle. */
-export type IslandDecor = { items: readonly DecorItem[]; flags: readonly DecorFlag[]; gifts?: readonly DecorGift[]; terrain?: Terrain; own: FlagDesign | null; character: string | null; photoBoard?: BoardPicture | null };
-export function DecorLayer({ items, flags, gifts, own, character, selectedId, photoBoard }: IslandDecor & { selectedId: string | null }) {
+export type IslandDecor = { items: readonly DecorItem[]; flags: readonly DecorFlag[]; gifts?: readonly DecorGift[]; terrain?: Terrain; tiles?: readonly TerrainCell[]; own: FlagDesign | null; character: string | null; photoBoard?: BoardPicture | null };
+export function DecorLayer({ items, flags, gifts, tiles = [], own, character, selectedId, photoBoard }: IslandDecor & { selectedId: string | null }) {
   return (
     <group>
+      <TerrainPatches tiles={tiles} />
       {photoBoard && <PhotoBoard key={photoBoard.url} photo={photoBoard} />}
       {items.map((item) => {
         let shown = null;

@@ -185,8 +185,8 @@ fn flag(row: &PgRow) -> Value {
 /// the owner the newest [`OWNER_FLAGS`] given besides, the newest first (`flags`); and the owner's character when their
 /// look is ready with a model (`character`), for anyone else only once it is placed.
 pub(super) async fn shown(db: &mut PgConnection, owner: Uuid, own: bool) -> Result<Value, sqlx::Error> {
-    let (items, terrain, board): (Value, String, Option<Value>) = sqlx::query_as(
-        "SELECT COALESCE(d.items, '[]'::jsonb), COALESCE(d.terrain, 'default'),
+    let (items, terrain, tiles, board): (Value, String, Value, Option<Value>) = sqlx::query_as(
+        "SELECT COALESCE(d.items, '[]'::jsonb), COALESCE(d.terrain, 'default'), COALESCE(d.tiles, '[]'::jsonb),
           CASE WHEN b.version IS NOT NULL THEN jsonb_build_object('version', b.version, 'width', b.width, 'height', b.height) END
          FROM (SELECT $1::uuid AS owner_id) o LEFT JOIN saju_decor d USING (owner_id)
          LEFT JOIN saju_photo_boards b USING (owner_id)",
@@ -232,6 +232,9 @@ pub(super) async fn shown(db: &mut PgConnection, owner: Uuid, own: bool) -> Resu
         json!({"items": items, "flags": flags.iter().map(flag).collect::<Vec<_>>(), "character": character});
     if terrain != "default" {
         decor["terrain"] = json!(terrain);
+    }
+    if tiles.as_array().is_some_and(|cells| !cells.is_empty()) {
+        decor["tiles"] = tiles;
     }
     if !gifts.is_empty() {
         decor["gifts"] = json!(gifts);

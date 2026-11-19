@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 
 import { problemText } from '../../api/client';
-import type { HomeView, HomeVisibility, User } from '../../api/types';
+import type { HomeView, HomeVisibility, ProfileChanges, User } from '../../api/types';
 import { useSignInPath } from '../../auth/signIn';
 import { Guestbook } from '../../minihome/Guestbook';
 import { NeighborActions, type Neighbors } from '../../minihome/Ilchons';
@@ -13,6 +13,7 @@ import { houseName, type Profile } from '../profile';
 import { editPath } from '../routes';
 import { Gauge } from './Gauge';
 import { PixelIcon } from './PixelIcon';
+import { ProfileCard } from './ProfileCard';
 
 /** The bridge between the viewer's home and this one: 이웃 build it, and it stands between two built homes. */
 export type Bridge = {
@@ -76,28 +77,63 @@ const VISIBILITY: { value: HomeVisibility; label: string }[] = [
   { value: 'private', label: '나만' },
 ];
 
-/** Who may see the home, and with it the birth its chart is read from: the owner's to say. */
-function Doors({ visibility, onChange }: { visibility: HomeVisibility; onChange: (visibility: HomeVisibility) => Promise<void> }) {
+/** Who may see the home, and with it the birth its chart is read from: the owner's to say, after they agree. */
+function Doors({ visibility, consented, onChange }: {
+  visibility: HomeVisibility;
+  /** `false` until the owner agrees that visitors may see the birth, chart and reading. */
+  consented: boolean;
+  onChange: (visibility: HomeVisibility, consent?: boolean) => Promise<void>;
+}) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  const pick = (value: HomeVisibility) => {
-    if (busy || value === visibility) return;
+  const [pending, setPending] = useState<HomeVisibility | null>(null);
+  const [agreed, setAgreed] = useState(false);
+  const send = (value: HomeVisibility, consent = false) => {
+    if (busy) return;
     setBusy(true);
     setProblem('');
-    onChange(value)
+    (consent ? onChange(value, true) : onChange(value))
+      .then(() => setPending(null))
       .catch((error: unknown) => setProblem(problemText(error)))
       .finally(() => setBusy(false));
   };
+  const pick = (value: HomeVisibility) => {
+    if (busy || (value === visibility && (value === 'private' || consented))) return;
+    if (value !== 'private' && !consented) {
+      setPending(value);
+      setAgreed(false);
+      return;
+    }
+    send(value);
+  };
+  const asking = pending ?? (!consented && visibility !== 'private' ? visibility : null);
   return (
     <section className="mg-saju-card" aria-label="공개 범위">
       <h2 className="mg-heading">누가 놀러 올 수 있나요</h2>
       <div className="mg-tabs" role="radiogroup" aria-label="공개 범위">
         {VISIBILITY.map((option) => (
-          <button key={option.value} role="radio" aria-checked={visibility === option.value} disabled={busy} onClick={() => pick(option.value)}>
+          <button key={option.value} type="button" role="radio" aria-checked={visibility === option.value} disabled={busy} onClick={() => pick(option.value)}>
             {option.label}
           </button>
         ))}
       </div>
+      {asking && (
+        <form
+          className="mg-saju-consent"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (agreed) send(asking, true);
+          }}
+        >
+          <p>생년월일, 사주, 풀이를 방문자가 볼 수 있습니다.</p>
+          <label>
+            <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} /> 동의합니다
+          </label>
+          <button className="mg-btn is-small" type="submit" disabled={busy || !agreed}>
+            공개
+          </button>
+        </form>
+      )}
       {problem && (
         <p className="mg-error" role="alert">
           {problem}
@@ -112,7 +148,7 @@ function Doors({ visibility, onChange }: { visibility: HomeVisibility; onChange:
  * of its island, the balance of elements, the bridge to it and its guestbook. A home not built yet has its bridge and
  * guestbook all the same: a visitor finds them under the empty plot, the owner under the card that builds the home.
  */
-export function HomePanel({ view, viewer, profile, picture, decor, neighbors, bridge, onVisibility, onGuestbook }: {
+export function HomePanel({ view, viewer, profile, picture, decor, neighbors, bridge, onVisibility, onProfile, onGuestbook }: {
   view: HomeView;
   viewer: User | null;
   /** The home's chart, once its owner has built it. */
@@ -123,8 +159,10 @@ export function HomePanel({ view, viewer, profile, picture, decor, neighbors, br
   decor?: ReactNode;
   neighbors: Neighbors;
   bridge: Bridge;
-  /** Changes who may see the home: its owner's. */
-  onVisibility: (visibility: HomeVisibility) => Promise<void>;
+  /** Changes who may see the home: its owner's. `consent` records the agreement to share the chart. */
+  onVisibility: (visibility: HomeVisibility, consent?: boolean) => Promise<void>;
+  /** Saves the owner's profile. */
+  onProfile?: ((changes: ProfileChanges) => Promise<void>) | undefined;
   /** Told when a line is left in the guestbook or taken away (the island's 기념 방명록 hangs them). */
   onGuestbook?: (() => void) | undefined;
 }) {
@@ -174,7 +212,8 @@ export function HomePanel({ view, viewer, profile, picture, decor, neighbors, br
           </div>
         </section>
       )}
-      {view.isOwner && <Doors visibility={view.profile.visibility} onChange={onVisibility} />}
+      {view.isOwner && onProfile && <ProfileCard profile={view.profile} onSave={onProfile} />}
+      {view.isOwner && <Doors visibility={view.profile.visibility} consented={view.profile.sajuShareConsent !== false} onChange={onVisibility} />}
       <BridgeCard view={view} viewer={viewer} neighbors={neighbors} bridge={bridge} />
       <section className="mg-saju-guestbook" aria-label="방명록">
         <h2 className="mg-heading">방명록</h2>

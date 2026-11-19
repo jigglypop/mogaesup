@@ -27,6 +27,8 @@ const AdminPage = lazy(() => import('./pages/AdminPage').then((module) => ({ def
 const PermissionsPage = lazy(() => import('./pages/permissions/PermissionsPage'));
 // A 섬 brings its own 3D scene and the chart calculation; they load with the first one opened.
 const SajuPage = lazy(() => import('./saju/SajuPage'));
+const IslandsPage = lazy(() => import('./pages/IslandsPage').then((module) => ({ default: module.IslandsPage })));
+const SharedIslandPage = lazy(() => import('./pages/IslandsPage').then((module) => ({ default: module.SharedIslandPage })));
 
 /** Old studio addresses: the wardrobe is `/character` now, the factory screens live under `/admin/studio`. */
 function StudioRedirect() {
@@ -110,6 +112,8 @@ if (root) {
                 </Suspense>
               }
             />
+            <Route path="/islands" element={<Suspense fallback={<Loading />}><IslandsPage /></Suspense>} />
+            <Route path="/island/:slug" element={<Suspense fallback={<Loading />}><SharedIslandPage /></Suspense>} />
             <Route path="/saju/*" element={<SajuRedirect />} />
             <Route path="/:slug/*" element={<UsernameRoute />} />
             <Route path="*" element={<Navigate to="/" replace />} />

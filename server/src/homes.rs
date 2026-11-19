@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::{User, current_user, optional_user, username},
+    auth::{User, current_user, display_name, optional_user, username},
     error::{ApiError, ApiResult, bad, conflict, forbidden, internal, not_found},
     models::model_refs,
     permissions::like_escape,
@@ -343,10 +343,13 @@ pub struct HomeProfile {
     pub thumbnail_url: Option<String>,
     /// The speech balloon the owner talks in, on any island (one of [`BALLOONS`]).
     pub balloon: String,
+    /// The owner agreed that visitors may see the birth, chart and reading.
+    pub saju_share_consent: bool,
 }
 
 const PROFILE_SELECT: &str = "SELECT h.owner_id, u.username, u.display_name AS owner_name, h.title, h.status_message,
-    h.mood, h.minime, h.emoji, h.visibility, h.updated_at, h.thumbnail_url, h.balloon
+    h.mood, h.minime, h.emoji, h.visibility, h.updated_at, h.thumbnail_url, h.balloon,
+    u.saju_share_consent_at IS NOT NULL AS saju_share_consent
     FROM homes h JOIN users u ON u.id = h.owner_id";
 
 fn profile(row: &PgRow) -> HomeProfile {
@@ -363,6 +366,7 @@ fn profile(row: &PgRow) -> HomeProfile {
         updated_at: row.get("updated_at"),
         thumbnail_url: row.get("thumbnail_url"),
         balloon: row.get("balloon"),
+        saju_share_consent: row.get("saju_share_consent"),
     }
 }
 
@@ -565,6 +569,10 @@ struct ProfileChanges {
     emoji: Option<String>,
     visibility: Option<String>,
     balloon: Option<String>,
+    /// The name shown on the account. Omitted fields are left as they are.
+    display_name: Option<String>,
+    /// `true` records that the owner agrees visitors may see the birth, chart and reading.
+    saju_share_consent: Option<bool>,
 }
 
 /// Refuses a save that a page loaded for another account sends.
@@ -628,6 +636,17 @@ async fn update(
     if changes.balloon.as_deref().is_some_and(|b| !BALLOONS.contains(&b)) {
         return Err(bad("invalid_balloon", "말풍선을 확인해 주세요."));
     }
+    let renamed = changes.display_name.as_deref().map(|raw| display_name(Some(raw), &user.username)).transpose()?;
+    let sharing = matches!(changes.visibility.as_deref(), Some("public" | "ilchon"));
+    if sharing && changes.saju_share_consent != Some(true) {
+        let agreed: bool = sqlx::query_scalar("SELECT saju_share_consent_at IS NOT NULL FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_one(&state.db)
+            .await?;
+        if !agreed {
+            return Err(conflict("consent_required", "사주를 공개하려면 개인정보 동의가 필요해요."));
+        }
+    }
     // Picking a 미니미 means walking as it: a look the owner wore comes off, in the same transaction, so neither change
     // is kept without the other.
     let picked = minime.is_some();
@@ -648,6 +667,19 @@ async fn update(
     .bind(changes.balloon)
     .execute(&mut *tx)
     .await?;
+    if let Some(name) = &renamed {
+        sqlx::query("UPDATE users SET display_name = $2 WHERE id = $1")
+            .bind(user.id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if changes.saju_share_consent == Some(true) {
+        sqlx::query("UPDATE users SET saju_share_consent_at = coalesce(saju_share_consent_at, now()) WHERE id = $1")
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await?;
+    }
     if picked {
         crate::looks::take_off(&mut *tx, user.id).await?;
     }

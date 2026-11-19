@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ApiRequestError } from '../api/client';
 import { homeApi, sajuApi } from '../api/endpoints';
-import type { HomeView, HomeVisibility, VisitCounter } from '../api/types';
+import type { HomeView, HomeVisibility, ProfileChanges, VisitCounter } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { visitorId } from '../minihome/stored';
 import { REQUESTS_CHANGED } from '../shell/Shell';
@@ -52,7 +52,7 @@ async function read(username: string, viewer: string | null): Promise<Minihome> 
  * (who may see the home) are the owner's: they keep the change on the server and show the answer.
  */
 export function useMinihome(username: string) {
-  const { status, user, lapsed } = useAuth();
+  const { status, user, lapsed, nameAs } = useAuth();
   const viewer = user?.username ?? null;
   const settled = status !== 'loading';
   const [state, setState] = useState<MinihomeState>({ status: 'loading' });
@@ -137,15 +137,29 @@ export function useMinihome(username: string) {
     setState((current) => (current.status === 'ready' ? { status: 'ready', minihome: { ...current.minihome, owner: null, mine: null } } : current));
   }, [ownerId]);
   const open = useCallback(
-    async (visibility: HomeVisibility) => {
+    async (visibility: HomeVisibility, consent = false) => {
       if (!ownerId) return;
-      const { profile } = await homeApi.update({ expectedOwnerId: ownerId, visibility });
+      const { profile } = await homeApi.update({
+        expectedOwnerId: ownerId,
+        visibility,
+        ...(consent ? { sajuShareConsent: true } : {}),
+      });
       writes.current += 1;
       setState((current) => (current.status === 'ready' ? { status: 'ready', minihome: { ...current.minihome, view: { ...current.minihome.view, profile } } } : current));
     },
     [ownerId],
   );
-  return { state, build, demolish, open };
+  const saveProfile = useCallback(
+    async (changes: ProfileChanges) => {
+      if (!ownerId) return;
+      const { profile } = await homeApi.update({ expectedOwnerId: ownerId, ...changes });
+      writes.current += 1;
+      setState((current) => (current.status === 'ready' ? { status: 'ready', minihome: { ...current.minihome, view: { ...current.minihome.view, profile } } } : current));
+      if (changes.displayName) nameAs(changes.displayName);
+    },
+    [ownerId, nameAs],
+  );
+  return { state, build, demolish, open, saveProfile };
 }
 
 // The village's first days kept each home in its browser's storage. A member who built one there finds its name and

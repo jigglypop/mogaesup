@@ -22,6 +22,7 @@ pub mod runtime;
 pub mod saju;
 pub mod saju_decor;
 mod saju_gifts;
+mod saju_islands;
 pub mod saju_made;
 mod saju_photo_board;
 mod saju_reading;
@@ -175,6 +176,7 @@ pub fn router(state: AppState) -> Router {
         .merge(saju_gifts::router().layer(small()))
         .merge(saju_photo_board::router())
         .merge(saju_terrain::router().layer(small()))
+        .merge(saju_islands::router().layer(small()))
         // The reading route keeps a body limit of its own, and the picture route reads its body itself.
         .merge(saju_made::router())
         .merge(catalog::router())

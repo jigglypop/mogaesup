@@ -41,6 +41,8 @@ import type {
   PhotoBoard,
   SajuDecor,
   Terrain,
+  TerrainCell,
+  SharedIsland,
   SajuHome,
   SajuPictureState,
   SajuReadingState,
@@ -192,11 +194,14 @@ export const sajuApi = {
     api<void>('/homes/me/saju/photo-board', { method: 'DELETE', body: { expectedOwnerId } }),
   /** Places what the caller's 섬 shows (at most 24 things); refused 409 `no_home` before the home is built. */
   placeDecor: (body: { expectedOwnerId: string; items: DecorItem[] }) => api<SajuDecor>('/homes/me/saju/decor', { method: 'PUT', body }),
-  setTerrain: (body: { expectedOwnerId: string; terrain: Terrain }) => api<SajuDecor>('/homes/me/saju/terrain', { method: 'PUT', body }),
+  setTerrain: (body: { expectedOwnerId: string; terrain?: Terrain; tiles?: TerrainCell[] }) => api<SajuDecor>('/homes/me/saju/terrain', { method: 'PUT', body }),
   /** Gives a member's 섬 the caller's flag: once a day for each 섬 (409 `already_given`), not one's own (400 `own_home`). */
   giveFlag: (username: string, design: FlagDesign) => api<DecorFlag>(`/homes/${segment(username)}/saju/flags`, { method: 'POST', body: { design } }),
-  giveGift: (username: string, body: { expectedGiverId: string; giverBirth: SajuBirth; recipientBirth: SajuBirth; giverPillars: string[]; recipientPillars: string[]; design: GiftDesign }) =>
+  giveGift: (username: string, body: { expectedGiverId: string; giverBirth: SajuBirth; recipientBirth: SajuBirth; giverPillars: string[]; recipientPillars: string[]; design: GiftDesign; x?: number; z?: number }) =>
     api<void>(`/homes/${segment(username)}/saju/gifts`, { method: 'POST', body }),
+  islands: () => api<{ islands: SharedIsland[] }>('/islands'),
+  island: (slug: string) => api<SharedIsland>(`/islands/${segment(slug)}`),
+  createIsland: (title: string) => api<SharedIsland>('/islands', { method: 'POST', body: { title } }),
   /** Takes down a flag given to the caller's 섬, and wherever it was placed. */
   dropFlag: (id: string) => api<void>(`/homes/me/saju/flags/${segment(id)}`, { method: 'DELETE' }),
 };

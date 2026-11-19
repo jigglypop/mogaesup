@@ -289,7 +289,7 @@ pub(crate) fn reads_as_staff(name: &str) -> bool {
 /// The name a new account shows others, as it is kept: what was typed, trimmed (the username when nothing was).
 /// Refused when it is too long, does not read as it was written ([`plain_text`]), reads as the site's staff
 /// ([`reads_as_staff`]), or holds a character that draws nothing outside an emoji ([`hides_something`]).
-fn display_name(raw: Option<&str>, fallback: &str) -> ApiResult<String> {
+pub(crate) fn display_name(raw: Option<&str>, fallback: &str) -> ApiResult<String> {
     let name = raw.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(fallback).to_owned();
     if name.chars().count() > 20 {
         return Err(bad("invalid_name", "이름은 20자 이하로 입력해 주세요."));

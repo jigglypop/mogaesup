@@ -68,6 +68,7 @@ export function VillagePanel({ owner, villagers, viewer }: {
           );
         })}
       </ul>
+      <Link className="mg-btn is-small" to="/islands">공용섬</Link>
     </section>
   );
 }

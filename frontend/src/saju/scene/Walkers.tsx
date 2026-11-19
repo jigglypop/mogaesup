@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 
 import { useFrame, useThree } from '@react-three/fiber';
-import { AnimationMixer, DoubleSide, LoopOnce, LoopRepeat, MeshStandardMaterial, Vector3, type AnimationAction, type AnimationClip, type Group, type Object3D } from 'three';
+import { AnimationMixer, CanvasTexture, DoubleSide, LoopOnce, LoopRepeat, MeshStandardMaterial, SRGBColorSpace, Vector3, type AnimationAction, type AnimationClip, type Group, type Object3D } from 'three';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
 import { balloonElement } from '../../minihome/balloons/dom';
@@ -166,15 +166,49 @@ function Figure({ dog, action, moves, holder }: { dog: string; action: () => Act
   );
 }
 
-const poleMaterial = new MeshStandardMaterial({ color: '#f5efe3', roughness: 0.6 });
-const clothMaterial = new MeshStandardMaterial({ color: '#ff6f61', roughness: 0.7, side: DoubleSide });
-const ringMaterial = new MeshStandardMaterial({ color: '#ffffff', roughness: 0.5, transparent: true, opacity: 0.85, emissive: '#ffffff', emissiveIntensity: 0.3 });
+const poleMaterial = new MeshStandardMaterial({ color: '#5c4636', roughness: 0.72 });
+const finialMaterial = new MeshStandardMaterial({ color: '#e6c27a', roughness: 0.32, metalness: 0.55 });
+const ringMaterial = new MeshStandardMaterial({ color: '#e6c27a', roughness: 0.45, transparent: true, opacity: 0.55, emissive: '#e6c27a', emissiveIntensity: 0.25 });
+
+/** A swallowtail pennant, drawn once: cloth, a dark edge, a mark. */
+function pennantMaterial(): MeshStandardMaterial {
+  const canvas = document.createElement('canvas');
+  canvas.width = 160;
+  canvas.height = 96;
+  const context = canvas.getContext('2d');
+  const material = new MeshStandardMaterial({ color: '#d85a48', roughness: 0.62, side: DoubleSide });
+  if (!context) return material;
+  context.fillStyle = '#f3e2c4';
+  context.beginPath();
+  context.moveTo(4, 8);
+  context.lineTo(150, 48);
+  context.lineTo(4, 88);
+  context.closePath();
+  context.fill();
+  context.strokeStyle = '#8c3d32';
+  context.lineWidth = 6;
+  context.stroke();
+  context.fillStyle = '#8c3d32';
+  context.beginPath();
+  context.arc(46, 48, 9, 0, Math.PI * 2);
+  context.fill();
+  const map = new CanvasTexture(canvas);
+  map.colorSpace = SRGBColorSpace;
+  material.map = map;
+  material.color.set('#ffffff');
+  return material;
+}
 
 /** The flag where the viewer's dog is going, planted with a little bounce, the ring on the ground pulsing. */
 function GoalFlag({ control }: { control: RefObject<WalkerControl> }) {
   const flag = useRef<Group>(null);
   const cloth = useRef<Group>(null);
   const ring = useRef<Group>(null);
+  const clothMaterial = useMemo(() => pennantMaterial(), []);
+  useEffect(() => () => {
+    clothMaterial.map?.dispose();
+    clothMaterial.dispose();
+  }, [clothMaterial]);
   const placed = useRef<{ x: number; z: number; at: number } | null>(null);
   useFrame(() => {
     const group = flag.current;
@@ -200,12 +234,15 @@ function GoalFlag({ control }: { control: RefObject<WalkerControl> }) {
   });
   return (
     <group ref={flag} visible={false}>
-      <mesh material={poleMaterial} position={[0, 0.45, 0]} castShadow>
-        <cylinderGeometry args={[0.025, 0.03, 0.9, 8]} />
+      <mesh material={poleMaterial} position={[0, 0.52, 0]} castShadow>
+        <cylinderGeometry args={[0.012, 0.02, 1.05, 8]} />
       </mesh>
-      <group ref={cloth} position={[0, 0.78, 0]}>
-        <mesh material={clothMaterial} position={[0.17, 0, 0]} castShadow>
-          <boxGeometry args={[0.32, 0.22, 0.015]} />
+      <mesh material={finialMaterial} position={[0, 1.08, 0]} castShadow>
+        <sphereGeometry args={[0.038, 12, 8]} />
+      </mesh>
+      <group ref={cloth} position={[0.02, 0.9, 0]}>
+        <mesh material={clothMaterial} position={[0.2, 0, 0]} castShadow>
+          <planeGeometry args={[0.42, 0.26]} />
         </mesh>
       </group>
       <group ref={ring}>

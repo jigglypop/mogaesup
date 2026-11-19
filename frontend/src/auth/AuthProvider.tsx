@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { authApi } from '../api/endpoints';
 import type { Credentials, Registration, User } from '../api/types';
@@ -28,6 +28,8 @@ type AuthValue = {
   login: (body: Credentials) => Promise<User>;
   register: (body: Registration) => Promise<User>;
   logout: () => Promise<void>;
+  /** The name the account shows, after it was saved. */
+  nameAs: (displayName: string) => void;
 };
 
 const AuthContext = createContext<AuthValue | null>(null);
@@ -303,6 +305,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const nameAs = useCallback((displayName: string) => {
+    setUser((current) => {
+      if (!current || current.displayName === displayName) return current;
+      const next = { ...current, displayName };
+      owner.current = next;
+      return next;
+    });
+  }, []);
   const value = useMemo<AuthValue>(
     () => ({
       status: !ready ? 'loading' : user ? 'signedIn' : 'anonymous',
@@ -324,8 +334,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout: async () => {
         await change(authApi.logout, () => null, true);
       },
+      nameAs,
     }),
-    [ready, user, lapsed, failures],
+    [ready, user, lapsed, failures, nameAs],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -49,6 +49,8 @@ export type HomeProfile = {
   thumbnailUrl?: string | null;
   /** The speech balloon the owner talks in on every island (minihome/balloons/designs.json); missing from older servers. */
   balloon?: string;
+  /** The owner agreed that visitors may see the birth, chart and reading. Missing from an older server. */
+  sajuShareConsent?: boolean;
 };
 
 export type VisitCounter = { today: number; total: number };
@@ -73,7 +75,11 @@ export type HomeListQuery = { limit?: number; before?: string; beforeId?: string
 
 export type ProfileChanges = Partial<
   Pick<HomeProfile, 'title' | 'statusMessage' | 'mood' | 'minime' | 'emoji' | 'visibility' | 'balloon'>
->;
+> & {
+  displayName?: string;
+  /** Records consent to share the birth, chart and reading. */
+  sajuShareConsent?: boolean;
+};
 
 /** The runtime's save envelope for one world, stored as-is; the server only owns its revision. */
 export type HomeWorld = {
@@ -176,8 +182,13 @@ export type DecorGift = { id: string; giver: { username: string; name: string };
  * placed ones for others) and its owner's character model (for the owner when it is ready, for others when placed).
  */
 export type Terrain = 'default' | 'snow' | 'desert' | 'moss';
+/** One painted metre of an island, in the island's own measure. */
+export type TerrainCell = { x: number; z: number; terrain: Exclude<Terrain, 'default'> };
 export type PhotoBoard = { version: string; width: number; height: number };
-export type SajuDecor = { items: DecorItem[]; flags: DecorFlag[]; gifts?: DecorGift[]; terrain?: Terrain; character: { modelUrl: string } | null; photoBoard?: PhotoBoard | null };
+export type SajuDecor = { items: DecorItem[]; flags: DecorFlag[]; gifts?: DecorGift[]; terrain?: Terrain; tiles?: TerrainCell[]; character: { modelUrl: string } | null; photoBoard?: PhotoBoard | null };
+
+/** A public island anyone can raise and open. */
+export type SharedIsland = { id: string; slug: string; title: string; creator: string; createdAt: string };
 
 /**
  * What a reading is written from: the chart as the browser calculated it from the home's stored birth (jamiblossom runs

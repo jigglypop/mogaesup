@@ -79,6 +79,14 @@ async fn 바닥_선택은_집주인만_저장하고_배치물과_독립적으로
         assert_eq!(shown["items"], items);
         assert_eq!(shown["terrain"].as_str().unwrap_or("default"), tile);
     }
+    let cells = json!({"expectedOwnerId": id, "tiles": [{"x": 1, "z": -2, "terrain": "moss"}, {"x": 1, "z": -2, "terrain": "snow"}]});
+    assert_eq!(refusal(&app.call("PUT", path, Some(cells), Some(&host)).await).1, "invalid_terrain");
+    let cells = json!({"expectedOwnerId": id, "tiles": [{"x": 1, "z": -2, "terrain": "moss"}]});
+    assert_eq!(app.call("PUT", path, Some(cells), Some(&host)).await.status, StatusCode::OK);
+    let shown = decor(&app, "terrain_host", None).await.body;
+    assert_eq!(shown["tiles"], json!([{"x": 1, "z": -2, "terrain": "moss"}]));
+    assert_eq!(shown["terrain"].as_str().unwrap_or("default"), "default");
+    assert_eq!(shown["items"], items);
     app.cleanup().await;
 }
 

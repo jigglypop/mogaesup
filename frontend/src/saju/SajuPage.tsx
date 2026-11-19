@@ -4,8 +4,8 @@ import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useR
 
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
-import { socialApi } from '../api/endpoints';
-import type { HomeVisibility, User } from '../api/types';
+import { sajuApi, socialApi } from '../api/endpoints';
+import type { HomeVisibility, ProfileChanges, Terrain, User } from '../api/types';
 import { useAuth } from '../auth/AuthProvider';
 import { useSignInPath } from '../auth/signIn';
 import { NeighborActions, NeighborsTab, useNeighbors } from '../minihome/Ilchons';
@@ -14,7 +14,7 @@ import { useStored } from '../minihome/stored';
 import { Brand, PageShell, TopActions } from '../shell/Shell';
 import { Icon } from '../ui/icons';
 import { compatOf } from './compat';
-import { keyOf, type Birth } from './engine';
+import { keyOf, pillarsOf, readingOf as chartOf, type Birth } from './engine';
 import { flagDesignOf, itemId, MOST_ITEMS, useDecor } from './decor';
 import { forgetLegacyHome, readLegacyHome, useMinihome, type Minihome } from './minihome';
 import { profileOf, type Profile } from './profile';
@@ -135,7 +135,7 @@ export default function SajuPage({ username, rest }: { username: string; rest: s
   const { user } = useAuth();
   const signIn = useSignInPath();
   const { search } = useLocation();
-  const { state, build, demolish, open } = useMinihome(username);
+  const { state, build, demolish, open, saveProfile } = useMinihome(username);
   // The 섬 on the page, and the address it was shown for. Going to another 섬 keeps it until the next one has been read:
   // the canvas, its renderer and every shader it has made stay, and the islands both villages share stay built (see
   // Stage, which makes the next village ready out of sight). Its panel waits meanwhile.
@@ -176,11 +176,12 @@ export default function SajuPage({ username, rest }: { username: string; rest: s
       onBuild={build}
       onDemolish={demolish}
       onVisibility={open}
+      onProfile={saveProfile}
     />
   );
 }
 
-function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish, onVisibility }: {
+function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish, onVisibility, onProfile }: {
   minihome: Minihome;
   viewer: User | null;
   rest: string;
@@ -189,7 +190,8 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   waiting: boolean;
   onBuild: (name: string, birth: Birth) => Promise<void>;
   onDemolish: () => Promise<void>;
-  onVisibility: (visibility: HomeVisibility) => Promise<void>;
+  onVisibility: (visibility: HomeVisibility, consent?: boolean) => Promise<void>;
+  onProfile: (changes: ProfileChanges) => Promise<void>;
 }) {
   const { view, owner, village: others, mine } = minihome;
   const { username, ownerName } = view.profile;
@@ -300,6 +302,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   const islandDecor = useMemo(() => decor.decor && ({
     items: decor.decor.items, flags: decor.decor.flags, gifts: decor.decor.gifts,
     terrain: decor.decor.terrain ?? 'default',
+    tiles: decor.decor.tiles ?? [],
     own: ownFlag, character: decor.decor.character?.modelUrl ?? null, photoBoard,
   }), [decor.decor, ownFlag, photoBoard]);
   const giftFlag = useMemo(() => (!view.isOwner && viewer && mine ? flagDesignOf(mine.birth) : null), [view.isOwner, viewer, mine]);
@@ -308,6 +311,9 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   const decorSection = decorTab.of === username ? decorTab.section : 'items';
   const canDecorate = view.isOwner && !!host && route.kind === 'home' && route.tab === 'home' && !waiting;
   const placing = canDecorate && placingFor.of === username ? placingFor.placing : null;
+  const [brushFor, setBrushFor] = useState<{ of: string; brush: Terrain | null }>({ of: username, brush: null });
+  const brush = canDecorate && !placing && brushFor.of === username ? brushFor.brush : null;
+  const [leavingGift, setLeavingGift] = useState(false);
   const [selectedFor, setSelectedFor] = useState<{ of: string; id: string } | null>(null);
   const selectedId = canDecorate && selectedFor?.of === username ? selectedFor.id : null;
   const setPlacing = useCallback((next: Placing | null) => {
@@ -350,6 +356,23 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
     },
     [placing, decor, selectOnIsland, setPlacing],
   );
+  const paintAt = useCallback((spot: Spot) => {
+    if (!brush) return;
+    decor.paintCell(spot.x, spot.z, brush);
+  }, [brush, decor]);
+  const compat = !view.isOwner && myProfile && host ? compatOf(myProfile, host.profile) : null;
+  const leaveAt = useCallback((spot: Spot) => {
+    if (!leavingGift || !viewer || !mine || !host || !compat) return;
+    const design = { tone: compat.tone, from: compat.from, to: compat.to };
+    const pillars = (birth: Birth) => pillarsOf(chartOf(birth)).map(({ pillar }) => pillar.cn);
+    void sajuApi.giveGift(host.resident.id, {
+      expectedGiverId: viewer.id, giverBirth: mine.birth, recipientBirth: host.resident.birth, design,
+      giverPillars: pillars(mine.birth), recipientPillars: pillars(host.resident.birth), x: spot.x, z: spot.z,
+    }).then(() => {
+      setLeavingGift(false);
+      decor.reload();
+    }, () => setLeavingGift(false));
+  }, [leavingGift, viewer, mine, host, compat, decor]);
   // What this browser kept from the village's first days, for a member who has not built their home here yet.
   const legacy = useMemo(() => (view.isOwner && !owner ? readLegacyHome() : null), [username, view.isOwner, owner]);
   const buildHome = useCallback(
@@ -385,7 +408,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
 
   // The home's room: everyone signed in here walks its island as their own guardian dog, and what they say shows over
   // them. The viewer's dog walks where they press the island's ground.
-  const walking = !!viewer && !wide && !placing;
+  const walking = !!viewer && !wide && !placing && !brush && !leavingGift;
   const myDog = myProfile?.guardian.dog ?? '02';
   const start = useMemo<[number, number, number]>(() => {
     const seed = [...(viewer?.id ?? '')].reduce((sum, char) => sum + char.charCodeAt(0), 0);
@@ -460,7 +483,6 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
   // The panel widens for the 명반, and a birth without an hour has none.
   const charted = tab === 'ziwei' && !!host?.resident.birth.time;
   const widened = charted && roomy;
-  const compat = !view.isOwner && myProfile && host ? compatOf(myProfile, host.profile) : null;
   const villagers = host ? [{ ...host, bridged: false }, ...around] : around;
   // Each tab of the chart opens with its part of the reading; a written one can be saved as a PDF, with the picture.
   const pictureUrl = picture.made?.status === 'ready' ? picture.made.url : null;
@@ -520,8 +542,8 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
           inset={cover}
           flag={flag}
           focus={wide ? null : username}
-          onVisit={placing ? undefined : visit}
-          onPlace={placing ? placeAt : undefined}
+          onVisit={placing || brush || leavingGift ? undefined : visit}
+          onPlace={placing ? placeAt : brush ? paintAt : leavingGift ? leaveAt : undefined}
           terrain={islandDecor?.terrain ?? 'default'}
           onSelectItem={canDecorate ? selectOnIsland : undefined}
           onOpenPhoto={photoBoard ? showBoard : undefined}
@@ -648,7 +670,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                 onDemolish={takeDown}
               />
               {/* An owner who has not built yet still has a guestbook to read, requests to answer and a door to close. */}
-              {route.kind === 'home' && <HomePanel view={view} viewer={viewer} profile={null} neighbors={neighbors} bridge={NO_BRIDGE} onVisibility={onVisibility} />}
+              {route.kind === 'home' && <HomePanel view={view} viewer={viewer} profile={null} neighbors={neighbors} bridge={NO_BRIDGE} onVisibility={onVisibility} onProfile={onProfile} />}
             </>
           ) : village ? (
             <>
@@ -699,7 +721,14 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                       const item = decor.decor?.items.find((one) => one.id === id);
                       if (item) stage.current?.focusItem({ x: item.x, z: item.z });
                     }}
-                    terrainPick={<TerrainPicker value={decor.decor?.terrain ?? 'default'} onChange={decor.setTerrain} />}
+                    terrainPick={(
+                      <TerrainPicker
+                        value={decor.decor?.terrain ?? 'default'}
+                        brush={brush}
+                        onBrush={(tile) => setBrushFor({ of: username, brush: tile })}
+                        onFill={decor.setTerrain}
+                      />
+                    )}
                     photoBoard={<PhotoBoardCard photo={photoBoard} onChange={decor.changePhoto} onOpen={showBoard} />}
                   >
                     <ElementShelf balance={host.profile.balance} dayMaster={host.profile.dayMaster} placing={placing} onPlacing={setPlacing} full={(decor.decor?.items.length ?? 0) >= MOST_ITEMS} />
@@ -708,7 +737,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
                   <>
                     {photoBoard && <div className="mg-saju-card"><PhotoBoardCard photo={photoBoard} onOpen={showBoard} /></div>}
                     {viewer && mine && compat && (
-                      <CompatGiftCard key={`${viewer.id}|${username}|${keyOf(mine.birth)}|${keyOf(host.resident.birth)}`} giverId={viewer.id} giver={mine} recipient={host.resident} compat={compat} />
+                      <CompatGiftCard key={`${viewer.id}|${username}|${keyOf(mine.birth)}|${keyOf(host.resident.birth)}`} giverId={viewer.id} giver={mine} recipient={host.resident} compat={compat} leaving={leavingGift} onLeave={() => setLeavingGift((on) => !on)} />
                     )}
                     {giftFlag && <GiveFlagCard key={username} own={giftFlag} onGive={decor.give} />}
                   </>
@@ -717,6 +746,7 @@ function Village({ minihome, viewer, rest, search, waiting, onBuild, onDemolish,
               neighbors={neighbors}
               bridge={{ compat, canShow: !!visitorHome, shown: together, onShow: setBridgeShown }}
               onVisibility={onVisibility}
+              onProfile={onProfile}
               onGuestbook={rereadNotes}
             />
           )}

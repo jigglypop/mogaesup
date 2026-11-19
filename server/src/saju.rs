@@ -2,7 +2,7 @@
 //!
 //! The app works a chart out in the browser, where the calendar tables are, so the server keeps what was entered and
 //! hands it to whoever may see the member's home ([`visible_home`]): the home's visibility and 이웃 decide that, as
-//! they do for its guestbook. A home's village is its owner's 이웃 who built a home of their own and, in the places
+//! they do for its guestbook. The birth itself also needs the owner's consent to share it. A home's village is its owner's 이웃 who built a home of their own and, in the places
 //! they leave, the public homes built most recently.
 
 use axum::{
@@ -68,11 +68,15 @@ fn home(row: &PgRow) -> Value {
 /// others, then the oldest 이웃); the places left go to the public homes built or built again most recently.
 async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     let viewer = optional_user(&state, &headers).await?;
-    let (profile, _) = visible_home(&state, &name, viewer.as_ref()).await?;
-    let own = sqlx::query(&format!("SELECT {COLUMNS} FROM saju_homes s WHERE s.owner_id = $1"))
-        .bind(profile.owner_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let (profile, is_owner) = visible_home(&state, &name, viewer.as_ref()).await?;
+    let own = if is_owner || profile.saju_share_consent {
+        sqlx::query(&format!("SELECT {COLUMNS} FROM saju_homes s WHERE s.owner_id = $1"))
+            .bind(profile.owner_id)
+            .fetch_optional(&state.db)
+            .await?
+    } else {
+        None
+    };
     let viewer_id = viewer.as_ref().map(|user| user.id);
     let rows = sqlx::query(&format!(
         "SELECT u.id, u.username, u.display_name, h.emoji, h.visibility, {COLUMNS}
@@ -81,7 +85,7 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
          JOIN users u ON u.id = mine.friend_id
          JOIN homes h ON h.owner_id = u.id
          JOIN saju_homes s ON s.owner_id = u.id
-         WHERE mine.user_id = $1
+         WHERE mine.user_id = $1 AND u.saju_share_consent_at IS NOT NULL
          ORDER BY (u.id IS NOT DISTINCT FROM $2) DESC, mine.since, u.id LIMIT $3"
     ))
     .bind(profile.owner_id)
@@ -108,7 +112,7 @@ async fn view(State(state): State<AppState>, headers: HeaderMap, Path(name): Pat
         let others = sqlx::query(&format!(
             "SELECT u.id, u.username, u.display_name, h.emoji, {COLUMNS}
              FROM saju_homes s JOIN users u ON u.id = s.owner_id JOIN homes h ON h.owner_id = u.id
-             WHERE h.visibility = 'public' AND NOT (u.id = ANY($1))
+             WHERE h.visibility = 'public' AND u.saju_share_consent_at IS NOT NULL AND NOT (u.id = ANY($1))
              ORDER BY s.updated_at DESC, u.id LIMIT $2"
         ))
         .bind(&placed)
