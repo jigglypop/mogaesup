@@ -60,9 +60,12 @@ export function useNeighbors(view: HomeView, viewer: User | null): Neighbors {
     }
   }, [username, view.isOwner, visitor]);
 
-  // A different viewer reads again: the standing is their own.
+  // A different viewer reads again: the standing is their own. Another 섬 (or viewer) shows none of the requests and
+  // problems read before it, even while its own read is on its way or when that read fails.
   useEffect(() => {
     setStatus(null);
+    setReceived([]);
+    setLoadError('');
     setActError('');
     const load = () => void reload();
     load();

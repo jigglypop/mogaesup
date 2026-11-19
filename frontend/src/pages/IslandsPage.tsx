@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
@@ -17,21 +17,28 @@ export function IslandsPage() {
   const [title, setTitle] = useState('');
   const [islands, setIslands] = useState<SharedIsland[] | null>(null);
   const [problem, setProblem] = useState('');
+  // Each press raises another island, so a second press (or Enter) while one is on its way sends nothing; one that
+  // answers after the page was left takes nobody anywhere.
+  const creating = useRef(false);
+  const shown = useRef(true);
   useEffect(() => {
     let live = true;
+    shown.current = true;
     sajuApi.islands().then(
       (page) => { if (live) setIslands(page.islands); },
       () => { if (live) setProblem('공용섬을 불러오지 못했어요.'); },
     );
-    return () => { live = false; };
+    return () => { live = false; shown.current = false; };
   }, []);
   const create = (event: FormEvent) => {
     event.preventDefault();
+    if (creating.current) return;
+    creating.current = true;
     setProblem('');
     void sajuApi.createIsland(title).then(
-      (island) => navigate(`/island/${island.slug}`),
-      (error) => setProblem(problemText(error)),
-    );
+      (island) => { if (shown.current) navigate(`/island/${island.slug}`); },
+      (error) => { if (shown.current) setProblem(problemText(error)); },
+    ).finally(() => { creating.current = false; });
   };
   return (
     <PageShell title="공용섬">

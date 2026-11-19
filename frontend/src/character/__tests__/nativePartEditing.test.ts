@@ -1,4 +1,4 @@
-import { Bone, BufferGeometry, Float32BufferAttribute, Group, Int16BufferAttribute, InterleavedBuffer, InterleavedBufferAttribute, Matrix4, MeshStandardMaterial, Skeleton, SkinnedMesh, Vector3 } from 'three';
+import { Bone, BufferGeometry, Float32BufferAttribute, Group, Int16BufferAttribute, InterleavedBuffer, InterleavedBufferAttribute, Matrix4, MeshStandardMaterial, Skeleton, SkinnedMesh, Texture, Vector3 } from 'three';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NativeWardrobe } from '../native-wardrobe';
@@ -27,7 +27,7 @@ function fixture(kind: 'plain' | 'morph' | 'shared' | 'quantized' | 'interleaved
   const parent = new Group(); parent.scale.set(2, 3, 1); parent.position.set(2, 3, 4); mesh.rotation.z = Math.PI / 4;
   parent.add(mesh); source.add(parent); source.updateMatrixWorld(true);
   const originalMatrix = mesh.matrixWorld.clone(), originalBind = mesh.bindMatrix.clone(), originalInverse = mesh.skeleton.boneInverses[0]!.clone();
-  const associations = new Map<object, { meshes: number; primitives: number }>([[mesh, { meshes: 0, primitives: 0 }]]);
+  const associations = new Map<object, { meshes?: number; primitives?: number; materials?: number }>([[mesh, { meshes: 0, primitives: 0 }]]);
   if (kind === 'shared') {
     const instance = new SkinnedMesh(geometry, mesh.material); instance.userData.standard_slot = slot;
     instance.bind(mesh.skeleton, new Matrix4()); instance.position.x = 1; source.add(instance);
@@ -37,7 +37,7 @@ function fixture(kind: 'plain' | 'morph' | 'shared' | 'quantized' | 'interleaved
   const wardrobe = new NativeWardrobe(body, new Map([[skin, '0:0']]));
   const equip = () => wardrobe.equip([{ id: `${slot}-v1`, slot, url: `/${slot}.glb`, sha256: '0'.repeat(64) }]);
   const dispose = () => { wardrobe.dispose(); skin.geometry.dispose(); skin.material.dispose(); skin.skeleton.dispose(); };
-  return { wardrobe, mesh, geometry, originalDispose, originalMatrix, originalBind, originalInverse, bone, skin, equip, dispose };
+  return { wardrobe, mesh, geometry, originalDispose, originalMatrix, originalBind, originalInverse, bone, skin, equip, dispose, associations };
 }
 
 describe('실제 옷장 파츠 변형', () => {
@@ -133,6 +133,26 @@ describe('실제 옷장 파츠 변형', () => {
       await hat.equip();
       expect(() => hat.wardrobe.setPartEdit('hat', { scale: [1, 1, 1], translation: [0, .151, 0] })).toThrow('범위');
       expect(() => hat.wardrobe.setPartEdit('hat', { scale: [1, 1.5, 1], translation: [0, .15, 0] })).not.toThrow();
+    } finally { hat.dispose(); }
+  });
+
+  it('다시 입은 파츠의 색 마스크가 바뀌면 그 전에 내려놓은 마스크는 GPU에서 다시 내린다', async () => {
+    const hat = fixture();
+    try {
+      hat.associations.set(hat.mesh.material, { materials: 0 });
+      const first = new Texture(), second = new Texture();
+      const released = vi.fn();
+      first.addEventListener('dispose', released);
+      await hat.equip();
+      hat.wardrobe.setRegionColors('hat', 0, first, [.5], ['#ff0000']);
+      await hat.wardrobe.equip([]);
+      // The wardrobe screen lets the mask go as the part comes off.
+      first.dispose();
+      expect(released).toHaveBeenCalledTimes(1);
+      // Worn again from the cache, it is drawn with that mask until its new one comes.
+      await hat.equip();
+      hat.wardrobe.setRegionColors('hat', 0, second, [.5], ['#00ff00']);
+      expect(released).toHaveBeenCalledTimes(2);
     } finally { hat.dispose(); }
   });
 });

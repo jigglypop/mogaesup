@@ -45,7 +45,9 @@ export function createPetSaver({ controller, ownerId, petId, revision: first, on
   let notBefore = 0;
   let writing: Promise<void> | null = null;
   const flush = async ({ keepalive = false }: { keepalive?: boolean } = {}): Promise<void> => {
-    if (writing) {
+    // Another flush waiting on the same save may have sent the next one meanwhile: that one is waited for too, so two
+    // never go out naming the same revision (the second would be refused as another page's).
+    while (writing) {
       await writing;
       if (!keepalive) return;
     }

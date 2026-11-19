@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { PendingRequestConflict, type Pending } from '../api';
+import { ApiError, isDefinitiveRejection, PendingRequestConflict, type Pending } from '../api';
 import { factoryApi, type GarmentShape, type WardrobePart } from '../factory/api';
 import { pollUntil } from './poll-until';
+
+/** A read that got no answer (a dropped line, a slow or waking studio) is a missed look, not the end of the wait. */
+const missedRead = (reason: unknown, stop: AbortSignal): undefined => {
+  if (stop.aborted || !(reason instanceof ApiError) || isDefinitiveRejection(reason)) throw reason;
+  return undefined;
+};
 
 const FITS: { value: NonNullable<GarmentShape['fit']>; label: string }[] = [
   { value: 'tight', label: '붙음' }, { value: 'normal', label: '보통' }, { value: 'loose', label: '넓음' }];
@@ -64,8 +70,9 @@ export function WardrobeShape({ part, label, reload, replace }: {
     try {
       await send?.();
       const rebuilt = await pollUntil(
-        stop => factoryApi.nativeParts(part.job_id, stop),
+        stop => factoryApi.nativeParts(part.job_id, stop).catch((reason: unknown) => missedRead(reason, stop)),
         state => {
+          if (!state) return undefined;
           if (['failed', 'recovery_required', 'qc_failed'].includes(state.status)) throw new Error(state.error || '다시 만들지 못했어요.');
           return state.status === 'review_required' && state.version && state.version !== from ? state.version : undefined;
         }, { attempts: 151, delayMs: POLL_MS, signal, immediate: !send });
@@ -75,8 +82,8 @@ export function WardrobeShape({ part, label, reload, replace }: {
       if (shown.current.job_id === part.job_id && shown.current.version === rebuilt) return;
       // The job listing behind the wardrobe refreshes every few seconds.
       const next = await pollUntil(
-        stop => reload(stop),
-        parts => parts.find(item => item.job_id === part.job_id && item.slot === part.slot && item.version === rebuilt),
+        stop => reload(stop).catch((reason: unknown) => missedRead(reason, stop)),
+        parts => parts?.find(item => item.job_id === part.job_id && item.slot === part.slot && item.version === rebuilt),
         { attempts: 15, delayMs: POLL_MS, immediate: true, signal });
       if (signal.aborted) return;
       if (!next) throw new Error('새 버전이 옷장에 아직 보이지 않아요.');

@@ -70,6 +70,31 @@ describe('createPetSaver', () => {
     saver.stop();
   });
 
+  it('sends one save, not two naming the same revision, when the page is hidden and left while a save is on its way', async () => {
+    const controller = controllerFor();
+    const answers: (() => void)[] = [];
+    const onConflict = vi.fn();
+    const save = vi.fn((body: { revision: number }) =>
+      new Promise<{ revision: number; updatedAt: string }>((resolve) => { answers.push(() => resolve({ revision: body.revision + 1, updatedAt: 'now' })); }));
+    const saver = createPetSaver({ controller, ownerId: OWNER, petId: controller.pet.id, revision: 3, onConflict, save });
+    controller.command('sit');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(save).toHaveBeenCalledTimes(1);
+    controller.feedback('praise');
+    window.dispatchEvent(new Event('pagehide'));
+    window.dispatchEvent(new Event('pagehide'));
+    answers[0]!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]![0]).toMatchObject({ revision: 4 });
+    answers[1]!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(saver.revision).toBe(5);
+    expect(onConflict).not.toHaveBeenCalled();
+    saver.stop();
+  });
+
   it('stops learning and saving once another page saved over it, and waits after too many saves', async () => {
     const controller = controllerFor();
     const onConflict = vi.fn();

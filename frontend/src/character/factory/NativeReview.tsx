@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../auth/AuthProvider';
 import { can } from '../../auth/can';
-import { isDefinitiveRejection } from '../api';
+import { isDefinitiveRejection, PendingRequestConflict } from '../api';
 import { factoryApi, type NativePartsState } from './api';
 
 type ReviewInput = Parameters<typeof factoryApi.reviewNative>[2];
 type PendingReview = { key: string; input: ReviewInput };
 const decisionLabels: Record<ReviewInput['decision'], string> = { approved: '시각 승인', changes_requested: '수정 필요' };
+/** Forgets the saved review only while it is still the one sent under `key` (another tab may have saved its own since). */
+function settleReview(storage: string, key: string) {
+  try { if ((JSON.parse(localStorage.getItem(storage) || 'null') as PendingReview | null)?.key === key) localStorage.removeItem(storage); }
+  catch { /* Not JSON, so not the review sent under `key`. */ }
+}
 /** The review sent for this version whose answer was lost; `unreadable` when what is kept for it cannot be read. */
 function pendingReview(storage: string): { pending: PendingReview | null; unreadable: boolean } {
   try {
@@ -46,15 +51,26 @@ export function NativeReview({ jobId, state, onChange }: { jobId: string; state:
     if (locked.current || !sha) return;
     const saved = pendingReview(storage);
     if (saved.unreadable) { setUnreadable(true); return; }
+    // Storage is read as it is sent, so a review saved since this screen looked (another tab, a lost answer) is not sent
+    // in place of the one clicked: it shows here to be recovered first, as a saved request does elsewhere (savedRequest).
+    // The recovery shown goes under its own key, even when another tab has had its answer and forgotten it since.
+    const kept = saved.pending || pending;
+    if (kept && kept.key !== pending?.key) {
+      setPending(kept); setNotes(kept.input.notes); setAppearance(kept.input.appearance_checked); setMotion(kept.input.motion_checked);
+      setError(new PendingRequestConflict(kept).message);
+      return;
+    }
     locked.current = true; setBusy(true); setError('');
+    let sending: PendingReview | null = null;
     try {
-      const sending = saved.pending || { key: crypto.randomUUID(), input: { expected_assembly_sha256: sha, decision, appearance_checked: appearance, motion_checked: motion, notes: notes.trim() } };
+      sending = kept || { key: crypto.randomUUID(), input: { expected_assembly_sha256: sha, decision, appearance_checked: appearance, motion_checked: motion, notes: notes.trim() } };
       localStorage.setItem(storage, JSON.stringify(sending)); setPending(sending);
       const value = await factoryApi.reviewNative(jobId, version, sending.input, sending.key);
-      localStorage.removeItem(storage);
+      settleReview(storage, sending.key);
       if (alive.current) { setPending(null); setNotes(''); setAppearance(false); setMotion(false); setAgain(false); onChange(value); }
     } catch (reason) {
-      if (isDefinitiveRejection(reason)) { localStorage.removeItem(storage); if (alive.current) setPending(null); }
+      // A saved review sent again that is refused before the studio sees it says nothing of what its first try made.
+      if (sending && isDefinitiveRejection(reason, !!kept)) { settleReview(storage, sending.key); if (alive.current) setPending(null); }
       if (alive.current) setError((reason as Error).message);
     } finally { locked.current = false; if (alive.current) setBusy(false); }
   }

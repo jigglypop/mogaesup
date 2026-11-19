@@ -30,6 +30,8 @@ const view = (isOwner: boolean): HomeView => ({
     visibility: 'public', updatedAt: '2026-10-01T00:00:00Z',
   },
 });
+/** Someone else's 섬, for a visitor. */
+const friendView = (): HomeView => ({ ...view(false), profile: { ...view(false).profile, ownerId: 'friend', username: 'friend', ownerName: '친구' } });
 const visitorA: User = { id: 'a', username: 'a', displayName: 'A', role: 'user' };
 const visitorB: User = { id: 'b', username: 'b', displayName: 'B', role: 'user' };
 const none: IlchonStatus = { relation: 'none', ilchon: null, request: null };
@@ -109,6 +111,32 @@ describe('이웃 목록', () => {
     expect(social.status).toHaveBeenCalledTimes(2);
     expect(container.textContent).not.toContain('이웃 신청을 보냈어요');
     expect(button(container, '이웃 신청')).toBeDefined();
+    await unmount();
+  });
+
+  it('다른 섬으로 가면 내 섬에서 읽은 이웃 신청은 그 섬을 읽지 못해도 보이지 않는다', async () => {
+    social.requests.mockResolvedValue({ received: [request('r1')], sent: [] });
+    const me: User = { ...visitorA, id: 'owner', username: 'host' };
+    const { container, rerender, unmount } = await mount(screen(view(true), me));
+    await settle();
+    expect(container.textContent).toContain('받은 이웃 신청');
+    social.ilchons.mockRejectedValueOnce(new ApiRequestError(503, 'database', '잠시 후 다시 시도해 주세요.'));
+    await rerender(screen(friendView(), me));
+    await settle();
+    expect(container.textContent).not.toContain('받은 이웃 신청');
+    expect(button(container, '수락')).toBeUndefined();
+    await unmount();
+  });
+
+  it('다른 섬으로 가면 앞 섬을 읽지 못한 문제는 그 섬을 읽는 동안 보이지 않는다', async () => {
+    social.ilchons.mockRejectedValueOnce(new ApiRequestError(503, 'database', '잠시 후 다시 시도해 주세요.'))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const { container, rerender, unmount } = await mount(screen(view(false), null));
+    await settle();
+    expect(container.querySelector('[role=alert]')?.textContent).toBe('잠시 후 다시 시도해 주세요.');
+    await rerender(screen(friendView(), null));
+    await settle();
+    expect(container.querySelector('[role=alert]')).toBeNull();
     await unmount();
   });
 

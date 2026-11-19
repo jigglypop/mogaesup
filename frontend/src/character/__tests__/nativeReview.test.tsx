@@ -58,6 +58,47 @@ describe('native 시각 승인', () => {
     await unmount();
   });
 
+  it('다른 탭이 저장한 검수 요청이 있으면 누른 결정 대신 보내지 않고, 그 요청을 복구하게 한다', async () => {
+    const send = vi.spyOn(factoryApi, 'reviewNative').mockResolvedValue(state);
+    const { container, unmount } = await mount(<NativeReview jobId="job" state={state} onChange={vi.fn()} />);
+    await type(container.querySelector('textarea')!, '외형과 걷기 확인 완료');
+    for (const checkbox of container.querySelectorAll('input[type=checkbox]')) await click(checkbox);
+    const other = { key: 'other-tab', input: { expected_assembly_sha256: sha, decision: 'changes_requested', appearance_checked: false, motion_checked: false, notes: '소매 확인 필요' } };
+    localStorage.setItem('gaesup.native-review:job:v1', JSON.stringify(other));
+    await click([...container.querySelectorAll('button')].find(button => button.textContent === '시각 승인')!);
+    expect(send).not.toHaveBeenCalled();
+    expect(container.querySelector('[role=alert]')?.textContent).toBe('응답을 확인하지 못한 다른 요청이 남아 있습니다.');
+    expect(container.querySelector('textarea')!.value).toBe('소매 확인 필요');
+    expect(JSON.parse(localStorage.getItem('gaesup.native-review:job:v1')!)).toEqual(other);
+    await click([...container.querySelectorAll('button')].find(button => button.textContent === '검수 기록 복구')!);
+    expect(send).toHaveBeenCalledExactlyOnceWith('job', 'v1', other.input, 'other-tab');
+    await unmount();
+  });
+
+  it('보여 준 복구는 다른 탭이 먼저 복구해 지웠어도 새 키가 아닌 그 키로 보낸다', async () => {
+    const saved = { key: 'old-key', input: { expected_assembly_sha256: sha, decision: 'changes_requested', appearance_checked: false, motion_checked: false, notes: '소매 확인 필요' } };
+    localStorage.setItem('gaesup.native-review:job:v1', JSON.stringify(saved));
+    const send = vi.spyOn(factoryApi, 'reviewNative').mockResolvedValue(state);
+    const { container, unmount } = await mount(<NativeReview jobId="job" state={state} onChange={vi.fn()} />);
+    localStorage.removeItem('gaesup.native-review:job:v1');
+    await click([...container.querySelectorAll('button')].find(button => button.textContent === '검수 기록 복구')!);
+    expect(send).toHaveBeenCalledExactlyOnceWith('job', 'v1', saved.input, 'old-key');
+    await unmount();
+  });
+
+  it('답을 받으면 그사이 다른 탭이 저장한 검수 요청은 지우지 않는다', async () => {
+    let answer!: (value: NativePartsState) => void;
+    vi.spyOn(factoryApi, 'reviewNative').mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const { container, unmount } = await mount(<NativeReview jobId="job" state={state} onChange={vi.fn()} />);
+    await type(container.querySelector('textarea')!, '외형과 걷기 확인 완료');
+    await click([...container.querySelectorAll('button')].find(button => button.textContent === '수정 필요 기록')!);
+    const other = JSON.stringify({ key: 'other-tab', input: { expected_assembly_sha256: sha, decision: 'approved', appearance_checked: true, motion_checked: true, notes: '다른 탭의 승인' } });
+    localStorage.setItem('gaesup.native-review:job:v1', other);
+    await act(async () => answer(state));
+    expect(localStorage.getItem('gaesup.native-review:job:v1')).toBe(other);
+    await unmount();
+  });
+
   it('예전처럼 탭 저장소에 남은 요청도 이어서 복구한다', async () => {
     const saved = { key: 'old-key', input: { expected_assembly_sha256: sha, decision: 'changes_requested', appearance_checked: false, motion_checked: false, notes: '소매 확인 필요' } };
     sessionStorage.setItem('gaesup.native-review:job:v1', JSON.stringify(saved));

@@ -69,7 +69,9 @@ export class NativeWardrobe {
 
   /** Region colours of the part worn in a slot; null entries keep the original colour.
    * index: the glTF material whose UV layout the mask follows. The mask stays the caller's: it disposes it once its part
-   * is no longer worn, and a different mask for the same material replaces the one used before. */
+   * is no longer worn, and a different mask for the same material replaces the one used before. That one is disposed
+   * again then: a part worn again from the cache is drawn with it until the new one comes, which puts it on the GPU
+   * once more. */
   setRegionColors(slot: string, index: number, mask: Texture, lights: number[], colors: (string | null)[]) {
     const entry = this.active.get(slot);
     if (!entry) return;
@@ -84,6 +86,7 @@ export class NativeWardrobe {
       let control = this.regionControls.get(material);
       if (!control) material.addEventListener('dispose', () => this.regionControls.delete(material));
       if (!control || control.mask !== mask) {
+        control?.mask.dispose();
         control = { mask, update: regionColorControl(material, mask, lights) };
         this.regionControls.set(material, control);
       }

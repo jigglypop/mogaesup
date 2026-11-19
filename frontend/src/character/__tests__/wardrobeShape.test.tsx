@@ -3,7 +3,7 @@ import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 import { mount, type } from '../../__tests__/mount';
-import { PendingRequestConflict } from '../api';
+import { ApiError, PendingRequestConflict } from '../api';
 import { factoryApi, type NativePartsState, type WardrobePart } from '../factory/api';
 import { WardrobeShape } from '../studio/WardrobeShape';
 
@@ -47,6 +47,33 @@ describe('옷 모양 다시 만들기', () => {
     await wait(4000);
     expect(replace).toHaveBeenCalledExactlyOnceWith(next);
     expect(container.querySelector('button')?.textContent).not.toContain('다시 만드는 중');
+    await unmount();
+  });
+
+  it('한 번 읽지 못해도 기다림을 이어 가 새 버전으로 바꾸고, 그사이 다시 만들기를 열지 않는다', async () => {
+    nativeParts.mockRejectedValueOnce(new ApiError('connection', '서버에 연결하지 못했습니다.', 0))
+      .mockResolvedValue(native({ status: 'review_required', version: 'v2' }));
+    const next = { ...part, version: 'v2' };
+    reload.mockRejectedValueOnce(new ApiError('timeout', '서버 응답이 늦어지고 있습니다.', 0)).mockResolvedValue([next]);
+    const { container, unmount } = await open();
+    await rebuild(container);
+    await wait(2000);
+    expect(container.querySelector('[role=alert]')).toBeNull();
+    expect([...container.querySelectorAll('button')].some((item) => item.textContent?.startsWith('다시 만드는 중'))).toBe(true);
+    await wait(2000);
+    await wait(2000);
+    expect(container.querySelector('[role=alert]')).toBeNull();
+    expect(replace).toHaveBeenCalledExactlyOnceWith(next);
+    await unmount();
+  });
+
+  it('읽기가 거절되면 기다림을 끝내고 그 이유를 보인다', async () => {
+    nativeParts.mockRejectedValue(new ApiError('not_found', '요청한 자료를 찾을 수 없습니다.', 404));
+    const { container, unmount } = await open();
+    await rebuild(container);
+    await wait(2000);
+    expect(container.querySelector('[role=alert]')?.textContent).toBe('요청한 자료를 찾을 수 없습니다.');
+    expect(nativeParts).toHaveBeenCalledOnce();
     await unmount();
   });
 
