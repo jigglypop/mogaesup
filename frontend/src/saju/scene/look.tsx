@@ -1,7 +1,7 @@
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 
 import { useFrame, useThree } from '@react-three/fiber';
-import { ACESFilmicToneMapping, Color, Fog, Matrix4, Vector3, type DirectionalLight, type OrthographicCamera, type Scene } from 'three';
+import { ACESFilmicToneMapping, Color, Fog, Matrix4, Vector3, type DirectionalLight, type Object3D, type OrthographicCamera, type Scene } from 'three';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { color as tone, distance, float, mix, orthographicDepthToViewZ, pass, pow, screenUV, smoothstep, toneMapping, uniform, vec2, vec3, vec4 } from 'three/tsl';
@@ -212,20 +212,55 @@ const yieldsQuickly = () => typeof (globalThis as { scheduler?: { yield?: unknow
  */
 async function prebuild(renderer: WebGPURenderer, room: Darkroom): Promise<void> {
   if (!yieldsQuickly()) return;
+  await compileFor(renderer, room, room.shot.scene, room.shot.scene as Scene);
+}
+
+/**
+ * Builds the shaders `object` is drawn with in the scene pass, in the background, lit as `scene` is. What the compile
+ * is for is taken as it starts: the pass's picture, its outputs, and `object` as it stands (shown, wherever it is).
+ */
+function compileFor(renderer: WebGPURenderer, room: Darkroom, object: Object3D, scene: Scene): Promise<void> {
   const { shot } = room;
   const target = renderer.getRenderTarget();
   const mrt = renderer.getMRT();
-  let compiling: Promise<void>;
-  // What the compile is for is taken as it starts: the pass's picture.
   renderer.setRenderTarget(shot.renderTarget);
   renderer.setMRT(shot.getMRT());
   try {
-    compiling = renderer.compileAsync(shot.scene, shot.camera);
+    return renderer.compileAsync(object, shot.camera, scene);
   } finally {
     renderer.setRenderTarget(target);
     renderer.setMRT(mrt);
   }
-  await compiling;
+}
+
+/** Each renderer's darkroom while its Look is mounted: what {@link makeAhead} builds shaders for. */
+const rooms = new WeakMap<object, Darkroom>();
+
+/**
+ * Builds the shaders `object` will be drawn with before it is first drawn, in the background: one built in the frame
+ * that first draws it holds that frame (a guest's dog stalled the picture for a quarter of a second). `object` is made
+ * as if shown wherever it stands, its own visibility and the camera's view aside. Resolves when they are made, or at
+ * once where the renderer cannot be asked.
+ */
+export async function makeAhead(renderer: unknown, object: Object3D, scene: Scene): Promise<void> {
+  const room = rooms.get(renderer as object);
+  if (!room || typeof (renderer as Partial<WebGPURenderer>).compileAsync !== 'function') return;
+  const hidden: Object3D[] = [];
+  const culled: Object3D[] = [];
+  object.traverse((part) => {
+    if (!part.visible) hidden.push(part);
+    if (part.frustumCulled) culled.push(part);
+  });
+  for (const part of hidden) part.visible = true;
+  for (const part of culled) part.frustumCulled = false;
+  let compiling: Promise<void>;
+  try {
+    compiling = compileFor(renderer as WebGPURenderer, room, object, scene);
+  } finally {
+    for (const part of hidden) part.visible = false;
+    for (const part of culled) part.frustumCulled = true;
+  }
+  await compiling.catch(() => undefined);
 }
 
 /**
@@ -284,7 +319,13 @@ export function Look({ frame, snap = false, gaze = UNTOUCHED, inset = UNCOVERED,
   const dials = useMemo(makeDials, []);
   const fine = quality === 'high';
   const room = useMemo(() => darkroom(renderer, scene, camera, fine, dials), [renderer, scene, camera, fine, dials]);
-  useEffect(() => () => room.dispose(), [room]);
+  useEffect(() => {
+    rooms.set(renderer, room);
+    return () => {
+      if (rooms.get(renderer) === room) rooms.delete(renderer);
+      room.dispose();
+    };
+  }, [renderer, room]);
   useWarm(renderer, room, onWarm, village);
   // Another village is looked at from where the camera begins, at once: the viewer's gaze is put back there as well
   // (see Stage), and nothing of the lake laid out about the last home is eased over from.

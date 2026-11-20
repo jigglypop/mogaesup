@@ -9,6 +9,7 @@ import { DEFAULT_BALLOON, PERSON_COLORS, balloonOf, readableInk } from '../../mi
 import '../../minihome/balloons/balloons.css';
 import { SELF, type Action, type VillageRoom } from '../live';
 import { loadDogModel, type DogModel } from './dogModel';
+import { makeAhead } from './look';
 
 /** A stable name-tag fill for someone who is not the viewer, from the same six colours the live room uses. */
 function tagColor(id: string): string {
@@ -44,6 +45,22 @@ const ONCE = new Set<Action>(['jump', 'wave', 'cheer', 'dance']);
 const dogs = new Map<string, DogModel>();
 
 /** Dog `id`'s model once it has arrived; null until then (or if it cannot be had). */
+/** Whether `object`'s shaders have been made, in the background (see makeAhead), since there was something to make. */
+function useMadeAhead(object: Object3D | null): boolean {
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  const [made, setMade] = useState<Object3D | null>(null);
+  useEffect(() => {
+    if (!object) return undefined;
+    let live = true;
+    void makeAhead(gl, object, scene).then(() => live && setMade(object));
+    return () => {
+      live = false;
+    };
+  }, [object, gl, scene]);
+  return !!object && made === object;
+}
+
 function useDogModel(id: string): DogModel | null {
   const [model, setModel] = useState<DogModel | null>(() => dogs.get(id) ?? null);
   useEffect(() => {
@@ -108,6 +125,9 @@ function Figure({ dog, action, moves, holder }: { dog: string; action: () => Act
     }
     return { figure, mixer, actions };
   }, [model]);
+  // Shown once its shaders are made, in the background: one who comes into the room stalled everyone's picture for a
+  // quarter of a second in the frame they were first drawn.
+  const ready = useMadeAhead(made?.figure ?? null);
   const state = useRef({ action: 'idle' as Action, moves: -1, playing: null as AnimationAction | null, since: 0, hop: 0 });
   useFrame((_, elapsed) => {
     if (!made) return;
@@ -156,7 +176,7 @@ function Figure({ dog, action, moves, holder }: { dog: string; action: () => Act
     made.figure.position.y = lift / HEIGHT;
   });
   useEffect(() => () => void made?.mixer?.stopAllAction(), [made]);
-  if (!made) return null;
+  if (!made || !ready) return null;
   return (
     <group ref={holder}>
       <group scale={HEIGHT}>
@@ -209,6 +229,13 @@ function GoalFlag({ control }: { control: RefObject<WalkerControl> }) {
     clothMaterial.map?.dispose();
     clothMaterial.dispose();
   }, [clothMaterial]);
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  // Its shaders are made now, in the background, not in the frame a press first sets it down (that stalled the walk a
+  // few hundred milliseconds).
+  useEffect(() => {
+    if (flag.current) void makeAhead(gl, flag.current, scene);
+  }, [gl, scene]);
   const placed = useRef<{ x: number; z: number; at: number } | null>(null);
   useFrame(() => {
     const group = flag.current;
@@ -234,14 +261,15 @@ function GoalFlag({ control }: { control: RefObject<WalkerControl> }) {
   });
   return (
     <group ref={flag} visible={false}>
-      <mesh material={poleMaterial} position={[0, 0.52, 0]} castShadow>
+      {/* No shadow: a marker comes and goes, and a shadow's own shaders would be made the first time it came. */}
+      <mesh material={poleMaterial} position={[0, 0.52, 0]}>
         <cylinderGeometry args={[0.012, 0.02, 1.05, 8]} />
       </mesh>
-      <mesh material={finialMaterial} position={[0, 1.08, 0]} castShadow>
+      <mesh material={finialMaterial} position={[0, 1.08, 0]}>
         <sphereGeometry args={[0.038, 12, 8]} />
       </mesh>
       <group ref={cloth} position={[0.02, 0.9, 0]}>
-        <mesh material={clothMaterial} position={[0.2, 0, 0]} castShadow>
+        <mesh material={clothMaterial} position={[0.2, 0, 0]}>
           <planeGeometry args={[0.42, 0.26]} />
         </mesh>
       </group>
